@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lium.io"
-version = "0.0.1"
+version = "0.0.3"
 description = "A custom CLI tool for Lium. Lium CLI provides tools for interacting with the Lium ecosystem from the command line."
 readme = "README.md"
 requires-python = ">=3.9"

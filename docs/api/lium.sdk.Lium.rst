@@ -27,6 +27,7 @@
       ~Lium.default_docker_template
       ~Lium.down
       ~Lium.download
+      ~Lium.edit
       ~Lium.exec
       ~Lium.exec_all
       ~Lium.get_default_images
@@ -37,6 +38,7 @@
       ~Lium.gpu_types
       ~Lium.install_jupyter
       ~Lium.ls
+      ~Lium.pod
       ~Lium.ps
       ~Lium.reboot
       ~Lium.restore

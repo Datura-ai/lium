@@ -12,6 +12,6 @@ class GetConfigAction:
         value = config.get(key)
 
         if value is None:
-            return ActionResult(ok=False, error=f"Key '{key}' not found")
+            return ActionResult(ok=False, data={}, error=f"Key '{key}' not found")
 
         return ActionResult(ok=True, data={"value": value})

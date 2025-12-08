@@ -11,6 +11,7 @@ from .ps import ps_command
 from .commands.exec import exec_command
 from .ssh.command import ssh_command
 from .rm import rm_command
+from .logs import logs_command
 from .reboot import reboot_command
 from .scp.command import scp_command
 from .rsync import rsync_command
@@ -24,13 +25,14 @@ from .commands.mine import mine_command
 from .volumes import volumes_command
 from .schedules import schedules_command
 from .update.command import update_command
+from .port_forward import port_forward_command
 from .plugins import load_plugins
 
 
 def get_version():
     """Get version from package metadata."""
     try:
-        return version("lium")
+        return version("lium.io")
     except PackageNotFoundError:
         return "unknown"
 
@@ -61,6 +63,7 @@ cli.add_command(ps_command)
 cli.add_command(exec_command)
 cli.add_command(ssh_command)
 cli.add_command(rm_command)
+cli.add_command(logs_command)
 cli.add_command(reboot_command)
 cli.add_command(scp_command)
 cli.add_command(rsync_command)
@@ -73,6 +76,7 @@ cli.add_command(mine_command)
 cli.add_command(volumes_command)
 cli.add_command(schedules_command, name="schedules")
 cli.add_command(update_command)
+cli.add_command(port_forward_command)
 
 # Add compose placeholder (will be overridden if plugin is installed)
 # cli.add_command(compose_command)  # Disabled for beta.1

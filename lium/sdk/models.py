@@ -19,6 +19,7 @@ class ExecutorInfo:
     specs: Dict
     status: str
     docker_in_docker: bool
+    ip: str
     available_port_count: Optional[int] = None
 
     @property

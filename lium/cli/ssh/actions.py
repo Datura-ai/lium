@@ -29,9 +29,9 @@ class SshAction:
                     data={"exit_code": result.returncode}
                 )
 
-            return ActionResult(ok=True)
+            return ActionResult(ok=True, data={})
 
         except KeyboardInterrupt:
-            return ActionResult(ok=False, error="SSH session interrupted")
+            return ActionResult(ok=False, data={}, error="SSH session interrupted")
         except Exception as e:
-            return ActionResult(ok=False, error=str(e))
+            return ActionResult(ok=False, data={}, error=str(e))

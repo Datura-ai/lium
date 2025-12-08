@@ -48,3 +48,12 @@ Direct SDK usage follows the same pattern:
 Most pod-level SDK calls (`exec`, `down`, `backup_*`, etc.) expect a :class:`lium.sdk.PodInfo`
 instance. Use `lium.ps()` or `lium.wait_ready()` to obtain the dataclass before passing the pod to
 other methods.
+
+vLLM Deployment
+~~~~~~~~~~~~~~~
+
+A more complete example showing how to deploy vLLM on the Lium platform:
+
+.. literalinclude:: ../examples/quick_vllm.py
+   :language: python
+   :linenos:

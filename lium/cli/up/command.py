@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Tuple
 import click
 
 from lium.sdk import Lium, ExecutorInfo
@@ -9,6 +9,7 @@ from . import validation, parsing
 from .actions import (
     ResolveExecutorAction,
     ResolveTemplateAction,
+    CreateEphemeralTemplateAction,
     CreateVolumeAction,
     RentPodAction,
     WaitReadyAction,
@@ -31,6 +32,11 @@ from .actions import (
 @click.option("--ttl", help="Auto-terminate after duration (e.g., 6h, 45m, 2d)")
 @click.option("--until", help="Auto-terminate at time in local timezone (e.g., 'today 23:00', 'tomorrow 01:00', '2025-10-20 15:30')")
 @click.option("--jupyter", is_flag=True, help="Install Jupyter Notebook (automatically selects available port)")
+@click.option("--image", help="Docker image to run (e.g., pytorch/pytorch:2.0, nvidia/cuda:12.0)")
+@click.option("--internal-ports", help="Internal ports to expose (comma-separated, e.g., 22,8000,8080)")
+@click.option("-e", "--env", multiple=True, help="Environment variables (KEY=VALUE), can be repeated")
+@click.option("--entrypoint", default="", help="Container entrypoint")
+@click.option("--cmd", default="", help="Command to run in the container")
 @handle_errors
 def up_command(
     executor_id: Optional[str],
@@ -44,7 +50,12 @@ def up_command(
     ports: Optional[int],
     ttl: Optional[str],
     until: Optional[str],
-    jupyter: bool
+    jupyter: bool,
+    image: Optional[str],
+    internal_ports: Optional[str],
+    env: Tuple[str, ...],
+    entrypoint: Optional[str],
+    cmd: Optional[str],
 ):
     """\b
     Create a new GPU pod on an executor.
@@ -69,13 +80,31 @@ def up_command(
       lium up 1 --until "tomorrow 01:00"    # Auto-terminate at 01:00 local time tomorrow
       lium up 1 --jupyter                   # Install Jupyter Notebook (auto-selects port)
       LIUM_DEBUG=1 lium up 1 --jupyter      # Show debug information
+    \b
+    Docker-run style (streams logs instead of SSH):
+      lium up --gpu A4000 --image pytorch/pytorch:2.0
+      lium up --gpu H100 --image vllm/vllm-openai:latest -e HF_TOKEN=xxx
+      lium up --gpu A6000 --image python:3.11 --cmd "python -c 'print(1+1)'"
+      lium up --gpu A4000 --image myimg --entrypoint /bin/sh --cmd "-c 'echo hi'"
+      lium up --gpu A4000 --image myimg --internal-ports 22,8000,8080
     """
     ensure_config()
 
-    valid, error = validation.validate(executor_id, gpu, count, country, ttl, until)
+    # Check if we're in docker-run mode
+    docker_run_mode = image is not None
+
+    valid, error = validation.validate(executor_id, gpu, count, country, ttl, until, image, template_id)
     if not valid:
         ui.error(error)
         return
+
+    # Parse env vars if provided
+    env_dict = {}
+    if env:
+        env_dict, error = validation.parse_env_vars(env)
+        if error:
+            ui.error(error)
+            return
 
     parsed, error = parsing.parse(ttl, until, volume)
     if error:
@@ -116,12 +145,39 @@ def up_command(
         if not ui.confirm(confirm_msg):
             return
 
-    action = ResolveTemplateAction()
-    result = action.execute({
-        "lium": lium,
-        "template_id": template_id,
-        "executor": executor
-    })
+    # Resolve or create template
+    if docker_run_mode:
+        # Parse internal ports (default to [22] if not specified)
+        ports_list = [22]
+        if internal_ports:
+            try:
+                ports_list = [int(p.strip()) for p in internal_ports.split(",")]
+                # Ensure port 22 is included for SSH access
+                if 22 not in ports_list:
+                    ports_list.insert(0, 22)
+            except ValueError:
+                ui.error("Invalid port format. Use comma-separated integers (e.g., 22,8000,8080)")
+                return
+
+        action = CreateEphemeralTemplateAction()
+        result = ui.load(
+            "Creating template",
+            lambda: action.execute({
+                "lium": lium,
+                "image": image,
+                "env": env_dict,
+                "entrypoint": entrypoint,
+                "cmd": cmd,
+                "ports": ports_list,
+            })
+        )
+    else:
+        action = ResolveTemplateAction()
+        result = action.execute({
+            "lium": lium,
+            "template_id": template_id,
+            "executor": executor
+        })
 
     if not result.ok:
         ui.error(result.error)
@@ -209,6 +265,23 @@ def up_command(
         if not result.ok:
             ui.error(result.error)
 
+    # Docker-run mode: stream logs instead of SSH
+    if docker_run_mode:
+        from lium.cli.logs.actions import StreamLogsAction
+
+        ui.dim(f"Streaming logs from {pod_name}... (Ctrl+C to stop)")
+
+        ctx = {"lium": lium, "pod": pod, "tail": 100, "follow": True}
+        action = StreamLogsAction()
+
+        try:
+            for line in action.execute(ctx):
+                click.echo(line)
+        except KeyboardInterrupt:
+            ui.dim("\nStopped following logs")
+        return
+
+    # Standard mode: SSH into the pod
     action = PrepareSSHAction()
     result = ui.load(
         "Connecting SSH",

@@ -122,7 +122,7 @@ def build_pods_table(pods: List[PodInfo], short: bool = False) -> tuple[Table | 
         status_text = f"[{status_color}]{pod.status.upper()}[/]"
 
         template_name = _format_template_name(pod.template)
-        ports_display = _format_ports(pod.ports)
+        ports_display = f"{executor.ip if executor else ''}\n" + _format_ports(pod.ports)
 
         row = [
             console.get_styled(pod.huid, 'pod_id'),

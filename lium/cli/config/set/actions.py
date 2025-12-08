@@ -15,6 +15,6 @@ class SetConfigAction:
         new_value = config.get(key)
 
         if new_value is None:
-            return ActionResult(ok=False, error=f"Failed to set {key}")
+            return ActionResult(ok=False, data={}, error=f"Failed to set {key}")
 
         return ActionResult(ok=True, data={"value": new_value})

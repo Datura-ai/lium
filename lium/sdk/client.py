@@ -141,6 +141,7 @@ class Lium:
 
         return ExecutorInfo(
             id=executor_dict.get("id", ""),
+            ip=executor_dict.get("executor_ip_address", ""),
             huid=generate_huid(executor_dict.get("id", "")),
             machine_name=machine_name,
             gpu_type=gpu_type,
@@ -170,7 +171,7 @@ class Lium:
 
         Args:
             executor_id: Target executor ID string.
-            name: Optional human-friendly pod name.
+            name: Human-friendly pod name (defaults to ``"Your Pod"``).
             template_id: Template ID. Defaults to the executor's default template.
             volume_id: Optional volume ID to attach on spawn.
             ports: Number of exposed ports to request.
@@ -222,6 +223,91 @@ class Lium:
                         }
 
         raise LiumError(f"Failed to create pod{' ' + name if name else ''}")
+
+    def pod(
+        self,
+        pod_id: str
+    ) -> Dict[str, Any]:
+        """Retrieve detailed information about a specific pod.
+
+        Args:
+            pod_id: The unique identifier of the pod to retrieve.
+
+        Returns:
+            Raw pod data dictionary including template, executor, status, and connection info.
+        """
+        return self._request("GET", f"/pods/{pod_id}").json()
+
+    def logs(
+        self,
+        pod_id: str,
+        *,
+        tail: int = 100,
+        follow: bool = False,
+    ) -> Generator[bytes, None, None]:
+        """Stream logs from a pod.
+
+        Args:
+            pod_id: The unique identifier of the pod.
+            tail: Number of lines to retrieve from the end of the logs (default: 100).
+            follow: If True, stream logs continuously (default: False).
+
+        Yields:
+            Log lines as bytes.
+        """
+        params = {"tail": tail, "follow": str(follow).lower()}
+        url = f"{self.config.base_url}/pods/{pod_id}/logs"
+
+        with requests.get(url, headers=self.headers, params=params, stream=True, timeout=None if follow else 30) as response:
+            if not response.ok:
+                if response.status_code == 401:
+                    raise LiumAuthError("Invalid API key")
+                if response.status_code == 404:
+                    raise LiumNotFoundError(f"Pod not found: {pod_id}")
+                if response.status_code == 429:
+                    raise LiumRateLimitError("Rate limit exceeded")
+                if 500 <= response.status_code < 600:
+                    raise LiumServerError(f"Server error: {response.status_code}")
+                raise LiumError(f"API error {response.status_code}: {response.text}")
+
+            for line in response.iter_lines():
+                if line:
+                    yield line
+
+    def edit(
+        self,
+        pod_id: str,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Edit a pod's template configuration.
+
+        Updates the template associated with a pod by merging the provided
+        keyword arguments with the existing template settings.
+
+        Args:
+            pod_id: The unique identifier of the pod whose template to edit.
+            **kwargs: Template fields to update. Common fields include:
+                - docker_image (str): Docker image repository.
+                - docker_image_tag (str): Docker image tag.
+                - startup_commands (str): Commands to run on container start.
+                - internal_ports (List[int]): Ports to expose.
+                - environment (Dict[str, str]): Environment variables.
+                - volumes (List[str]): Volume mount paths.
+
+        Returns:
+            Updated template data dictionary from the API.
+
+        Example:
+            >>> lium.edit(pod_id, startup_commands="python main.py", environment={"DEBUG": "1"})
+        """
+        pod = self.pod(pod_id=pod_id)
+
+        payload = {
+            **pod["template"],
+            **kwargs,
+        }
+
+        return self._request("PUT", f"/templates/{pod['template']['id']}", json=payload).json()
 
     def ls(
         self,
@@ -852,7 +938,7 @@ class Lium:
         self,
         name: str,
         docker_image: str,
-        docker_image_digest: str,
+        docker_image_digest: str = "",
         docker_image_tag: str = "latest",
         ports: Optional[List[int]] = None,
         start_command: Optional[str] = None,
@@ -863,11 +949,17 @@ class Lium:
         Args:
             name: Friendly template name.
             docker_image: Image repository (e.g., ``"daturaai/pytorch"``).
-            docker_image_digest: Optional digest string for pinning.
+            docker_image_digest: Digest string for pinning (defaults to empty string).
             docker_image_tag: Image tag (defaults to ``"latest"``).
             ports: Internal ports to expose (defaults to ``[22, 8000]``).
             start_command: Optional command executed on container start.
-            **kwargs: Additional template fields such as ``category`` or ``volumes``.
+            **kwargs: Additional template fields:
+                - category (str): Template category (defaults to ``"UBUNTU"``).
+                - is_private (bool): Whether template is private (defaults to ``True``).
+                - volumes (List[str]): Volume mount paths (defaults to ``["/workspace"]``).
+                - description (str): Template description.
+                - environment (Dict[str, str]): Environment variables.
+                - entrypoint (str): Container entrypoint.
 
         Returns:
             Newly created :class:`Template`.
@@ -884,9 +976,9 @@ class Lium:
             "description": kwargs.get("description", name),
             "entrypoint": kwargs.get("entrypoint", ""),
             "environment": kwargs.get("environment", {}),
-            "is_private": kwargs.get("is_private", False),
+            "is_private": kwargs.get("is_private", True),
             "readme": kwargs.get("readme", name),
-            "volumes": kwargs.get("volumes", []),
+            "volumes": kwargs.get("volumes", ["/workspace"]),
         }
 
         response = self._request("POST", "/templates", json=payload).json()
@@ -916,7 +1008,7 @@ class Lium:
 
         start = time.time()
         while time.time() - start < timeout:
-            templates = self.templates()
+            templates = self.templates(only_my=True)
             current = next((t for t in templates if t.id == template_id), None)
 
             if current:

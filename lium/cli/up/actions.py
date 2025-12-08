@@ -108,6 +108,48 @@ class ResolveTemplateAction:
             return ActionResult(ok=False, data={}, error=str(e))
 
 
+class CreateEphemeralTemplateAction:
+    """Create an ephemeral template for docker-run style execution."""
+
+    def execute(self, ctx: dict) -> ActionResult:
+        lium: Lium = ctx["lium"]
+        image: str = ctx["image"]
+        env: Dict[str, str] = ctx.get("env", {})
+        entrypoint: Optional[str] = ctx.get("entrypoint", "")
+        cmd: Optional[str] = ctx.get("cmd", "")
+        ports: List[int] = ctx.get("ports", [22])
+
+        try:
+            # Parse image:tag
+            if ":" in image:
+                docker_image, docker_tag = image.rsplit(":", 1)
+            else:
+                docker_image = image
+                docker_tag = "latest"
+
+            # Generate a unique name for the ephemeral template
+            import hashlib
+            hash_input = f"{image}{env}{entrypoint}{cmd}"
+            short_hash = hashlib.md5(hash_input.encode()).hexdigest()[:8]
+            template_name = f"ephemeral-{short_hash}"
+
+            template = lium.create_template(
+                name=template_name,
+                docker_image=docker_image,
+                docker_image_tag=docker_tag,
+                ports=ports,
+                start_command=cmd,
+                entrypoint=entrypoint,
+                environment=env if env else None,
+                is_private=True,
+            )
+
+            return ActionResult(ok=True, data={"template": template})
+
+        except Exception as e:
+            return ActionResult(ok=False, data={}, error=str(e))
+
+
 class CreateVolumeAction:
 
     def execute(self, ctx: dict) -> ActionResult:
