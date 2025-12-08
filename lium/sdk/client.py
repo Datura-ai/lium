@@ -136,9 +136,6 @@ class Lium:
                 if gpu_name:
                     gpu_type = extract_gpu_type(gpu_name)
 
-        price_per_hour = executor_dict.get("price_per_hour", 0)
-        price_per_gpu = executor_dict.get("price_per_gpu", 0)
-
         return ExecutorInfo(
             id=executor_dict.get("id", ""),
             ip=executor_dict.get("executor_ip_address", ""),
@@ -147,13 +144,13 @@ class Lium:
             gpu_type=gpu_type,
             gpu_count=gpu_count,
             available_gpu_count=available_gpu_count,
-            price_per_hour=price_per_hour,
-            price_per_gpu_hour=price_per_gpu,
+            price_per_gpu_hour=executor_dict.get("price_per_gpu", 0),
             location=executor_dict.get("location", {}),
             specs=specs,
             status=executor_dict.get("status", "unknown"),
             docker_in_docker=specs.get("sysbox_runtime", False),
             available_port_count=specs.get("available_port_count"),
+            min_gpu_count_for_rental=executor_dict.get("min_gpu_count_for_rental", None),
         )
 
     def up(
@@ -920,7 +917,6 @@ class Lium:
                 gpu_type=response.get("gpu_name", ""),
                 gpu_count=int(response.get("gpu_count", 0) or 0),
                 available_gpu_count=0,
-                price_per_hour=0.0,
                 price_per_gpu_hour=0.0,
                 location={},
                 specs={},

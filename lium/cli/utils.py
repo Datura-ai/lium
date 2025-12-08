@@ -401,8 +401,13 @@ def store_executor_selection(executors: List[ExecutorInfo]) -> None:
             'gpu_type': executor.gpu_type,
             'gpu_count': executor.gpu_count,
             'available_gpu_count': executor.available_gpu_count,
-            'price_per_hour': executor.price_per_hour,
-            'location': executor.location.get('country', 'Unknown') if executor.location else 'Unknown'
+            'price_per_gpu_hour': executor.price_per_gpu_hour,
+            'min_gpu_count_for_rental': executor.min_gpu_count_for_rental,
+            'location': executor.location.get('country', 'Unknown') if executor.location else 'Unknown',
+            'status': executor.status,
+            'docker_in_docker': executor.docker_in_docker,
+            'ip': executor.ip,
+            'available_port_count': executor.available_port_count,
         })
     
     # Store in config directory

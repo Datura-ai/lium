@@ -13,7 +13,6 @@ class ExecutorInfo:
     gpu_type: str
     gpu_count: int
     available_gpu_count: int
-    price_per_hour: float
     price_per_gpu_hour: float
     location: Dict
     specs: Dict
@@ -21,6 +20,7 @@ class ExecutorInfo:
     docker_in_docker: bool
     ip: str
     available_port_count: Optional[int] = None
+    min_gpu_count_for_rental: int | None = None
 
     @property
     def driver_version(self) -> str:
