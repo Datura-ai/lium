@@ -33,8 +33,15 @@ class ResolveExecutorAction:
                 if not executor:
                     return ActionResult(ok=False, data={}, error=f"Executor '{executor_id}' not found")
                 
-                if count and count > executor.available_gpu_count:
-                    return ActionResult(ok=False, data={}, error=f"Executor {executor.huid} has insufficient GPUs (available: {executor.available_gpu_count}, required: {count})")
+                if count:
+                    if count > executor.available_gpu_count:
+                        return ActionResult(ok=False, data={}, error=f"Executor {executor.huid} has insufficient GPUs (available: {executor.available_gpu_count}, required: {count})")
+                    if executor.min_gpu_count_for_rental:
+                        if count < executor.min_gpu_count_for_rental:
+                            return ActionResult(ok=False, data={}, error=f"Executor {executor.huid} requires at least {executor.min_gpu_count_for_rental} GPUs for rental.")
+                    else:
+                        if count < executor.available_gpu_count:
+                            return ActionResult(ok=False, data={}, error=f"Executor {executor.huid} doesn't support gpu splitting.")
 
                 if ports and (not executor.available_port_count or executor.available_port_count < ports):
                     available = executor.available_port_count or 0
@@ -44,10 +51,13 @@ class ResolveExecutorAction:
                         error=f"Executor {executor.huid} has insufficient ports (available: {available}, required: {ports})"
                     )
             else:
-                executors = lium.ls(gpu_type=gpu)
+                executors = lium.ls(gpu_type=gpu, gpu_count=count)
 
                 if count:
-                    executors = [e for e in executors if e.available_gpu_count >= count]
+                    executors = [
+                        e for e in executors
+                        if (not e.min_gpu_count_for_rental and e.available_gpu_count == count) or (e.min_gpu_count_for_rental and e.min_gpu_count_for_rental <= count and e.available_gpu_count >= count)
+                    ]
                 if country:
                     executors = [
                         e for e in executors
