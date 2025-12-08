@@ -122,6 +122,7 @@ class Lium:
         specs = executor_dict.get("specs", {})
         gpu_info = specs.get("gpu", {})
         gpu_count = gpu_info.get("count", 1)
+        available_gpu_count = executor_dict.get("available_gpu_count", 1)
 
         # Extract GPU type from machine_name or specs
         machine_name = executor_dict.get("machine_name", "")
@@ -135,8 +136,6 @@ class Lium:
                 if gpu_name:
                     gpu_type = extract_gpu_type(gpu_name)
 
-        price_per_hour = executor_dict.get("price_per_hour", 0)
-
         return ExecutorInfo(
             id=executor_dict.get("id", ""),
             ip=executor_dict.get("executor_ip_address", ""),
@@ -144,20 +143,22 @@ class Lium:
             machine_name=machine_name,
             gpu_type=gpu_type,
             gpu_count=gpu_count,
-            price_per_hour=price_per_hour,
-            price_per_gpu_hour=price_per_hour / max(1, gpu_count),
+            available_gpu_count=available_gpu_count,
+            price_per_gpu_hour=executor_dict.get("price_per_gpu", 0),
             location=executor_dict.get("location", {}),
             specs=specs,
             status=executor_dict.get("status", "unknown"),
             docker_in_docker=specs.get("sysbox_runtime", False),
             available_port_count=specs.get("available_port_count"),
+            min_gpu_count_for_rental=executor_dict.get("min_gpu_count_for_rental", None),
         )
 
     def up(
         self,
         *,
         executor_id: str,
-        name: str = "Your Pod",
+        name: Optional[str] = None,
+        gpu_count: Optional[int] = None,
         template_id: Optional[str] = None,
         volume_id: Optional[str] = None,
         ports: Optional[int] = None,
@@ -190,6 +191,7 @@ class Lium:
 
         payload = {
             "pod_name": name,
+            "gpu_count": gpu_count,
             "template_id": template_id,
             "volume_id": volume_id,
             "user_public_key": ssh_material,
@@ -336,7 +338,7 @@ class Lium:
                 params["machine_names"] = gpu_type
         if gpu_count:
             params["gpu_count_gte"] = gpu_count
-            params["gpu_count_lte"] = gpu_count
+            # params["gpu_count_lte"] = gpu_count
         if lat is not None and lon is not None:
             params["lat"] = lat
             params["lon"] = lon
@@ -365,6 +367,8 @@ class Lium:
                 name=d.get("pod_name", ""),
                 status=d.get("status", "unknown"),
                 huid=generate_huid(d.get("id", "")),
+                gpu_count=int(d.get("gpu_count", 0)),
+                price=d.get("price", 0.0),
                 ssh_cmd=d.get("ssh_connect_cmd"),
                 ports=d.get("ports_mapping", {}),
                 created_at=d.get("created_at", ""),
@@ -900,6 +904,8 @@ class Lium:
             name=response.get("pod_name", pod.name),
             status=response.get("status", "PENDING"),
             huid=pod.huid,  # Keep the original HUID
+            gpu_count=int(response.get("gpu_count", 0)),
+            price=response.get("price", 0.0),
             ssh_cmd=response.get("ssh_connect_cmd"),
             ports=response.get("ports_mapping", {}),
             created_at=response.get("created_at", ""),
@@ -910,7 +916,7 @@ class Lium:
                 machine_name="",
                 gpu_type=response.get("gpu_name", ""),
                 gpu_count=int(response.get("gpu_count", 0) or 0),
-                price_per_hour=0.0,
+                available_gpu_count=0,
                 price_per_gpu_hour=0.0,
                 location={},
                 specs={},

@@ -2,6 +2,9 @@ import os, sys, time, requests, webbrowser
 from typing import Optional
 
 from lium.cli import ui
+from lium.sdk.config import Config
+
+config = Config.load()
 
 class quiet_fds:
     """Redirect stdout/stderr to /dev/null (silences child processes)."""
@@ -18,7 +21,7 @@ class quiet_fds:
         self._null.close()
 
 def init_auth():
-    url = "https://lium.io/api/cli-auth/init"
+    url = f"{config.base_url}/cli-auth/init"
     resp = requests.post(url,
         json={"callback_url": "http://localhost:8080/auth/callback"},
         headers={"Content-Type": "application/json"},
@@ -28,7 +31,7 @@ def init_auth():
     return resp.json()["browser_url"], resp.json()["session_id"]
 
 def poll_auth(session_id, max_attempts=6, interval=5) -> Optional[str]:  # 30 seconds timeout (6 * 5)
-    url = f"https://lium.io/api/cli-auth/poll/{session_id}"
+    url = f"{config.base_url}/cli-auth/poll/{session_id}"
     for _ in range(max_attempts):
         try:
             resp = requests.get(url, timeout=5)

@@ -22,7 +22,7 @@ def _mid_ellipsize(s: str, width: int = 28) -> str:
 
 def _cfg(exe: ExecutorInfo) -> str:
     """Format GPU configuration string."""
-    return f"{exe.gpu_count}×{exe.gpu_type}"
+    return f"{exe.available_gpu_count}×{exe.gpu_type}"
 
 
 def _country_name(loc: Optional[Dict]) -> str:
@@ -117,8 +117,9 @@ def _sort_key_factory(name: str) -> Callable[[ExecutorInfo], Any]:
 def _add_table_columns(t: Table) -> None:
     """Add columns to the table with fixed widths."""
     t.add_column("", justify="right", width=3, no_wrap=True, style="dim")
-    t.add_column("Id", justify="left", ratio=8, min_width=24, overflow="fold")
+    t.add_column("Id", justify="left", ratio=8, min_width=18, overflow="fold")
     t.add_column("Config", justify="left", width=12, no_wrap=True)
+    t.add_column("GPU Splitting", justify="left", min_width=12, no_wrap=True)
     t.add_column("$/GPU·h", justify="right", width=8, no_wrap=True)
     t.add_column("Location", justify="left", ratio=4, min_width=10, overflow="fold")
     t.add_column("VRAM (Gb)", justify="right", width=11, no_wrap=True)
@@ -201,11 +202,13 @@ def build_executors_table(
         huid = _mid_ellipsize(exe.huid)
         huid += " (DinD)" if exe.docker_in_docker else ""
         huid_display = f"{console.get_styled('★', 'success')} {console.get_styled(huid, 'id')}" if is_pareto else f"  {console.get_styled(huid, 'id')}"
+        gpu_splitting_display = f"Min GPUs: {exe.min_gpu_count_for_rental}" if exe.min_gpu_count_for_rental else "—"
 
         table.add_row(
             str(idx),
             huid_display,
             _cfg(exe),
+            gpu_splitting_display,
             console.get_styled(_money(exe.price_per_gpu_hour), 'success'),
             _country_name(exe.location),
             s["VRAM"],

@@ -1,7 +1,7 @@
 from typing import Optional, Tuple
 import click
 
-from lium.sdk import Lium
+from lium.sdk import Lium, ExecutorInfo
 from lium.cli import ui
 from lium.cli.utils import handle_errors, ensure_config
 from lium.cli.completion import get_gpu_completions
@@ -134,13 +134,13 @@ def up_command(
         ui.error(result.error)
         return
 
-    executor = result.data["executor"]
+    executor: ExecutorInfo = result.data["executor"]
 
     if not yes:
         confirm_msg = (
             f"Acquire pod on {executor.huid} "
-            f"({executor.gpu_count}×{executor.gpu_type}) "
-            f"at ${executor.price_per_hour:.2f}/h?"
+            f"({count or executor.available_gpu_count}×{executor.gpu_type}) "
+            f"at ${(executor.price_per_gpu_hour * (count or executor.available_gpu_count)):.2f}/h?"
         )
         if not ui.confirm(confirm_msg):
             return
@@ -208,6 +208,7 @@ def up_command(
             "lium": lium,
             "executor": executor,
             "template": template,
+            "gpu_count": count or executor.available_gpu_count,
             "name": name,
             "volume_id": volume_id,
             "ports": ports
