@@ -171,11 +171,6 @@ main() {
     echo -e "${BLUE}══════════════════════════════════════${NC}"
     echo ""
 
-    # Restore stdin from terminal (needed when running via curl | bash)
-    if [[ ! -t 0 ]]; then
-        exec < /dev/tty
-    fi
-
     ensure_path
 
     # Check if lium already installed
@@ -191,6 +186,11 @@ main() {
     fi
 
     echo ""
+
+    # Restore stdin from terminal (needed when running via curl | bash)
+    if [[ ! -t 0 ]]; then
+        exec < /dev/tty
+    fi
 
     if [[ -n "$LIUM_ARGS" ]]; then
         exec "$LIUM_BIN" mine $LIUM_ARGS
