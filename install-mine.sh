@@ -1,7 +1,24 @@
 #!/bin/bash
 # Lium Mine Installer & Runner
-# One-line: curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-cli/main/install-mine.sh | bash
-# With hotkey: curl -fsSL ... | bash -s -- -k <YOUR_HOTKEY>
+# curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-cli/main/install-mine.sh | bash -s -- -k <HOTKEY>
+
+# If running from pipe, save to temp file and re-execute
+if [[ ! -t 0 ]] && [[ -z "$LIUM_INSTALLER_REEXEC" ]]; then
+    TEMP_SCRIPT=$(mktemp) || { echo "Failed to create temp file"; exit 1; }
+    cat > "$TEMP_SCRIPT"
+    chmod +x "$TEMP_SCRIPT"
+    export LIUM_INSTALLER_REEXEC=1
+
+    # Re-execute with tty if available, otherwise without interactive support
+    if [[ -e /dev/tty ]]; then
+        bash "$TEMP_SCRIPT" "$@" < /dev/tty
+    else
+        bash "$TEMP_SCRIPT" "$@"
+    fi
+    exit_code=$?
+    rm -f "$TEMP_SCRIPT"
+    exit $exit_code
+fi
 
 set -e
 
@@ -11,114 +28,104 @@ BLUE='\033[0;34m'
 GRAY='\033[0;90m'
 NC='\033[0m'
 
-log_info() { echo -e "${BLUE}▸${NC} $1"; }
-log_success() { echo -e "${GREEN}✓${NC} $1"; }
-log_error() { echo -e "${RED}✗${NC} $1"; }
+log_ok() { echo -e "${GREEN}✓${NC} $1"; }
+log_err() { echo -e "${RED}✗${NC} $1"; }
 
-# Pass all args through to lium mine
-LIUM_ARGS="$@"
+# Store arguments as array to preserve spaces/special chars
+LIUM_ARGS=("$@")
 
-# Detect OS for package manager
 detect_os() {
     if [[ -f /etc/os-release ]]; then
         . /etc/os-release
         OS=$ID
-    elif [[ -f /etc/debian_version ]]; then
-        OS="debian"
-    elif [[ -f /etc/redhat-release ]]; then
-        OS="rhel"
     else
         OS=$(uname -s | tr '[:upper:]' '[:lower:]')
     fi
 }
 
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
+command_exists() { command -v "$1" >/dev/null 2>&1; }
 
 find_lium() {
-    if command_exists lium; then
-        echo "lium"
-        return 0
-    elif [[ -x "$HOME/.local/bin/lium" ]]; then
-        echo "$HOME/.local/bin/lium"
-        return 0
-    elif [[ -x "/usr/local/bin/lium" ]]; then
-        echo "/usr/local/bin/lium"
-        return 0
-    fi
+    command_exists lium && echo "lium" && return 0
+    [[ -x "$HOME/.local/bin/lium" ]] && echo "$HOME/.local/bin/lium" && return 0
+    [[ -x "/usr/local/bin/lium" ]] && echo "/usr/local/bin/lium" && return 0
     return 1
+}
+
+show_elapsed() {
+    local start=$1 msg=$2 pid=$3
+    while kill -0 "$pid" 2>/dev/null; do
+        local elapsed=$(($(date +%s) - start))
+        printf "\r${BLUE}▸${NC} %s... ${GRAY}%ds${NC}  " "$msg" "$elapsed"
+        sleep 1
+    done
+    wait "$pid" 2>/dev/null
+    return $?
+}
+
+run_with_timer() {
+    local msg="$1"
+    shift
+    local start=$(date +%s)
+    local log_file
+    log_file=$(mktemp) || { log_err "Failed to create log file"; exit 1; }
+
+    "$@" > "$log_file" 2>&1 &
+    local pid=$!
+
+    show_elapsed "$start" "$msg" "$pid"
+    local exit_code=$?
+
+    local elapsed=$(($(date +%s) - start))
+    if [[ $exit_code -eq 0 ]]; then
+        printf "\r${GREEN}✓${NC} %s ${GRAY}(%ds)${NC}      \n" "$msg" "$elapsed"
+    else
+        printf "\r${RED}✗${NC} %s ${GRAY}(%ds)${NC}      \n" "$msg" "$elapsed"
+        echo -e "${GRAY}--- Last 15 lines of log ---${NC}"
+        tail -15 "$log_file"
+        rm -f "$log_file"
+        exit $exit_code
+    fi
+    rm -f "$log_file"
 }
 
 ensure_python() {
     command_exists python3 && return 0
-
-    log_info "Installing Python3..."
     detect_os
-
     case "$OS" in
         ubuntu|debian)
-            sudo apt-get update -qq >/dev/null 2>&1
-            sudo apt-get install -y python3 python3-pip python3-venv >/dev/null 2>&1
+            run_with_timer "Updating apt" sudo apt-get update -qq
+            run_with_timer "Installing Python3" sudo apt-get install -y python3 python3-pip python3-venv
             ;;
         centos|rhel|fedora|rocky|almalinux)
-            if command_exists dnf; then
-                sudo dnf install -y python3 python3-pip >/dev/null 2>&1
-            else
-                sudo yum install -y python3 python3-pip >/dev/null 2>&1
-            fi
+            local pkg_mgr
+            pkg_mgr=$(command_exists dnf && echo dnf || echo yum)
+            run_with_timer "Installing Python3" sudo "$pkg_mgr" install -y python3 python3-pip
             ;;
-        arch|manjaro)
-            sudo pacman -Sy --noconfirm python python-pip >/dev/null 2>&1
-            ;;
-        *)
-            log_error "Unsupported OS: $OS"
-            exit 1
-            ;;
+        *) log_err "Unsupported OS: $OS"; exit 1 ;;
     esac
-    log_success "Python3 installed"
 }
 
 ensure_pip() {
     python3 -m pip --version >/dev/null 2>&1 && return 0
-
-    log_info "Installing pip..."
     detect_os
-
     case "$OS" in
         ubuntu|debian)
-            sudo apt-get install -y python3-pip >/dev/null 2>&1
-            ;;
-        centos|rhel|fedora|rocky|almalinux)
-            if command_exists dnf; then
-                sudo dnf install -y python3-pip >/dev/null 2>&1
-            else
-                sudo yum install -y python3-pip >/dev/null 2>&1
-            fi
+            run_with_timer "Installing pip" sudo apt-get install -y python3-pip
             ;;
         *)
-            curl -sS https://bootstrap.pypa.io/get-pip.py | python3 >/dev/null 2>&1
+            run_with_timer "Installing pip" bash -c "curl -sS https://bootstrap.pypa.io/get-pip.py | python3"
             ;;
     esac
-    log_success "pip installed"
 }
 
 install_lium() {
-    log_info "Installing lium-cli..."
-    python3 -m pip install --user --upgrade lium-cli >/dev/null 2>&1
-
-    if find_lium >/dev/null; then
-        log_success "lium-cli installed"
-    else
-        log_error "Installation failed"
-        exit 1
-    fi
+    run_with_timer "Installing lium-cli" python3 -m pip install --user --upgrade lium-cli
+    find_lium >/dev/null || { log_err "Installation failed"; exit 1; }
 }
 
 ensure_path() {
-    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-        export PATH="$HOME/.local/bin:$PATH"
-    fi
+    [[ ":$PATH:" != *":$HOME/.local/bin:"* ]] && export PATH="$HOME/.local/bin:$PATH"
 }
 
 main() {
@@ -131,7 +138,7 @@ main() {
     ensure_path
 
     if LIUM_BIN=$(find_lium); then
-        log_success "lium-cli found"
+        log_ok "lium-cli found"
     else
         ensure_python
         ensure_pip
@@ -141,11 +148,9 @@ main() {
 
     echo ""
 
-    # Restore stdin from terminal (for interactive prompts in lium mine)
-    exec < /dev/tty
-
-    if [[ -n "$LIUM_ARGS" ]]; then
-        exec "$LIUM_BIN" mine $LIUM_ARGS
+    # Run lium mine with preserved arguments
+    if [[ ${#LIUM_ARGS[@]} -gt 0 ]]; then
+        exec "$LIUM_BIN" mine "${LIUM_ARGS[@]}"
     else
         exec "$LIUM_BIN" mine
     fi
