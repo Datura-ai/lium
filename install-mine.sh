@@ -7,55 +7,13 @@ set -e
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 GRAY='\033[0;90m'
 NC='\033[0m'
-CLEAR_LINE='\033[2K'
 
-# Spinner characters
-SPINNER='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-
-# Run command with spinner, hiding output
-run_with_spinner() {
-    local msg="$1"
-    shift
-    local cmd="$@"
-    local log_file=$(mktemp)
-    local pid
-    local i=0
-
-    # Start command in background
-    eval "$cmd" > "$log_file" 2>&1 &
-    pid=$!
-
-    # Show spinner while command runs
-    while kill -0 $pid 2>/dev/null; do
-        i=$(( (i + 1) % ${#SPINNER} ))
-        printf "\r${CLEAR_LINE}${BLUE}${SPINNER:$i:1}${NC} %s..." "$msg"
-        sleep 0.1
-    done
-
-    # Get exit code
-    wait $pid
-    local exit_code=$?
-
-    if [[ $exit_code -eq 0 ]]; then
-        printf "\r${CLEAR_LINE}${GREEN}✓${NC} %s\n" "$msg"
-    else
-        printf "\r${CLEAR_LINE}${RED}✗${NC} %s\n" "$msg"
-        echo -e "${GRAY}--- Error log ---${NC}"
-        tail -20 "$log_file"
-        rm -f "$log_file"
-        exit $exit_code
-    fi
-
-    rm -f "$log_file"
-}
+log_info() { echo -e "${BLUE}▸${NC} $1"; }
+log_success() { echo -e "${GREEN}✓${NC} $1"; }
+log_error() { echo -e "${RED}✗${NC} $1"; }
 
 # Pass all args through to lium mine
 LIUM_ARGS="$@"
@@ -78,7 +36,6 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# Find lium binary in common locations
 find_lium() {
     if command_exists lium; then
         echo "lium"
@@ -93,71 +50,71 @@ find_lium() {
     return 1
 }
 
-# Install Python3 if missing
 ensure_python() {
-    if command_exists python3; then
-        return 0
-    fi
+    command_exists python3 && return 0
 
+    log_info "Installing Python3..."
     detect_os
 
     case "$OS" in
         ubuntu|debian)
-            run_with_spinner "Installing Python3" "sudo apt-get update -qq && sudo apt-get install -y python3 python3-pip python3-venv"
+            sudo apt-get update -qq >/dev/null 2>&1
+            sudo apt-get install -y python3 python3-pip python3-venv >/dev/null 2>&1
             ;;
         centos|rhel|fedora|rocky|almalinux)
             if command_exists dnf; then
-                run_with_spinner "Installing Python3" "sudo dnf install -y python3 python3-pip"
+                sudo dnf install -y python3 python3-pip >/dev/null 2>&1
             else
-                run_with_spinner "Installing Python3" "sudo yum install -y python3 python3-pip"
+                sudo yum install -y python3 python3-pip >/dev/null 2>&1
             fi
             ;;
         arch|manjaro)
-            run_with_spinner "Installing Python3" "sudo pacman -Sy --noconfirm python python-pip"
+            sudo pacman -Sy --noconfirm python python-pip >/dev/null 2>&1
             ;;
         *)
-            log_error "Unsupported OS: $OS. Please install Python3 manually."
+            log_error "Unsupported OS: $OS"
             exit 1
             ;;
     esac
+    log_success "Python3 installed"
 }
 
-# Install pip if missing
 ensure_pip() {
-    if python3 -m pip --version >/dev/null 2>&1; then
-        return 0
-    fi
+    python3 -m pip --version >/dev/null 2>&1 && return 0
 
+    log_info "Installing pip..."
     detect_os
 
     case "$OS" in
         ubuntu|debian)
-            run_with_spinner "Installing pip" "sudo apt-get install -y python3-pip"
+            sudo apt-get install -y python3-pip >/dev/null 2>&1
             ;;
         centos|rhel|fedora|rocky|almalinux)
             if command_exists dnf; then
-                run_with_spinner "Installing pip" "sudo dnf install -y python3-pip"
+                sudo dnf install -y python3-pip >/dev/null 2>&1
             else
-                run_with_spinner "Installing pip" "sudo yum install -y python3-pip"
+                sudo yum install -y python3-pip >/dev/null 2>&1
             fi
             ;;
         *)
-            run_with_spinner "Installing pip" "curl -sS https://bootstrap.pypa.io/get-pip.py | python3"
+            curl -sS https://bootstrap.pypa.io/get-pip.py | python3 >/dev/null 2>&1
             ;;
     esac
+    log_success "pip installed"
 }
 
-# Install lium-cli via pip
 install_lium() {
-    run_with_spinner "Installing lium-cli" "python3 -m pip install --user --upgrade lium-cli"
+    log_info "Installing lium-cli..."
+    python3 -m pip install --user --upgrade lium-cli >/dev/null 2>&1
 
-    if ! LIUM_BIN=$(find_lium); then
-        log_error "Installation failed - lium not found"
+    if find_lium >/dev/null; then
+        log_success "lium-cli installed"
+    else
+        log_error "Installation failed"
         exit 1
     fi
 }
 
-# Add ~/.local/bin to PATH for current session
 ensure_path() {
     if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
         export PATH="$HOME/.local/bin:$PATH"
@@ -173,24 +130,19 @@ main() {
 
     ensure_path
 
-    # Check if lium already installed
     if LIUM_BIN=$(find_lium); then
-        log_success "lium-cli found: $LIUM_BIN"
+        log_success "lium-cli found"
     else
-        log_info "Installing lium-cli..."
         ensure_python
         ensure_pip
         install_lium
         LIUM_BIN=$(find_lium)
-        log_success "lium-cli ready: $LIUM_BIN"
     fi
 
     echo ""
 
-    # Restore stdin from terminal (needed when running via curl | bash)
-    if [[ ! -t 0 ]]; then
-        exec < /dev/tty
-    fi
+    # Restore stdin from terminal (for interactive prompts in lium mine)
+    exec < /dev/tty
 
     if [[ -n "$LIUM_ARGS" ]]; then
         exec "$LIUM_BIN" mine $LIUM_ARGS
