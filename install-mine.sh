@@ -171,6 +171,11 @@ main() {
     echo -e "${BLUE}══════════════════════════════════════${NC}"
     echo ""
 
+    # Restore stdin from terminal (needed when running via curl | bash)
+    if [[ ! -t 0 ]]; then
+        exec < /dev/tty
+    fi
+
     ensure_path
 
     # Check if lium already installed
