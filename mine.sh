@@ -1,13 +1,14 @@
 #!/bin/bash
 # Lium Mine Installer & Runner
-# curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-cli/main/install-mine.sh | bash -s -- -k <HOTKEY>
+# curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-cli/main/mine.sh | bash -s -- -k <HOTKEY>
 
 # If running from pipe, save to temp file and re-execute
 # (Preserves interactive capabilities if needed)
 if [[ ! -t 0 ]] && [[ -z "$LIUM_INSTALLER_REEXEC" ]]; then
     TEMP_SCRIPT=$(mktemp) || { echo "Failed to create temp file"; exit 1; }
-    cat > "$TEMP_SCRIPT"
-    chmod +x "$TEMP_SCRIPT"
+    trap 'rm -f "$TEMP_SCRIPT"' EXIT INT TERM
+    cat > "$TEMP_SCRIPT" || { echo "Failed to write installer script"; exit 1; }
+    chmod 700 "$TEMP_SCRIPT" || { echo "Failed to make script executable"; exit 1; }
     export LIUM_INSTALLER_REEXEC=1
 
     if { true < /dev/tty; } 2>/dev/null; then
@@ -15,9 +16,7 @@ if [[ ! -t 0 ]] && [[ -z "$LIUM_INSTALLER_REEXEC" ]]; then
     else
         bash "$TEMP_SCRIPT" "$@"
     fi
-    exit_code=$?
-    rm -f "$TEMP_SCRIPT"
-    exit $exit_code
+    exit $?
 fi
 
 set -e
@@ -43,7 +42,7 @@ find_lium() {
     return 1
 }
 
-# Spinner logic for UX
+# Show elapsed time while waiting for background process
 show_elapsed() {
     local start=$1 msg=$2 pid=$3
     while kill -0 "$pid" 2>/dev/null; do
@@ -112,7 +111,7 @@ main() {
     if LIUM_BIN=$(find_lium); then
         log_ok "lium-cli found"
     else
-        log_ok "lium-cli not found, installing via pip..."
+        echo -e "${BLUE}▸${NC} lium-cli not found, installing via pip..."
 
         install_lium
 
