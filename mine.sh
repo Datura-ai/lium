@@ -83,7 +83,7 @@ run_with_timer() {
 
 install_lium() {
     # Simple pip install
-    run_with_timer "Installing lium-cli" python3 -m pip install --user --upgrade lium-cli
+    run_with_timer "Installing lium-cli" python3 -m pip install --user --upgrade lium.io
 
     # CRITICAL: Reset bash hash table to find the new command
     hash -r
