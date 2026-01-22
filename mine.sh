@@ -96,7 +96,6 @@ ensure_path() {
 }
 
 main() {
-    echo ""
     echo -e "${BLUE}══════════════════════════════════════${NC}"
     echo -e "${BLUE}     Lium Mine Installer & Runner${NC}"
     echo -e "${BLUE}══════════════════════════════════════${NC}"
