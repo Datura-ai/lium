@@ -3,14 +3,14 @@
 # curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-cli/main/install-mine.sh | bash -s -- -k <HOTKEY>
 
 # If running from pipe, save to temp file and re-execute
+# (Preserves interactive capabilities if needed)
 if [[ ! -t 0 ]] && [[ -z "$LIUM_INSTALLER_REEXEC" ]]; then
     TEMP_SCRIPT=$(mktemp) || { echo "Failed to create temp file"; exit 1; }
     cat > "$TEMP_SCRIPT"
     chmod +x "$TEMP_SCRIPT"
     export LIUM_INSTALLER_REEXEC=1
 
-    # Re-execute with tty if available, otherwise without interactive support
-    if [[ -e /dev/tty ]]; then
+    if { true < /dev/tty; } 2>/dev/null; then
         bash "$TEMP_SCRIPT" "$@" < /dev/tty
     else
         bash "$TEMP_SCRIPT" "$@"
@@ -31,20 +31,11 @@ NC='\033[0m'
 log_ok() { echo -e "${GREEN}✓${NC} $1"; }
 log_err() { echo -e "${RED}✗${NC} $1"; }
 
-# Store arguments as array to preserve spaces/special chars
 LIUM_ARGS=("$@")
-
-detect_os() {
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        OS=$ID
-    else
-        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-    fi
-}
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
+# Try to find lium in path or common locations
 find_lium() {
     command_exists lium && echo "lium" && return 0
     [[ -x "$HOME/.local/bin/lium" ]] && echo "$HOME/.local/bin/lium" && return 0
@@ -52,6 +43,7 @@ find_lium() {
     return 1
 }
 
+# Spinner logic for UX
 show_elapsed() {
     local start=$1 msg=$2 pid=$3
     while kill -0 "$pid" 2>/dev/null; do
@@ -89,39 +81,12 @@ run_with_timer() {
     rm -f "$log_file"
 }
 
-ensure_python() {
-    command_exists python3 && return 0
-    detect_os
-    case "$OS" in
-        ubuntu|debian)
-            run_with_timer "Updating apt" sudo apt-get update -qq
-            run_with_timer "Installing Python3" sudo apt-get install -y python3 python3-pip python3-venv
-            ;;
-        centos|rhel|fedora|rocky|almalinux)
-            local pkg_mgr
-            pkg_mgr=$(command_exists dnf && echo dnf || echo yum)
-            run_with_timer "Installing Python3" sudo "$pkg_mgr" install -y python3 python3-pip
-            ;;
-        *) log_err "Unsupported OS: $OS"; exit 1 ;;
-    esac
-}
-
-ensure_pip() {
-    python3 -m pip --version >/dev/null 2>&1 && return 0
-    detect_os
-    case "$OS" in
-        ubuntu|debian)
-            run_with_timer "Installing pip" sudo apt-get install -y python3-pip
-            ;;
-        *)
-            run_with_timer "Installing pip" bash -c "curl -sS https://bootstrap.pypa.io/get-pip.py | python3"
-            ;;
-    esac
-}
-
 install_lium() {
+    # Simple pip install
     run_with_timer "Installing lium-cli" python3 -m pip install --user --upgrade lium-cli
-    find_lium >/dev/null || { log_err "Installation failed"; exit 1; }
+
+    # CRITICAL: Reset bash hash table to find the new command
+    hash -r
 }
 
 ensure_path() {
@@ -137,20 +102,35 @@ main() {
     echo -e "${BLUE}══════════════════════════════════════${NC}"
     echo ""
 
+    # Basic Pre-flight check
+    if ! command_exists python3; then
+        log_err "Python3 is not installed. Please install Python3 and try again."
+        exit 1
+    fi
+
     ensure_path
 
     if LIUM_BIN=$(find_lium); then
         log_ok "lium-cli found"
     else
-        ensure_python
-        ensure_pip
+        log_ok "lium-cli not found, installing via pip..."
+
         install_lium
-        LIUM_BIN=$(find_lium)
+
+        # CRITICAL: Safe assignment with error handling
+        # This prevents 'set -e' from killing the script if finding the binary fails immediately
+        LIUM_BIN=$(find_lium) || { log_err "Critical: Could not locate lium binary after install. Please check your PATH."; exit 1; }
     fi
 
     echo ""
 
-    # Run lium mine with preserved arguments
+    # Final sanity check
+    if [[ -z "$LIUM_BIN" ]]; then
+        log_err "Binary path is empty."
+        exit 1
+    fi
+
+    # Execute lium mine
     if [[ ${#LIUM_ARGS[@]} -gt 0 ]]; then
         exec "$LIUM_BIN" mine "${LIUM_ARGS[@]}"
     else
