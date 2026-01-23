@@ -50,8 +50,10 @@ show_elapsed() {
         printf "\r${BLUE}▸${NC} %s... ${GRAY}%ds${NC}  " "$msg" "$elapsed"
         sleep 1
     done
-    wait "$pid" 2>/dev/null
-    return $?
+    # Capture exit code safely to avoid set -e termination
+    local exit_code=0
+    wait "$pid" 2>/dev/null || exit_code=$?
+    return $exit_code
 }
 
 run_with_timer() {
