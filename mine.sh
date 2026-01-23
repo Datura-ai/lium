@@ -66,8 +66,8 @@ run_with_timer() {
     "$@" > "$log_file" 2>&1 &
     local pid=$!
 
-    show_elapsed "$start" "$msg" "$pid"
-    local exit_code=$?
+    local exit_code=0
+    show_elapsed "$start" "$msg" "$pid" || exit_code=$?
 
     local elapsed=$(($(date +%s) - start))
     if [[ $exit_code -eq 0 ]]; then
