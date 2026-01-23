@@ -95,8 +95,8 @@ install_lium() {
         hash -r
     fi
 
-    # Install lium-cli using uv (better dependency resolution than pip)
-    run_with_timer "Installing lium-cli" uv pip install --system lium.io
+    # Install lium-cli using uv tool (isolated environment in ~/.local/bin)
+    run_with_timer "Installing lium-cli" uv tool install lium.io
 
     # CRITICAL: Reset bash hash table to find the new command
     hash -r
