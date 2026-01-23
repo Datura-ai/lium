@@ -82,9 +82,21 @@ run_with_timer() {
     rm -f "$log_file"
 }
 
+install_uv() {
+    # Install uv package manager (fast, better dependency resolution)
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+}
+
 install_lium() {
-    # Simple pip install
-    run_with_timer "Installing lium-cli" python3 -m pip install --user --upgrade lium.io
+    # Ensure uv is installed
+    if ! command_exists uv; then
+        run_with_timer "Installing uv" install_uv
+        export PATH="$HOME/.local/bin:$PATH"
+        hash -r
+    fi
+
+    # Install lium-cli using uv (better dependency resolution than pip)
+    run_with_timer "Installing lium-cli" uv pip install --user lium.io
 
     # CRITICAL: Reset bash hash table to find the new command
     hash -r
@@ -93,6 +105,9 @@ install_lium() {
 ensure_path() {
     if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
         export PATH="$HOME/.local/bin:$PATH"
+    fi
+    if [[ ":$PATH:" != *":$HOME/.cargo/bin:"* ]]; then
+        export PATH="$HOME/.cargo/bin:$PATH"
     fi
 }
 
