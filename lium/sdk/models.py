@@ -12,7 +12,7 @@ class ExecutorInfo:
     machine_name: str
     gpu_type: str
     gpu_count: int
-    price_per_hour: float
+    available_gpu_count: int
     price_per_gpu_hour: float
     location: Dict
     specs: Dict
@@ -20,6 +20,7 @@ class ExecutorInfo:
     docker_in_docker: bool
     ip: str
     available_port_count: Optional[int] = None
+    min_gpu_count_for_rental: int | None = None
 
     @property
     def driver_version(self) -> str:
@@ -43,6 +44,8 @@ class PodInfo:
     ports: Dict
     created_at: str
     updated_at: str
+    gpu_count: int
+    price: float
     executor: Optional[ExecutorInfo]
     template: Dict
     removal_scheduled_at: Optional[str]
