@@ -1212,10 +1212,8 @@ class Lium:
         Returns:
             :class:`BackupConfig` if present, otherwise ``None``.
         """
-        if not pod.executor:
-            raise ValueError(f"Pod {pod.name} has no executor information")
         try:
-            response = self._request("GET", f"/backup-configs/pod/{pod.executor.id}").json()
+            response = self._request("GET", f"/backup-configs/pod/{pod.id}").json()
             return self._dict_to_backup_config(response) if response else None
         except LiumNotFoundError:
             # No backup config exists for this pod
@@ -1239,11 +1237,9 @@ class Lium:
         Returns:
             List of :class:`BackupLog` entries (possibly empty).
         """
-        if not pod.executor:
-            raise ValueError(f"Pod {pod.name} has no executor information")
         
         try:
-            response = self._request("GET", f"/backup-logs/pod/{pod.executor.id}").json()
+            response = self._request("GET", f"/backup-logs/pod/{pod.id}").json()
             
             # Handle paginated response - extract items from the response
             if isinstance(response, dict) and 'items' in response:
