@@ -329,12 +329,18 @@ def _gather_inputs(
     return answers
 
 
-def _validate_executor():
+def _validate_executor(extra_args=None):
     """
     Validate the executor using the Lium validator Docker image.
     Returns (passed, message) tuple.
     """
-    out, _ = _run("docker run --rm --gpus all daturaai/lium-validator:latest", check=False)
+    # Build the docker command with any extra arguments
+    docker_cmd = "docker run --rm --gpus all daturaai/lium-validator:latest"
+    if extra_args:
+        # Join the extra arguments as a string
+        docker_cmd += " " + " ".join(extra_args)
+
+    out, _ = _run(docker_cmd, check=False)
 
     # Parse JSON output
     result = json.loads(out.strip())
@@ -348,14 +354,15 @@ def _validate_executor():
 # --------------------------
 # CLI
 # --------------------------
-@click.command("mine")
+@click.command("mine", context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
 @click.option("--hotkey", "-k", help="Miner hotkey SS58 address")
 @click.option("--dir", "-d", "dir_", default="compute-subnet", help="Target directory")
 @click.option("--branch", "-b", default="main")
 @click.option("--auto", "-a", is_flag=True)
 @click.option("--verbose", "-v", is_flag=True, help="Show the plan banner")
+@click.pass_context
 @handle_errors
-def mine_command(hotkey, dir_, branch, auto, verbose):
+def mine_command(ctx, hotkey, dir_, branch, auto, verbose):
     if verbose:
         _show_setup_summary()   # keep the banner only when asked
 
@@ -397,7 +404,8 @@ def mine_command(hotkey, dir_, branch, auto, verbose):
             _start_executor(executor_dir)
 
         with timed_step_status(6, TOTAL_STEPS, "Validating executor"):
-            _validate_executor()
+            # Pass any extra arguments to the validator
+            _validate_executor(ctx.args if ctx.args else None)
 
     except Exception as e:
         console.error(f"❌ {e}")
