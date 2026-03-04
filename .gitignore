@@ -175,6 +175,7 @@ cython_debug/
 
 
 notebooks/
+.docs/
 
 # Claude Code configuration
 CLAUDE.md
