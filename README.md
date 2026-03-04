@@ -124,7 +124,11 @@ requires connecting this repository; the `.readthedocs.yaml` file points RTD at
 ### Other Commands
 
 - `lium theme [THEME]` - Get or set UI theme (light/dark/auto)
-- `lium mine` - Mining-related commands
+- `lium mine` - Mining-related command group
+- `lium mine executor-setup` - Set up a compute subnet executor/miner
+- `sudo lium mine gpu-splitting setup [--device /dev/...] [--yes]` - Prepare Docker storage for LIUM GPU splitting
+- `lium mine gpu-splitting check [--device /dev/...]` - Inspect the host and print the GPU-splitting plan
+- `lium mine gpu-splitting verify` - Verify Docker storage matches LIUM GPU-splitting requirements
 
 ### Command Examples
 
@@ -142,6 +146,14 @@ lium up --gpu H200 --country US
 
 # Create pod with specific template
 lium up 1 --template_id <TEMPLATE_ID> --yes
+
+# Set up executor bootstrap flow
+lium mine executor-setup --auto --hotkey <HOTKEY>
+
+# Inspect or configure Docker storage for GPU splitting (Ubuntu/Debian + systemd, run setup as root)
+lium mine gpu-splitting check
+sudo lium mine gpu-splitting setup --yes
+lium mine gpu-splitting verify
 
 # Create pod with volume
 lium up 1 --volume id:<VOLUME_HUID>

@@ -1,14 +1,6 @@
-# mine.py
-"""Mine command for setting up a compute subnet executor/miner."""
-import os
-import re
-import sys
-import json
-import time
-import shutil
-from pathlib import Path
+"""Compatibility shim for the mine command import path."""
 
-from typing import Optional, Tuple
+from lium.cli.mine import mine_command
 
 import click
 from rich import box
