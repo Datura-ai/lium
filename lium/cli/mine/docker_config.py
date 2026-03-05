@@ -38,6 +38,11 @@ def inspect_docker_state(runner: Runner) -> DockerState:
     """
     result = runner(["docker", "info", "--format", "{{json .}}"], False, True)
     if result.returncode != 0 or not (result.stdout or "").strip():
+        error_text = (result.stderr or "").strip() or (result.stdout or "").strip()
+        if not error_text:
+            error_text = f"docker info exited with status {result.returncode}"
+        if len(error_text) > 400:
+            error_text = f"{error_text[:397]}..."
         return DockerState(
             docker_root_dir="/var/lib/docker",
             storage_driver=None,
@@ -45,6 +50,7 @@ def inspect_docker_state(runner: Runner) -> DockerState:
             supports_d_type=None,
             service_running=False,
             docker_info_available=False,
+            docker_info_error=error_text,
             driver_status={},
         )
 
@@ -105,7 +111,7 @@ def build_verification_result(runner: Runner, docker_root_dir: str = "/var/lib/d
     Commands delegated through helpers:
 
     - `docker info --format '{{json .}}'` via `inspect_docker_state(...)`
-    - `findmnt --json <docker-root>` via `load_mount_info(...)`
+    - `findmnt --json --target <docker-root>` via `load_mount_info(...)`
 
     This is used by both `lium mine gpu-splitting verify` and the final step of
     `setup`.

@@ -54,6 +54,7 @@ class DockerState:
     supports_d_type: Optional[bool]
     service_running: bool
     docker_info_available: bool
+    docker_info_error: Optional[str] = None
     driver_status: dict[str, str] = field(default_factory=dict)
     server_version: Optional[str] = None
     raw: dict[str, Any] = field(default_factory=dict)
