@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from lium.cli.mine import storage
-from lium.cli.mine.docker_config import inspect_docker_state, load_daemon_json, merge_overlay2
+from lium.cli.mine.docker_config import build_verification_result, inspect_docker_state, load_daemon_json, merge_overlay2
 from lium.cli.mine.models import BlockDevice, CommandResult, MountInfo
 from lium.cli.mine.storage import auto_select_target, load_mount_info, resolve_explicit_target
 
@@ -229,6 +229,42 @@ def test_load_mount_info_uses_findmnt_target_semantics():
     assert mount_info.source == "/dev/sda1"
     assert mount_info.fstype == "ext4"
     assert "rw" in mount_info.options
+
+
+def test_has_project_quota_option_accepts_aliases():
+    assert storage.has_project_quota_option(["rw", "pquota"]) is True
+    assert storage.has_project_quota_option(["rw", "prjquota"]) is True
+    assert storage.has_project_quota_option(["rw", "prjquota=1"]) is True
+    assert storage.has_project_quota_option(["rw", "noquota"]) is False
+
+
+def test_build_verification_result_accepts_prjquota_mount_option():
+    runner = _runner_factory(
+        {
+            ("docker", "info", "--format", "{{json .}}"): CommandResult(
+                args=["docker", "info", "--format", "{{json .}}"],
+                stdout=(
+                    '{"DockerRootDir":"/var/lib/docker","Driver":"overlay2",'
+                    '"DriverStatus":[["Backing Filesystem","xfs"],["Supports d_type","true"]]}'
+                ),
+                stderr="",
+                returncode=0,
+            ),
+            ("findmnt", "--json", "--target", "/var/lib/docker"): CommandResult(
+                args=["findmnt", "--json", "--target", "/var/lib/docker"],
+                stdout='{"filesystems":[{"target":"/var/lib/docker","source":"/dev/vdb1","fstype":"xfs","options":"rw,prjquota"}]}',
+                stderr="",
+                returncode=0,
+            ),
+        }
+    )
+
+    result = build_verification_result(runner)
+    project_quota_check = next(check for check in result.checks if check.name == "Mount options include project quota")
+
+    assert result.passed is True
+    assert project_quota_check.passed is True
+    assert project_quota_check.expected == "contains pquota or prjquota"
 
 
 def test_inspect_docker_state_captures_error_details():
