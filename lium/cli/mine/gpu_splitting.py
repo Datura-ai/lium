@@ -321,14 +321,13 @@ def _print_gpu_splitting_requirements():
                     "- Docker daemon must be running and reachable",
                     "- Need one safe extra disk/partition (not root or current Docker backing device)",
                     "- Final required state: Docker `overlay2`, `/var/lib/docker` on XFS with project quota (`pquota`/`prjquota`), `Supports d_type=true`",
-                    "- Docs link:",
+                    f"- Docs link: {GPU_SPLITTING_DOC_URL}",
                 ]
             ),
             title="GPU Splitting Requirements",
             border_style="cyan",
         )
     )
-    click.echo(GPU_SPLITTING_DOC_URL)
 
 
 def _write_json_atomic(path: str, payload: dict):
