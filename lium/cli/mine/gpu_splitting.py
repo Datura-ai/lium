@@ -21,7 +21,16 @@ from rich.table import Table
 from ..utils import console, timed_step_status
 from .docker_config import build_verification_result, inspect_docker_state, load_daemon_json, merge_overlay2
 from .models import CandidateEvaluation, CommandResult, PreflightResult, SetupPlan, VerificationResult
-from .storage import auto_select_target, evaluate_candidates, load_block_devices, load_mount_info, resolve_explicit_target
+from .storage import (
+    auto_select_target,
+    evaluate_candidates,
+    has_project_quota_option,
+    load_block_devices,
+    load_mount_info,
+    resolve_explicit_target,
+)
+
+GPU_SPLITTING_DOC_URL = "https://docs.lium.io/miner-portal/executors/manage/?_highlight=gpu&_highlight=split#gpu-splitting"
 
 
 def run_command(args: list[str], check: bool = True, capture: bool = True) -> CommandResult:
@@ -302,6 +311,26 @@ def _verification_table(result: VerificationResult, title: str = "Verification")
     return table
 
 
+def _print_gpu_splitting_requirements():
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    "- Ubuntu/Debian Linux host with systemd",
+                    "- Run `check` and `setup` as root (`sudo`)",
+                    "- Docker daemon must be running and reachable",
+                    "- Need one safe extra disk/partition (not root or current Docker backing device)",
+                    "- Final required state: Docker `overlay2`, `/var/lib/docker` on XFS with project quota (`pquota`/`prjquota`), `Supports d_type=true`",
+                    "- Docs link:",
+                ]
+            ),
+            title="GPU Splitting Requirements",
+            border_style="cyan",
+        )
+    )
+    click.echo(GPU_SPLITTING_DOC_URL)
+
+
 def _write_json_atomic(path: str, payload: dict):
     """Atomically rewrite a JSON config file using temp-file + rename.
 
@@ -448,7 +477,7 @@ def _mount_validation(target_path: str, docker_root: str):
 
     The temporary mount checks two things before we touch `/var/lib/docker`:
 
-    - the kernel accepted `pquota`
+    - the kernel accepted project quota (`pquota` or `prjquota`)
     - the mounted filesystem is writable
     """
     validation_mount = Path("/mnt/lium-docker-validate")
@@ -456,8 +485,8 @@ def _mount_validation(target_path: str, docker_root: str):
     run_command(["mount", "-o", "pquota", target_path, str(validation_mount)], True, True)
     try:
         mount_info = load_mount_info(run_command, str(validation_mount))
-        if "pquota" not in mount_info.options:
-            raise RuntimeError("Temporary mount validation failed: pquota not present")
+        if not has_project_quota_option(mount_info.options):
+            raise RuntimeError("Temporary mount validation failed: project quota option not present (pquota/prjquota)")
         if not os.access(str(validation_mount), os.W_OK):
             raise RuntimeError("Temporary mount validation failed: mount is not writable")
     finally:
@@ -605,8 +634,8 @@ def _execute_setup(plan: SetupPlan):
             run_command(["umount", str(docker_root)], False, True)
         run_command(["mount", str(docker_root)], True, True)
         current_mount = load_mount_info(run_command, str(docker_root))
-        if "pquota" not in current_mount.options:
-            raise RuntimeError("Mounted Docker root without pquota")
+        if not has_project_quota_option(current_mount.options):
+            raise RuntimeError("Mounted Docker root without project quota option (pquota/prjquota)")
 
     with timed_step_status(9, total_steps, "Restoring Docker data"):
         console.dim(f"Restoring backup from {plan.backup_dir}")
@@ -634,6 +663,7 @@ def gpu_splitting_command():
 @gpu_command_errors
 def gpu_splitting_check_command(device: Optional[Path]):
     """Inspect the host and print the plan without making changes."""
+    _print_gpu_splitting_requirements()
     with timed_step_status(1, 2, "Running preflight inspection"):
         preflight = _preflight()
     with timed_step_status(2, 2, "Resolving target"):
@@ -664,6 +694,7 @@ def gpu_splitting_check_command(device: Optional[Path]):
 @gpu_command_errors
 def gpu_splitting_verify_command():
     """Verify the host matches LIUM GPU splitting requirements."""
+    _print_gpu_splitting_requirements()
     with timed_step_status(1, 1, "Running verification"):
         verification = build_verification_result(run_command)
     console.print(_verification_table(verification))
@@ -677,6 +708,7 @@ def gpu_splitting_verify_command():
 @gpu_command_errors
 def gpu_splitting_setup_command(device: Optional[Path], yes: bool):
     """Perform end-to-end Docker storage setup for GPU splitting."""
+    _print_gpu_splitting_requirements()
     with timed_step_status(1, 2, "Running preflight inspection"):
         preflight = _preflight()
     with timed_step_status(2, 2, "Resolving target"):
