@@ -24,6 +24,13 @@ def _no_spinner(*args, **kwargs):
     yield
 
 
+def _assert_docs_link_present(output: str):
+    normalized = output.replace("\n", "").replace("\r", "").replace("│", "").replace(" ", "")
+    expected = gpu_splitting.GPU_SPLITTING_DOC_URL.replace(" ", "")
+    assert expected in normalized
+    assert normalized.count(expected) == 1
+
+
 def _sample_preflight() -> PreflightResult:
     return PreflightResult(
         os_name="Linux",
@@ -102,8 +109,7 @@ def test_gpu_splitting_check_prints_plan_without_prompt(monkeypatch):
 
     assert result.exit_code == 0
     assert "GPU Splitting Requirements" in result.output
-    assert gpu_splitting.GPU_SPLITTING_DOC_URL in result.output
-    assert result.output.count(gpu_splitting.GPU_SPLITTING_DOC_URL) == 1
+    _assert_docs_link_present(result.output)
     assert "Storage Candidates" in result.output
     assert "GPU Splitting Setup Plan" in result.output
     assert "Proceed?" not in result.output
@@ -131,8 +137,7 @@ def test_gpu_splitting_verify_reports_failures(monkeypatch):
 
     assert result.exit_code == 1
     assert "GPU Splitting Requirements" in result.output
-    assert gpu_splitting.GPU_SPLITTING_DOC_URL in result.output
-    assert result.output.count(gpu_splitting.GPU_SPLITTING_DOC_URL) == 1
+    _assert_docs_link_present(result.output)
     assert "FAIL" in result.output
     assert "One or more GPU splitting requirements are not satisfied" in result.output
 
@@ -149,8 +154,7 @@ def test_gpu_splitting_setup_aborts_on_negative_confirmation(monkeypatch):
 
     assert result.exit_code == 0
     assert "GPU Splitting Requirements" in result.output
-    assert gpu_splitting.GPU_SPLITTING_DOC_URL in result.output
-    assert result.output.count(gpu_splitting.GPU_SPLITTING_DOC_URL) == 1
+    _assert_docs_link_present(result.output)
     assert "Aborted before making changes" in result.output
     assert called["executed"] is False
 
@@ -170,8 +174,7 @@ def test_gpu_splitting_setup_yes_prints_plan_then_executes(monkeypatch):
 
     assert result.exit_code == 0
     assert "GPU Splitting Requirements" in result.output
-    assert gpu_splitting.GPU_SPLITTING_DOC_URL in result.output
-    assert result.output.count(gpu_splitting.GPU_SPLITTING_DOC_URL) == 1
+    _assert_docs_link_present(result.output)
     assert "Destructive Actions" in result.output
     assert "create partition on /dev/nvme1n1" in result.output
     assert called["executed"] is True
