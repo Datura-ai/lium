@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .models import CommandResult, DockerState, VerificationCheck, VerificationResult
-from .storage import load_mount_info
+from .storage import has_project_quota_option, load_mount_info
 
 Runner = Callable[[list[str], bool, bool], CommandResult]
 
@@ -145,10 +145,10 @@ def build_verification_result(runner: Runner, docker_root_dir: str = "/var/lib/d
             expected=docker_root_dir,
         ),
         VerificationCheck(
-            name="Mount options include pquota",
-            passed="pquota" in docker_mount.options,
+            name="Mount options include project quota",
+            passed=has_project_quota_option(docker_mount.options),
             actual=",".join(docker_mount.options),
-            expected="contains pquota",
+            expected="contains pquota or prjquota",
         ),
     ]
     return VerificationResult(checks=checks)

@@ -110,7 +110,7 @@ def load_mount_info(runner: Runner, target: str) -> MountInfo:
 
     We use this for `/`, `/var/lib/docker`, and the temporary validation
     mountpoint so later safety checks can compare device sources, filesystems,
-    and mount options such as `pquota`.
+    and mount options such as project quota (`pquota`/`prjquota`).
     """
     data = run_json_command(runner, ["findmnt", "--json", "--target", target])
     filesystems = data.get("filesystems") or []
@@ -124,6 +124,19 @@ def load_mount_info(runner: Runner, target: str) -> MountInfo:
         fstype=item.get("fstype", ""),
         options=[value for value in options if value],
     )
+
+
+def has_project_quota_option(options: list[str]) -> bool:
+    """Return true when mount options include XFS project quota.
+
+    We treat both `pquota` and `prjquota` as valid aliases because kernels and
+    tools may report either form.
+    """
+    for option in options:
+        key = option.split("=", 1)[0].strip().lower()
+        if key in {"pquota", "prjquota"}:
+            return True
+    return False
 
 
 def get_device_by_path(devices: list[BlockDevice], path: str) -> Optional[BlockDevice]:

@@ -101,6 +101,9 @@ def test_gpu_splitting_check_prints_plan_without_prompt(monkeypatch):
     result = CliRunner().invoke(cli, ["mine", "gpu-splitting", "check"])
 
     assert result.exit_code == 0
+    assert "GPU Splitting Requirements" in result.output
+    assert gpu_splitting.GPU_SPLITTING_DOC_URL in result.output
+    assert result.output.count(gpu_splitting.GPU_SPLITTING_DOC_URL) == 1
     assert "Storage Candidates" in result.output
     assert "GPU Splitting Setup Plan" in result.output
     assert "Proceed?" not in result.output
@@ -115,10 +118,10 @@ def test_gpu_splitting_verify_reports_failures(monkeypatch):
         lambda runner, docker_root_dir="/var/lib/docker": VerificationResult(
             checks=[
                 VerificationCheck(
-                    name="Mount options include pquota",
+                    name="Mount options include project quota",
                     passed=False,
                     actual="defaults",
-                    expected="contains pquota",
+                    expected="contains pquota or prjquota",
                 )
             ]
         ),
@@ -127,6 +130,9 @@ def test_gpu_splitting_verify_reports_failures(monkeypatch):
     result = CliRunner().invoke(cli, ["mine", "gpu-splitting", "verify"])
 
     assert result.exit_code == 1
+    assert "GPU Splitting Requirements" in result.output
+    assert gpu_splitting.GPU_SPLITTING_DOC_URL in result.output
+    assert result.output.count(gpu_splitting.GPU_SPLITTING_DOC_URL) == 1
     assert "FAIL" in result.output
     assert "One or more GPU splitting requirements are not satisfied" in result.output
 
@@ -142,6 +148,9 @@ def test_gpu_splitting_setup_aborts_on_negative_confirmation(monkeypatch):
     result = CliRunner().invoke(cli, ["mine", "gpu-splitting", "setup"])
 
     assert result.exit_code == 0
+    assert "GPU Splitting Requirements" in result.output
+    assert gpu_splitting.GPU_SPLITTING_DOC_URL in result.output
+    assert result.output.count(gpu_splitting.GPU_SPLITTING_DOC_URL) == 1
     assert "Aborted before making changes" in result.output
     assert called["executed"] is False
 
@@ -160,6 +169,9 @@ def test_gpu_splitting_setup_yes_prints_plan_then_executes(monkeypatch):
     result = CliRunner().invoke(cli, ["mine", "gpu-splitting", "setup", "--yes"])
 
     assert result.exit_code == 0
+    assert "GPU Splitting Requirements" in result.output
+    assert gpu_splitting.GPU_SPLITTING_DOC_URL in result.output
+    assert result.output.count(gpu_splitting.GPU_SPLITTING_DOC_URL) == 1
     assert "Destructive Actions" in result.output
     assert "create partition on /dev/nvme1n1" in result.output
     assert called["executed"] is True
@@ -248,3 +260,32 @@ def test_preflight_fails_fast_when_docker_info_is_unavailable(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Unable to read Docker metadata required for gpu-splitting preflight"):
         gpu_splitting._preflight()
+
+
+def test_mount_validation_accepts_prjquota_alias(monkeypatch, tmp_path):
+    validation_mount = tmp_path / "lium-docker-validate"
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(gpu_splitting, "Path", lambda *_: validation_mount)
+    monkeypatch.setattr(
+        gpu_splitting,
+        "run_command",
+        lambda args, check=True, capture=True: commands.append(args)
+        or gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0),
+    )
+    monkeypatch.setattr(
+        gpu_splitting,
+        "load_mount_info",
+        lambda runner, target: MountInfo(
+            target=target,
+            source="/dev/vdb1",
+            fstype="xfs",
+            options=["rw", "prjquota"],
+        ),
+    )
+    monkeypatch.setattr(gpu_splitting.os, "access", lambda *_: True)
+
+    gpu_splitting._mount_validation("/dev/vdb1", "/var/lib/docker")
+
+    assert commands[0] == ["mount", "-o", "pquota", "/dev/vdb1", str(validation_mount)]
+    assert commands[-1] == ["umount", str(validation_mount)]
