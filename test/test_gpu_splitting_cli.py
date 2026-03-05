@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
+import pytest
 from click.testing import CliRunner
 
 from lium.cli.cli import cli
@@ -211,3 +212,39 @@ def test_detect_new_partition_uses_before_after_diff(monkeypatch):
     new_partition = gpu_splitting._detect_new_partition("/dev/nvme1n1", {"/dev/nvme1n1p1"})
 
     assert new_partition == "/dev/nvme1n1p2"
+
+
+def test_preflight_fails_fast_when_docker_info_is_unavailable(monkeypatch):
+    monkeypatch.setattr(gpu_splitting.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(gpu_splitting.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(gpu_splitting, "_detect_distro", lambda: "ubuntu")
+    monkeypatch.setattr(gpu_splitting, "_require_binary", lambda _: None)
+    monkeypatch.setattr(
+        gpu_splitting,
+        "run_command",
+        lambda args, check=True, capture=True: gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0),
+    )
+    monkeypatch.setattr(
+        gpu_splitting,
+        "inspect_docker_state",
+        lambda runner: DockerState(
+            docker_root_dir="/var/lib/docker",
+            storage_driver=None,
+            backing_filesystem=None,
+            supports_d_type=None,
+            service_running=False,
+            docker_info_available=False,
+            docker_info_error="permission denied while trying to connect to docker.sock",
+        ),
+    )
+    monkeypatch.setattr(gpu_splitting, "load_block_devices", lambda runner: [])
+
+    def fake_load_mount_info(runner, target):
+        if target == "/":
+            return MountInfo(target="/", source="/dev/sda1", fstype="ext4", options=["rw"])
+        raise AssertionError(f"Unexpected mount lookup target: {target}")
+
+    monkeypatch.setattr(gpu_splitting, "load_mount_info", fake_load_mount_info)
+
+    with pytest.raises(RuntimeError, match="Unable to read Docker metadata required for gpu-splitting preflight"):
+        gpu_splitting._preflight()

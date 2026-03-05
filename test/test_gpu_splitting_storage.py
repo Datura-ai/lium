@@ -5,9 +5,9 @@ from pathlib import Path
 import pytest
 
 from lium.cli.mine import storage
-from lium.cli.mine.docker_config import load_daemon_json, merge_overlay2
+from lium.cli.mine.docker_config import inspect_docker_state, load_daemon_json, merge_overlay2
 from lium.cli.mine.models import BlockDevice, CommandResult, MountInfo
-from lium.cli.mine.storage import auto_select_target, resolve_explicit_target
+from lium.cli.mine.storage import auto_select_target, load_mount_info, resolve_explicit_target
 
 
 def _runner_factory(responses: dict[tuple[str, ...], CommandResult]):
@@ -209,6 +209,45 @@ def test_merge_overlay2_preserves_other_keys():
 
     assert changed is True
     assert merged == {"debug": True, "storage-driver": "overlay2"}
+
+
+def test_load_mount_info_uses_findmnt_target_semantics():
+    runner = _runner_factory(
+        {
+            ("findmnt", "--json", "--target", "/var/lib/docker"): CommandResult(
+                args=["findmnt", "--json", "--target", "/var/lib/docker"],
+                stdout='{"filesystems":[{"target":"/","source":"/dev/sda1","fstype":"ext4","options":"rw,noatime"}]}',
+                stderr="",
+                returncode=0,
+            )
+        }
+    )
+
+    mount_info = load_mount_info(runner, "/var/lib/docker")
+
+    assert mount_info.target == "/"
+    assert mount_info.source == "/dev/sda1"
+    assert mount_info.fstype == "ext4"
+    assert "rw" in mount_info.options
+
+
+def test_inspect_docker_state_captures_error_details():
+    runner = _runner_factory(
+        {
+            ("docker", "info", "--format", "{{json .}}"): CommandResult(
+                args=["docker", "info", "--format", "{{json .}}"],
+                stdout="",
+                stderr="permission denied while trying to connect to the docker API at unix:///var/run/docker.sock",
+                returncode=1,
+            )
+        }
+    )
+
+    state = inspect_docker_state(runner)
+
+    assert state.docker_info_available is False
+    assert state.docker_info_error is not None
+    assert "permission denied" in state.docker_info_error
 
 
 def test_load_daemon_json_invalid(tmp_path):

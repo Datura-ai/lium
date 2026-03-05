@@ -102,9 +102,9 @@ def _preflight() -> PreflightResult:
 
     Commands delegated through helpers:
 
-    - `findmnt --json /` via `load_mount_info(...)`
+    - `findmnt --json --target /` via `load_mount_info(...)`
     - `docker info --format '{{json .}}'` via `inspect_docker_state(...)`
-    - `findmnt --json <docker-root>` via `load_mount_info(...)`
+    - `findmnt --json --target <docker-root>` via `load_mount_info(...)`
     - `lsblk --json --bytes ...` via `load_block_devices(...)`
 
     This function must stay read-only. Its job is to confirm the OS/runtime
@@ -139,6 +139,13 @@ def _preflight() -> PreflightResult:
     run_command(["systemctl", "--version"], True, True)
     root_mount = load_mount_info(run_command, "/")
     docker_state = inspect_docker_state(run_command)
+    if not docker_state.docker_info_available:
+        reason = docker_state.docker_info_error or "docker info did not return server metadata"
+        raise RuntimeError(
+            "Unable to read Docker metadata required for gpu-splitting preflight.\n"
+            f"Docker reported: {reason}\n"
+            "Ensure the Docker daemon is running and run this command with root privileges."
+        )
     docker_mount = load_mount_info(run_command, docker_state.docker_root_dir)
     block_devices = load_block_devices(run_command)
     return PreflightResult(
@@ -436,7 +443,7 @@ def _mount_validation(target_path: str, docker_root: str):
     Commands run here:
 
     - `mount -o pquota <target> /mnt/lium-docker-validate`
-    - `findmnt --json /mnt/lium-docker-validate` via `load_mount_info(...)`
+    - `findmnt --json --target /mnt/lium-docker-validate` via `load_mount_info(...)`
     - `umount /mnt/lium-docker-validate`
 
     The temporary mount checks two things before we touch `/var/lib/docker`:
@@ -506,7 +513,7 @@ def _execute_setup(plan: SetupPlan):
 
     5. Temporary mount validation
        - `mount -o pquota <partition> /mnt/lium-docker-validate`
-       - `findmnt --json /mnt/lium-docker-validate` via helper
+       - `findmnt --json --target /mnt/lium-docker-validate` via helper
        - `umount /mnt/lium-docker-validate`
 
     6. Persist host configuration
@@ -517,13 +524,13 @@ def _execute_setup(plan: SetupPlan):
     7. Cut over Docker root and restore data
        - optional `umount /var/lib/docker`
        - `mount /var/lib/docker`
-       - `findmnt --json /var/lib/docker` via helper
+       - `findmnt --json --target /var/lib/docker` via helper
        - `rsync -aHAX --numeric-ids <backup-dir>/ <docker-root>/`
 
     8. Restart and verify Docker
        - `systemctl start docker`
        - `docker info --format '{{json .}}'` via helper
-       - `findmnt --json /var/lib/docker` via helper
+       - `findmnt --json --target /var/lib/docker` via helper
 
     The sequence is intentionally linear and verbose because a partial failure
     here affects real host storage state.
