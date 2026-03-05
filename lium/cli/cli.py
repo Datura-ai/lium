@@ -21,7 +21,7 @@ from .config import config_command
 # from .commands.image import image_command  # Disabled for beta.1
 from .fund import fund_command
 from .bk import bk_command
-from .commands.mine import mine_command
+from .mine import mine_command
 from .volumes import volumes_command
 from .schedules import schedules_command
 from .update.command import update_command
