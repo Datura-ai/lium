@@ -36,9 +36,9 @@ load_dotenv()
 class Lium:
     """Clean Unix-style SDK for Lium."""
 
-    def __init__(self, config: Optional[Config] = None):
+    def __init__(self, config: Optional[Config] = None, source: str = "sdk"):
         self.config = config or Config.load()
-        self.headers = {"X-API-KEY": self.config.api_key}
+        self.headers = {"X-API-KEY": self.config.api_key, "X-Source": source}
 
     @with_retry()
     def _request(
@@ -1291,6 +1291,24 @@ class Lium:
         }
         
         return self._request("POST", f"/pods/{pod.id}/restore", json=payload).json()
+
+    def get_deployment_estimate(self, executor_id: str, template_id: str) -> dict:
+        """Estimate deployment time for a template on an executor.
+
+        Args:
+            executor_id: Executor UUID.
+            template_id: Template UUID.
+
+        Returns:
+            Dict with ``estimated_seconds``, ``is_slow_machine``, ``warning_message``, ``is_cached_template``,
+            and ``docker_image_size`` (image size in bytes, or ``None`` if unknown).
+        """
+        resp = self._request(
+            "GET",
+            "/executors/deployment-estimate",
+            params={"executor_id": executor_id, "template_id": template_id},
+        )
+        return resp.json()
 
     def balance(self) -> float:
         """Get current account balance.

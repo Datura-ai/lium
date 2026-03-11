@@ -115,7 +115,7 @@ def up_command(
     volume_id = parsed.get("volume_id")
     volume_create_params = parsed.get("volume_create_params")
 
-    lium = Lium()
+    lium = Lium(source="cli")
 
     action = ResolveExecutorAction()
     result = ui.load(
@@ -136,14 +136,13 @@ def up_command(
 
     executor = result.data["executor"]
 
-    if not yes:
-        confirm_msg = (
-            f"Acquire pod on {executor.huid} "
-            f"({executor.gpu_count}×{executor.gpu_type}) "
-            f"at ${executor.price_per_hour:.2f}/h?"
-        )
-        if not ui.confirm(confirm_msg):
-            return
+    def _show_estimate(est_secs, dl_speed, img_gb, is_slow, warning_msg):
+        est_min, est_sec = divmod(est_secs, 60)
+        est_str = f"{est_min}m {est_sec}s" if est_min else f"{est_sec}s"
+        img_str = f"image: ~{img_gb:.1f} GB, " if img_gb is not None else ""
+        ui.dim(f"Est. deploy time: ~{est_str} ({img_str}download: {int(dl_speed)} Mbps)")
+        if is_slow and warning_msg:
+            ui.warning(f"Warning: {warning_msg}")
 
     # Resolve or create template
     if docker_run_mode:
@@ -179,9 +178,38 @@ def up_command(
             "executor": executor
         })
 
+        if result.ok:
+            template = result.data["template"]
+            # API-based estimate using resolved template ID
+            try:
+                estimate = lium.get_deployment_estimate(executor.id, template.id)
+                est_secs = estimate.get("estimated_seconds")
+                if est_secs:
+                    specs = executor.specs or {}
+                    network = specs.get("network", {}) or {}
+                    dl_speed = network.get("download_speed") or 0
+                    raw_bytes = estimate.get("docker_image_size")
+                    img_gb = raw_bytes / 1e9 if raw_bytes is not None else None
+                    _show_estimate(
+                        est_secs, dl_speed, img_gb,
+                        estimate.get("is_slow_machine", False),
+                        estimate.get("warning_message"),
+                    )
+            except Exception:
+                pass
+
     if not result.ok:
         ui.error(result.error)
         return
+
+    if not yes:
+        confirm_msg = (
+            f"Acquire pod on {executor.huid} "
+            f"({executor.gpu_count}×{executor.gpu_type}) "
+            f"at ${executor.price_per_hour:.2f}/h?"
+        )
+        if not ui.confirm(confirm_msg):
+            return
 
     template = result.data["template"]
 

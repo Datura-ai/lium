@@ -178,4 +178,8 @@ notebooks/
 
 # Claude Code configuration
 CLAUDE.md
+AGENTS.md
 .python-version
+.cursor
+.codex
+.claude
