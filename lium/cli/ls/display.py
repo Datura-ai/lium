@@ -202,6 +202,14 @@ def build_executors_table(
         huid += " (DinD)" if exe.docker_in_docker else ""
         huid_display = f"{console.get_styled('★', 'success')} {console.get_styled(huid, 'id')}" if is_pareto else f"  {console.get_styled(huid, 'id')}"
 
+        # Style download speed in yellow when below 100 Mbps
+        dl_val = _intish(s["Download"])
+        dl_display = (
+            console.get_styled(s["Download"], "warning")
+            if dl_val is not None and dl_val < 100
+            else s["Download"]
+        )
+
         table.add_row(
             str(idx),
             huid_display,
@@ -212,7 +220,7 @@ def build_executors_table(
             s["RAM"],
             s["Disk"],
             s["Upload"],
-            s["Download"],
+            dl_display,
             s["Ports"]
         )
 
