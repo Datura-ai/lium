@@ -15,7 +15,7 @@ def calculate_pod_cost(pod: PodInfo) -> float:
     Returns:
         Total cost in dollars
     """
-    if not pod.executor or not pod.executor.price_per_hour or not pod.created_at:
+    if not pod.price or not pod.created_at:
         return 0.0
 
     try:
@@ -28,7 +28,7 @@ def calculate_pod_cost(pod: PodInfo) -> float:
 
         now_utc = datetime.now(timezone.utc)
         hours = (now_utc - dt_created).total_seconds() / 3600
-        return hours * pod.executor.price_per_hour
+        return hours * pod.price
     except Exception:
         return 0.0
 
@@ -48,8 +48,8 @@ def format_pods_for_removal(pods: List[PodInfo], show_cost: bool = True) -> str:
 
     for pod in pods:
         price_info = ""
-        if pod.executor and pod.executor.price_per_hour:
-            price_info = f" (${pod.executor.price_per_hour:.2f}/h)"
+        if pod.price:
+            price_info = f" (${pod.price:.2f}/h)"
             if show_cost:
                 total_cost += calculate_pod_cost(pod)
 
@@ -75,8 +75,8 @@ def format_pods_for_scheduled_removal(pods: List[PodInfo], termination_time: dat
 
     for pod in pods:
         price_info = ""
-        if pod.executor and pod.executor.price_per_hour:
-            price_info = f" (${pod.executor.price_per_hour:.2f}/h)"
+        if pod.price:
+            price_info = f" (${pod.price:.2f}/h)"
         lines.append(f"  {pod.huid} - {pod.status}{price_info}")
 
     # Add scheduled time info

@@ -112,13 +112,11 @@ def build_pods_table(pods: List[PodInfo], short: bool = False) -> tuple[Table | 
     for pod in pods:
         executor = pod.executor
         if executor:
-            config = f"{executor.gpu_count}×{executor.gpu_type}" if executor.gpu_count > 1 else executor.gpu_type
-            price_str = f"${executor.price_per_hour:.2f}"
-            price_per_hour = executor.price_per_hour
+            config = f"{pod.gpu_count}×{executor.gpu_type}" if pod.gpu_count > 1 else executor.gpu_type
+            price_str = f"${pod.price:.2f}"
         else:
             config = "—"
             price_str = "—"
-            price_per_hour = None
 
         status_color = console.pod_status_color(pod.status)
         status_text = f"[{status_color}]{pod.status.upper()}[/]"
@@ -132,7 +130,7 @@ def build_pods_table(pods: List[PodInfo], short: bool = False) -> tuple[Table | 
             config,
             console.get_styled(template_name, 'info'),
             price_str,
-            _format_cost(pod.created_at, price_per_hour),
+            _format_cost(pod.created_at, pod.price),
             _format_uptime(pod.created_at),
         ]
 
