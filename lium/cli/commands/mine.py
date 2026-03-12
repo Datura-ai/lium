@@ -1,12 +1,17 @@
-"""Compatibility shim for the mine command import path."""
+"""Mine command for setting up a compute subnet executor/miner."""
 
-from lium.cli.mine import mine_command
+import json
+import re
+import shutil
+import time
+from pathlib import Path
+from typing import Optional, Tuple
 
 import click
 from rich import box
+from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
-from rich.panel import Panel
 
 from ..utils import console, handle_errors, timed_step_status
 
