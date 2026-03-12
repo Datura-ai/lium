@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -77,6 +78,62 @@ def _sample_plan() -> SetupPlan:
             "create partition on /dev/nvme1n1",
             "format target as XFS: /dev/nvme1n1",
         ],
+    )
+
+
+def _execution_plan(tmp_path, docker_mount: MountInfo | None = None) -> SetupPlan:
+    preflight = _sample_preflight()
+    if docker_mount is not None:
+        preflight.docker_mount = docker_mount
+
+    return SetupPlan(
+        preflight=preflight,
+        target=TargetPlan(
+            selection_mode="explicit",
+            requested_device="/dev/vdb1",
+            resolved_target="/dev/vdb1",
+            parent_disk="/dev/vdb",
+            classification="empty_partition",
+            needs_partition_creation=False,
+            needs_format=False,
+            existing_fs_type="xfs",
+            selection_reason="Selected explicit empty XFS partition",
+            needs_new_gpt=False,
+        ),
+        backup_dir=str(tmp_path / "docker-backup"),
+        daemon_json_path=str(tmp_path / "daemon.json"),
+        daemon_json_changed=True,
+        daemon_json_merged={"storage-driver": "overlay2"},
+        fstab_path=str(tmp_path / "fstab"),
+        fstab_changed=True,
+        destructive_actions=[],
+    )
+
+
+def _patch_execute_setup_dependencies(monkeypatch, run_command, load_mount_info, verification=None):
+    monkeypatch.setattr(gpu_splitting, "timed_step_status", _no_spinner)
+    monkeypatch.setattr(gpu_splitting, "_partition_paths_for_disk", lambda *_: set())
+    monkeypatch.setattr(gpu_splitting, "_ensure_xfs_compliant", lambda *_: None)
+    monkeypatch.setattr(gpu_splitting, "_mount_validation", lambda *_: None)
+    monkeypatch.setattr(gpu_splitting, "_get_uuid", lambda *_: "uuid-test")
+    monkeypatch.setattr(gpu_splitting, "run_command", run_command)
+    monkeypatch.setattr(gpu_splitting, "load_mount_info", load_mount_info)
+    monkeypatch.setattr(
+        gpu_splitting,
+        "build_verification_result",
+        verification
+        or (
+            lambda runner, docker_root_dir="/var/lib/docker": VerificationResult(
+                checks=[
+                    VerificationCheck(
+                        name="Mount options include project quota",
+                        passed=True,
+                        actual="rw,pquota",
+                        expected="contains pquota or prjquota",
+                    )
+                ]
+            )
+        ),
     )
 
 
@@ -341,3 +398,185 @@ def test_mount_validation_accepts_prjquota_alias(monkeypatch, tmp_path):
 
     assert commands[0] == ["mount", "-o", "pquota", "/dev/vdb1", str(validation_mount)]
     assert commands[-1] == ["umount", str(validation_mount)]
+
+
+def test_execute_setup_restarts_docker_when_failure_happens_after_stop(monkeypatch, tmp_path):
+    plan = _execution_plan(tmp_path)
+    commands: list[list[str]] = []
+
+    def run_command(args, check=True, capture=True):
+        commands.append(args)
+        if args[:3] == ["systemctl", "stop", "docker"]:
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args == ["systemctl", "stop", "docker.socket"]:
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args[:2] == ["rsync", "-aHAX"]:
+            raise RuntimeError("backup failed")
+        if args == ["systemctl", "start", "docker"]:
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        raise AssertionError(f"Unexpected command: {args}")
+
+    _patch_execute_setup_dependencies(
+        monkeypatch,
+        run_command,
+        lambda runner, target: plan.preflight.docker_mount,
+    )
+
+    with pytest.raises(RuntimeError, match="GPU splitting setup failed: backup failed"):
+        gpu_splitting._execute_setup(plan)
+
+    assert ["systemctl", "start", "docker"] in commands
+
+
+def test_execute_setup_restores_config_files_after_config_stage_failure(monkeypatch, tmp_path):
+    plan = _execution_plan(tmp_path)
+    daemon_path = Path(plan.daemon_json_path)
+    daemon_path.write_text('{"debug": true}\n')
+    fstab_path = Path(plan.fstab_path)
+    fstab_path.write_text("/dev/sda1 / ext4 defaults 0 1\n")
+    commands: list[list[str]] = []
+
+    def run_command(args, check=True, capture=True):
+        commands.append(args)
+        if args[:2] == ["systemctl", "stop"] or args == ["systemctl", "start", "docker"]:
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args[:2] == ["rsync", "-aHAX"]:
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args[:3] == ["blkid", "-s", "UUID"]:
+            return gpu_splitting.CommandResult(args=args, stdout="uuid-test\n", stderr="", returncode=0)
+        if args == ["mount", "/var/lib/docker"]:
+            raise RuntimeError("mount failed")
+        raise AssertionError(f"Unexpected command: {args}")
+
+    _patch_execute_setup_dependencies(
+        monkeypatch,
+        run_command,
+        lambda runner, target: plan.preflight.docker_mount,
+    )
+
+    with pytest.raises(RuntimeError, match="mount failed"):
+        gpu_splitting._execute_setup(plan)
+
+    assert daemon_path.read_text() == '{"debug": true}\n'
+    assert fstab_path.read_text() == "/dev/sda1 / ext4 defaults 0 1\n"
+    assert ["systemctl", "start", "docker"] in commands
+
+
+def test_execute_setup_restores_original_mount_after_cutover_failure(monkeypatch, tmp_path):
+    docker_mount = MountInfo(
+        target="/var/lib/docker",
+        source="/dev/mapper/docker-old",
+        fstype="xfs",
+        options=["rw", "pquota"],
+    )
+    plan = _execution_plan(tmp_path, docker_mount=docker_mount)
+    commands: list[list[str]] = []
+    mount_state = {"phase": "original"}
+
+    Path(plan.daemon_json_path).write_text('{"storage-driver": "aufs"}\n')
+    Path(plan.fstab_path).write_text("UUID=old /var/lib/docker xfs defaults,pquota 0 0\n")
+
+    def load_mount_info(runner, target):
+        if mount_state["phase"] == "original":
+            return docker_mount
+        return MountInfo(
+            target="/var/lib/docker",
+            source="/dev/vdb1",
+            fstype="xfs",
+            options=["rw", "pquota"],
+        )
+
+    def run_command(args, check=True, capture=True):
+        commands.append(args)
+        if args[:2] == ["systemctl", "stop"] or args == ["systemctl", "start", "docker"]:
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args[:2] == ["rsync", "-aHAX"]:
+            if args[-1] == f"{plan.preflight.docker_state.docker_root_dir}/":
+                raise RuntimeError("restore failed")
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args[:3] == ["blkid", "-s", "UUID"]:
+            return gpu_splitting.CommandResult(args=args, stdout="uuid-test\n", stderr="", returncode=0)
+        if args == ["umount", "/var/lib/docker"]:
+            mount_state["phase"] = "root"
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args == ["mount", "/var/lib/docker"]:
+            mount_state["phase"] = "target"
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args == ["mount", "-t", "xfs", "-o", "rw,pquota", "/dev/mapper/docker-old", "/var/lib/docker"]:
+            mount_state["phase"] = "original"
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        raise AssertionError(f"Unexpected command: {args}")
+
+    _patch_execute_setup_dependencies(monkeypatch, run_command, load_mount_info)
+
+    with pytest.raises(RuntimeError, match="restore failed"):
+        gpu_splitting._execute_setup(plan)
+
+    assert commands.count(["umount", "/var/lib/docker"]) == 2
+    assert ["mount", "-t", "xfs", "-o", "rw,pquota", "/dev/mapper/docker-old", "/var/lib/docker"] in commands
+    assert ["systemctl", "start", "docker"] in commands
+
+
+def test_execute_setup_reports_rollback_failures(monkeypatch, tmp_path):
+    plan = _execution_plan(tmp_path)
+    commands: list[list[str]] = []
+
+    def run_command(args, check=True, capture=True):
+        commands.append(args)
+        if args[:2] == ["systemctl", "stop"]:
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args[:2] == ["rsync", "-aHAX"]:
+            raise RuntimeError("backup failed")
+        if args == ["systemctl", "start", "docker"]:
+            raise RuntimeError("start failed")
+        raise AssertionError(f"Unexpected command: {args}")
+
+    _patch_execute_setup_dependencies(
+        monkeypatch,
+        run_command,
+        lambda runner, target: plan.preflight.docker_mount,
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        gpu_splitting._execute_setup(plan)
+
+    message = str(exc_info.value)
+    assert "GPU splitting setup failed: backup failed" in message
+    assert "Rollback encountered additional errors:" in message
+    assert "- start docker: start failed" in message
+    assert f"Backup remains at {plan.backup_dir}" in message
+
+
+def test_execute_setup_success_starts_docker_once(monkeypatch, tmp_path):
+    plan = _execution_plan(tmp_path)
+    commands: list[list[str]] = []
+    mount_state = {"phase": "root"}
+
+    def load_mount_info(runner, target):
+        if mount_state["phase"] == "root":
+            return plan.preflight.docker_mount
+        return MountInfo(
+            target="/var/lib/docker",
+            source="/dev/vdb1",
+            fstype="xfs",
+            options=["rw", "pquota"],
+        )
+
+    def run_command(args, check=True, capture=True):
+        commands.append(args)
+        if args[:2] == ["systemctl", "stop"] or args == ["systemctl", "start", "docker"]:
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args[:2] == ["rsync", "-aHAX"]:
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args[:3] == ["blkid", "-s", "UUID"]:
+            return gpu_splitting.CommandResult(args=args, stdout="uuid-test\n", stderr="", returncode=0)
+        if args == ["mount", "/var/lib/docker"]:
+            mount_state["phase"] = "target"
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        raise AssertionError(f"Unexpected command: {args}")
+
+    _patch_execute_setup_dependencies(monkeypatch, run_command, load_mount_info)
+
+    gpu_splitting._execute_setup(plan)
+
+    assert commands.count(["systemctl", "start", "docker"]) == 1

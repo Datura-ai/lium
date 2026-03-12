@@ -7,6 +7,7 @@ import os
 import platform
 import shutil
 import subprocess
+from dataclasses import dataclass
 from functools import wraps
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,7 +21,7 @@ from rich.table import Table
 
 from ..utils import console, timed_step_status
 from .docker_config import build_verification_result, inspect_docker_state, load_daemon_json, merge_overlay2
-from .models import CandidateEvaluation, CommandResult, PreflightResult, SetupPlan, VerificationResult
+from .models import CandidateEvaluation, CommandResult, MountInfo, PreflightResult, SetupPlan, VerificationResult
 from .storage import (
     auto_select_target,
     evaluate_candidates,
@@ -31,6 +32,25 @@ from .storage import (
 )
 
 GPU_SPLITTING_DOC_URL = "https://docs.lium.io/miner-portal/executors/manage/?_highlight=gpu&_highlight=split#gpu-splitting"
+
+
+@dataclass
+class _FileSnapshot:
+    path: str
+    existed: bool
+    contents: str
+
+
+@dataclass
+class _SetupExecutionState:
+    original_daemon_json: _FileSnapshot
+    original_fstab: _FileSnapshot
+    original_docker_mount: MountInfo
+    docker_stopped: bool = False
+    docker_started: bool = False
+    daemon_json_written: bool = False
+    fstab_written: bool = False
+    docker_root_mounted_on_target: bool = False
 
 
 def run_command(args: list[str], check: bool = True, capture: bool = True) -> CommandResult:
@@ -344,6 +364,23 @@ def _write_json_atomic(path: str, payload: dict):
     os.replace(temp_path, target)
 
 
+def _snapshot_text_file(path: str) -> _FileSnapshot:
+    target = Path(path)
+    if not target.exists():
+        return _FileSnapshot(path=path, existed=False, contents="")
+    return _FileSnapshot(path=path, existed=True, contents=target.read_text())
+
+
+def _restore_text_file(snapshot: _FileSnapshot):
+    target = Path(snapshot.path)
+    if snapshot.existed:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(snapshot.contents)
+        return
+    if target.exists():
+        target.unlink()
+
+
 def _update_fstab(fstab_path: str, uuid: str):
     """Insert or replace the `/var/lib/docker` mount entry in `/etc/fstab`.
 
@@ -517,6 +554,66 @@ def _confirm_plan(plan: SetupPlan, yes: bool):
         raise click.Abort()
 
 
+def _mount_command_for_mount_info(mount_info: MountInfo, target: str) -> list[str]:
+    args = ["mount"]
+    if mount_info.fstype:
+        args.extend(["-t", mount_info.fstype])
+    options = ",".join(option for option in mount_info.options if option)
+    if options:
+        args.extend(["-o", options])
+    args.extend([mount_info.source, target])
+    return args
+
+
+def _rollback_attempt(errors: list[str], label: str, action):
+    try:
+        action()
+    except Exception as exc:  # pragma: no cover - exercised via callers
+        errors.append(f"{label}: {exc}")
+
+
+def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partition: str) -> list[str]:
+    docker_root = plan.preflight.docker_state.docker_root_dir
+    errors: list[str] = []
+
+    if state.docker_started:
+        _rollback_attempt(errors, "stop docker", lambda: run_command(["systemctl", "stop", "docker"], True, True))
+        _rollback_attempt(errors, "stop docker.socket", lambda: run_command(["systemctl", "stop", "docker.socket"], False, True))
+
+    if state.docker_root_mounted_on_target:
+        _rollback_attempt(errors, f"unmount {docker_root}", lambda: run_command(["umount", docker_root], True, True))
+        if state.original_docker_mount.target == docker_root and state.original_docker_mount.source != target_partition:
+            _rollback_attempt(
+                errors,
+                f"remount original Docker root {state.original_docker_mount.source}",
+                lambda: run_command(_mount_command_for_mount_info(state.original_docker_mount, docker_root), True, True),
+            )
+
+    if state.fstab_written:
+        _rollback_attempt(errors, f"restore {plan.fstab_path}", lambda: _restore_text_file(state.original_fstab))
+
+    if state.daemon_json_written:
+        _rollback_attempt(errors, f"restore {plan.daemon_json_path}", lambda: _restore_text_file(state.original_daemon_json))
+
+    if state.docker_stopped:
+        _rollback_attempt(errors, "start docker", lambda: run_command(["systemctl", "start", "docker"], True, True))
+
+    return errors
+
+
+def _setup_failure_message(plan: SetupPlan, exc: Exception, rollback_errors: list[str]) -> str:
+    lines = [
+        f"GPU splitting setup failed: {exc}",
+        "Rollback of reversible host changes was attempted.",
+        "Disk partitioning and filesystem formatting were not rolled back.",
+        f"Backup remains at {plan.backup_dir}",
+    ]
+    if rollback_errors:
+        lines.append("Rollback encountered additional errors:")
+        lines.extend(f"- {error}" for error in rollback_errors)
+    return "\n".join(lines)
+
+
 def _execute_setup(plan: SetupPlan):
     """Run the full host-mutation sequence for GPU-splitting storage setup.
 
@@ -566,90 +663,112 @@ def _execute_setup(plan: SetupPlan):
     total_steps = 10
     target_partition = _target_partition_path(plan)
     existing_partition_paths = _partition_paths_for_disk(plan.target.parent_disk)
+    state = _SetupExecutionState(
+        original_daemon_json=_snapshot_text_file(plan.daemon_json_path),
+        original_fstab=_snapshot_text_file(plan.fstab_path),
+        original_docker_mount=plan.preflight.docker_mount,
+    )
 
-    with timed_step_status(1, total_steps, "Stopping Docker"):
-        console.dim(f"Stopping docker services for {plan.preflight.docker_state.docker_root_dir}")
-        run_command(["systemctl", "stop", "docker"], True, True)
-        run_command(["systemctl", "stop", "docker.socket"], False, True)
+    try:
+        with timed_step_status(1, total_steps, "Stopping Docker"):
+            console.dim(f"Stopping docker services for {plan.preflight.docker_state.docker_root_dir}")
+            run_command(["systemctl", "stop", "docker"], True, True)
+            state.docker_stopped = True
+            run_command(["systemctl", "stop", "docker.socket"], False, True)
 
-    with timed_step_status(2, total_steps, "Backing up Docker data"):
-        console.dim(f"Backup directory: {plan.backup_dir}")
-        Path(plan.backup_dir).mkdir(parents=True, exist_ok=True)
-        run_command(
-            ["rsync", "-aHAX", "--numeric-ids", f"{plan.preflight.docker_state.docker_root_dir}/", f"{plan.backup_dir}/"],
-            True,
-            True,
-        )
-
-    with timed_step_status(3, total_steps, "Preparing partition"):
-        if plan.target.needs_new_gpt:
-            console.dim(f"Creating GPT label on {plan.target.parent_disk}")
-            run_command(["parted", "-s", plan.target.parent_disk, "mklabel", "gpt"], True, True)
-        if plan.target.needs_partition_creation:
-            if plan.target.free_region_start_bytes and plan.target.free_region_end_bytes:
-                start = f"{plan.target.free_region_start_bytes}B"
-                end = f"{plan.target.free_region_end_bytes}B"
-            else:
-                start = "1MiB"
-                end = "100%"
-            console.dim(f"Creating partition on {plan.target.parent_disk} from {start} to {end}")
-            run_command(["parted", "-s", plan.target.parent_disk, "mkpart", "primary", "xfs", start, end], True, True)
-            run_command(["partprobe", plan.target.parent_disk], False, True)
-            plan.target.created_partition_path = _detect_new_partition(
-                plan.target.parent_disk,
-                existing_partition_paths,
+        with timed_step_status(2, total_steps, "Backing up Docker data"):
+            console.dim(f"Backup directory: {plan.backup_dir}")
+            Path(plan.backup_dir).mkdir(parents=True, exist_ok=True)
+            run_command(
+                ["rsync", "-aHAX", "--numeric-ids", f"{plan.preflight.docker_state.docker_root_dir}/", f"{plan.backup_dir}/"],
+                True,
+                True,
             )
+
+        with timed_step_status(3, total_steps, "Preparing partition"):
+            if plan.target.needs_new_gpt:
+                console.dim(f"Creating GPT label on {plan.target.parent_disk}")
+                run_command(["parted", "-s", plan.target.parent_disk, "mklabel", "gpt"], True, True)
+            if plan.target.needs_partition_creation:
+                if plan.target.free_region_start_bytes and plan.target.free_region_end_bytes:
+                    start = f"{plan.target.free_region_start_bytes}B"
+                    end = f"{plan.target.free_region_end_bytes}B"
+                else:
+                    start = "1MiB"
+                    end = "100%"
+                console.dim(f"Creating partition on {plan.target.parent_disk} from {start} to {end}")
+                run_command(["parted", "-s", plan.target.parent_disk, "mkpart", "primary", "xfs", start, end], True, True)
+                run_command(["partprobe", plan.target.parent_disk], False, True)
+                plan.target.created_partition_path = _detect_new_partition(
+                    plan.target.parent_disk,
+                    existing_partition_paths,
+                )
+                target_partition = _target_partition_path(plan)
+                console.dim(f"Created partition: {target_partition}")
+            else:
+                console.dim(f"Skipping partition creation for {target_partition}")
+
+        with timed_step_status(4, total_steps, "Formatting XFS"):
             target_partition = _target_partition_path(plan)
-            console.dim(f"Created partition: {target_partition}")
+            if plan.target.needs_format:
+                console.dim(f"Formatting {target_partition} as XFS")
+                run_command(["mkfs.xfs", "-f", target_partition], True, True)
+            else:
+                console.dim(f"Skipping format; existing filesystem will be reused: {target_partition}")
+            _ensure_xfs_compliant(target_partition)
+
+        with timed_step_status(5, total_steps, "Validating temporary mount"):
+            _mount_validation(target_partition, plan.preflight.docker_state.docker_root_dir)
+
+        with timed_step_status(6, total_steps, "Updating daemon.json"):
+            console.dim(f"Writing Docker config to {plan.daemon_json_path}")
+            _write_json_atomic(plan.daemon_json_path, plan.daemon_json_merged)
+            state.daemon_json_written = True
+
+        with timed_step_status(7, total_steps, "Updating fstab"):
+            uuid = _get_uuid(target_partition)
+            console.dim(f"Using UUID={uuid} for /var/lib/docker")
+            _update_fstab(plan.fstab_path, uuid)
+            state.fstab_written = True
+
+        with timed_step_status(8, total_steps, "Cutting over /var/lib/docker"):
+            docker_root = Path(plan.preflight.docker_state.docker_root_dir)
+            docker_root.mkdir(parents=True, exist_ok=True)
+            current_mount = load_mount_info(run_command, str(docker_root))
+            if current_mount.target == str(docker_root) and current_mount.source != target_partition:
+                run_command(["umount", str(docker_root)], False, True)
+            run_command(["mount", str(docker_root)], True, True)
+            state.docker_root_mounted_on_target = True
+            current_mount = load_mount_info(run_command, str(docker_root))
+            if not has_project_quota_option(current_mount.options):
+                raise RuntimeError("Mounted Docker root without project quota option (pquota/prjquota)")
+
+        with timed_step_status(9, total_steps, "Restoring Docker data"):
+            console.dim(f"Restoring backup from {plan.backup_dir}")
+            run_command(
+                ["rsync", "-aHAX", "--numeric-ids", f"{plan.backup_dir}/", f"{plan.preflight.docker_state.docker_root_dir}/"],
+                True,
+                True,
+            )
+
+        with timed_step_status(10, total_steps, "Starting Docker and verifying"):
+            run_command(["systemctl", "start", "docker"], True, True)
+            state.docker_started = True
+            verification = build_verification_result(run_command, plan.preflight.docker_state.docker_root_dir)
+            console.print(_verification_table(verification, "Final Verification"))
+            if not verification.passed:
+                raise RuntimeError(f"Verification failed. Backup remains at {plan.backup_dir}")
+    except Exception as exc:
+        console.error(f"Setup failed: {exc}")
+        console.warning("Attempting rollback of reversible host changes.")
+        console.warning("Disk partitioning and filesystem formatting are not rolled back.")
+        console.warning(f"Backup remains at {plan.backup_dir}")
+        rollback_errors = _rollback_setup(plan, state, target_partition)
+        if rollback_errors:
+            console.error("Rollback encountered additional errors.")
         else:
-            console.dim(f"Skipping partition creation for {target_partition}")
-
-    with timed_step_status(4, total_steps, "Formatting XFS"):
-        target_partition = _target_partition_path(plan)
-        if plan.target.needs_format:
-            console.dim(f"Formatting {target_partition} as XFS")
-            run_command(["mkfs.xfs", "-f", target_partition], True, True)
-        else:
-            console.dim(f"Skipping format; existing filesystem will be reused: {target_partition}")
-        _ensure_xfs_compliant(target_partition)
-
-    with timed_step_status(5, total_steps, "Validating temporary mount"):
-        _mount_validation(target_partition, plan.preflight.docker_state.docker_root_dir)
-
-    with timed_step_status(6, total_steps, "Updating daemon.json"):
-        console.dim(f"Writing Docker config to {plan.daemon_json_path}")
-        _write_json_atomic(plan.daemon_json_path, plan.daemon_json_merged)
-
-    with timed_step_status(7, total_steps, "Updating fstab"):
-        uuid = _get_uuid(target_partition)
-        console.dim(f"Using UUID={uuid} for /var/lib/docker")
-        _update_fstab(plan.fstab_path, uuid)
-
-    with timed_step_status(8, total_steps, "Cutting over /var/lib/docker"):
-        docker_root = Path(plan.preflight.docker_state.docker_root_dir)
-        docker_root.mkdir(parents=True, exist_ok=True)
-        current_mount = load_mount_info(run_command, str(docker_root))
-        if current_mount.target == str(docker_root) and current_mount.source != target_partition:
-            run_command(["umount", str(docker_root)], False, True)
-        run_command(["mount", str(docker_root)], True, True)
-        current_mount = load_mount_info(run_command, str(docker_root))
-        if not has_project_quota_option(current_mount.options):
-            raise RuntimeError("Mounted Docker root without project quota option (pquota/prjquota)")
-
-    with timed_step_status(9, total_steps, "Restoring Docker data"):
-        console.dim(f"Restoring backup from {plan.backup_dir}")
-        run_command(
-            ["rsync", "-aHAX", "--numeric-ids", f"{plan.backup_dir}/", f"{plan.preflight.docker_state.docker_root_dir}/"],
-            True,
-            True,
-        )
-
-    with timed_step_status(10, total_steps, "Starting Docker and verifying"):
-        run_command(["systemctl", "start", "docker"], True, True)
-        verification = build_verification_result(run_command, plan.preflight.docker_state.docker_root_dir)
-        console.print(_verification_table(verification, "Final Verification"))
-        if not verification.passed:
-            raise RuntimeError(f"Verification failed. Backup remains at {plan.backup_dir}")
+            console.success("Reversible host changes rolled back and Docker was restarted.")
+        raise RuntimeError(_setup_failure_message(plan, exc, rollback_errors)) from exc
 
 
 @click.group("gpu-splitting")
