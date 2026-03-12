@@ -6,6 +6,7 @@ import pytest
 from click.testing import CliRunner
 
 from lium.cli.cli import cli
+from lium.cli.commands import mine as legacy_mine
 from lium.cli.mine.models import (
     CandidateEvaluation,
     DockerState,
@@ -79,12 +80,24 @@ def _sample_plan() -> SetupPlan:
     )
 
 
-def test_mine_help_lists_new_subcommands():
+def test_mine_help_shows_legacy_leaf_command():
     result = CliRunner().invoke(cli, ["mine", "--help"])
 
     assert result.exit_code == 0
-    assert "executor-setup" in result.output
-    assert "gpu-splitting" in result.output
+    assert "Usage:" in result.output
+    assert "--hotkey" in result.output
+    assert "gpu-splitting" not in result.output
+    assert "executor-setup" not in result.output
+
+
+def test_gpu_splitting_help_is_top_level():
+    result = CliRunner().invoke(cli, ["gpu-splitting", "--help"])
+
+    assert result.exit_code == 0
+    assert "Prepare Docker storage for LIUM GPU splitting" in result.output
+    assert "check" in result.output
+    assert "setup" in result.output
+    assert "verify" in result.output
 
 
 def test_gpu_splitting_check_prints_plan_without_prompt(monkeypatch):
@@ -105,7 +118,7 @@ def test_gpu_splitting_check_prints_plan_without_prompt(monkeypatch):
         ],
     )
 
-    result = CliRunner().invoke(cli, ["mine", "gpu-splitting", "check"])
+    result = CliRunner().invoke(cli, ["gpu-splitting", "check"])
 
     assert result.exit_code == 0
     assert "GPU Splitting Requirements" in result.output
@@ -133,7 +146,7 @@ def test_gpu_splitting_verify_reports_failures(monkeypatch):
         ),
     )
 
-    result = CliRunner().invoke(cli, ["mine", "gpu-splitting", "verify"])
+    result = CliRunner().invoke(cli, ["gpu-splitting", "verify"])
 
     assert result.exit_code == 1
     assert "GPU Splitting Requirements" in result.output
@@ -150,7 +163,7 @@ def test_gpu_splitting_setup_aborts_on_negative_confirmation(monkeypatch):
     called = {"executed": False}
     monkeypatch.setattr(gpu_splitting, "_execute_setup", lambda plan: called.__setitem__("executed", True))
 
-    result = CliRunner().invoke(cli, ["mine", "gpu-splitting", "setup"])
+    result = CliRunner().invoke(cli, ["gpu-splitting", "setup"])
 
     assert result.exit_code == 0
     assert "GPU Splitting Requirements" in result.output
@@ -170,7 +183,7 @@ def test_gpu_splitting_setup_yes_prints_plan_then_executes(monkeypatch):
 
     monkeypatch.setattr(gpu_splitting, "_execute_setup", execute)
 
-    result = CliRunner().invoke(cli, ["mine", "gpu-splitting", "setup", "--yes"])
+    result = CliRunner().invoke(cli, ["gpu-splitting", "setup", "--yes"])
 
     assert result.exit_code == 0
     assert "GPU Splitting Requirements" in result.output
@@ -189,11 +202,47 @@ def test_gpu_splitting_check_reports_precise_explicit_device_error(monkeypatch):
         lambda preflight, device: (_ for _ in ()).throw(RuntimeError("Unsafe or unsupported device /dev/sda: protected_root_or_docker")),
     )
 
-    result = CliRunner().invoke(cli, ["mine", "gpu-splitting", "check", "--device", "/dev/null"])
+    result = CliRunner().invoke(cli, ["gpu-splitting", "check", "--device", "/dev/null"])
 
     assert result.exit_code == 1
     assert "Unsafe or unsupported device /dev/sda" in result.output
     assert "protected_root_or_docker" in result.output
+
+
+def test_mine_does_not_route_gpu_splitting_as_subcommand(monkeypatch):
+    monkeypatch.setattr(
+        legacy_mine,
+        "_gather_inputs",
+        lambda hotkey, auto: {
+            "hotkey": "5F4hQyQ1wY2M6zS4mP7dN8kR2tV9xB3cL6jH1nT5uA7q",
+            "internal_port": "8080",
+            "external_port": "8080",
+            "ssh_port": "2200",
+            "ssh_public_port": "",
+            "port_range": "",
+        },
+    )
+    monkeypatch.setattr(legacy_mine, "_clone_or_update_repo", lambda *args, **kwargs: None)
+    monkeypatch.setattr(legacy_mine, "_install_executor_tools", lambda *args, **kwargs: None)
+    monkeypatch.setattr(legacy_mine, "_check_prereqs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(legacy_mine, "_setup_executor_env", lambda *args, **kwargs: None)
+    monkeypatch.setattr(legacy_mine, "_apply_env_overrides", lambda *args, **kwargs: None)
+    monkeypatch.setattr(legacy_mine, "_start_executor", lambda *args, **kwargs: None)
+    monkeypatch.setattr(legacy_mine, "_get_gpu_info", lambda: {"gpu_count": 1, "gpu_type": "H100"})
+    monkeypatch.setattr(legacy_mine, "_get_public_ip", lambda: "1.2.3.4")
+    forwarded = {}
+
+    def fake_validate(extra_args=None):
+        forwarded["args"] = extra_args
+
+    monkeypatch.setattr(legacy_mine, "_validate_executor", fake_validate)
+    monkeypatch.setattr(legacy_mine.Path, "absolute", lambda self: self)
+    monkeypatch.setattr(legacy_mine.Path, "exists", lambda self: True)
+
+    result = CliRunner().invoke(cli, ["mine", "--auto", "gpu-splitting", "check"])
+
+    assert result.exit_code == 0
+    assert forwarded["args"] == ["gpu-splitting", "check"]
 
 
 def test_detect_new_partition_uses_before_after_diff(monkeypatch):

@@ -113,8 +113,8 @@ def build_verification_result(runner: Runner, docker_root_dir: str = "/var/lib/d
     - `docker info --format '{{json .}}'` via `inspect_docker_state(...)`
     - `findmnt --json --target <docker-root>` via `load_mount_info(...)`
 
-    This is used by both `lium mine gpu-splitting verify` and the final step of
-    `setup`.
+    This is used by both `lium gpu-splitting verify` and the final step of
+    `gpu-splitting setup`.
     """
     docker_state = inspect_docker_state(runner)
     docker_mount = load_mount_info(runner, docker_root_dir)
