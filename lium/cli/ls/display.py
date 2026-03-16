@@ -105,7 +105,7 @@ def _specs_row(specs: Optional[Dict]) -> Dict[str, str]:
 def _sort_key_factory(name: str) -> Callable[[ExecutorInfo], Any]:
     """Get sort key function by name."""
     mapping = {
-        "price_gpu": lambda e: e.price_per_gpu_hour or 0.0,
+        "price_gpu": lambda e: e.price_per_gpu_hour or 0.0,  # TODO: DAH-1874 - deprecated
         "price_total": lambda e: e.price_per_hour or 0.0,
         "loc": lambda e: _country_name(e.location),
         "id": lambda e: e.huid,
@@ -214,7 +214,7 @@ def build_executors_table(
             str(idx),
             huid_display,
             _cfg(exe),
-            console.get_styled(_money(exe.price_per_gpu_hour), 'success'),
+            console.get_styled(_money(exe.price_per_gpu_hour), 'success'),  # TODO: DAH-1874 - deprecated
             _country_name(exe.location),
             s["VRAM"],
             s["RAM"],

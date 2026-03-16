@@ -283,7 +283,8 @@ def extract_executor_metrics(executor: ExecutorInfo) -> Dict[str, float]:
     is_us = country == "UNITED STATES" or country_code == "US"
     
     return {
-        'price_per_gpu_hour': executor.price_per_gpu_hour or float('inf'),
+        'price_per_gpu_hour': executor.price_per_gpu_hour or float('inf'), # TODO: DAH-1874 - deprecated
+        'price_per_gpu': executor.price_per_gpu,
         'vram_gb': (gpu_details.get("capacity", 0) / 1024) if gpu_details else 0,  # MiB to GB
         'ram_gb': (ram_data.get("total", 0) / (1024 * 1024)) if ram_data else 0,  # KB to GB
         'disk_gb': (disk_data.get("total", 0) / (1024 * 1024)) if disk_data else 0,  # KB to GB
@@ -300,13 +301,13 @@ def extract_executor_metrics(executor: ExecutorInfo) -> Dict[str, float]:
 def dominates(metrics_a: Dict[str, float], metrics_b: Dict[str, float]) -> bool:
     """Check if executor A dominates executor B in Pareto sense."""
     # Metrics to minimize (lower is better)
-    minimize_metrics = {'price_per_gpu_hour'}
+    minimize_metrics = {'price_per_gpu_hour'}  # TODO: DAH-1874 - deprecated
     
     # Priority metrics when prices are equal
     priority_metrics = ['total_bandwidth', 'location_score', 'net_down', 'net_up']
     
-    price_a = metrics_a.get('price_per_gpu_hour', float('inf'))
-    price_b = metrics_b.get('price_per_gpu_hour', float('inf'))
+    price_a = metrics_a.get('price_per_gpu_hour', float('inf'))  # TODO: DAH-1874 - deprecated
+    price_b = metrics_b.get('price_per_gpu_hour', float('inf'))  # TODO: DAH-1874 - deprecated
     
     # Special handling when prices are equal (common with GPU filtering)
     if abs(price_a - price_b) < 0.01:  # Prices are effectively equal

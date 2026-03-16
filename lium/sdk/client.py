@@ -135,7 +135,8 @@ class Lium:
                 if gpu_name:
                     gpu_type = extract_gpu_type(gpu_name)
 
-        price_per_hour = executor_dict.get("price_per_hour", 0)
+        price_per_gpu = executor_dict.get("price_per_gpu", 0)
+        price_per_hour = price_per_gpu * gpu_count
 
         return ExecutorInfo(
             id=executor_dict.get("id", ""),
@@ -145,7 +146,8 @@ class Lium:
             gpu_type=gpu_type,
             gpu_count=gpu_count,
             price_per_hour=price_per_hour,
-            price_per_gpu_hour=price_per_hour / max(1, gpu_count),
+            price_per_gpu_hour=price_per_hour / max(1, gpu_count), # deprecated field
+            price_per_gpu=price_per_gpu,
             location=executor_dict.get("location", {}),
             specs=specs,
             status=executor_dict.get("status", "unknown"),
@@ -911,7 +913,8 @@ class Lium:
                 gpu_type=response.get("gpu_name", ""),
                 gpu_count=int(response.get("gpu_count", 0) or 0),
                 price_per_hour=0.0,
-                price_per_gpu_hour=0.0,
+                price_per_gpu_hour=0.0,  # TODO: DAH-1874 - deprecated
+                price_per_gpu=0.0,
                 location={},
                 specs={},
                 status="",
