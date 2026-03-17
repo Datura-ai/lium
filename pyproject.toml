@@ -61,6 +61,11 @@ lium = "lium.cli.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["lium"]
 
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.19.0",
+]
+
 
 [project.urls]
 Homepage = "https://github.com/Datura-ai/lium-cli"

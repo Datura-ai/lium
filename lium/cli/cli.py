@@ -1,6 +1,7 @@
 """Main CLI entry point for Lium."""
 import click
 import os
+import sys
 from importlib.metadata import version, PackageNotFoundError
 from .themed_console import ThemedConsole
 from .init.command import init_command
@@ -31,6 +32,8 @@ from .plugins import load_plugins
 
 def get_version():
     """Get version from package metadata."""
+    if getattr(sys, 'frozen', False):
+        return "0.0.4"
     try:
         return version("lium.io")
     except PackageNotFoundError:
