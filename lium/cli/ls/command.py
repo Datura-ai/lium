@@ -42,7 +42,7 @@ def ls_store_executor(gpu_type: Optional[str] = None, sort_by: str = "download")
 @click.option(
     "--sort",
     "sort_by",
-    type=click.Choice(["download", "price_gpu", "price_total", "loc", "id", "gpu"]),
+    type=click.Choice(["download", "upload", "price_gpu", "price_total", "loc", "id", "gpu"]),
     default="download",
     help="Sort result by the chosen field.",
 )
