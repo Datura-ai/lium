@@ -1319,7 +1319,7 @@ class Lium:
         Returns:
             Floating-point balance value reported by ``/users/me``.
         """
-        return float(self._request("GET", "/users/me").json().get("balance", 0))
+        return float(self._request("GET", "/users/me").json().get("balance") or 0)
 
     def volumes(self) -> List[VolumeInfo]:
         """List all volumes for the current user.
