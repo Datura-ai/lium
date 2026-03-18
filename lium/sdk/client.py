@@ -36,9 +36,9 @@ load_dotenv()
 class Lium:
     """Clean Unix-style SDK for Lium."""
 
-    def __init__(self, config: Optional[Config] = None):
+    def __init__(self, config: Optional[Config] = None, source: str = "sdk"):
         self.config = config or Config.load()
-        self.headers = {"X-API-KEY": self.config.api_key}
+        self.headers = {"X-API-KEY": self.config.api_key, "X-Source": source}
 
     @with_retry()
     def _request(
@@ -135,7 +135,8 @@ class Lium:
                 if gpu_name:
                     gpu_type = extract_gpu_type(gpu_name)
 
-        price_per_hour = executor_dict.get("price_per_hour", 0)
+        price_per_gpu = executor_dict.get("price_per_gpu") or 0
+        price_per_hour = price_per_gpu * gpu_count
 
         return ExecutorInfo(
             id=executor_dict.get("id", ""),
@@ -145,7 +146,8 @@ class Lium:
             gpu_type=gpu_type,
             gpu_count=gpu_count,
             price_per_hour=price_per_hour,
-            price_per_gpu_hour=price_per_hour / max(1, gpu_count),
+            price_per_gpu_hour=price_per_hour / max(1, gpu_count), # deprecated field
+            price_per_gpu=price_per_gpu,
             location=executor_dict.get("location", {}),
             specs=specs,
             status=executor_dict.get("status", "unknown"),
@@ -911,7 +913,8 @@ class Lium:
                 gpu_type=response.get("gpu_name", ""),
                 gpu_count=int(response.get("gpu_count", 0) or 0),
                 price_per_hour=0.0,
-                price_per_gpu_hour=0.0,
+                price_per_gpu_hour=0.0,  # TODO: DAH-1874 - deprecated
+                price_per_gpu=0.0,
                 location={},
                 specs={},
                 status="",
@@ -1292,13 +1295,31 @@ class Lium:
         
         return self._request("POST", f"/pods/{pod.id}/restore", json=payload).json()
 
+    def get_deployment_estimate(self, executor_id: str, template_id: str) -> dict:
+        """Estimate deployment time for a template on an executor.
+
+        Args:
+            executor_id: Executor UUID.
+            template_id: Template UUID.
+
+        Returns:
+            Dict with ``estimated_seconds``, ``is_slow_machine``, ``warning_message``, ``is_cached_template``,
+            and ``docker_image_size`` (image size in bytes, or ``None`` if unknown).
+        """
+        resp = self._request(
+            "GET",
+            "/executors/deployment-estimate",
+            params={"executor_id": executor_id, "template_id": template_id},
+        )
+        return resp.json()
+
     def balance(self) -> float:
         """Get current account balance.
 
         Returns:
             Floating-point balance value reported by ``/users/me``.
         """
-        return float(self._request("GET", "/users/me").json().get("balance", 0))
+        return float(self._request("GET", "/users/me").json().get("balance") or 0)
 
     def volumes(self) -> List[VolumeInfo]:
         """List all volumes for the current user.
