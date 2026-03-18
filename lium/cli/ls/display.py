@@ -110,6 +110,8 @@ def _sort_key_factory(name: str) -> Callable[[ExecutorInfo], Any]:
         "loc": lambda e: _country_name(e.location),
         "id": lambda e: e.huid,
         "gpu": lambda e: (e.gpu_type, e.gpu_count),
+        "download": lambda e: -(e.specs.get("network", {}).get("download_speed", 0) or 0),
+        "upload": lambda e: -(e.specs.get("network", {}).get("upload_speed", 0) or 0),
     }
     return mapping.get(name, mapping["price_gpu"])
 
