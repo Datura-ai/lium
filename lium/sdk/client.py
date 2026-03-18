@@ -135,7 +135,7 @@ class Lium:
                 if gpu_name:
                     gpu_type = extract_gpu_type(gpu_name)
 
-        price_per_gpu = executor_dict.get("price_per_gpu", 0)
+        price_per_gpu = executor_dict.get("price_per_gpu") or 0
         price_per_hour = price_per_gpu * gpu_count
 
         return ExecutorInfo(
