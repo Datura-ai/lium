@@ -306,8 +306,8 @@ def dominates(metrics_a: Dict[str, float], metrics_b: Dict[str, float]) -> bool:
     # Priority metrics when prices are equal
     priority_metrics = ['total_bandwidth', 'location_score', 'net_down', 'net_up']
     
-    price_a = (v := metrics_a.get('price_per_gpu_hour')) if v is not None else float('inf')  # TODO: DAH-1874 - deprecated
-    price_b = (v := metrics_b.get('price_per_gpu_hour')) if v is not None else float('inf')  # TODO: DAH-1874 - deprecated
+    price_a = metrics_a.get('price_per_gpu_hour') or float('inf')  # TODO: DAH-1874 - deprecated
+    price_b = metrics_b.get('price_per_gpu_hour') or float('inf')  # TODO: DAH-1874 - deprecated
     
     # Special handling when prices are equal (common with GPU filtering)
     if abs(price_a - price_b) < 0.01:  # Prices are effectively equal
