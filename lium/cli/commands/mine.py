@@ -1,20 +1,17 @@
-# mine.py
 """Mine command for setting up a compute subnet executor/miner."""
-import os
-import re
-import sys
-import json
-import time
-import shutil
-from pathlib import Path
 
+import json
+import re
+import shutil
+import time
+from pathlib import Path
 from typing import Optional, Tuple
 
 import click
 from rich import box
+from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
-from rich.panel import Panel
 
 from ..utils import console, handle_errors, timed_step_status
 

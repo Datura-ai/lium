@@ -175,10 +175,12 @@ cython_debug/
 
 
 notebooks/
+.docs/
 
 # Claude Code configuration
 CLAUDE.md
 AGENTS.md
+.codex
 .python-version
 .cursor
 .codex
