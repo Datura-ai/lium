@@ -31,7 +31,7 @@ from .storage import (
     resolve_explicit_target,
 )
 
-GPU_SPLITTING_DOC_URL = "https://docs.lium.io/miner-portal/executors/manage/?_highlight=gpu&_highlight=split#gpu-splitting"
+GPU_SPLITTING_DOC_URL = "https://docs.lium.io/miner-portal/executors/manage?_highlight=gpu&_highlight=split#gpu-splitting"
 
 
 @dataclass
