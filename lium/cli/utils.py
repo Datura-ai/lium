@@ -292,10 +292,17 @@ def extract_executor_metrics(executor: ExecutorInfo) -> Dict[str, float]:
         'memory_bandwidth': gpu_details.get("memory_speed") or 0,
         'tflops': gpu_details.get("graphics_speed") or 0,
         'net_up': network.get("upload_speed") or 0,
-        'net_down': network.get("ema_verifyx_download_speed") or network.get("download_speed") or 0,
+        'net_down': executor.download_speed,
         'location_score': 1.0 if is_us else 0.0,  # US locations get higher score
-        'total_bandwidth': (network.get("upload_speed") or 0) + (network.get("ema_verifyx_download_speed") or network.get("download_speed") or 0),  # Combined bandwidth
+        'total_bandwidth': (network.get("upload_speed") or 0) + executor.download_speed,  # Combined bandwidth
     }
+
+
+_MINIMIZE_METRICS = frozenset({'price_per_gpu_hour', 'price_per_gpu'})  # TODO: DAH-1874 - deprecated price_per_gpu_hour
+_SECONDARY_METRICS = ('total_bandwidth', 'location_score', 'net_up')
+# Metrics excluded from the equal-price residual sweep: already handled above, or
+# minimize-metrics whose direction the residual loop does not account for.
+_EQUAL_PRICE_SKIP = frozenset({'net_down'} | set(_SECONDARY_METRICS) | _MINIMIZE_METRICS)
 
 
 def dominates(metrics_a: Dict[str, float], metrics_b: Dict[str, float]) -> bool:
@@ -305,12 +312,9 @@ def dominates(metrics_a: Dict[str, float], metrics_b: Dict[str, float]) -> bool:
     dominates immediately. If B is >10% faster, A cannot dominate. Only when
     speeds are within 10% of each other does the rest of the comparison run.
     """
-    # Metrics to minimize (lower is better)
-    minimize_metrics = {'price_per_gpu_hour', 'price_per_gpu'}  # TODO: DAH-1874 - deprecated price_per_gpu_hour
-
     # --- Download speed: unconditional first priority ---
-    net_down_a = metrics_a.get('net_down', 0) or 0
-    net_down_b = metrics_b.get('net_down', 0) or 0
+    net_down_a = metrics_a.get('net_down') or 0
+    net_down_b = metrics_b.get('net_down') or 0
     dl_threshold = 0.1 * max(net_down_a, net_down_b)
 
     if net_down_a > net_down_b + dl_threshold:
@@ -319,27 +323,29 @@ def dominates(metrics_a: Dict[str, float], metrics_b: Dict[str, float]) -> bool:
         return False  # B is significantly faster — A cannot dominate
 
     # --- Download speeds are similar; fall back to price-based logic ---
-    secondary_metrics = ['total_bandwidth', 'location_score', 'net_up']
-
     price_a = metrics_a.get('price_per_gpu_hour', float('inf'))  # TODO: DAH-1874 - deprecated
     price_b = metrics_b.get('price_per_gpu_hour', float('inf'))  # TODO: DAH-1874 - deprecated
 
     if abs(price_a - price_b) < 0.01:  # Prices are effectively equal
-        for metric in secondary_metrics:
+        # Check secondary metrics in priority order; both A and B must be
+        # compared across ALL of them before declaring domination.
+        at_least_one_better = False
+        for metric in _SECONDARY_METRICS:
             val_a = metrics_a.get(metric, 0) or 0
             val_b = metrics_b.get(metric, 0) or 0
             threshold = 0.1 * max(val_a, val_b) if metric != 'location_score' else 0
 
             if val_a > val_b + threshold:
-                return True
+                at_least_one_better = True
             elif val_b > val_a + threshold:
                 return False
 
-        # All secondary metrics similar — compare everything else
-        at_least_one_better = False
-        skip = {'net_down'} | set(secondary_metrics)
+        if at_least_one_better:
+            return True
+
+        # All secondary metrics similar — compare remaining maximize-metrics
         for metric in metrics_a:
-            if metric in skip:
+            if metric in _EQUAL_PRICE_SKIP:
                 continue
             val_a = metrics_a[metric] or 0
             val_b = metrics_b.get(metric, 0) or 0
@@ -349,7 +355,7 @@ def dominates(metrics_a: Dict[str, float], metrics_b: Dict[str, float]) -> bool:
                 return False
         return at_least_one_better
 
-    # Standard Pareto domination when prices differ
+    # Standard Pareto domination when prices differ.
     # Use a 0.1% relative tolerance to absorb floating-point noise from unit
     # conversions (e.g. KB→GB for RAM), so a 7 MB difference on a 1.5 TB node
     # doesn't block a genuine domination.
@@ -361,7 +367,7 @@ def dominates(metrics_a: Dict[str, float], metrics_b: Dict[str, float]) -> bool:
         val_b = metrics_b.get(metric, 0) or 0
         eps = 0.001 * max(abs(val_a), abs(val_b))
 
-        if metric in minimize_metrics:
+        if metric in _MINIMIZE_METRICS:
             if val_a < val_b - eps:
                 at_least_one_better = True
             elif val_a > val_b + eps:

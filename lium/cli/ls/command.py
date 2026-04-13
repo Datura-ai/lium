@@ -24,7 +24,7 @@ def ls_store_executor(gpu_type: Optional[str] = None, sort_by: str = "download")
 
     executors_with_pareto = sorted(
         executors_with_pareto,
-        key=lambda x: (not x[1], -(x[0].specs.get("network", {}).get("ema_verifyx_download_speed") or 0))
+        key=lambda x: (not x[1], -x[0].download_speed)
     )
 
     sorted_executors = [e for e, _ in executors_with_pareto]
