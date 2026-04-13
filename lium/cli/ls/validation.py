@@ -11,7 +11,7 @@ def validate(
     """Validate ls command options, returns (is_valid, error_message)."""
 
     # Validate sort_by
-    valid_sort_options = ["price_gpu", "price_total", "loc", "id", "gpu"]
+    valid_sort_options = ["download", "price_gpu", "price_total", "loc", "id", "gpu"]
     if sort_by not in valid_sort_options:
         return False, f"Invalid sort option: {sort_by}"
 
