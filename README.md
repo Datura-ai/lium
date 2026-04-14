@@ -36,6 +36,9 @@ pip install lium.io
 curl -fsSL https://github.com/Datura-ai/lium-cli/releases/latest/download/install.sh | bash
 ```
 
+Fresh binary installs place a managed symlink at `~/.lium/bin/lium` that points to a
+versioned binary under `~/.lium/versions/<version>/lium`.
+
 ## Quick Start
 
 ### CLI
