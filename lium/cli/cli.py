@@ -2,6 +2,7 @@
 import click
 import os
 from importlib.metadata import version, PackageNotFoundError
+from lium.__about__ import __version__ as fallback_version
 from .themed_console import ThemedConsole
 from .init.command import init_command
 from .ls import ls_command
@@ -35,7 +36,7 @@ def get_version():
     try:
         return version("lium.io")
     except PackageNotFoundError:
-        return "unknown"
+        return os.environ.get("LIUM_BUILD_VERSION", fallback_version)
 
 
 @click.group(invoke_without_command=True)
