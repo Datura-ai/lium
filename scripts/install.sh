@@ -41,6 +41,66 @@ detect_asset_name() {
     esac
 }
 
+normalize_version() {
+    local version="$1"
+
+    version="${version#v}"
+    if [[ -z "$version" ]]; then
+        echo "Error: release version could not be determined." >&2
+        exit 1
+    fi
+
+    printf '%s' "$version"
+}
+
+resolve_latest_release_url() {
+    local latest_url resolved_url
+
+    if [[ -n "${LIUM_INSTALLER_RELEASE_URL:-}" ]]; then
+        printf '%s' "${LIUM_INSTALLER_RELEASE_URL}"
+        return
+    fi
+
+    latest_url="${RELEASE_BASE}/latest"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSLI -o /dev/null -w '%{url_effective}' "$latest_url"
+        return
+    fi
+
+    if command -v wget >/dev/null 2>&1; then
+        resolved_url="$(
+            wget -qO /dev/null --server-response "$latest_url" 2>&1 \
+                | awk '/^[[:space:]]*Location: / {print $2}' \
+                | tr -d '\r' \
+                | tail -n 1
+        )"
+        if [[ -n "$resolved_url" ]]; then
+            printf '%s' "$resolved_url"
+            return
+        fi
+    fi
+
+    echo "Error: could not determine the latest Lium release version." >&2
+    exit 1
+}
+
+resolve_version() {
+    local release_url version
+
+    if [[ -n "${LIUM_VERSION:-}" ]]; then
+        normalize_version "${LIUM_VERSION}"
+        return
+    fi
+
+    release_url="$(resolve_latest_release_url)"
+    version="${release_url%/}"
+    version="${version##*/}"
+    version="${version%%\?*}"
+    version="${version%%\#*}"
+    normalize_version "$version"
+}
+
 download() {
     local url="$1"
     local target="$2"
@@ -74,6 +134,17 @@ verify_checksum() {
     )
 }
 
+ensure_managed_cli_path() {
+    local cli_path="$1"
+
+    if [[ -e "$cli_path" && ! -L "$cli_path" ]]; then
+        echo "Error: ${cli_path} already exists as a regular file." >&2
+        echo "Managed symlink installs are only used for fresh installs." >&2
+        echo "Leave the current install as-is or remove it before reinstalling." >&2
+        exit 1
+    fi
+}
+
 add_to_path() {
     local shell_name shell_rc path_line
 
@@ -105,18 +176,22 @@ add_to_path() {
 }
 
 main() {
-    local asset_name release_path temp_dir binary_url checksum_url
+    local asset_name version release_path temp_dir binary_url checksum_url
+    local install_root version_dir cli_path versioned_binary
 
     asset_name="$(detect_asset_name)"
-    release_path="${RELEASE_BASE}/latest/download"
-    if [[ -n "${LIUM_VERSION:-}" ]]; then
-        release_path="${RELEASE_BASE}/download/v${LIUM_VERSION}"
-    fi
+    version="$(resolve_version)"
+    release_path="${RELEASE_BASE}/download/v${version}"
+    install_root="$(dirname "$INSTALL_DIR")"
+    version_dir="${install_root}/versions/${version}"
+    cli_path="${INSTALL_DIR}/lium"
+    versioned_binary="${version_dir}/lium"
 
     temp_dir="$(mktemp -d)"
-    trap 'rm -rf "$temp_dir"' EXIT
+    trap "rm -rf \"$temp_dir\"" EXIT
 
-    mkdir -p "$INSTALL_DIR"
+    mkdir -p "$INSTALL_DIR" "$version_dir"
+    ensure_managed_cli_path "$cli_path"
 
     binary_url="${release_path}/${asset_name}"
     checksum_url="${release_path}/checksums.txt"
@@ -126,11 +201,13 @@ main() {
     download "$checksum_url" "$temp_dir/checksums.txt"
     verify_checksum "$asset_name" "$temp_dir"
 
-    install -m 0755 "$temp_dir/${asset_name}" "${INSTALL_DIR}/lium"
+    install -m 0755 "$temp_dir/${asset_name}" "$versioned_binary"
+    ln -sfn "../versions/${version}/lium" "$cli_path"
     add_to_path
 
     echo
     echo "Lium CLI installed to ${INSTALL_DIR}/lium"
+    echo "Managed binary location: ${versioned_binary}"
     echo
     echo "Next steps:"
     echo "  1. Restart your shell or run: export PATH=\"${INSTALL_DIR}:\$PATH\""
@@ -138,7 +215,7 @@ main() {
     echo "  3. List GPUs:  lium ls"
     echo
 
-    "${INSTALL_DIR}/lium" --version || true
+    "$cli_path" --version || true
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

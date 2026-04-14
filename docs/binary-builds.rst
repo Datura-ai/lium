@@ -37,6 +37,8 @@ The manual GitHub Actions release workflow now builds:
 
 Binary assets are uploaded to GitHub Releases so the public installer can fetch
 ``releases/latest/download/<asset>`` without relying on private infrastructure.
+Fresh installs keep ``~/.lium/bin/lium`` on ``PATH`` as a symlink to the managed
+versioned binary stored in ``~/.lium/versions/<version>/lium``.
 
 Binary runtime notes
 --------------------
