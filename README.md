@@ -22,8 +22,16 @@ Command-line interface for managing GPU pods on the Lium platform.
 
 ## Installation
 
+### Python package
+
 ```bash
 pip install lium.io
+```
+
+### Binary install (macOS amd64/arm64 / Linux amd64/arm64)
+
+```bash
+curl -fsSL https://github.com/Datura-ai/lium-cli/releases/latest/download/install.sh | bash
 ```
 
 ## Quick Start
@@ -68,6 +76,12 @@ sphinx-build -b html docs docs/_build/html
 The generated HTML lives in `docs/_build/html`. Publishing to Read the Docs only
 requires connecting this repository; the `.readthedocs.yaml` file points RTD at
 `docs/conf.py`.
+
+## Binary Releases
+
+- Supported binary targets: `darwin-amd64`, `darwin-arm64`, `linux-amd64`, `linux-arm64`
+- Maintainers can build locally with `bash scripts/build.sh [macos|linux|all]`
+- Release artifacts publish through GitHub Releases with matching checksums
 
 
  ![Area](https://github.com/user-attachments/assets/089e3a25-f246-4664-a069-1366d8357fe3)

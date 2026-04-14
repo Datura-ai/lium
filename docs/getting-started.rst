@@ -10,7 +10,7 @@ The SDK ships with the `lium.io` package on PyPI:
 
    pip install lium.io
 
-Managed binary installs are also available for macOS arm64 and Linux amd64:
+Managed binary installs are also available for macOS and Linux on amd64 and arm64:
 
 .. code-block:: bash
 

@@ -1,9 +1,11 @@
 Binary Builds
 =============
 
-The first official binary rollout targets:
+Official binary releases target:
 
+- ``darwin-amd64``
 - ``darwin-arm64``
+- ``linux-arm64``
 - ``linux-amd64``
 
 Local maintainer builds
@@ -26,7 +28,9 @@ Release flow
 The manual GitHub Actions release workflow now builds:
 
 - Python sdist/wheel outputs
+- ``lium-darwin-amd64``
 - ``lium-darwin-arm64``
+- ``lium-linux-arm64``
 - ``lium-linux-amd64``
 - ``install.sh``
 - ``checksums.txt``
