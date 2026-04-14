@@ -4,21 +4,45 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release'
+        description: "Version to release"
         required: true
         type: string
 
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+  RELEASE_TAG: v${{ inputs.version }}
+
 jobs:
-  build:
+  build-python:
     name: Build Python distribution
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.10'
+        python-version: "3.12"
+
+    - name: Validate requested version
+      run: |
+        python - <<'PY'
+        import tomllib
+        from pathlib import Path
+        import os
+
+        version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+        about_ns = {}
+        exec(Path("lium/__about__.py").read_text(), about_ns)
+        module_version = about_ns["__version__"]
+        requested = os.environ["RELEASE_VERSION"]
+        if requested != version:
+            raise SystemExit(f"Requested version {requested!r} does not match pyproject version {version!r}")
+        if module_version != version:
+            raise SystemExit(f"lium.__about__.__version__ {module_version!r} does not match pyproject version {version!r}")
+        PY
 
     - name: Install dependencies
       run: |
@@ -28,14 +52,150 @@ jobs:
     - name: Build package
       run: python -m build --sdist --wheel --outdir dist/
 
-    - name: Upload artifact
+    - name: Upload Python artifact
       uses: actions/upload-artifact@v4
       with:
-        name: dist
+        name: python-dist
         path: dist/
 
+  build-linux-binary:
+    name: Build Linux binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build Linux binary in Docker
+      run: |
+        mkdir -p dist
+        docker build --platform linux/amd64 -f Dockerfile.build -t lium-build:${GITHUB_SHA} .
+        docker create --name lium-extract lium-build:${GITHUB_SHA} true
+        docker cp lium-extract:/app/dist/lium dist/lium-linux-amd64
+        docker rm -f lium-extract
+        chmod +x dist/lium-linux-amd64
+
+    - name: Smoke test Linux binary
+      run: |
+        ./dist/lium-linux-amd64 --version
+        ./dist/lium-linux-amd64 --help >/dev/null
+
+    - name: Generate Linux checksum
+      run: |
+        cd dist
+        sha256sum lium-linux-amd64 > lium-linux-amd64.sha256
+
+    - name: Upload Linux artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: lium-linux-amd64
+        path: |
+          dist/lium-linux-amd64
+          dist/lium-linux-amd64.sha256
+
+  build-macos-binary:
+    name: Build macOS binary
+    runs-on: macos-14
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install uv
+      run: python -m pip install --upgrade pip uv
+
+    - name: Build macOS binary
+      run: |
+        uv sync --frozen --extra dev
+        uv run pyinstaller lium.spec --clean
+        mv dist/lium dist/lium-darwin-arm64
+        chmod +x dist/lium-darwin-arm64
+
+    - name: Smoke test macOS binary
+      run: |
+        ./dist/lium-darwin-arm64 --version
+        ./dist/lium-darwin-arm64 --help >/dev/null
+
+    - name: Generate macOS checksum
+      run: |
+        cd dist
+        shasum -a 256 lium-darwin-arm64 > lium-darwin-arm64.sha256
+
+    - name: Upload macOS artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: lium-darwin-arm64
+        path: |
+          dist/lium-darwin-arm64
+          dist/lium-darwin-arm64.sha256
+
+  release-assets:
+    name: Publish GitHub release assets
+    needs:
+    - build-python
+    - build-linux-binary
+    - build-macos-binary
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download Python artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: python-dist
+        path: release-assets/python-dist
+
+    - name: Download Linux artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: lium-linux-amd64
+        path: release-assets/linux
+
+    - name: Download macOS artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: lium-darwin-arm64
+        path: release-assets/macos
+
+    - name: Assemble release assets
+      run: |
+        cp scripts/install.sh release-assets/install.sh
+        chmod +x release-assets/install.sh
+        {
+          cat release-assets/linux/lium-linux-amd64.sha256
+          cat release-assets/macos/lium-darwin-arm64.sha256
+        } > release-assets/checksums.txt
+
+    - name: Create or update GitHub release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
+          gh release create "$RELEASE_TAG" \
+            --target "$GITHUB_SHA" \
+            --title "Lium CLI ${RELEASE_VERSION}" \
+            --notes "Binary and Python package artifacts for ${RELEASE_VERSION}."
+
+        gh release upload "$RELEASE_TAG" \
+          release-assets/install.sh \
+          release-assets/checksums.txt \
+          release-assets/linux/lium-linux-amd64 \
+          release-assets/linux/lium-linux-amd64.sha256 \
+          release-assets/macos/lium-darwin-arm64 \
+          release-assets/macos/lium-darwin-arm64.sha256 \
+          release-assets/python-dist/* \
+          --clobber
+
   approve-and-publish:
-    needs: build
+    needs: build-python
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -46,7 +206,7 @@ jobs:
     - name: Download artifact
       uses: actions/download-artifact@v4
       with:
-        name: dist
+        name: python-dist
         path: dist/
 
     - name: Publish package distributions to PyPI

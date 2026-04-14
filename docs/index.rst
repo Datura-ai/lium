@@ -11,4 +11,5 @@ with each release.
    :maxdepth: 2
 
    getting-started
+   binary-builds
    api

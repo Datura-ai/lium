@@ -323,8 +323,10 @@ def dominates(metrics_a: Dict[str, float], metrics_b: Dict[str, float]) -> bool:
         return False  # B is significantly faster — A cannot dominate
 
     # --- Download speeds are similar; fall back to price-based logic ---
-    price_a = metrics_a.get('price_per_gpu_hour', float('inf'))  # TODO: DAH-1874 - deprecated
-    price_b = metrics_b.get('price_per_gpu_hour', float('inf'))  # TODO: DAH-1874 - deprecated
+    price_a_value = metrics_a.get('price_per_gpu_hour')
+    price_b_value = metrics_b.get('price_per_gpu_hour')
+    price_a = price_a_value if price_a_value is not None else float('inf')  # TODO: DAH-1874 - deprecated
+    price_b = price_b_value if price_b_value is not None else float('inf')  # TODO: DAH-1874 - deprecated
 
     if abs(price_a - price_b) < 0.01:  # Prices are effectively equal
         # Check secondary metrics in priority order; both A and B must be
