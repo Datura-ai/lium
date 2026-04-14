@@ -5,27 +5,37 @@ INSTALL_DIR="${LIUM_INSTALL_DIR:-$HOME/.lium/bin}"
 REPO_SLUG="${LIUM_REPO_SLUG:-Datura-ai/lium-cli}"
 RELEASE_BASE="https://github.com/${REPO_SLUG}/releases"
 
-detect_asset_name() {
-    local os arch
+detect_os() {
+    printf '%s' "${LIUM_INSTALLER_UNAME_S:-$(uname -s)}" | tr '[:upper:]' '[:lower:]'
+}
 
-    os="$(uname -s | tr '[:upper:]' '[:lower:]')"
-    arch="$(uname -m)"
+detect_arch() {
+    local arch
+
+    arch="${LIUM_INSTALLER_UNAME_M:-$(uname -m)}"
 
     case "$arch" in
-        x86_64|amd64) arch="amd64" ;;
-        arm64|aarch64) arch="arm64" ;;
+        x86_64|amd64) printf 'amd64' ;;
+        arm64|aarch64) printf 'arm64' ;;
         *)
             echo "Error: unsupported architecture: $arch" >&2
             exit 1
             ;;
     esac
+}
 
-    case "$os" in
-        linux|darwin)
+detect_asset_name() {
+    local os arch
+
+    os="$(detect_os)"
+    arch="$(detect_arch)"
+
+    case "$os/$arch" in
+        linux/amd64|linux/arm64|darwin/amd64|darwin/arm64)
             printf 'lium-%s-%s' "$os" "$arch"
             ;;
         *)
-            echo "Error: unsupported OS: $os" >&2
+            echo "Error: unsupported platform: ${os}-${arch}. Supported binaries: darwin-amd64, darwin-arm64, linux-amd64, linux-arm64." >&2
             exit 1
             ;;
     esac
@@ -131,4 +141,6 @@ main() {
     "${INSTALL_DIR}/lium" --version || true
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
