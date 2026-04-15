@@ -1,9 +1,9 @@
-# Lium CLI
+# Lium — Python SDK & CLI
 
-Command-line interface for managing GPU pods on the Lium platform.
+`lium.io` is a Python package that provides both a **command-line interface** and a **Python SDK** for managing GPU pods on the [Lium](https://lium.io) platform. Install it once — use whichever interface fits the job.
 
 <p align="center">
-  <img src="assets/web-app-logo.png" alt="Lium CLI Logo" width="120" />
+  <img src="assets/web-app-logo.png" alt="Lium Logo" width="120" />
 </p>
 
 <h1 align="center">Lium</h1>
@@ -13,12 +13,14 @@ Command-line interface for managing GPU pods on the Lium platform.
   <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
   <a href="https://lium.io/?utm_source=github">Website</a>
   <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
-  <a href="https://docs.lium.io/cli">Docs</a>
+  <a href="https://docs.lium.io/category/cli">CLI Docs</a>
   <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
-  <a href="https://docs.lium.io/cli/commands">Reference</a>
+  <a href="https://lium-docs.readthedocs.io/en/latest/index.html">SDK Docs</a>
   <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
   <a href="https://discord.gg/lium">Discord</a>
 </div>
+
+![Lium](https://github.com/user-attachments/assets/089e3a25-f246-4664-a069-1366d8357fe3)
 
 ## Installation
 
@@ -27,6 +29,8 @@ pip install lium.io
 ```
 
 ## Quick Start
+
+### CLI
 
 ```bash
 # First-time setup
@@ -54,26 +58,50 @@ lium ssh <pod-name>
 lium rm <pod-name>
 ```
 
+### SDK
+
+The SDK mirrors the CLI's capabilities for programmatic use. Two entry points: the `@lium.machine` decorator for quickly offloading isolated functions, and the `Lium()` client for long-lived orchestration code.
+
+High-level decorator — annotate a function and offload work to a GPU pod:
+
+```python
+import lium
+
+@lium.machine(machine="A100", requirements=["torch", "transformers", "accelerate"])
+def infer(prompt: str) -> str:
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+    tokenizer = AutoTokenizer.from_pretrained("sshleifer/tiny-gpt2")
+    model = AutoModelForCausalLM.from_pretrained("sshleifer/tiny-gpt2", device_map="cuda")
+    tokens = tokenizer(prompt, return_tensors="pt").to("cuda")
+    out = model.generate(**tokens, max_new_tokens=50)
+    return tokenizer.decode(out[0], skip_special_tokens=True)
+
+print(infer("Who discovered penicillin?"))
+```
+
+Direct SDK usage follows the same pattern:
+
+```python
+from lium.sdk import Lium
+
+lium = Lium()
+executor = lium.ls(gpu_type="A100")[0]
+pod = lium.up(executor=executor.id, name="demo")
+ready = lium.wait_ready(pod, timeout=600)
+print(lium.exec(ready, command="nvidia-smi")["stdout"])
+lium.down(ready)
+```
+
+Full API reference: https://lium-docs.readthedocs.io/en/latest/index.html
 
 ## Documentation
 
-The SDK and decorator API ship with Sphinx-powered docs that are ready for Read the
-Docs. Build them locally with:
+- **CLI docs:** https://docs.lium.io/category/cli
+- **SDK docs:** https://lium-docs.readthedocs.io/en/latest/index.html
 
-```bash
-pip install -e .[docs]
-sphinx-build -b html docs docs/_build/html
-```
+## CLI Reference
 
-The generated HTML lives in `docs/_build/html`. Publishing to Read the Docs only
-requires connecting this repository; the `.readthedocs.yaml` file points RTD at
-`docs/conf.py`.
-
-
- ![Area](https://github.com/user-attachments/assets/089e3a25-f246-4664-a069-1366d8357fe3)
-
-
-## Commands
+The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everything, or browse the reference below.
 
 ### Core Commands
 
@@ -231,6 +259,7 @@ lium fund -w mywal -a 0.5 -y       # Skip confirmation
 
 ## Features
 
+- **Dual Interface**: Same package ships both the `lium` CLI and a Python SDK (`lium.sdk.Lium` + `@lium.machine` decorator)
 - **Pareto Optimization**: `ls` command shows optimal executors with ★ indicator
 - **Flexible Pod Creation**: Use executor index or auto-select with filters (GPU type, count, country)
 - **Index Selection**: Use numbers from `ls` output in commands
@@ -268,12 +297,23 @@ export LIUM_API_KEY=your-api-key-here
 
 ```bash
 # Clone repository
-git clone https://github.com/Datura-ai/lium-cli.git
-cd lium-cli
+git clone https://github.com/datura-ai/lium.git
+cd lium
 
 # Install in development mode
 pip install -e .
 ```
+
+### Building the SDK docs
+
+The SDK and decorator API ship with Sphinx-powered docs that are ready for Read the Docs. Build them locally with:
+
+```bash
+pip install -e .[docs]
+sphinx-build -b html docs docs/_build/html
+```
+
+The generated HTML lives in `docs/_build/html`. Publishing to Read the Docs only requires connecting this repository; the `.readthedocs.yaml` file points RTD at `docs/conf.py`.
 
 ## License
 
