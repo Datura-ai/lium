@@ -218,6 +218,8 @@ main() {
     "$cli_path" --version || true
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+if [[ -z "${BASH_SOURCE:-}" ]]; then
+    main "$@"
+elif [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     main "$@"
 fi
