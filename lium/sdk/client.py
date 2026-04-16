@@ -153,6 +153,8 @@ class Lium:
             status=executor_dict.get("status", "unknown"),
             docker_in_docker=specs.get("sysbox_runtime", False),
             available_port_count=specs.get("available_port_count"),
+            effective_upload_speed_mbps=executor_dict.get("effective_upload_speed_mbps"),
+            effective_download_speed_mbps=executor_dict.get("effective_download_speed_mbps"),
         )
 
     def up(
