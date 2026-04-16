@@ -97,7 +97,7 @@ def _specs_row(specs: Optional[Dict]) -> Dict[str, str]:
         "Country": _country_name(specs.get("location")),
         "PCIe": _maybe_int(d.get("pcie_speed")),
         "Upload": _maybe_int(net.get("upload_speed")),
-        "Download": _maybe_int(net.get("download_speed")),
+        "Download": _maybe_int(net.get("ema_verifyx_download_speed") or net.get("download_speed")),
         "Ports": _maybe_int(specs.get("available_port_count")),
     }
 
@@ -105,13 +105,14 @@ def _specs_row(specs: Optional[Dict]) -> Dict[str, str]:
 def _sort_key_factory(name: str) -> Callable[[ExecutorInfo], Any]:
     """Get sort key function by name."""
     mapping = {
+        "download": lambda e: -e.download_speed,
         "price_gpu": lambda e: e.price_per_gpu_hour or 0.0,  # TODO: DAH-1874 - deprecated
         "price_total": lambda e: e.price_per_hour or 0.0,
         "loc": lambda e: _country_name(e.location),
         "id": lambda e: e.huid,
         "gpu": lambda e: (e.gpu_type, e.gpu_count),
     }
-    return mapping.get(name, mapping["price_gpu"])
+    return mapping.get(name, mapping["download"])
 
 
 def _add_table_columns(t: Table) -> None:
@@ -144,7 +145,7 @@ def format_tip() -> str:
 
 def build_executors_table(
     executors: List[ExecutorInfo],
-    sort_by: str = "price_gpu",
+    sort_by: str = "download",
     limit: Optional[int] = None,
     show_pareto: bool = True
 ) -> tuple[Table, List[ExecutorInfo], str, str]:

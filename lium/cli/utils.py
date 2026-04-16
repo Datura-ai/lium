@@ -292,97 +292,119 @@ def extract_executor_metrics(executor: ExecutorInfo) -> Dict[str, float]:
         'memory_bandwidth': gpu_details.get("memory_speed") or 0,
         'tflops': gpu_details.get("graphics_speed") or 0,
         'net_up': network.get("upload_speed") or 0,
-        'net_down': network.get("download_speed") or 0,
+        'net_down': executor.download_speed,
         'location_score': 1.0 if is_us else 0.0,  # US locations get higher score
-        'total_bandwidth': (network.get("upload_speed") or 0) + (network.get("download_speed") or 0),  # Combined bandwidth
+        'total_bandwidth': (network.get("upload_speed") or 0) + executor.download_speed,  # Combined bandwidth
     }
 
 
+_MINIMIZE_METRICS = frozenset({'price_per_gpu_hour', 'price_per_gpu'})  # TODO: DAH-1874 - deprecated price_per_gpu_hour
+_SECONDARY_METRICS = ('total_bandwidth', 'location_score', 'net_up')
+# Metrics excluded from the equal-price residual sweep: already handled above, or
+# minimize-metrics whose direction the residual loop does not account for.
+_EQUAL_PRICE_SKIP = frozenset({'net_down'} | set(_SECONDARY_METRICS) | _MINIMIZE_METRICS)
+
+
 def dominates(metrics_a: Dict[str, float], metrics_b: Dict[str, float]) -> bool:
-    """Check if executor A dominates executor B in Pareto sense."""
-    # Metrics to minimize (lower is better)
-    minimize_metrics = {'price_per_gpu_hour'}  # TODO: DAH-1874 - deprecated
-    
-    # Priority metrics when prices are equal
-    priority_metrics = ['total_bandwidth', 'location_score', 'net_down', 'net_up']
-    
-    price_a = (v := metrics_a.get('price_per_gpu_hour')) if v is not None else float('inf')  # TODO: DAH-1874 - deprecated
-    price_b = (v := metrics_b.get('price_per_gpu_hour')) if v is not None else float('inf')  # TODO: DAH-1874 - deprecated
-    
-    # Special handling when prices are equal (common with GPU filtering)
+    """Check if executor A dominates executor B in Pareto sense.
+
+    Download speed is always evaluated first: if A is >10% faster than B, A
+    dominates immediately. If B is >10% faster, A cannot dominate. Only when
+    speeds are within 10% of each other does the rest of the comparison run.
+    """
+    # --- Download speed: unconditional first priority ---
+    net_down_a = metrics_a.get('net_down') or 0
+    net_down_b = metrics_b.get('net_down') or 0
+    dl_threshold = 0.1 * max(net_down_a, net_down_b)
+
+    if net_down_a > net_down_b + dl_threshold:
+        return True   # A is significantly faster — A dominates
+    if net_down_b > net_down_a + dl_threshold:
+        return False  # B is significantly faster — A cannot dominate
+
+    # --- Download speeds are similar; fall back to price-based logic ---
+    price_a = metrics_a.get('price_per_gpu_hour', float('inf'))  # TODO: DAH-1874 - deprecated
+    price_b = metrics_b.get('price_per_gpu_hour', float('inf'))  # TODO: DAH-1874 - deprecated
+
     if abs(price_a - price_b) < 0.01:  # Prices are effectively equal
-        # Compare based on priority metrics
-        for metric in priority_metrics:
+        # Check secondary metrics in priority order; both A and B must be
+        # compared across ALL of them before declaring domination.
+        at_least_one_better = False
+        for metric in _SECONDARY_METRICS:
             val_a = metrics_a.get(metric, 0) or 0
             val_b = metrics_b.get(metric, 0) or 0
-            
-            # Significant difference threshold (10% for bandwidth, any diff for location)
             threshold = 0.1 * max(val_a, val_b) if metric != 'location_score' else 0
-            
+
             if val_a > val_b + threshold:
-                # A is significantly better in this priority metric
-                return True
+                at_least_one_better = True
             elif val_b > val_a + threshold:
-                # B is significantly better in this priority metric
                 return False
-        
-        # If all priority metrics are similar, compare all metrics
-        at_least_one_better = False
+
+        if at_least_one_better:
+            return True
+
+        # All secondary metrics similar — compare remaining maximize-metrics
         for metric in metrics_a:
-            if metric in priority_metrics:
-                continue  # Already checked
-            
+            if metric in _EQUAL_PRICE_SKIP:
+                continue
             val_a = metrics_a[metric] or 0
             val_b = metrics_b.get(metric, 0) or 0
-            
             if val_a > val_b:
                 at_least_one_better = True
             elif val_a < val_b:
                 return False
-        
         return at_least_one_better
-    
-    # Standard Pareto domination when prices differ
+
+    # Standard Pareto domination when prices differ.
+    # Use a 0.1% relative tolerance to absorb floating-point noise from unit
+    # conversions (e.g. KB→GB for RAM), so a 7 MB difference on a 1.5 TB node
+    # doesn't block a genuine domination.
     at_least_one_better = False
-    
     for metric in metrics_a:
+        if metric == 'net_down':
+            continue  # already decided above
         val_a = metrics_a[metric] or 0
         val_b = metrics_b.get(metric, 0) or 0
+        eps = 0.001 * max(abs(val_a), abs(val_b))
 
-        if metric in minimize_metrics:
-            # For minimize metrics, A is better if it's lower
-            if val_a < val_b:
+        if metric in _MINIMIZE_METRICS:
+            if val_a < val_b - eps:
                 at_least_one_better = True
-            elif val_a > val_b:
-                return False  # B is better in this metric
+            elif val_a > val_b + eps:
+                return False
         else:
-            # For maximize metrics, A is better if it's higher
-            if val_a > val_b:
+            if val_a > val_b + eps:
                 at_least_one_better = True
-            elif val_a < val_b:
-                return False  # B is better in this metric
-    
+            elif val_a < val_b - eps:
+                return False
+
     return at_least_one_better
+
+
+MIN_DOWNLOAD_MBPS = 100.0  # mirrors MIN_VERIFYX_EMA_DOWNLOAD_SPEED_MBPS in the validator
 
 
 def calculate_pareto_frontier(executors: List[ExecutorInfo]) -> List[bool]:
     """Calculate which executors are on the Pareto frontier.
-    
+
     Returns a list of booleans indicating if each executor is Pareto-optimal.
+    Executors below MIN_DOWNLOAD_MBPS are disqualified before domination checks.
     """
-    # Extract metrics for all executors
     metrics_list = [extract_executor_metrics(e) for e in executors]
-    
-    # Mark each executor as Pareto-optimal or not
+
     is_pareto = []
     for i, metrics_i in enumerate(metrics_list):
+        if (metrics_i.get('net_down') or 0) < MIN_DOWNLOAD_MBPS:
+            is_pareto.append(False)
+            continue
+
         dominated = False
         for j, metrics_j in enumerate(metrics_list):
             if i != j and dominates(metrics_j, metrics_i):
                 dominated = True
                 break
         is_pareto.append(not dominated)
-    
+
     return is_pareto
 
 

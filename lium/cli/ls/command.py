@@ -11,7 +11,7 @@ from . import validation, display
 from .actions import GetExecutorsAction
 
 
-def ls_store_executor(gpu_type: Optional[str] = None, sort_by: str = "price_gpu") -> List[ExecutorInfo]:
+def ls_store_executor(gpu_type: Optional[str] = None, sort_by: str = "download") -> List[ExecutorInfo]:
     """Load and store executors without displaying them."""
     lium = Lium()
     executors = lium.ls(gpu_type=gpu_type)
@@ -24,7 +24,7 @@ def ls_store_executor(gpu_type: Optional[str] = None, sort_by: str = "price_gpu"
 
     executors_with_pareto = sorted(
         executors_with_pareto,
-        key=lambda x: (not x[1], x[0].price_per_gpu_hour or 0.0)  # TODO: DAH-1874 - deprecated
+        key=lambda x: (not x[1], -x[0].download_speed)
     )
 
     sorted_executors = [e for e, _ in executors_with_pareto]
@@ -42,8 +42,8 @@ def ls_store_executor(gpu_type: Optional[str] = None, sort_by: str = "price_gpu"
 @click.option(
     "--sort",
     "sort_by",
-    type=click.Choice(["price_gpu", "price_total", "loc", "id", "gpu"]),
-    default="price_gpu",
+    type=click.Choice(["download", "price_gpu", "price_total", "loc", "id", "gpu"]),
+    default="download",
     help="Sort result by the chosen field.",
 )
 @click.option("--limit", type=int, default=None, help="Limit number of rows shown.")

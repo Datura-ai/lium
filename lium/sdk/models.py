@@ -33,6 +33,12 @@ class ExecutorInfo:
         gpu_details = self.specs.get('gpu', {}).get('details', [])
         return gpu_details[0].get('name', '') if gpu_details else ''
 
+    @property
+    def download_speed(self) -> float:
+        """Verified EMA download speed in Mbps, falling back to raw download_speed."""
+        net = self.specs.get("network", {})
+        return net.get("ema_verifyx_download_speed") or net.get("download_speed") or 0.0
+
 
 @dataclass
 class PodInfo:
