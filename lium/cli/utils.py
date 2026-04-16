@@ -274,14 +274,16 @@ def extract_executor_metrics(executor: ExecutorInfo) -> Dict[str, float]:
     # System metrics
     ram_data = specs.get("ram", {})
     disk_data = specs.get("hard_disk", {})
-    network = specs.get("network", {})
-    
+
     # Location preference (US gets a bonus)
     location = executor.location or {}
     country = location.get("country", "").upper()
     country_code = location.get("country_code", "").upper()
     is_us = country == "UNITED STATES" or country_code == "US"
-    
+
+    net_up = executor.upload_speed
+    net_down = executor.download_speed
+
     return {
         'price_per_gpu_hour': executor.price_per_gpu_hour or float('inf'), # TODO: DAH-1874 - deprecated
         'price_per_gpu': executor.price_per_gpu,
@@ -291,10 +293,10 @@ def extract_executor_metrics(executor: ExecutorInfo) -> Dict[str, float]:
         'pcie_speed': gpu_details.get("pcie_speed") or 0,
         'memory_bandwidth': gpu_details.get("memory_speed") or 0,
         'tflops': gpu_details.get("graphics_speed") or 0,
-        'net_up': network.get("upload_speed") or 0,
-        'net_down': executor.download_speed,
+        'net_up': net_up,
+        'net_down': net_down,
         'location_score': 1.0 if is_us else 0.0,  # US locations get higher score
-        'total_bandwidth': (network.get("upload_speed") or 0) + executor.download_speed,  # Combined bandwidth
+        'total_bandwidth': net_up + net_down,  # Combined bandwidth
     }
 
 
