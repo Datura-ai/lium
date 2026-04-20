@@ -19,6 +19,7 @@ from .rsync import rsync_command
 from .theme import theme_command
 # from .commands.compose import compose_command  # Disabled for beta.1
 from .config import config_command
+from .env import env_command
 # from .commands.image import image_command  # Disabled for beta.1
 from .fund import fund_command
 from .gpu_splitting import gpu_splitting_command
@@ -71,6 +72,7 @@ cli.add_command(scp_command)
 cli.add_command(rsync_command)
 cli.add_command(theme_command)
 cli.add_command(config_command)
+cli.add_command(env_command)
 # cli.add_command(image_command)  # Disabled for beta.1
 cli.add_command(fund_command)
 cli.add_command(gpu_splitting_command)
