@@ -10,6 +10,15 @@ The SDK ships with the `lium.io` package on PyPI:
 
    pip install lium.io
 
+Managed binary installs are also available for macOS and Linux on amd64 and arm64:
+
+.. code-block:: bash
+
+   curl -fsSL https://github.com/Datura-ai/lium-cli/releases/latest/download/install.sh | bash
+
+Fresh binary installs create ``~/.lium/bin/lium`` as a managed symlink pointing at a
+versioned binary under ``~/.lium/versions/<version>/lium``.
+
 Authentication requires an API key stored in ``~/.lium/config.ini`` or exported as
 ``LIUM_API_KEY``. The CLI (`lium init`) can bootstrap this for you.
 

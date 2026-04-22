@@ -24,9 +24,20 @@
 
 ## Installation
 
+### Python package
+
 ```bash
 pip install lium.io
 ```
+
+### Binary install (macOS amd64/arm64 / Linux amd64/arm64)
+
+```bash
+curl -fsSL https://github.com/Datura-ai/lium-cli/releases/latest/download/install.sh | bash
+```
+
+Fresh binary installs place a managed symlink at `~/.lium/bin/lium` that points to a
+versioned binary under `~/.lium/versions/<version>/lium`.
 
 ## Quick Start
 
@@ -98,6 +109,12 @@ Full API reference: https://lium-docs.readthedocs.io/en/latest/index.html
 
 - **CLI docs:** https://docs.lium.io/category/cli
 - **SDK docs:** https://lium-docs.readthedocs.io/en/latest/index.html
+
+## Binary Releases
+
+- Supported binary targets: `darwin-amd64`, `darwin-arm64`, `linux-amd64`, `linux-arm64`
+- Maintainers can build locally with `bash scripts/build.sh [macos|linux|all]`
+- Release artifacts publish through GitHub Releases with matching checksums
 
 ## CLI Reference
 
