@@ -6,6 +6,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
+DOCKERFILE_BUILD = REPO_ROOT / "Dockerfile.build"
 
 SUPPORTED_TARGETS = {
     ("Linux", "x86_64"): "lium-linux-amd64",
@@ -154,6 +155,14 @@ def test_release_workflow_mentions_every_supported_binary_target():
         assert f"name: {asset_name}" in workflow_text
         assert f"{asset_name}.sha256" in workflow_text
         assert asset_name in workflow_text
+
+
+def test_linux_build_container_installs_required_gui_build_deps_and_uses_python_3_12():
+    dockerfile_text = DOCKERFILE_BUILD.read_text(encoding="utf-8")
+
+    assert "libglib2.0-dev" in dockerfile_text
+    assert "libwebkit2gtk-4.1-dev" in dockerfile_text
+    assert "uv sync --python /usr/local/bin/python3.12 --frozen --extra dev" in dockerfile_text
 
 
 def test_install_script_fresh_install_uses_versioned_symlink_layout(tmp_path: Path):
