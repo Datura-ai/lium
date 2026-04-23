@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# hatch-vcs generated version file
+lium/_version.py
+
 # C extensions
 *.so
 
