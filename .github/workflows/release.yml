@@ -1,15 +1,16 @@
 name: Build and Publish Python Package
-run-name: Release ${{ inputs.version }} (${{ inputs.release_mode }})
+run-name: >-
+  ${{ github.event_name == 'release'
+      && format('Release {0}', github.event.release.tag_name)
+      || format('Manual {0}', inputs.release_mode) }}
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version to release"
-        required: true
-        type: string
       release_mode:
-        description: "Which release path to run"
+        description: "Which release path to run (ignored for release events)"
         required: true
         type: choice
         default: build-only
@@ -19,8 +20,8 @@ on:
         - full-release
 
 env:
-  RELEASE_VERSION: ${{ inputs.version }}
-  RELEASE_TAG: v${{ inputs.version }}
+  RELEASE_TAG: >-
+    ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
 
 jobs:
   build-python:
@@ -30,29 +31,13 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: "3.12"
-
-    - name: Validate requested version
-      run: |
-        python - <<'PY'
-        import tomllib
-        from pathlib import Path
-        import os
-
-        version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
-        about_ns = {}
-        exec(Path("lium/__about__.py").read_text(), about_ns)
-        module_version = about_ns["__version__"]
-        requested = os.environ["RELEASE_VERSION"]
-        if requested != version:
-            raise SystemExit(f"Requested version {requested!r} does not match pyproject version {version!r}")
-        if module_version != version:
-            raise SystemExit(f"lium.__about__.__version__ {module_version!r} does not match pyproject version {version!r}")
-        PY
 
     - name: Install dependencies
       run: |
@@ -104,6 +89,8 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
     - name: Build Linux binary in Docker
       run: |
@@ -150,6 +137,8 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -191,7 +180,9 @@ jobs:
 
   release-assets:
     name: Publish GitHub release assets
-    if: ${{ inputs.release_mode != 'build-only' }}
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.release_mode != 'build-only')
     needs:
     - build-python
     - validate-binary-targets
@@ -203,6 +194,20 @@ jobs:
       contents: write
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Resolve release tag
+      id: tag
+      run: |
+        if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
+          TAG="${{ github.event.release.tag_name }}"
+        else
+          TAG="$(git describe --tags --abbrev=0)"
+        fi
+        VERSION="${TAG#v}"
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
     - name: Download Python artifact
       uses: actions/download-artifact@v4
@@ -245,9 +250,11 @@ jobs:
           cat release-assets/darwin-arm64/lium-darwin-arm64.sha256
         } > release-assets/checksums.txt
 
-    - name: Create or update GitHub release
+    - name: Upload assets to GitHub release
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        RELEASE_VERSION: ${{ steps.tag.outputs.version }}
       run: |
         gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
           gh release create "$RELEASE_TAG" \
@@ -270,7 +277,10 @@ jobs:
           --clobber
 
   approve-and-publish:
-    if: ${{ inputs.release_mode == 'full-release' }}
+    name: Publish Python package to PyPI
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.release_mode == 'full-release')
     needs: build-python
     runs-on: ubuntu-latest
     environment: release

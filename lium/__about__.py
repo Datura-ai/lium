@@ -1,3 +1,6 @@
 """Project version metadata."""
 
-__version__ = "0.0.7"
+try:
+    from lium._version import __version__
+except ImportError:
+    __version__ = "0.0.0+unknown"
