@@ -1,12 +1,9 @@
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
-    libglib2.0-dev \
     libssl-dev \
-    libwebkit2gtk-4.0-dev \
-    libwebkit2gtk-4.1-dev \
     pkg-config \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
     && rm -rf /var/lib/apt/lists/*
@@ -18,5 +15,5 @@ RUN pip install --no-cache-dir uv
 WORKDIR /app
 COPY . .
 
-RUN uv sync --python /usr/local/bin/python3.12 --frozen --extra dev
+RUN uv sync --frozen --extra dev
 RUN uv run pyinstaller lium.spec --clean
