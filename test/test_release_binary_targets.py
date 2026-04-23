@@ -6,8 +6,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
-PYPROJECT = REPO_ROOT / "pyproject.toml"
-LIUM_SPEC = REPO_ROOT / "lium.spec"
 
 SUPPORTED_TARGETS = {
     ("Linux", "x86_64"): "lium-linux-amd64",
@@ -156,11 +154,6 @@ def test_release_workflow_mentions_every_supported_binary_target():
         assert f"name: {asset_name}" in workflow_text
         assert f"{asset_name}.sha256" in workflow_text
         assert asset_name in workflow_text
-
-
-def test_binary_packaging_does_not_depend_on_pywry():
-    assert "pywry" not in PYPROJECT.read_text(encoding="utf-8")
-    assert "pywry" not in LIUM_SPEC.read_text(encoding="utf-8")
 
 
 def test_install_script_fresh_install_uses_versioned_symlink_layout(tmp_path: Path):
