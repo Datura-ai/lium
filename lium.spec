@@ -37,7 +37,6 @@ datas = [
 datas += collect_data_files("bittensor", include_py_files=False)
 datas += collect_data_files("bittensor_cli", include_py_files=False)
 datas += collect_data_files("plotly", include_py_files=False)
-datas += collect_data_files("pywry", include_py_files=False)
 datas += collect_data_files("certifi", include_py_files=False)
 
 a = Analysis(

@@ -7,6 +7,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 DOCKERFILE_BUILD = REPO_ROOT / "Dockerfile.build"
+PYPROJECT = REPO_ROOT / "pyproject.toml"
+LIUM_SPEC = REPO_ROOT / "lium.spec"
 
 SUPPORTED_TARGETS = {
     ("Linux", "x86_64"): "lium-linux-amd64",
@@ -163,6 +165,11 @@ def test_linux_build_container_installs_required_gui_build_deps_and_uses_python_
     assert "libglib2.0-dev" in dockerfile_text
     assert "libwebkit2gtk-4.1-dev" in dockerfile_text
     assert "uv sync --python /usr/local/bin/python3.12 --frozen --extra dev" in dockerfile_text
+
+
+def test_binary_packaging_does_not_depend_on_pywry():
+    assert "pywry" not in PYPROJECT.read_text(encoding="utf-8")
+    assert "pywry" not in LIUM_SPEC.read_text(encoding="utf-8")
 
 
 def test_install_script_fresh_install_uses_versioned_symlink_layout(tmp_path: Path):
