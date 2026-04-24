@@ -185,9 +185,7 @@ def up_command(
                 estimate = lium.get_deployment_estimate(executor.id, template.id)
                 est_secs = estimate.get("estimated_seconds")
                 if est_secs:
-                    specs = executor.specs or {}
-                    network = specs.get("network", {}) or {}
-                    dl_speed = network.get("download_speed") or 0
+                    dl_speed = executor.download_speed
                     raw_bytes = estimate.get("docker_image_size")
                     img_gb = raw_bytes / 1e9 if raw_bytes is not None else None
                     _show_estimate(

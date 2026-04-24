@@ -80,15 +80,15 @@ def _first_gpu_detail(specs: Optional[Dict]) -> Dict:
     return details[0] if details else {}
 
 
-def _specs_row(specs: Optional[Dict]) -> Dict[str, str]:
-    """Extract display fields from specs."""
+def _specs_row(executor: ExecutorInfo) -> Dict[str, str]:
+    """Extract display fields from an executor."""
+    specs = executor.specs
     if not specs:
         return {k: "—" for k in ["VRAM", "RAM", "Disk", "PCIe", "Mem", "TFLOPs", "Upload", "Download", "Ports"]}
 
     d = _first_gpu_detail(specs)
     ram = specs.get("ram", {})
     disk = specs.get("hard_disk", {})
-    net = specs.get("network", {})
 
     return {
         "VRAM": _maybe_gi_from_capacity(d.get("capacity")),
@@ -96,8 +96,8 @@ def _specs_row(specs: Optional[Dict]) -> Dict[str, str]:
         "Disk": _maybe_gi_from_big_number(disk.get("total")),
         "Country": _country_name(specs.get("location")),
         "PCIe": _maybe_int(d.get("pcie_speed")),
-        "Upload": _maybe_int(net.get("upload_speed")),
-        "Download": _maybe_int(net.get("ema_verifyx_download_speed") or net.get("download_speed")),
+        "Upload": _maybe_int(executor.upload_speed or None),
+        "Download": _maybe_int(executor.download_speed or None),
         "Ports": _maybe_int(specs.get("available_port_count")),
     }
 
@@ -196,7 +196,7 @@ def build_executors_table(
 
     # Add rows
     for idx, (exe, is_pareto) in enumerate(zip(sorted_executors, pareto_flags), 1):
-        s = _specs_row(exe.specs)
+        s = _specs_row(exe)
 
         # Format HUID with Pareto star
         huid = _mid_ellipsize(exe.huid)

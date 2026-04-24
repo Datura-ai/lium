@@ -21,6 +21,8 @@ class ExecutorInfo:
     docker_in_docker: bool
     ip: str
     available_port_count: Optional[int] = None
+    effective_upload_speed_mbps: Optional[float] = None
+    effective_download_speed_mbps: Optional[float] = None
 
     @property
     def driver_version(self) -> str:
@@ -35,9 +37,13 @@ class ExecutorInfo:
 
     @property
     def download_speed(self) -> float:
-        """Verified EMA download speed in Mbps, falling back to raw download_speed."""
-        net = self.specs.get("network", {})
-        return net.get("ema_verifyx_download_speed") or net.get("download_speed") or 0.0
+        """Effective download speed in Mbps (backend-authoritative; 0.0 if unknown)."""
+        return self.effective_download_speed_mbps or 0.0
+
+    @property
+    def upload_speed(self) -> float:
+        """Effective upload speed in Mbps (backend-authoritative; 0.0 if unknown)."""
+        return self.effective_upload_speed_mbps or 0.0
 
 
 @dataclass
