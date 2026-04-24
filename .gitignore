@@ -31,6 +31,7 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+!lium.spec
 
 # Installer logs
 pip-log.txt
@@ -175,11 +176,14 @@ cython_debug/
 
 
 notebooks/
+.docs/
 
 # Claude Code configuration
 CLAUDE.md
 AGENTS.md
+.codex
 .python-version
 .cursor
 .codex
 .claude
+.omx/

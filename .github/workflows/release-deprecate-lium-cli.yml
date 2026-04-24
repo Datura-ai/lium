@@ -1,0 +1,35 @@
+name: Publish Deprecated lium-cli Stub
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    name: Build and publish lium-cli deprecation stub
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install build dependencies
+      run: pip install build
+
+    - name: Build stub package
+      working-directory: stubs/lium-cli
+      run: python -m build --sdist --wheel --outdir dist/
+
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        packages-dir: stubs/lium-cli/dist/
+        verbose: true
+        print-hash: true

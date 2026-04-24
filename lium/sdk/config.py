@@ -10,7 +10,7 @@ from typing import List, Optional
 class Config:
     api_key: str
     base_url: str = "https://lium.io/api"
-    base_pay_url: str = "https://pay-api.celiumcompute.ai"
+    base_pay_url: str = "https://pay-api.lium.io"
     ssh_key_path: Optional[Path] = None
 
     @classmethod
@@ -39,7 +39,7 @@ class Config:
         return cls(
             api_key=api_key,
             base_url=os.getenv("LIUM_BASE_URL", "https://lium.io/api"),
-            base_pay_url=os.getenv("LIUM_PAY_URL", "https://pay-api.celiumcompute.ai"),
+            base_pay_url=os.getenv("LIUM_PAY_URL", "https://pay-api.lium.io"),
             ssh_key_path=ssh_key
         )
 

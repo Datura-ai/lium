@@ -21,6 +21,8 @@ class ExecutorInfo:
     docker_in_docker: bool
     ip: str
     available_port_count: Optional[int] = None
+    effective_upload_speed_mbps: Optional[float] = None
+    effective_download_speed_mbps: Optional[float] = None
 
     @property
     def driver_version(self) -> str:
@@ -32,6 +34,16 @@ class ExecutorInfo:
         """Extract GPU model name from specs."""
         gpu_details = self.specs.get('gpu', {}).get('details', [])
         return gpu_details[0].get('name', '') if gpu_details else ''
+
+    @property
+    def download_speed(self) -> float:
+        """Effective download speed in Mbps (backend-authoritative; 0.0 if unknown)."""
+        return self.effective_download_speed_mbps or 0.0
+
+    @property
+    def upload_speed(self) -> float:
+        """Effective upload speed in Mbps (backend-authoritative; 0.0 if unknown)."""
+        return self.effective_upload_speed_mbps or 0.0
 
 
 @dataclass
