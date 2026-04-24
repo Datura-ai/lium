@@ -146,7 +146,6 @@ class Lium:
             gpu_type=gpu_type,
             gpu_count=gpu_count,
             price_per_hour=price_per_hour,
-            price_per_gpu_hour=price_per_hour / max(1, gpu_count), # deprecated field
             price_per_gpu=price_per_gpu,
             location=executor_dict.get("location", {}),
             specs=specs,
@@ -363,8 +362,17 @@ class Lium:
         """
         data = self._request("GET", "/pods").json()
 
-        pods = [
-            PodInfo(
+        pods = []
+        for d in data:
+            executor = self._dict_to_executor_info(d.get("executor") or {}) if d.get("executor") else None
+            # The /pods endpoint returns the authoritative total $/h as pod.price; the
+            # nested executor.price_per_gpu is not populated in this payload. Anchor
+            # executor.price_per_hour on pod.price and derive per-GPU from it.
+            pod_price = d.get("price")
+            if executor is not None and pod_price is not None:
+                executor.price_per_hour = float(pod_price)
+                executor.price_per_gpu = float(pod_price) / max(1, executor.gpu_count)
+            pods.append(PodInfo(
                 id=d.get("id", ""),
                 name=d.get("pod_name", ""),
                 status=d.get("status", "unknown"),
@@ -373,14 +381,12 @@ class Lium:
                 ports=d.get("ports_mapping", {}),
                 created_at=d.get("created_at", ""),
                 updated_at=d.get("updated_at", ""),
-                executor=self._dict_to_executor_info(d.get("executor", {})) if d.get("executor") else None,
+                executor=executor,
                 template=d.get("template", {}),
                 removal_scheduled_at=d.get("removal_scheduled_at"),
                 jupyter_installation_status=d.get("jupyter_installation_status"),
                 jupyter_url=d.get("jupyter_url")
-            )
-            for d in data
-        ]
+            ))
 
         return pods
 
@@ -915,7 +921,6 @@ class Lium:
                 gpu_type=response.get("gpu_name", ""),
                 gpu_count=int(response.get("gpu_count", 0) or 0),
                 price_per_hour=0.0,
-                price_per_gpu_hour=0.0,  # TODO: DAH-1874 - deprecated
                 price_per_gpu=0.0,
                 location={},
                 specs={},

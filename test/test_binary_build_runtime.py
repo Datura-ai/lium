@@ -48,7 +48,7 @@ def test_themed_console_loads_themes_from_meipass(monkeypatch, tmp_path):
 
 
 def test_dominates_handles_missing_price_without_unboundlocalerror():
-    better = {"price_per_gpu_hour": None, "total_bandwidth": 100, "location_score": 1.0, "net_down": 50, "net_up": 50}
-    worse = {"price_per_gpu_hour": 2.0, "total_bandwidth": 10, "location_score": 0.0, "net_down": 5, "net_up": 5}
+    better = {"price_per_gpu": None, "total_bandwidth": 100, "location_score": 1.0, "net_down": 50, "net_up": 50}
+    worse = {"price_per_gpu": 2.0, "total_bandwidth": 10, "location_score": 0.0, "net_down": 5, "net_up": 5}
 
     assert isinstance(dominates(better, worse), bool)

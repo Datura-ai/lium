@@ -285,8 +285,7 @@ def extract_executor_metrics(executor: ExecutorInfo) -> Dict[str, float]:
     net_down = executor.download_speed
 
     return {
-        'price_per_gpu_hour': executor.price_per_gpu_hour or float('inf'), # TODO: DAH-1874 - deprecated
-        'price_per_gpu': executor.price_per_gpu,
+        'price_per_gpu': executor.price_per_gpu or float('inf'),
         'vram_gb': ((gpu_details.get("capacity") or 0) / 1024) if gpu_details else 0,  # MiB to GB
         'ram_gb': ((ram_data.get("total") or 0) / (1024 * 1024)) if ram_data else 0,  # KB to GB
         'disk_gb': ((disk_data.get("total") or 0) / (1024 * 1024)) if disk_data else 0,  # KB to GB
@@ -300,7 +299,7 @@ def extract_executor_metrics(executor: ExecutorInfo) -> Dict[str, float]:
     }
 
 
-_MINIMIZE_METRICS = frozenset({'price_per_gpu_hour', 'price_per_gpu'})  # TODO: DAH-1874 - deprecated price_per_gpu_hour
+_MINIMIZE_METRICS = frozenset({'price_per_gpu'})
 _SECONDARY_METRICS = ('total_bandwidth', 'location_score', 'net_up')
 # Metrics excluded from the equal-price residual sweep: already handled above, or
 # minimize-metrics whose direction the residual loop does not account for.
@@ -325,10 +324,10 @@ def dominates(metrics_a: Dict[str, float], metrics_b: Dict[str, float]) -> bool:
         return False  # B is significantly faster — A cannot dominate
 
     # --- Download speeds are similar; fall back to price-based logic ---
-    price_a_value = metrics_a.get('price_per_gpu_hour')
-    price_b_value = metrics_b.get('price_per_gpu_hour')
-    price_a = price_a_value if price_a_value is not None else float('inf')  # TODO: DAH-1874 - deprecated
-    price_b = price_b_value if price_b_value is not None else float('inf')  # TODO: DAH-1874 - deprecated
+    price_a_value = metrics_a.get('price_per_gpu')
+    price_b_value = metrics_b.get('price_per_gpu')
+    price_a = price_a_value if price_a_value is not None else float('inf')
+    price_b = price_b_value if price_b_value is not None else float('inf')
 
     if abs(price_a - price_b) < 0.01:  # Prices are effectively equal
         # Check secondary metrics in priority order; both A and B must be
