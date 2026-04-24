@@ -1,4 +1,5 @@
 """Main CLI entry point for Lium."""
+
 import click
 import os
 from importlib.metadata import version, PackageNotFoundError
@@ -17,8 +18,10 @@ from .reboot import reboot_command
 from .scp.command import scp_command
 from .rsync import rsync_command
 from .theme import theme_command
+
 # from .commands.compose import compose_command  # Disabled for beta.1
 from .config import config_command
+
 # from .commands.image import image_command  # Disabled for beta.1
 from .fund import fund_command
 from .gpu_splitting import gpu_splitting_command
@@ -29,6 +32,7 @@ from .schedules import schedules_command
 from .update.command import update_command
 from .port_forward import port_forward_command
 from .plugins import load_plugins
+from .self_update import maybe_perform_startup_update
 
 
 def get_version():
@@ -44,14 +48,14 @@ def get_version():
 @click.pass_context
 def cli(ctx):
     """Lium CLI - Unix-style GPU pod management.
-    
+
     A clean, Unix-style command-line interface for managing GPU pods.
     Run individual commands or use 'lium --help' to see all available commands.
     """
     # Make ThemedConsole available to all commands via context
     ctx.ensure_object(dict)
-    ctx.obj['console'] = ThemedConsole()
-    
+    ctx.obj["console"] = ThemedConsole()
+
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
@@ -91,10 +95,12 @@ load_plugins(cli)
 
 def main():
     """Main entry point for the CLI."""
-    if not os.environ.get('_LIUM_COMPLETE'):
+    if not os.environ.get("_LIUM_COMPLETE"):
+        maybe_perform_startup_update()
         from .completion import ensure_completion
+
         ensure_completion()
-    
+
     cli()
 
 
