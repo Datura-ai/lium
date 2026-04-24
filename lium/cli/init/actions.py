@@ -2,15 +2,16 @@ import subprocess
 from pathlib import Path
 
 from lium.cli.actions import ActionResult
-from .auth import browser_auth
+from .auth import browser_auth, init_auth, poll_auth
 from lium.cli.settings import config
+from lium.cli import ui
 
 
 class SetupApiKeyAction:
     """Setup API key using browser authentication."""
 
     def execute(self, ctx: dict) -> ActionResult:
-        """Execute API key setup."""
+        """Execute API key setup with browser flow."""
         current_key = config.get('api.api_key')
         if current_key:
             return ActionResult(ok=True, data={"already_configured": True})
@@ -21,6 +22,49 @@ class SetupApiKeyAction:
             return ActionResult(ok=False, data={}, error="Authentication failed")
 
         config.set('api.api_key', api_key)
+        return ActionResult(ok=True, data={"already_configured": False})
+
+
+class RequestAuthUrlAction:
+    """Request auth URL and print it (step 1 of headless auth)."""
+
+    def execute(self, ctx: dict) -> ActionResult:
+        current_key = config.get('api.api_key')
+        if current_key:
+            return ActionResult(ok=True, data={"already_configured": True})
+
+        try:
+            browser_url, session_id = init_auth()
+        except Exception as e:
+            return ActionResult(ok=False, data={}, error=f"Failed to request auth URL: {e}")
+
+        ui.info("Open this URL to authenticate:")
+        ui.print(f"\n  {browser_url}\n")
+        ui.info(f"Then complete authentication with:")
+        ui.print(f"\n  lium init --session {session_id}\n")
+
+        return ActionResult(ok=True, data={"session_id": session_id})
+
+
+class VerifySessionAction:
+    """Verify auth session and save API key (step 2 of headless auth)."""
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+
+    def execute(self, ctx: dict) -> ActionResult:
+        current_key = config.get('api.api_key')
+        if current_key:
+            return ActionResult(ok=True, data={"already_configured": True})
+
+        ui.dim("Checking authentication status...")
+        api_key = poll_auth(self.session_id, max_attempts=12, interval=5)
+
+        if not api_key:
+            return ActionResult(ok=False, data={}, error="Authentication not approved yet. Make sure you opened the URL and approved access.")
+
+        config.set('api.api_key', api_key)
+        ui.success("API key saved")
         return ActionResult(ok=True, data={"already_configured": False})
 
 

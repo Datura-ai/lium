@@ -17,7 +17,8 @@ class quiet_fds:
         os.close(self._stdout); os.close(self._stderr)
         self._null.close()
 
-def init_auth():
+def init_auth() -> tuple[str, str]:
+    """Request a new auth session. Returns (browser_url, session_id)."""
     url = "https://lium.io/api/cli-auth/init"
     resp = requests.post(url,
         json={"callback_url": "http://localhost:8080/auth/callback"},
@@ -27,7 +28,8 @@ def init_auth():
     resp.raise_for_status()
     return resp.json()["browser_url"], resp.json()["session_id"]
 
-def poll_auth(session_id, max_attempts=6, interval=5) -> Optional[str]:  # 30 seconds timeout (6 * 5)
+def poll_auth(session_id: str, max_attempts: int = 6, interval: int = 5) -> Optional[str]:
+    """Poll for auth approval. Returns API key or None on timeout."""
     url = f"https://lium.io/api/cli-auth/poll/{session_id}"
     for _ in range(max_attempts):
         try:
@@ -44,11 +46,10 @@ def poll_auth(session_id, max_attempts=6, interval=5) -> Optional[str]:  # 30 se
     return None
 
 def browser_auth() -> Optional[str]:
-    """Execute browser authentication flow and return API key or None."""
+    """Open browser for authentication and poll for approval."""
     try:
         browser_url, session_id = init_auth()
 
-        # Clear messaging about what's happening
         ui.info("Browser opened, waiting for authentication...")
 
         with quiet_fds():
