@@ -14,7 +14,6 @@ class ExecutorInfo:
     gpu_count: int
     price_per_hour: float
     price_per_gpu: float
-    price_per_gpu_hour: float # TODO: DAH-1874 - deprecated field
     location: Dict
     specs: Dict
     status: str
