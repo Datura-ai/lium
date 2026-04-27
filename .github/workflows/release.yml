@@ -1,4 +1,5 @@
 name: Build and Publish Python Package
+run-name: Release ${{ inputs.version }} (${{ inputs.release_mode }})
 
 on:
   workflow_dispatch:
@@ -7,6 +8,15 @@ on:
         description: "Version to release"
         required: true
         type: string
+      release_mode:
+        description: "Which release path to run"
+        required: true
+        type: choice
+        default: build-only
+        options:
+        - build-only
+        - github-release
+        - full-release
 
 env:
   RELEASE_VERSION: ${{ inputs.version }}
@@ -181,6 +191,7 @@ jobs:
 
   release-assets:
     name: Publish GitHub release assets
+    if: ${{ inputs.release_mode != 'build-only' }}
     needs:
     - build-python
     - validate-binary-targets
@@ -259,6 +270,7 @@ jobs:
           --clobber
 
   approve-and-publish:
+    if: ${{ inputs.release_mode == 'full-release' }}
     needs: build-python
     runs-on: ubuntu-latest
     environment: release
