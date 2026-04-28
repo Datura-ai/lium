@@ -15,6 +15,7 @@ from .models import (
     BackupLog,
     ExecutorInfo,
     PodInfo,
+    SSHKey,
     Template,
     VolumeInfo,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "VolumeInfo",
     "BackupConfig",
     "BackupLog",
+    "SSHKey",
     "LiumError",
     "LiumAuthError",
     "LiumRateLimitError",
