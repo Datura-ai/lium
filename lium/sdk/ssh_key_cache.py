@@ -22,8 +22,18 @@ def _cache_path() -> Path:
     return Path.home() / ".lium" / CACHE_FILE_NAME
 
 
+_API_KEY_DIGEST_SALT = b"lium.ssh_key_cache.v1"
+_API_KEY_DIGEST_ITERATIONS = 200_000
+
+
 def _api_key_digest(api_key: str) -> str:
-    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
+    derived = hashlib.pbkdf2_hmac(
+        "sha256",
+        api_key.encode("utf-8"),
+        _API_KEY_DIGEST_SALT,
+        _API_KEY_DIGEST_ITERATIONS,
+    )
+    return derived.hex()[:16]
 
 
 def fingerprint(public_key: str) -> str:
