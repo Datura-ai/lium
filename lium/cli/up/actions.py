@@ -173,6 +173,7 @@ class RentPodAction:
         name: Optional[str] = ctx.get("name")
         volume_id: Optional[str] = ctx.get("volume_id")
         ports: Optional[int] = ctx.get("ports")
+        ssh_name: Optional[str] = ctx.get("ssh_name")
 
         try:
             if not name:
@@ -184,6 +185,7 @@ class RentPodAction:
                 template_id=template.id if template else None,
                 volume_id=volume_id,
                 ports=ports,
+                ssh_name=ssh_name,
             )
 
             pod_id = pod_info.get('id') or pod_info.get('name', '')

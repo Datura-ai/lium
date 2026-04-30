@@ -37,6 +37,7 @@ from .actions import (
 @click.option("-e", "--env", multiple=True, help="Environment variables (KEY=VALUE), can be repeated")
 @click.option("--entrypoint", default="", help="Container entrypoint")
 @click.option("--cmd", default="", help="Command to run in the container")
+@click.option("--ssh-name", default=None, help="Name to register a new SSH key under (default: cli-<user>@<hostname>)")
 @handle_errors
 def up_command(
     executor_id: Optional[str],
@@ -56,6 +57,7 @@ def up_command(
     env: Tuple[str, ...],
     entrypoint: Optional[str],
     cmd: Optional[str],
+    ssh_name: Optional[str],
 ):
     """\b
     Create a new GPU pod on an executor.
@@ -236,7 +238,8 @@ def up_command(
             "template": template,
             "name": name,
             "volume_id": volume_id,
-            "ports": ports
+            "ports": ports,
+            "ssh_name": ssh_name,
         })
     )
 

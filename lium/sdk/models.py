@@ -119,6 +119,15 @@ class BackupLog:
 
 
 @dataclass
+class SSHKey:
+    """Public SSH key registered for the current user."""
+    id: str
+    name: str
+    public_key: str
+    created_at: Optional[str] = None
+
+
+@dataclass
 class VolumeInfo:
     """Volume information."""
     id: str
@@ -141,4 +150,5 @@ __all__ = [
     "BackupConfig",
     "BackupLog",
     "VolumeInfo",
+    "SSHKey",
 ]

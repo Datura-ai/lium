@@ -1,8 +1,12 @@
 """Lium SDK - Clean, Unix-style SDK for GPU pod management."""
 
+import getpass
+import re
 import shlex
+import socket
 import subprocess
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Any, Dict, Generator, List, Optional, Union
@@ -25,9 +29,11 @@ from .models import (
     BackupLog,
     ExecutorInfo,
     PodInfo,
+    SSHKey,
     Template,
     VolumeInfo,
 )
+from .ssh_key_cache import fingerprint, load_cache, save_cache
 from .utils import expand_gpu_shorthand, extract_gpu_type, generate_huid, with_retry
 
 load_dotenv()
@@ -156,6 +162,94 @@ class Lium:
             effective_download_speed_mbps=executor_dict.get("effective_download_speed_mbps"),
         )
 
+    def list_ssh_keys(self) -> List[SSHKey]:
+        """Return SSH keys registered for the current user."""
+        data = self._request("GET", "/ssh-keys").json()
+        if not isinstance(data, list):
+            return []
+        return [
+            SSHKey(
+                id=str(row.get("id", "")),
+                name=row.get("name", ""),
+                public_key=row.get("public_key", ""),
+                created_at=row.get("created_at"),
+            )
+            for row in data
+            if isinstance(row, dict)
+        ]
+
+    def register_ssh_key(self, *, name: str, public_key: str) -> SSHKey:
+        """Register a new SSH public key under the current user."""
+        payload = {"name": name, "public_key": public_key}
+        data = self._request("POST", "/ssh-keys", json=payload).json()
+        if not isinstance(data, dict):
+            data = {}
+        return SSHKey(
+            id=str(data.get("id", "")),
+            name=data.get("name", name),
+            public_key=data.get("public_key", public_key),
+            created_at=data.get("created_at"),
+        )
+
+    @staticmethod
+    def default_ssh_key_name() -> str:
+        """``cli-<user>@<host>`` sanitised to ``[A-Za-z0-9._@-]``."""
+        user = getpass.getuser() or "user"
+        host = socket.gethostname() or "host"
+        return re.sub(r"[^A-Za-z0-9._@-]", "-", f"cli-{user}@{host}")[:64]
+
+    def _ensure_ssh_keys_registered(
+        self,
+        public_keys: List[str],
+        name: Optional[str] = None,
+    ) -> None:
+        """Make sure each pubkey in ``public_keys`` is registered server-side.
+
+        Lazy + cached: skips the network call when every fingerprint is already
+        in ``~/.lium/ssh_keys_cache.json``. On any registration failure we warn
+        and return — the rent that follows must never be blocked by this step.
+        """
+        if not public_keys:
+            return
+
+        fps = {pk: fingerprint(pk) for pk in public_keys if pk.strip()}
+        cached = load_cache(self.config)
+        missing_locally = [pk for pk, fp in fps.items() if fp not in cached]
+        if not missing_locally:
+            return
+
+        try:
+            server_keys = {k.public_key.strip() for k in self.list_ssh_keys() if k.public_key}
+        except LiumError as exc:
+            warnings.warn(
+                f"lium: could not list ssh-keys ({exc}); skipping registration",
+                stacklevel=2,
+            )
+            return
+
+        new_fps = set(cached)
+        default_name = name or self.default_ssh_key_name()
+
+        for pk in missing_locally:
+            stripped = pk.strip()
+            if stripped in server_keys:
+                new_fps.add(fps[pk])
+                continue
+            try:
+                self.register_ssh_key(name=default_name, public_key=stripped)
+                new_fps.add(fps[pk])
+            except LiumError as exc:
+                warnings.warn(
+                    f"lium: could not register ssh key ({exc}); continuing rent",
+                    stacklevel=2,
+                )
+
+        if new_fps != cached:
+            try:
+                save_cache(self.config, new_fps)
+            except OSError as exc:
+                warnings.warn(f"lium: could not write ssh-keys cache ({exc})", stacklevel=2)
+
     def up(
         self,
         *,
@@ -165,6 +259,7 @@ class Lium:
         volume_id: Optional[str] = None,
         ports: Optional[int] = None,
         ssh_keys: Optional[List[str]] = None,
+        ssh_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Start a new pod on a specific executor.
 
@@ -175,6 +270,9 @@ class Lium:
             volume_id: Optional volume ID to attach on spawn.
             ports: Number of exposed ports to request.
             ssh_keys: SSH public keys to authorize. Defaults to the keys discovered by the Config.
+            ssh_name: Optional name to use when registering a new SSH key with the
+                backend. Defaults to ``cli-<user>@<hostname>``. Only applied to keys
+                that are not already registered server-side.
 
         Returns:
             Pod metadata as returned by the rent API (id, name, status, ssh command, etc.).
@@ -190,6 +288,8 @@ class Lium:
         ssh_material = ssh_keys or self.config.ssh_public_keys
         if not ssh_material:
             raise ValueError("No SSH keys found")
+
+        self._ensure_ssh_keys_registered(ssh_material, name=ssh_name)
 
         payload = {
             "pod_name": name,
