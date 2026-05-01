@@ -1,7 +1,6 @@
 """Pods (ps) command implementation."""
 
 import json
-from dataclasses import asdict
 from typing import Optional
 import click
 
@@ -63,7 +62,7 @@ def ps_command(pod_id: Optional[str], output_format: str):
         return
 
     if output_format == "json":
-        click.echo(json.dumps([asdict(p) for p in pods], indent=2, default=str))
+        click.echo(json.dumps([display.compact_pod(p) for p in pods], indent=2, ensure_ascii=False))
         return
 
     # Build table

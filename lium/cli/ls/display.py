@@ -145,6 +145,30 @@ def format_tip() -> str:
     return f"Tip: {console.get_styled('lium up <index>', 'success')} {console.get_styled('# e.g. lium up 1', 'dim')}"
 
 
+def compact_executor(exe: ExecutorInfo, is_pareto: bool, index: int) -> Dict[str, Any]:
+    """Slim, table-equivalent JSON view of an executor."""
+    s = _specs_row(exe)
+    return {
+        "index": index,
+        "id": exe.id,
+        "huid": exe.huid,
+        "config": _cfg(exe),
+        "gpu_type": exe.gpu_type,
+        "gpu_count": exe.gpu_count,
+        "price_per_gpu_hour": exe.price_per_gpu,
+        "price_per_hour": exe.price_per_hour,
+        "country": _country_name(exe.location),
+        "vram_gb": _intish(s["VRAM"]),
+        "ram_gb": _intish(s["RAM"]),
+        "disk_gb": _intish(s["Disk"]),
+        "upload_mbps": _intish(s["Upload"]),
+        "download_mbps": _intish(s["Download"]),
+        "available_ports": _intish(s["Ports"]),
+        "docker_in_docker": exe.docker_in_docker,
+        "is_pareto": is_pareto,
+    }
+
+
 def sort_executors(
     executors: List[ExecutorInfo],
     sort_by: str = "download",

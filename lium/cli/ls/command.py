@@ -1,7 +1,6 @@
 """List (ls) command implementation."""
 
 import json
-from dataclasses import asdict
 from typing import Optional, List
 import click
 
@@ -115,10 +114,10 @@ def ls_command(
             executors, sort_by=sort_by, limit=limit
         )
         payload = [
-            {**asdict(exe), "is_pareto": is_pareto}
-            for exe, is_pareto in zip(sorted_executors, pareto_flags)
+            display.compact_executor(exe, is_pareto, idx)
+            for idx, (exe, is_pareto) in enumerate(zip(sorted_executors, pareto_flags), 1)
         ]
-        click.echo(json.dumps(payload, indent=2, default=str))
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
         store_executor_selection(sorted_executors)
         return
 
