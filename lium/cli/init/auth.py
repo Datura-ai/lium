@@ -20,13 +20,10 @@ class quiet_fds:
 def init_auth() -> tuple[str, str]:
     """Request a new auth session. Returns (browser_url, session_id)."""
     url = "https://lium.io/api/cli-auth/init"
-    resp = requests.post(url,
-        json={"callback_url": "http://localhost:8080/auth/callback"},
-        headers={"Content-Type": "application/json"},
-        timeout=10
-    )
+    resp = requests.post(url, timeout=10)
     resp.raise_for_status()
-    return resp.json()["browser_url"], resp.json()["session_id"]
+    data = resp.json()
+    return data["browser_url"], data["session_id"]
 
 def poll_auth(session_id: str, max_attempts: int = 6, interval: int = 5) -> Optional[str]:
     """Poll for auth approval. Returns API key or None on timeout."""
@@ -49,15 +46,16 @@ def browser_auth() -> Optional[str]:
     """Open browser for authentication and poll for approval."""
     try:
         browser_url, session_id = init_auth()
-
-        ui.info("Browser opened, waiting for authentication...")
-
-        with quiet_fds():
-            result = webbrowser.open(browser_url)
-
-        if not result:
-            ui.info(f"Opening browser failed. Please, open the page for authentication: {browser_url}")
-
-        return poll_auth(session_id)
-    except Exception:
+    except Exception as e:
+        ui.error(f"Failed to request auth URL: {e}")
         return None
+
+    ui.info("Browser opened, waiting for authentication...")
+
+    with quiet_fds():
+        result = webbrowser.open(browser_url)
+
+    if not result:
+        ui.info(f"Opening browser failed. Please, open the page for authentication: {browser_url}")
+
+    return poll_auth(session_id)
