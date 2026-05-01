@@ -1,5 +1,6 @@
 """List (ls) command implementation."""
 
+import json
 from typing import Optional, List
 import click
 
@@ -47,6 +48,12 @@ def ls_store_executor(gpu_type: Optional[str] = None, sort_by: str = "download")
     help="Sort result by the chosen field.",
 )
 @click.option("--limit", type=int, default=None, help="Limit number of rows shown.")
+@click.option(
+    "--format", "output_format",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    help="Output format. 'json' emits machine-readable JSON to stdout (suitable for piping to jq).",
+)
 @handle_errors
 def ls_command(
     gpu_type: Optional[str],
@@ -56,6 +63,7 @@ def ls_command(
     max_distance: Optional[int],
     sort_by: str,
     limit: Optional[int],
+    output_format: str,
 ):
     """List available GPU executors."""
 
@@ -77,7 +85,10 @@ def ls_command(
     }
 
     action = GetExecutorsAction()
-    result = ui.load("Loading executors", lambda: action.execute(ctx))
+    if output_format == "json":
+        result = action.execute(ctx)
+    else:
+        result = ui.load("Loading executors", lambda: action.execute(ctx))
 
     if not result.ok:
         ui.error(result.error)
@@ -87,12 +98,27 @@ def ls_command(
 
     # Check if empty
     if not executors:
+        if output_format == "json":
+            click.echo("[]")
+            return
         if gpu_type:
             ui.error(f"All {gpu_type} GPUs are currently rented out")
             ui.info(f"Tip: {ui.styled('lium ls', 'success')}")
         else:
             ui.error("All GPUs are currently rented out")
             ui.info("Check back later or contact support if this persists")
+        return
+
+    if output_format == "json":
+        sorted_executors, pareto_flags = display.sort_executors(
+            executors, sort_by=sort_by, limit=limit
+        )
+        payload = [
+            display.compact_executor(exe, is_pareto, idx)
+            for idx, (exe, is_pareto) in enumerate(zip(sorted_executors, pareto_flags), 1)
+        ]
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        store_executor_selection(sorted_executors)
         return
 
     # Build table
