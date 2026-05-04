@@ -17,6 +17,7 @@ on:
         - build-only
         - github-release
         - full-release
+        - deprecate-lium-cli
 
 env:
   RELEASE_VERSION: ${{ inputs.version }}
@@ -24,6 +25,7 @@ env:
 
 jobs:
   build-python:
+    if: ${{ inputs.release_mode != 'deprecate-lium-cli' }}
     name: Build Python distribution
     runs-on: ubuntu-latest
     permissions:
@@ -69,6 +71,7 @@ jobs:
         path: dist/
 
   validate-binary-targets:
+    if: ${{ inputs.release_mode != 'deprecate-lium-cli' }}
     name: Validate binary target matrix
     runs-on: ubuntu-latest
     permissions:
@@ -88,6 +91,7 @@ jobs:
       run: pytest test/test_release_binary_targets.py
 
   build-linux-binary:
+    if: ${{ inputs.release_mode != 'deprecate-lium-cli' }}
     name: Build Linux binary (${{ matrix.asset_name }})
     strategy:
       fail-fast: false
@@ -134,6 +138,7 @@ jobs:
           dist/${{ matrix.asset_name }}.sha256
 
   build-macos-binary:
+    if: ${{ inputs.release_mode != 'deprecate-lium-cli' }}
     name: Build macOS binary (${{ matrix.asset_name }})
     strategy:
       fail-fast: false
@@ -191,7 +196,7 @@ jobs:
 
   release-assets:
     name: Publish GitHub release assets
-    if: ${{ inputs.release_mode != 'build-only' }}
+    if: ${{ inputs.release_mode == 'github-release' || inputs.release_mode == 'full-release' }}
     needs:
     - build-python
     - validate-binary-targets
@@ -288,5 +293,51 @@ jobs:
     - name: Publish package distributions to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
+        verbose: true
+        print-hash: true
+
+  build-and-publish-deprecated-lium-cli:
+    if: ${{ inputs.release_mode == 'deprecate-lium-cli' }}
+    name: Build and publish lium-cli deprecation stub
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Validate requested version
+      run: |
+        python - <<'PY'
+        import tomllib
+        from pathlib import Path
+        import os
+
+        version = tomllib.loads(Path("stubs/lium-cli/pyproject.toml").read_text())["project"]["version"]
+        requested = os.environ["RELEASE_VERSION"]
+        if requested != version:
+            raise SystemExit(f"Requested version {requested!r} does not match stub pyproject version {version!r}")
+        PY
+
+    - name: Install build dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build
+
+    - name: Build stub package
+      working-directory: stubs/lium-cli
+      run: python -m build --sdist --wheel --outdir dist/
+
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        packages-dir: stubs/lium-cli/dist/
         verbose: true
         print-hash: true
