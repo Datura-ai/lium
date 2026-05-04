@@ -62,6 +62,6 @@ packages = ["lium"]
 
 
 [project.urls]
-Homepage = "https://github.com/Datura-ai/lium-cli"
-Repository = "https://github.com/Datura-ai/lium-cli"
-Issues = "https://github.com/Datura-ai/lium-cli/issues"
+Homepage = "https://github.com/Datura-ai/lium"
+Repository = "https://github.com/Datura-ai/lium"
+Issues = "https://github.com/Datura-ai/lium/issues"
