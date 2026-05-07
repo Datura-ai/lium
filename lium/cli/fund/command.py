@@ -23,6 +23,17 @@ def _print_json(payload: dict) -> None:
     click.echo(json.dumps(payload, sort_keys=True))
 
 
+def _lium_client() -> Lium:
+    try:
+        return Lium()
+    except ValueError as exc:
+        if "No API key found" in str(exc):
+            raise click.ClickException(
+                "No API key configured. Run 'lium init' or set LIUM_API_KEY."
+            ) from exc
+        raise click.ClickException(str(exc)) from exc
+
+
 def _legacy_tao_fund(wallet: Optional[str], amount: Optional[str], yes: bool) -> None:
     """Run the original Bittensor TAO funding flow."""
     try:
@@ -159,7 +170,7 @@ def crypto_currencies_command(refresh: bool, json_output: bool):
       lium fund crypto currencies --refresh
       lium fund crypto currencies --json
     """
-    lium = Lium()
+    lium = _lium_client()
     currencies = lium.nowpayments_currencies(refresh=refresh)
 
     if json_output:
@@ -202,15 +213,13 @@ def crypto_invoice_command(amount_usd: str, currency: str, json_output: bool):
     """
     amount, amount_error = validation.validate_usd_amount(amount_usd)
     if amount_error:
-        ui.error(amount_error)
-        return
+        raise click.ClickException(amount_error)
 
     pay_currency, currency_error = validation.validate_currency(currency)
     if currency_error:
-        ui.error(currency_error)
-        return
+        raise click.ClickException(currency_error)
 
-    lium = Lium()
+    lium = _lium_client()
     invoice = lium.create_nowpayments_invoice(
         amount_usd=amount,
         pay_currency=pay_currency,

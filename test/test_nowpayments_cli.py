@@ -152,6 +152,31 @@ def test_crypto_currencies_json(monkeypatch):
     }
 
 
+def test_crypto_currencies_json_empty_list_has_pure_stdout(monkeypatch):
+    class FakeLium:
+        def nowpayments_currencies(self, *, refresh=False):
+            assert refresh is False
+            return []
+
+    monkeypatch.setattr(fund_module, "Lium", FakeLium)
+
+    result = CliRunner().invoke(cli, ["fund", "crypto", "currencies", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {"currencies": []}
+    assert "No NowPayments currencies returned" not in result.output
+
+
+def test_crypto_currencies_missing_api_key_exits_nonzero(monkeypatch, tmp_path):
+    monkeypatch.delenv("LIUM_API_KEY", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    result = CliRunner().invoke(cli, ["fund", "crypto", "currencies", "--json"])
+
+    assert result.exit_code != 0
+    assert "No API key configured" in result.output
+
+
 def test_crypto_invoice_json(monkeypatch):
     class FakeLium:
         def create_nowpayments_invoice(self, *, amount_usd, pay_currency):
@@ -203,6 +228,42 @@ def test_crypto_invoice_json(monkeypatch):
         "network": "tron",
         "expires_at": None,
     }
+
+
+def test_crypto_invoice_invalid_amount_exits_nonzero():
+    result = CliRunner().invoke(
+        cli,
+        [
+            "fund",
+            "crypto",
+            "invoice",
+            "--amount-usd",
+            "0",
+            "--currency",
+            "usdttrc20",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Amount must be positive" in result.output
+
+
+def test_crypto_invoice_invalid_currency_exits_nonzero():
+    result = CliRunner().invoke(
+        cli,
+        [
+            "fund",
+            "crypto",
+            "invoice",
+            "--amount-usd",
+            "25",
+            "--currency",
+            "",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Currency is required" in result.output
 
 
 def test_balance_json(monkeypatch):

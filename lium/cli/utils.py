@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from typing import List, Dict, Any, Tuple, Optional, Callable, TypeVar
 import json
 from pathlib import Path
+import click
 from lium.cli.settings import config
 from datetime import datetime
 from rich.status import Status
@@ -248,6 +249,8 @@ def handle_errors(func):
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
+        except (click.ClickException, click.Abort):
+            raise
         except ValueError as e:
             # Check if it's the API key error from SDK
             if "No API key found" in str(e):
