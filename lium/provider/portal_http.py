@@ -1,4 +1,4 @@
-"""Synchronous HTTP transport for the miner SDK.
+"""Synchronous HTTP transport for the provider SDK.
 
 Mirrors the renter SDK's ``lium/sdk/client.py::_request`` style: ``requests``
 + ``with_retry`` + status-code -> structured-error mapping. One file owns
@@ -16,27 +16,27 @@ from typing import Any, Callable
 
 import requests
 
-from lium.miner.errors import (
+from lium.provider.errors import (
     PORTAL_AUTH_EXPIRED,
     PORTAL_AUTH_INVALID,
     PORTAL_NOT_FOUND,
     PORTAL_RATE_LIMIT,
     PORTAL_SERVER_ERROR,
-    MinerAuthError,
-    MinerError,
-    MinerNotFoundError,
-    MinerPortalContractError,
-    MinerServerError,
+    ProviderAuthError,
+    ProviderError,
+    ProviderNotFoundError,
+    ProviderPortalContractError,
+    ProviderServerError,
 )
 from lium.sdk.utils import with_retry
 
-logger = logging.getLogger("lium.miner.portal_http")
+logger = logging.getLogger("lium.provider.portal_http")
 
 
 # Default base URL: production portal API. Note: ``provider.lium.io`` is the
 # Next.js frontend; the FastAPI backend lives at a separate host with no
 # ``/api`` prefix. Override with ``LIUM_PORTAL_URL`` / ``--portal-url`` /
-# ``miner.portal_url`` in ~/.lium/config.ini.
+# ``provider.portal_url`` in ~/.lium/config.ini.
 DEFAULT_PORTAL_URL = "https://provider-api.lium.io"
 
 
@@ -44,7 +44,7 @@ TokenProvider = Callable[[], str | None]
 
 
 class PortalHTTP:
-    """Thin wrapper around ``requests.Session`` for miner-portal calls.
+    """Thin wrapper around ``requests.Session`` for provider-portal calls.
 
     Args:
         base_url: the portal origin. Trailing slashes are stripped.
@@ -130,8 +130,8 @@ class PortalHTTP:
             )
         except requests.RequestException as e:
             # Network-level failure: with_retry will retry; on the final
-            # attempt the exception bubbles up. Wrap into MinerError.
-            raise MinerServerError(
+            # attempt the exception bubbles up. Wrap into ProviderError.
+            raise ProviderServerError(
                 f"network error reaching portal: {e}",
                 code=PORTAL_SERVER_ERROR,
                 cause=e,
@@ -147,7 +147,7 @@ def _parse_response(
     method: str,
     url: str,
 ) -> dict[str, Any]:
-    """Translate an HTTP response into either a parsed dict or a MinerError.
+    """Translate an HTTP response into either a parsed dict or a ProviderError.
 
     Body parsing is lenient: missing/invalid JSON on a 2xx returns ``{}``;
     error bodies are stashed under ``context["body"]`` for diagnostics.
@@ -185,49 +185,49 @@ def _parse_response(
     context = {"url": url, "method": method, "status": status, "body": body}
 
     if status == 401:
-        raise MinerAuthError(
+        raise ProviderAuthError(
             "portal rejected credentials",
             code=PORTAL_AUTH_INVALID,
             context=context,
         )
     if status == 403:
-        raise MinerAuthError(
+        raise ProviderAuthError(
             "portal forbade the requested action",
             code=PORTAL_AUTH_INVALID,
             context=context,
         )
     if status == 404:
-        raise MinerNotFoundError(
+        raise ProviderNotFoundError(
             "portal returned 404",
             code=PORTAL_NOT_FOUND,
             context=context,
         )
     if status == 419 or status == 440:
         # Some portals use these for session expiry.
-        raise MinerAuthError(
+        raise ProviderAuthError(
             "portal session expired",
             code=PORTAL_AUTH_EXPIRED,
             context=context,
         )
     if status == 422:
-        raise MinerPortalContractError(
+        raise ProviderPortalContractError(
             "portal rejected payload (likely schema drift)",
             context=context,
         )
     if status == 429:
-        raise MinerServerError(
+        raise ProviderServerError(
             "portal rate limit",
             code=PORTAL_RATE_LIMIT,
             context=context,
         )
     if 500 <= status < 600:
-        raise MinerServerError(
+        raise ProviderServerError(
             f"portal server error ({status})",
             code=PORTAL_SERVER_ERROR,
             context=context,
         )
-    # Anything else: treat as a generic MinerError but keep context.
-    raise MinerError(
+    # Anything else: treat as a generic ProviderError but keep context.
+    raise ProviderError(
         f"unexpected portal status {status}",
         code=PORTAL_SERVER_ERROR,
         context=context,

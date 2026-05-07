@@ -1,4 +1,4 @@
-"""Tests for ``lium.miner.client.MinerClient`` (M1 skeleton)."""
+"""Tests for ``lium.provider.client.ProviderClient`` (M1 skeleton)."""
 
 from __future__ import annotations
 
@@ -9,13 +9,13 @@ from typing import Any
 
 import pytest
 
-from lium.miner.auth import LocalKeypairSigner
-from lium.miner.client import MinerClient
-from lium.miner.errors import (
+from lium.provider.auth import LocalKeypairSigner
+from lium.provider.client import ProviderClient
+from lium.provider.errors import (
     PORTAL_AUTH_INVALID,
-    MinerAuthError,
+    ProviderAuthError,
 )
-from lium.miner.token_store import TokenStore
+from lium.provider.token_store import TokenStore
 
 
 class _FakePortal:
@@ -65,10 +65,10 @@ def _make_jwt(exp: int) -> str:
 
 def _login_response_body(token: str, hotkey: str) -> dict:
     return {
-        "miner": {
+        "provider": {
             "id": "m-1",
             "miner_hotkey": hotkey,
-            "miner_coldkey": "5CK",
+            "provider_coldkey": "5CK",
             "created_at": "2026-05-06T00:00:00",
             "updated_at": "2026-05-06T00:00:00",
         },
@@ -80,10 +80,10 @@ def _build_client(
     portal: _FakePortal,
     token_store: TokenStore,
     fake_signer: LocalKeypairSigner,
-) -> MinerClient:
+) -> ProviderClient:
     # PortalHTTP is the type we lie about; the in-memory fake matches the
-    # methods MinerClient actually calls.
-    return MinerClient(
+    # methods ProviderClient actually calls.
+    return ProviderClient(
         signer=fake_signer,
         portal_url="https://portal.example.com",
         token_store=token_store,
@@ -93,11 +93,11 @@ def _build_client(
 
 def test_constructor_requires_signer_or_hotkey() -> None:
     with pytest.raises(ValueError):
-        MinerClient()
+        ProviderClient()
 
 
 def test_constructor_with_signer_only_works(fake_signer: LocalKeypairSigner) -> None:
-    client = MinerClient(signer=fake_signer)
+    client = ProviderClient(signer=fake_signer)
     assert client.hotkey_ss58 == fake_signer.ss58_address
 
 
@@ -159,10 +159,10 @@ def test_login_invalid_response_shape_raises_auth_error(
     fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
 ) -> None:
     portal = _FakePortal()
-    # Missing required `miner` field => Pydantic validation failure.
+    # Missing required `provider` field => Pydantic validation failure.
     portal.next_post = {"token": "abc"}
     client = _build_client(portal, tmp_token_store, fake_signer)
-    with pytest.raises(MinerAuthError) as exc:
+    with pytest.raises(ProviderAuthError) as exc:
         client.login()
     assert exc.value.code == PORTAL_AUTH_INVALID
 
@@ -193,6 +193,6 @@ def test_whoami_calls_auth_me(
 
 def test_signer_lazy_default_requires_coldkey_and_hotkey() -> None:
     # No signer + no coldkey path -> error raised when signer is needed.
-    client = MinerClient(hotkey="hk")
+    client = ProviderClient(hotkey="hk")
     with pytest.raises(ValueError):
         _ = client.hotkey_ss58

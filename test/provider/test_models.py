@@ -4,21 +4,21 @@ from __future__ import annotations
 
 import pytest
 
-from lium.miner.errors import PORTS_INVALID, MinerError
-from lium.miner.models import (
+from lium.provider.errors import PORTS_INVALID, ProviderError
+from lium.provider.models import (
     AddExecutorPayload,
     LoginResponse,
     NodePorts,
-    SafeMinerResponse,
+    SafeProviderResponse,
 )
 
 
 def test_login_response_round_trips_minimal_body() -> None:
     body = {
-        "miner": {
+        "provider": {
             "id": "m1",
             "miner_hotkey": "5HK",
-            "miner_coldkey": "5CK",
+            "provider_coldkey": "5CK",
             "created_at": "2026-05-06T00:00:00",
             "updated_at": "2026-05-06T00:00:00",
         },
@@ -26,8 +26,8 @@ def test_login_response_round_trips_minimal_body() -> None:
     }
     parsed = LoginResponse.model_validate(body)
     assert parsed.token == "jwt.body.sig"
-    assert isinstance(parsed.miner, SafeMinerResponse)
-    assert parsed.miner.machine_request_subscription == []  # default factory
+    assert isinstance(parsed.provider, SafeProviderResponse)
+    assert parsed.provider.machine_request_subscription == []  # default factory
 
 
 def test_add_executor_payload_required_fields() -> None:
@@ -77,7 +77,7 @@ def test_node_ports_from_string_valid(raw: str | None, expected: NodePorts) -> N
     ],
 )
 def test_node_ports_from_string_invalid(raw: str) -> None:
-    with pytest.raises(MinerError) as exc:
+    with pytest.raises(ProviderError) as exc:
         NodePorts.from_string(raw)
     assert exc.value.code == PORTS_INVALID
 

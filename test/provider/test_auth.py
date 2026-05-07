@@ -1,4 +1,4 @@
-"""Tests for ``lium.miner.auth``: Signer Protocol + A2 wire format."""
+"""Tests for ``lium.provider.auth``: Signer Protocol + A2 wire format."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import logging
 
 import pytest
 
-from lium.miner.auth import (
+from lium.provider.auth import (
     REPLAY_DEBT_MESSAGE,
     LocalKeypairSigner,
     Signer,
@@ -73,7 +73,7 @@ def test_build_login_payload_rejects_hotkey_mismatch(
 def test_replay_debt_warning_emitted_once(
     fake_signer: LocalKeypairSigner, caplog: pytest.LogCaptureFixture
 ) -> None:
-    caplog.set_level(logging.WARNING, logger="lium.miner.auth")
+    caplog.set_level(logging.WARNING, logger="lium.provider.auth")
     build_login_payload(fake_signer)
     build_login_payload(fake_signer)
     build_login_payload(fake_signer)

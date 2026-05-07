@@ -7,7 +7,7 @@ from pathlib import Path
 import click
 from click.testing import CliRunner
 
-from lium.cli.miner._persona import (
+from lium.cli.provider._persona import (
     PersonaContext,
     confirm_persona,
     is_acked,

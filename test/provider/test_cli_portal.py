@@ -1,4 +1,4 @@
-"""CLI tests for ``lium miner portal {login,logout,whoami}`` (M2)."""
+"""CLI tests for ``lium provider portal {login,logout,whoami}`` (M2)."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
-from lium.cli.miner.command import miner_command
-from lium.miner.auth import LocalKeypairSigner
-from lium.miner.client import MinerClient
-from lium.miner.errors import MinerAuthError, MinerError
-from lium.miner.token_store import TokenStore
+from lium.cli.provider.command import provider_command
+from lium.provider.auth import LocalKeypairSigner
+from lium.provider.client import ProviderClient
+from lium.provider.errors import ProviderAuthError, ProviderError
+from lium.provider.token_store import TokenStore
 
 
 class _Portal:
@@ -65,7 +65,7 @@ def patched_build_client(monkeypatch, fake_signer: LocalKeypairSigner, tmp_token
         portals.append(portal)
 
         def _builder(ctx):
-            client = MinerClient(
+            client = ProviderClient(
                 signer=fake_signer,
                 token_store=tmp_token_store,
                 http=portal,  # type: ignore[arg-type]
@@ -73,8 +73,8 @@ def patched_build_client(monkeypatch, fake_signer: LocalKeypairSigner, tmp_token
             return client
 
         for module in (
-            "lium.cli.miner.portal",
-            "lium.cli.miner.status",
+            "lium.cli.provider.portal",
+            "lium.cli.provider.status",
         ):
             monkeypatch.setattr(f"{module}.build_client", _builder)
 
@@ -84,10 +84,10 @@ def patched_build_client(monkeypatch, fake_signer: LocalKeypairSigner, tmp_token
 def test_portal_login_emits_summary(patched_build_client, fake_signer) -> None:
     portal = _Portal(
         post_body={
-            "miner": {
+            "provider": {
                 "id": "m-7",
                 "miner_hotkey": fake_signer.ss58_address,
-                "miner_coldkey": "5CK",
+                "provider_coldkey": "5CK",
                 "created_at": "2026-05-06T00:00:00",
                 "updated_at": "2026-05-06T00:00:00",
             },
@@ -98,21 +98,21 @@ def test_portal_login_emits_summary(patched_build_client, fake_signer) -> None:
 
     runner = CliRunner()
     result = runner.invoke(
-        miner_command,
+        provider_command,
         ["--hotkey", "hk1", "portal", "login"],
     )
     assert result.exit_code == 0, result.output
-    assert "miner_id=m-7" in result.output
+    assert "provider_id=m-7" in result.output
     assert portal.posts and portal.posts[0][0] == "/auth/login-flexible"
 
 
 def test_portal_login_json_envelope(patched_build_client, fake_signer) -> None:
     portal = _Portal(
         post_body={
-            "miner": {
+            "provider": {
                 "id": "m-7",
                 "miner_hotkey": fake_signer.ss58_address,
-                "miner_coldkey": "5CK",
+                "provider_coldkey": "5CK",
                 "created_at": "x",
                 "updated_at": "x",
             },
@@ -123,22 +123,22 @@ def test_portal_login_json_envelope(patched_build_client, fake_signer) -> None:
 
     runner = CliRunner()
     result = runner.invoke(
-        miner_command,
+        provider_command,
         ["--hotkey", "hk1", "--json", "portal", "login"],
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output.strip())
     assert payload["ok"] is True
-    assert payload["data"]["miner_id"] == "m-7"
+    assert payload["data"]["provider_id"] == "m-7"
 
 
 def test_portal_login_auth_error_returns_exit_2(patched_build_client) -> None:
-    portal = _Portal(post_raises=MinerAuthError("bad signature"))
+    portal = _Portal(post_raises=ProviderAuthError("bad signature"))
     patched_build_client(portal)
 
     runner = CliRunner()
     result = runner.invoke(
-        miner_command,
+        provider_command,
         ["--hotkey", "hk1", "portal", "login"],
     )
     assert result.exit_code == 2, result.output
@@ -150,7 +150,7 @@ def test_portal_whoami_renders_body(patched_build_client) -> None:
 
     runner = CliRunner()
     result = runner.invoke(
-        miner_command,
+        provider_command,
         ["--hotkey", "hk1", "portal", "whoami"],
     )
     assert result.exit_code == 0, result.output
@@ -167,11 +167,11 @@ def test_portal_logout_clears_cache(
     tmp_token_store.save(
         fake_signer.ss58_address,
         _make_jwt(int(time.time()) + 3600),
-        miner_id="m-1",
+        provider_id="m-1",
     )
     runner = CliRunner()
     result = runner.invoke(
-        miner_command,
+        provider_command,
         ["--hotkey", "hk1", "portal", "logout"],
     )
     assert result.exit_code == 0, result.output
@@ -180,17 +180,17 @@ def test_portal_logout_clears_cache(
 
 def test_portal_login_requires_hotkey(monkeypatch) -> None:
     runner = CliRunner()
-    result = runner.invoke(miner_command, ["portal", "login"])
+    result = runner.invoke(provider_command, ["portal", "login"])
     assert result.exit_code == 1, result.output
     assert "ARG_INVALID" in result.output
 
 
-def test_portal_generic_miner_error_returns_exit_3(patched_build_client) -> None:
-    portal = _Portal(post_raises=MinerError("server boom", code="PORTAL_SERVER_ERROR"))
+def test_portal_generic_provider_error_returns_exit_3(patched_build_client) -> None:
+    portal = _Portal(post_raises=ProviderError("server boom", code="PORTAL_SERVER_ERROR"))
     patched_build_client(portal)
     runner = CliRunner()
     result = runner.invoke(
-        miner_command,
+        provider_command,
         ["--hotkey", "hk1", "portal", "login"],
     )
     assert result.exit_code == 3, result.output

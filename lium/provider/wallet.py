@@ -1,9 +1,9 @@
-"""Wallet / keypair helpers for the miner SDK.
+"""Wallet / keypair helpers for the provider SDK.
 
 Thin wrapper around ``bittensor.Wallet`` so unit tests can stub the
 materialisation step without pulling 120MB of bittensor deps into the
-test runtime. ``MinerClient`` consumers can also bypass this module
-entirely by injecting a custom :class:`lium.miner.auth.Signer`.
+test runtime. ``ProviderClient`` consumers can also bypass this module
+entirely by injecting a custom :class:`lium.provider.auth.Signer`.
 
 This module deals only with the *hotkey* keypair, which is unencrypted in
 a default bittensor install -- no password handling lives here. Coldkey
@@ -15,10 +15,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from lium.miner.errors import (
+from lium.provider.errors import (
     WALLET_NOT_FOUND,
-    MinerConfigError,
-    MinerError,
+    ProviderConfigError,
+    ProviderError,
 )
 
 
@@ -45,8 +45,8 @@ def load_hotkey_keypair(
         try:
             import bittensor  # type: ignore[import-not-found]
         except ImportError as e:  # pragma: no cover - dep missing
-            raise MinerConfigError(
-                "bittensor is required to load wallets; install with `pip install lium.io[miner]`",
+            raise ProviderConfigError(
+                "bittensor is required to load wallets; install with `pip install lium.io[provider]`",
                 cause=e,
             ) from e
         wallet_factory = bittensor.Wallet
@@ -56,14 +56,14 @@ def load_hotkey_keypair(
         # FileNotFound surfaces here, not in the constructor above.
         keypair = wallet.hotkey
     except Exception as e:
-        raise MinerError(
+        raise ProviderError(
             f"could not open wallet name={coldkey!r} hotkey={hotkey!r}",
             code=WALLET_NOT_FOUND,
             cause=e,
             context={"coldkey": coldkey, "hotkey": hotkey},
         ) from e
     if keypair is None or not hasattr(keypair, "sign"):
-        raise MinerError(
+        raise ProviderError(
             f"wallet name={coldkey!r} hotkey={hotkey!r} has no usable hotkey keypair",
             code=WALLET_NOT_FOUND,
             context={"coldkey": coldkey, "hotkey": hotkey},

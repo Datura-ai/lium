@@ -1,4 +1,4 @@
-"""Tests for ``lium.miner.token_store`` (A5 atomic + flock)."""
+"""Tests for ``lium.provider.token_store`` (A5 atomic + flock)."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from lium.miner.errors import PORTAL_AUTH_REFRESH_RACE, MinerError
-from lium.miner.token_store import (
+from lium.provider.errors import PORTAL_AUTH_REFRESH_RACE, ProviderError
+from lium.provider.token_store import (
     CachedToken,
     TokenStore,
     _decode_jwt_exp,
@@ -35,16 +35,16 @@ def _make_jwt(exp: int) -> str:
 def test_save_and_load_round_trip(tmp_token_store: TokenStore) -> None:
     exp = int(time.time()) + 3600
     token = _make_jwt(exp)
-    cached = tmp_token_store.save("5HK", token, miner_id="miner-1")
+    cached = tmp_token_store.save("5HK", token, provider_id="provider-1")
     assert cached.token == token
-    assert cached.miner_id == "miner-1"
+    assert cached.provider_id == "provider-1"
     assert cached.exp == exp
     assert not cached.expired()
 
     reloaded = tmp_token_store.load("5HK")
     assert reloaded is not None
     assert reloaded.token == token
-    assert reloaded.miner_id == "miner-1"
+    assert reloaded.provider_id == "provider-1"
 
 
 def test_load_missing_returns_none(tmp_token_store: TokenStore) -> None:
@@ -59,8 +59,8 @@ def test_load_expired_returns_none(tmp_token_store: TokenStore) -> None:
 
 def test_clear_specific_hotkey(tmp_token_store: TokenStore) -> None:
     exp = int(time.time()) + 3600
-    tmp_token_store.save("5HK_A", _make_jwt(exp), miner_id="a")
-    tmp_token_store.save("5HK_B", _make_jwt(exp), miner_id="b")
+    tmp_token_store.save("5HK_A", _make_jwt(exp), provider_id="a")
+    tmp_token_store.save("5HK_B", _make_jwt(exp), provider_id="b")
     tmp_token_store.clear("5HK_A")
     assert tmp_token_store.load("5HK_A") is None
     assert tmp_token_store.load("5HK_B") is not None
@@ -86,7 +86,7 @@ def test_save_atomic_write_no_partial_file(
 ) -> None:
     """If json.dump fails, the on-disk file should not be left half-written."""
     # First, populate a valid file.
-    tmp_token_store.save("5HK", _make_jwt(int(time.time()) + 3600), miner_id="orig")
+    tmp_token_store.save("5HK", _make_jwt(int(time.time()) + 3600), provider_id="orig")
 
     real_replace = os.replace
 
@@ -95,12 +95,12 @@ def test_save_atomic_write_no_partial_file(
 
     monkeypatch.setattr(os, "replace", boom_replace)
     with pytest.raises(OSError):
-        tmp_token_store.save("5HK", _make_jwt(int(time.time()) + 3600), miner_id="new")
+        tmp_token_store.save("5HK", _make_jwt(int(time.time()) + 3600), provider_id="new")
     monkeypatch.setattr(os, "replace", real_replace)
 
     # Original entry must still be intact.
     reloaded = tmp_token_store.load("5HK")
-    assert reloaded is not None and reloaded.miner_id == "orig"
+    assert reloaded is not None and reloaded.provider_id == "orig"
 
     # No leftover .tmp file lingering.
     tmp_files = list(Path(tmp_token_store.path.parent).glob("*.tmp"))
@@ -112,7 +112,7 @@ def test_flock_contention_raises_refresh_race(tmp_path: Path) -> None:
     pytest.importorskip("fcntl")
     import fcntl as _fcntl
 
-    store_path = tmp_path / "miner-portal-token.json"
+    store_path = tmp_path / "provider-portal-token.json"
     lock_path = store_path.with_suffix(store_path.suffix + ".lock")
     store_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.touch()
@@ -120,7 +120,7 @@ def test_flock_contention_raises_refresh_race(tmp_path: Path) -> None:
     try:
         _fcntl.flock(holder_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
         store = TokenStore(path=store_path)
-        with pytest.raises(MinerError) as exc:
+        with pytest.raises(ProviderError) as exc:
             store.save("5HK", _make_jwt(int(time.time()) + 3600))
         assert exc.value.code == PORTAL_AUTH_REFRESH_RACE
     finally:
@@ -136,7 +136,7 @@ def test_with_refresh_retry_recovers(tmp_token_store: TokenStore) -> None:
     def maybe_succeeds() -> str:
         calls["n"] += 1
         if calls["n"] < 2:
-            raise MinerError("locked", code=PORTAL_AUTH_REFRESH_RACE)
+            raise ProviderError("locked", code=PORTAL_AUTH_REFRESH_RACE)
         return "ok"
 
     result = with_refresh_retry(maybe_succeeds, max_retries=3, delay_range=(0.0, 0.0))
@@ -146,9 +146,9 @@ def test_with_refresh_retry_recovers(tmp_token_store: TokenStore) -> None:
 
 def test_with_refresh_retry_propagates_other_errors() -> None:
     def boom() -> None:
-        raise MinerError("nope", code="OTHER_CODE")
+        raise ProviderError("nope", code="OTHER_CODE")
 
-    with pytest.raises(MinerError):
+    with pytest.raises(ProviderError):
         with_refresh_retry(boom, max_retries=3, delay_range=(0.0, 0.0))
 
 

@@ -1,6 +1,6 @@
-"""Top-level façade for the miner SDK.
+"""Top-level façade for the provider SDK.
 
-``MinerClient`` is the single class consumed by ``lium/cli/miner/*`` (M2+)
+``ProviderClient`` is the single class consumed by ``lium/cli/provider/*`` (M2+)
 and by external agents. It composes ``PortalHTTP``, ``TokenStore``, and a
 ``Signer`` (defaulting to ``LocalKeypairSigner``).
 
@@ -20,26 +20,26 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from lium.miner._routes import LOGIN_FLEXIBLE, ME
-from lium.miner.auth import LocalKeypairSigner, Signer, build_login_payload
-from lium.miner.errors import (
+from lium.provider._routes import LOGIN_FLEXIBLE, ME
+from lium.provider.auth import LocalKeypairSigner, Signer, build_login_payload
+from lium.provider.errors import (
     PORTAL_AUTH_INVALID,
-    MinerAuthError,
-    MinerError,
+    ProviderAuthError,
+    ProviderError,
 )
-from lium.miner.models import (
+from lium.provider.models import (
     LoginResponse,
-    MinerStatus,
-    SafeMinerResponse,
+    ProviderStatus,
+    SafeProviderResponse,
     ValidatorWeight,
 )
-from lium.miner.portal_http import DEFAULT_PORTAL_URL, PortalHTTP
-from lium.miner.token_store import CachedToken, TokenStore, with_refresh_retry
+from lium.provider.portal_http import DEFAULT_PORTAL_URL, PortalHTTP
+from lium.provider.token_store import CachedToken, TokenStore, with_refresh_retry
 
-logger = logging.getLogger("lium.miner.client")
+logger = logging.getLogger("lium.provider.client")
 
 
-class MinerClient:
+class ProviderClient:
     """Browserless mining onboarding client for SN51.
 
     Args:
@@ -65,7 +65,7 @@ class MinerClient:
         signer: Signer | None = None,
     ) -> None:
         if signer is None and hotkey is None:
-            raise ValueError("MinerClient requires either signer= or hotkey=")
+            raise ValueError("ProviderClient requires either signer= or hotkey=")
         self.coldkey = coldkey
         self.hotkey = hotkey
         self.portal_url = (portal_url or DEFAULT_PORTAL_URL).rstrip("/")
@@ -107,25 +107,25 @@ class MinerClient:
             )
             if cached is not None:
                 self._cached_token = cached
-                # We still need the SafeMinerResponse for callers; fetch
+                # We still need the SafeProviderResponse for callers; fetch
                 # /auth/me lazily via ``whoami``. For the cached path we
-                # synthesise a minimal LoginResponse with a hotkey-only miner
+                # synthesise a minimal LoginResponse with a hotkey-only provider
                 # body so the contract is non-None.
-                miner_body = SafeMinerResponse(
-                    id=cached.miner_id or "",
+                provider_body = SafeProviderResponse(
+                    id=cached.provider_id or "",
                     miner_hotkey=signer.ss58_address,
-                    miner_coldkey="",
+                    provider_coldkey="",
                     created_at="",
                     updated_at="",
                 )
-                return LoginResponse(miner=miner_body, token=cached.token)
+                return LoginResponse(provider=provider_body, token=cached.token)
 
         payload = build_login_payload(signer)
         body = self._http.post(LOGIN_FLEXIBLE, json_body=payload, auth=False)
         try:
             response = LoginResponse.model_validate(body)
         except Exception as e:
-            raise MinerAuthError(
+            raise ProviderAuthError(
                 "portal returned an unexpected login response shape",
                 code=PORTAL_AUTH_INVALID,
                 cause=e,
@@ -134,7 +134,7 @@ class MinerClient:
 
         self._cached_token = with_refresh_retry(
             lambda: self._token_store.save(
-                signer.ss58_address, response.token, miner_id=response.miner.id
+                signer.ss58_address, response.token, provider_id=response.provider.id
             )
         )
         return response
@@ -169,7 +169,7 @@ class MinerClient:
         *,
         netuid: int = 51,
         metagraph_factory: object | None = None,
-    ) -> MinerStatus:
+    ) -> ProviderStatus:
         """Aggregate registration / portal / executor / weights snapshot.
 
         ``status`` degrades gracefully: any individual source that raises is
@@ -184,39 +184,39 @@ class MinerClient:
                 2D iterable). Used by tests to stub bittensor.
         """
         warnings: list[str] = []
-        out = MinerStatus(
+        out = ProviderStatus(
             hotkey=self._safe_hotkey(),
             coldkey=self.coldkey,
             netuid=netuid,
         )
 
         # Portal / auth liveness.
-        miner_id: str | None = None
+        provider_id: str | None = None
         try:
             me_body = self.whoami()
             out.portal_session_active = True
-            # /auth/me returns a flat dict: {miner_id, miner_hotkey, ...}.
-            # Older / alternate shapes (nested {miner: {id: ...}}) are also
+            # /auth/me returns a flat dict: {provider_id, miner_hotkey, ...}.
+            # Older / alternate shapes (nested {provider: {id: ...}}) are also
             # accepted so unit fixtures and any future portal rev land cleanly.
             if isinstance(me_body, dict):
-                miner_id = me_body.get("miner_id") or me_body.get("id")
-                if not miner_id:
-                    nested = me_body.get("miner")
+                provider_id = me_body.get("provider_id") or me_body.get("id")
+                if not provider_id:
+                    nested = me_body.get("provider")
                     if isinstance(nested, dict):
-                        miner_id = nested.get("id") or nested.get("miner_id")
-        except MinerAuthError as e:
+                        provider_id = nested.get("id") or nested.get("provider_id")
+        except ProviderAuthError as e:
             out.portal_session_active = False
             warnings.append(f"whoami: {e.code}")
-        except MinerError as e:
+        except ProviderError as e:
             out.portal_session_active = False
             warnings.append(f"whoami: {e.code}")
-        out.miner_id = miner_id
+        out.provider_id = provider_id
 
         # Executor list (skip silently if portal not authed).
         if out.portal_session_active:
             try:
-                from lium.miner._routes import EXECUTORS
-                from lium.miner.models import ExecutorInfo
+                from lium.provider._routes import EXECUTORS
+                from lium.provider.models import ExecutorInfo
 
                 body = self._http.get(EXECUTORS)
                 rows = body.get("data") if isinstance(body, dict) else body
@@ -232,7 +232,7 @@ class MinerClient:
                         continue
                 out.executors = executors
                 out.executor_count = len(executors)
-            except MinerError as e:
+            except ProviderError as e:
                 warnings.append(f"executors: {e.code}")
 
         # Subnet registration + validator weights via metagraph.
@@ -270,7 +270,7 @@ class MinerClient:
             return self._cached_token.token
         # Try a cache load without a network round-trip. We need the signer's
         # ss58 to key the cache; materialise it lazily via the property so a
-        # fresh ``MinerClient`` (e.g. for ``whoami``) can pick up a cached
+        # fresh ``ProviderClient`` (e.g. for ``whoami``) can pick up a cached
         # token from a previous ``login`` invocation. If the wallet isn't on
         # disk we can't derive ss58 -- return None and let the caller see a
         # clean 401.
@@ -293,10 +293,10 @@ class MinerClient:
         """Build ``LocalKeypairSigner`` from ``coldkey`` + ``hotkey``."""
         if self.coldkey is None or self.hotkey is None:
             raise ValueError(
-                "MinerClient(coldkey, hotkey) is required when signer= is not provided"
+                "ProviderClient(coldkey, hotkey) is required when signer= is not provided"
             )
         # Lazy import to avoid pulling bittensor at import time.
-        from lium.miner.wallet import load_hotkey_keypair
+        from lium.provider.wallet import load_hotkey_keypair
 
         keypair = load_hotkey_keypair(self.coldkey, self.hotkey)
         return LocalKeypairSigner(keypair)
@@ -334,7 +334,7 @@ def _read_metagraph(
     hotkeys = list(getattr(metagraph, "hotkeys", []) or [])
     if hotkey_ss58 not in hotkeys:
         return False, []
-    miner_uid = hotkeys.index(hotkey_ss58)
+    provider_uid = hotkeys.index(hotkey_ss58)
 
     weights_attr = (
         getattr(metagraph, "W", None) or getattr(metagraph, "weights", None) or []
@@ -345,7 +345,7 @@ def _read_metagraph(
             if v_uid >= len(hotkeys):
                 break
             try:
-                weight_value = float(row[miner_uid])
+                weight_value = float(row[provider_uid])
             except (TypeError, ValueError, IndexError):
                 continue
             if weight_value > 0:
@@ -361,4 +361,4 @@ def _read_metagraph(
     return True, rows
 
 
-__all__ = ["MinerClient"]
+__all__ = ["ProviderClient"]

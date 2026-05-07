@@ -1,6 +1,6 @@
-"""Persona-confirmation gate for ``lium miner …`` (A4).
+"""Persona-confirmation gate for ``lium provider …`` (A4).
 
-Why this exists: ``lium mine`` (renter rent flow) and ``lium miner`` (provider
+Why this exists: ``lium mine`` (renter rent flow) and ``lium provider`` (provider
 flow) live in adjacent namespaces. Spend-affecting subcommands -- adding /
 removing executors, switching validators, installing a node over SSH -- get
 an explicit one-shot confirmation the first time they run in a shell
@@ -56,7 +56,7 @@ class PersonaContext:
 def shell_session_id() -> str:
     """Best-effort stable id for the parent shell session.
 
-    Uses ``$$``'s parent (``os.getppid()``) so two ``lium miner`` invocations
+    Uses ``$$``'s parent (``os.getppid()``) so two ``lium provider`` invocations
     from the same shell share an id. Agents wanting deterministic acks
     should set ``LIUM_PROVIDER_ACK=1`` instead of relying on this heuristic.
     """
@@ -159,7 +159,7 @@ def confirm_persona(
 
     output = output_func or (lambda m: click.echo(m, err=True))
     output(
-        "You are operating as a PROVIDER (miner persona), not a renter. "
+        "You are operating as a PROVIDER (provider persona), not a renter. "
         "Spend-affecting actions (executor / node install) follow."
     )
 

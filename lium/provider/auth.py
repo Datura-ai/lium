@@ -1,9 +1,9 @@
-"""Hotkey-signature -> JWT exchange for the miner SDK.
+"""Hotkey-signature -> JWT exchange for the provider SDK.
 
 This module implements:
 
 - The ``Signer`` Protocol (A7), so v2 can drop in a HITL or remote-signer
-  without touching ``MinerClient`` call sites.
+  without touching ``ProviderClient`` call sites.
 - ``LocalKeypairSigner``, the default v1 implementation that wraps
   ``bittensor.Keypair``.
 - ``build_login_payload``, the *single* place that knows the wire format
@@ -26,7 +26,7 @@ import threading
 import time
 from typing import Any, Protocol, runtime_checkable
 
-logger = logging.getLogger("lium.miner.auth")
+logger = logging.getLogger("lium.provider.auth")
 
 # Module-level once-flag for the SECURITY-DEBT warning. Per-process, not per
 # call -- a follow-up issue tracks tuning the cadence.
@@ -50,7 +50,7 @@ class Signer(Protocol):
 
     The default implementation is :class:`LocalKeypairSigner`. Phase-2 trust
     models (HITL, hardware wallet, remote KMS) implement this Protocol and
-    are injected via ``MinerClient(signer=...)``.
+    are injected via ``ProviderClient(signer=...)``.
     """
 
     @property
@@ -68,7 +68,7 @@ class LocalKeypairSigner:
 
     The keypair must be unlocked (i.e. the wallet's coldkey password has
     already been supplied to ``bittensor.Wallet`` if required). The lift of
-    materialising the wallet lives in :mod:`lium.miner.wallet`.
+    materialising the wallet lives in :mod:`lium.provider.wallet`.
     """
 
     def __init__(self, keypair: Any) -> None:
@@ -151,8 +151,8 @@ def build_login_payload(
 def _emit_replay_debt_warning_once() -> None:
     """Log the SECURITY-DEBT marker once per process.
 
-    Idempotent and thread-safe. ``MinerClient`` consumers can suppress the
-    log by reconfiguring the ``lium.miner.auth`` logger.
+    Idempotent and thread-safe. ``ProviderClient`` consumers can suppress the
+    log by reconfiguring the ``lium.provider.auth`` logger.
     """
     global _REPLAY_DEBT_WARNED
     if _REPLAY_DEBT_WARNED:

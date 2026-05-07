@@ -1,23 +1,23 @@
-"""Tests for ``lium.miner.portal_http`` (transport + status-code mapping)."""
+"""Tests for ``lium.provider.portal_http`` (transport + status-code mapping)."""
 
 from __future__ import annotations
 
 import pytest
 import requests
 
-from lium.miner.errors import (
+from lium.provider.errors import (
     PORTAL_AUTH_INVALID,
     PORTAL_CONTRACT_DRIFT,
     PORTAL_NOT_FOUND,
     PORTAL_RATE_LIMIT,
     PORTAL_SERVER_ERROR,
-    MinerAuthError,
-    MinerError,
-    MinerNotFoundError,
-    MinerPortalContractError,
-    MinerServerError,
+    ProviderAuthError,
+    ProviderError,
+    ProviderNotFoundError,
+    ProviderPortalContractError,
+    ProviderServerError,
 )
-from lium.miner.portal_http import PortalHTTP
+from lium.provider.portal_http import PortalHTTP
 
 
 class _FakeResponse:
@@ -114,13 +114,13 @@ def test_2xx_with_empty_body_returns_empty_dict() -> None:
 @pytest.mark.parametrize(
     "status,exc_type,expected_code",
     [
-        (401, MinerAuthError, PORTAL_AUTH_INVALID),
-        (403, MinerAuthError, PORTAL_AUTH_INVALID),
-        (404, MinerNotFoundError, PORTAL_NOT_FOUND),
-        (422, MinerPortalContractError, PORTAL_CONTRACT_DRIFT),
-        (429, MinerServerError, PORTAL_RATE_LIMIT),
-        (500, MinerServerError, PORTAL_SERVER_ERROR),
-        (502, MinerServerError, PORTAL_SERVER_ERROR),
+        (401, ProviderAuthError, PORTAL_AUTH_INVALID),
+        (403, ProviderAuthError, PORTAL_AUTH_INVALID),
+        (404, ProviderNotFoundError, PORTAL_NOT_FOUND),
+        (422, ProviderPortalContractError, PORTAL_CONTRACT_DRIFT),
+        (429, ProviderServerError, PORTAL_RATE_LIMIT),
+        (500, ProviderServerError, PORTAL_SERVER_ERROR),
+        (502, ProviderServerError, PORTAL_SERVER_ERROR),
     ],
 )
 def test_status_code_mapping(status: int, exc_type: type, expected_code: str) -> None:
@@ -132,16 +132,16 @@ def test_status_code_mapping(status: int, exc_type: type, expected_code: str) ->
     assert exc.value.context["body"] == {"detail": "boom"}
 
 
-def test_unknown_status_raises_generic_miner_error() -> None:
+def test_unknown_status_raises_generic_provider_error() -> None:
     http, _ = _make_http(_FakeResponse(418, {"i": "am a teapot"}))
-    with pytest.raises(MinerError) as exc:
+    with pytest.raises(ProviderError) as exc:
         http.get("/teapot")
     assert exc.value.context["status"] == 418
 
 
-def test_network_error_raises_miner_server_error() -> None:
+def test_network_error_raises_provider_server_error() -> None:
     http, _ = _make_http(requests.ConnectionError("dns blew up"))
-    with pytest.raises(MinerServerError) as exc:
+    with pytest.raises(ProviderServerError) as exc:
         http.get("/anything")
     assert exc.value.code == PORTAL_SERVER_ERROR
     assert "dns blew up" in exc.value.message

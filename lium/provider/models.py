@@ -1,4 +1,4 @@
-"""Hand-written Pydantic models for the miner SDK.
+"""Hand-written Pydantic models for the provider SDK.
 
 Field names mirror ``lium-miner-portal/src/dtos/*.py``. Portal payload drift
 surfaces at runtime as ``PORTAL_CONTRACT_DRIFT``.
@@ -15,17 +15,17 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from lium.miner.errors import PORTS_INVALID, MinerError
+from lium.provider.errors import PORTS_INVALID, ProviderError
 
 # --- Auth ---------------------------------------------------------------
 
 
-class SafeMinerResponse(BaseModel):
-    """Mirrors ``lium-miner-portal/src/dtos/miner.py::SafeMinerResponse``."""
+class SafeProviderResponse(BaseModel):
+    """Mirrors ``lium-miner-portal/src/dtos/provider.py::SafeProviderResponse``."""
 
     id: str
     miner_hotkey: str
-    miner_coldkey: str
+    provider_coldkey: str
     email: str | None = None
     machine_request_subscription: list[str] = Field(default_factory=list)
     created_at: str
@@ -35,11 +35,11 @@ class SafeMinerResponse(BaseModel):
 class LoginResponse(BaseModel):
     """Mirrors ``LoginResponse`` returned by ``POST /auth/login-flexible``."""
 
-    miner: SafeMinerResponse
+    provider: SafeProviderResponse
     token: str
 
 
-class MinerCredentials(BaseModel):
+class ProviderCredentials(BaseModel):
     """Wire payload for ``POST /auth/login-flexible``.
 
     The portal expects ``signature`` as hex *without* the ``0x`` prefix; the
@@ -74,7 +74,7 @@ class UpdateGpuPayload(BaseModel):
 
 
 class ExecutorInfo(BaseModel):
-    """A reduced view of ``ExecutorResponse`` used by ``MinerClient``.
+    """A reduced view of ``ExecutorResponse`` used by ``ProviderClient``.
 
     Only the fields the SDK actually surfaces are typed strictly; everything
     else is stashed under ``extra`` so a portal field rename does not blow
@@ -98,14 +98,14 @@ class ExecutorInfo(BaseModel):
 
 
 class ValidatorWeight(BaseModel):
-    """One row of validator -> miner weight read from the metagraph."""
+    """One row of validator -> provider weight read from the metagraph."""
 
     validator_hotkey: str
     weight: float
 
 
-class MinerStatus(BaseModel):
-    """Composite output of ``lium miner status``.
+class ProviderStatus(BaseModel):
+    """Composite output of ``lium provider status``.
 
     All fields are optional because ``status`` degrades gracefully when one
     source (subtensor / portal / SSH) is unavailable.
@@ -116,7 +116,7 @@ class MinerStatus(BaseModel):
     registered_on_subnet: bool | None = None
     netuid: int | None = None
     portal_session_active: bool | None = None
-    miner_id: str | None = None
+    provider_id: str | None = None
     executor_count: int | None = None
     executors: list[ExecutorInfo] = Field(default_factory=list)
     validator_weights: list[ValidatorWeight] = Field(default_factory=list)
@@ -124,7 +124,7 @@ class MinerStatus(BaseModel):
 
 
 class NodeInstallResult(BaseModel):
-    """Outcome of ``lium miner node install``."""
+    """Outcome of ``lium provider node install``."""
 
     host: str
     executor_uuid: str | None = None
@@ -142,7 +142,7 @@ _PORT_FIELD_RE = re.compile(
 
 
 class NodePorts(BaseModel):
-    """Port specification for ``lium miner node install --ports``.
+    """Port specification for ``lium provider node install --ports``.
 
     The CLI parses the user input via ``NodePorts.from_string`` so the SDK is
     the single source of truth for port-spec parsing (Principle 1, A11).
@@ -164,7 +164,7 @@ class NodePorts(BaseModel):
     def from_string(cls, raw: str | None) -> "NodePorts":
         """Parse ``HTTP=8080,SSH=2200,RANGE=2000-2005`` into ``NodePorts``.
 
-        Raises ``MinerError(code=PORTS_INVALID)`` on any parse failure.
+        Raises ``ProviderError(code=PORTS_INVALID)`` on any parse failure.
         Empty / ``None`` input returns the default ``NodePorts()``.
         """
         if raw is None or raw.strip() == "":
@@ -173,7 +173,7 @@ class NodePorts(BaseModel):
         for part in raw.split(","):
             match = _PORT_FIELD_RE.match(part)
             if not match:
-                raise MinerError(
+                raise ProviderError(
                     f"could not parse port spec segment: {part!r}",
                     code=PORTS_INVALID,
                 )
@@ -194,14 +194,14 @@ class NodePorts(BaseModel):
                     kwargs["range_lo"] = lo
                     kwargs["range_hi"] = hi
             except ValueError as e:
-                raise MinerError(
+                raise ProviderError(
                     f"invalid port value in segment {part!r}: {e}",
                     code=PORTS_INVALID,
                 ) from e
         try:
             return cls(**kwargs)
         except Exception as e:  # pydantic ValidationError or our ValueError
-            raise MinerError(
+            raise ProviderError(
                 f"invalid ports: {e}",
                 code=PORTS_INVALID,
                 cause=e if isinstance(e, BaseException) else None,
@@ -223,11 +223,11 @@ __all__ = [
     "AddExecutorPayload",
     "ExecutorInfo",
     "LoginResponse",
-    "MinerCredentials",
-    "MinerStatus",
+    "ProviderCredentials",
+    "ProviderStatus",
     "NodeInstallResult",
     "NodePorts",
-    "SafeMinerResponse",
+    "SafeProviderResponse",
     "UpdateGpuPayload",
     "UpdatePricePayload",
     "ValidatorWeight",

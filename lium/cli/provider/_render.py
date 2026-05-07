@@ -1,4 +1,4 @@
-"""Output rendering + exit-code mapping for ``lium miner …``.
+"""Output rendering + exit-code mapping for ``lium provider …``.
 
 Two output modes:
 
@@ -8,7 +8,7 @@ Two output modes:
   simple in M2 (single-line summaries) so we can extend later without
   breaking parsers.
 
-Exit codes follow the taxonomy in :mod:`lium.miner.errors` (see module
+Exit codes follow the taxonomy in :mod:`lium.provider.errors` (see module
 docstring). Returning the int from a Click command via
 ``ctx.exit(emit_error(ctx, err))`` keeps every command's error path
 identical.
@@ -22,7 +22,7 @@ from typing import Any, Mapping
 
 import click
 
-from lium.miner.errors import (
+from lium.provider.errors import (
     ARG_INVALID,
     CONFIG_MISSING,
     HOTKEY_NOT_REGISTERED,
@@ -37,7 +37,7 @@ from lium.miner.errors import (
     SSH_AUTH_FAILED,
     SSH_UNREACHABLE,
     WALLET_NOT_FOUND,
-    MinerError,
+    ProviderError,
 )
 
 
@@ -66,8 +66,8 @@ _EXIT_CODES: dict[str, int] = {
 }
 
 
-def exit_code_for(err: MinerError) -> int:
-    """Map a :class:`MinerError` to its CLI exit status."""
+def exit_code_for(err: ProviderError) -> int:
+    """Map a :class:`ProviderError` to its CLI exit status."""
     return _EXIT_CODES.get(err.code, 1)
 
 
@@ -99,8 +99,8 @@ def render(
                 click.echo(f"  {key}: {value}")
 
 
-def emit_error(ctx: click.Context, err: MinerError) -> int:
-    """Format a :class:`MinerError` and return its exit code."""
+def emit_error(ctx: click.Context, err: ProviderError) -> int:
+    """Format a :class:`ProviderError` and return its exit code."""
     code = exit_code_for(err)
     if _json_mode(ctx):
         envelope = {"ok": False, "error": err.to_dict()}
@@ -120,7 +120,7 @@ def emit_warning(ctx: click.Context, code: str, message: str) -> None:
     if _json_mode(ctx):
         # Warnings ride alongside the next render() call; for now emit
         # nothing to keep the JSON stream clean. The status command surfaces
-        # warnings via MinerStatus.warnings instead.
+        # warnings via ProviderStatus.warnings instead.
         return
     click.echo(
         click.style(f"[{code}]", fg="yellow", bold=True) + f" {message}",
@@ -138,7 +138,7 @@ def _debug_mode(ctx: click.Context) -> bool:
 
 def _opts(ctx: click.Context) -> Mapping[str, Any]:
     obj = ctx.obj or {}
-    return obj.get("miner_opts") or {}
+    return obj.get("provider_opts") or {}
 
 
 def _to_serialisable(payload: Any) -> Any:
@@ -152,7 +152,7 @@ def _to_serialisable(payload: Any) -> Any:
     return payload
 
 
-def fatal(ctx: click.Context, err: MinerError) -> None:
+def fatal(ctx: click.Context, err: ProviderError) -> None:
     """Convenience: emit the error and exit with the mapped status code."""
     code = emit_error(ctx, err)
     sys.exit(code)

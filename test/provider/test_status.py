@@ -1,13 +1,13 @@
-"""Tests for ``MinerClient.status`` aggregation (M2)."""
+"""Tests for ``ProviderClient.status`` aggregation (M2)."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from lium.miner.auth import LocalKeypairSigner
-from lium.miner.client import MinerClient
-from lium.miner.errors import MinerAuthError
-from lium.miner.token_store import TokenStore
+from lium.provider.auth import LocalKeypairSigner
+from lium.provider.client import ProviderClient
+from lium.provider.errors import ProviderAuthError
+from lium.provider.token_store import TokenStore
 
 
 class _Portal:
@@ -57,8 +57,8 @@ def _stub_metagraph_factory(hotkeys, weights):
     return _factory
 
 
-def _client(portal, token_store, signer) -> MinerClient:
-    return MinerClient(
+def _client(portal, token_store, signer) -> ProviderClient:
+    return ProviderClient(
         signer=signer,
         token_store=token_store,
         http=portal,  # type: ignore[arg-type]
@@ -69,7 +69,7 @@ def test_status_aggregates_portal_executors_and_metagraph(
     fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
 ) -> None:
     portal = _Portal(
-        me_body={"miner": {"id": "m-99"}},
+        me_body={"provider": {"id": "m-99"}},
         executors=[
             {"id": "exec-1", "gpu_type": "h100", "gpu_count": 1},
             {"id": "exec-2", "gpu_type": "rtx4090", "gpu_count": 8},
@@ -87,7 +87,7 @@ def test_status_aggregates_portal_executors_and_metagraph(
 
     snapshot = client.status(metagraph_factory=metagraph)
     assert snapshot.portal_session_active is True
-    assert snapshot.miner_id == "m-99"
+    assert snapshot.provider_id == "m-99"
     assert snapshot.executor_count == 2
     assert {e.id for e in snapshot.executors} == {"exec-1", "exec-2"}
     assert snapshot.registered_on_subnet is True
@@ -95,18 +95,18 @@ def test_status_aggregates_portal_executors_and_metagraph(
     assert weight_map == {"v1": 0.5, "v3": 0.25}
 
 
-def test_status_extracts_miner_id_from_flat_whoami_shape(
+def test_status_extracts_provider_id_from_flat_whoami_shape(
     fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
 ) -> None:
     """The portal's ``GET /auth/me`` returns a flat dict
-    ``{miner_id, miner_hotkey, ...}`` (mirrors
-    ``lium-miner-portal/src/routes/auth.py::_get_miner_resposne``).
-    Earlier code looked for a nested ``miner.id`` and silently dropped it."""
+    ``{provider_id, miner_hotkey, ...}`` (mirrors
+    ``lium-miner-portal/src/routes/auth.py::_get_provider_resposne``).
+    Earlier code looked for a nested ``provider.id`` and silently dropped it."""
     portal = _Portal(
         me_body={
-            "miner_id": "flat-1",
+            "provider_id": "flat-1",
             "miner_hotkey": fake_signer.ss58_address,
-            "miner_coldkey": "5CK",
+            "provider_coldkey": "5CK",
             "opt_in_status": True,
         },
         executors=[],
@@ -115,14 +115,14 @@ def test_status_extracts_miner_id_from_flat_whoami_shape(
     client = _client(portal, tmp_token_store, fake_signer)
     snapshot = client.status(metagraph_factory=metagraph)
     assert snapshot.portal_session_active is True
-    assert snapshot.miner_id == "flat-1"
+    assert snapshot.provider_id == "flat-1"
 
 
 def test_status_degrades_when_whoami_fails(
     fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
 ) -> None:
     portal = _Portal(
-        me_body=MinerAuthError("token rejected"),
+        me_body=ProviderAuthError("token rejected"),
         executors=[],
     )
     metagraph = _stub_metagraph_factory(hotkeys=[], weights=[])
@@ -137,7 +137,7 @@ def test_status_degrades_when_whoami_fails(
 def test_status_handles_missing_hotkey_in_metagraph(
     fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
 ) -> None:
-    portal = _Portal(me_body={"miner": {"id": "m-1"}}, executors=[])
+    portal = _Portal(me_body={"provider": {"id": "m-1"}}, executors=[])
     metagraph = _stub_metagraph_factory(hotkeys=["other1", "other2"], weights=[])
     client = _client(portal, tmp_token_store, fake_signer)
     snapshot = client.status(metagraph_factory=metagraph)
@@ -148,7 +148,7 @@ def test_status_handles_missing_hotkey_in_metagraph(
 def test_status_metagraph_unavailable_appends_warning(
     fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
 ) -> None:
-    portal = _Portal(me_body={"miner": {"id": "m-1"}}, executors=[])
+    portal = _Portal(me_body={"provider": {"id": "m-1"}}, executors=[])
 
     def _broken_factory(netuid: int) -> Any:
         raise RuntimeError("metagraph offline")

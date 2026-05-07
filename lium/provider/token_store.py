@@ -1,6 +1,6 @@
 """Persisted JWT cache with concurrency safety (A5).
 
-Two ``lium miner ...`` processes may race through 401 -> re-login. Without
+Two ``lium provider ...`` processes may race through 401 -> re-login. Without
 locking the second process clobbers the first's token. Without atomic
 writes a crashed write leaves a half-truncated JSON.
 
@@ -8,7 +8,7 @@ This module:
 
 - writes via ``<path>.tmp`` + ``os.replace`` (atomic on POSIX)
 - wraps load+refresh in ``fcntl.flock(LOCK_EX | LOCK_NB)``
-- on contention raises ``MinerError(code=PORTAL_AUTH_REFRESH_RACE)``
+- on contention raises ``ProviderError(code=PORTAL_AUTH_REFRESH_RACE)``
   (exit code 7) so the caller can back off and retry
 - enforces ``0o600`` on every save
 - decodes JWT ``exp`` via ``PyJWT`` (``options={"verify_signature": False}``)
@@ -28,12 +28,12 @@ from typing import Any, Iterator
 
 import jwt as pyjwt
 
-from lium.miner.errors import (
+from lium.provider.errors import (
     PORTAL_AUTH_REFRESH_RACE,
-    MinerError,
+    ProviderError,
 )
 
-DEFAULT_TOKEN_PATH = Path.home() / ".lium" / "miner-portal-token.json"
+DEFAULT_TOKEN_PATH = Path.home() / ".lium" / "provider-portal-token.json"
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,7 @@ class CachedToken:
 
     token: str
     exp: int  # unix seconds
-    miner_id: str | None = None
+    provider_id: str | None = None
     hotkey: str = ""
 
     def expired(self, *, leeway_seconds: int = 30, now: int | None = None) -> bool:
@@ -52,7 +52,7 @@ class CachedToken:
 
 
 class TokenStore:
-    """JSON file holding ``{hotkey: {token, exp, miner_id}}`` records."""
+    """JSON file holding ``{hotkey: {token, exp, provider_id}}`` records."""
 
     def __init__(self, path: Path | str | None = None) -> None:
         self.path = Path(path) if path is not None else DEFAULT_TOKEN_PATH
@@ -71,7 +71,7 @@ class TokenStore:
                 cached = CachedToken(
                     token=str(entry["token"]),
                     exp=int(entry["exp"]),
-                    miner_id=entry.get("miner_id"),
+                    provider_id=entry.get("provider_id"),
                     hotkey=hotkey,
                 )
             except (KeyError, TypeError, ValueError):
@@ -82,15 +82,15 @@ class TokenStore:
             return cached
 
     def save(
-        self, hotkey: str, token: str, *, miner_id: str | None = None
+        self, hotkey: str, token: str, *, provider_id: str | None = None
     ) -> CachedToken:
         """Persist a token; returns the resulting :class:`CachedToken`."""
         exp = _decode_jwt_exp(token)
         with self._locked():
             data = self._read_all()
-            data[hotkey] = {"token": token, "exp": exp, "miner_id": miner_id}
+            data[hotkey] = {"token": token, "exp": exp, "provider_id": provider_id}
             self._write_all(data)
-        return CachedToken(token=token, exp=exp, miner_id=miner_id, hotkey=hotkey)
+        return CachedToken(token=token, exp=exp, provider_id=provider_id, hotkey=hotkey)
 
     def clear(self, hotkey: str | None = None) -> None:
         """Remove ``hotkey`` (or all entries) from the cache."""
@@ -169,8 +169,8 @@ class TokenStore:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as e:
-                raise MinerError(
-                    "another lium miner process is using the token cache",
+                raise ProviderError(
+                    "another lium provider process is using the token cache",
                     code=PORTAL_AUTH_REFRESH_RACE,
                     cause=e,
                     context={"lock_path": str(lock_path)},
@@ -214,11 +214,11 @@ def with_refresh_retry(
     Used by callers that wrap a load+refresh sequence and want to hide
     transient contention from the user.
     """
-    last_err: MinerError | None = None
+    last_err: ProviderError | None = None
     for _ in range(max_retries):
         try:
             return func()
-        except MinerError as e:
+        except ProviderError as e:
             if e.code != PORTAL_AUTH_REFRESH_RACE:
                 raise
             last_err = e

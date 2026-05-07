@@ -1,4 +1,4 @@
-"""Test fixtures shared across the miner SDK test suite (M1)."""
+"""Test fixtures shared across the provider SDK test suite (M1)."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from lium.miner.auth import LocalKeypairSigner, reset_replay_debt_warned
-from lium.miner.token_store import TokenStore
+from lium.provider.auth import LocalKeypairSigner, reset_replay_debt_warned
+from lium.provider.token_store import TokenStore
 
 
 class FakeKeypair:
@@ -43,7 +43,7 @@ def fake_signer(fake_keypair: FakeKeypair) -> LocalKeypairSigner:
 @pytest.fixture
 def tmp_token_store(tmp_path: Path) -> TokenStore:
     """A TokenStore rooted in a tmp dir so tests don't touch ~/.lium."""
-    return TokenStore(path=tmp_path / "miner-portal-token.json")
+    return TokenStore(path=tmp_path / "provider-portal-token.json")
 
 
 @pytest.fixture(autouse=True)
@@ -59,9 +59,9 @@ def _isolate_user_config(tmp_path_factory, monkeypatch) -> None:
     """Re-root ``~`` to a tmp dir so tests never read the developer's
     ``~/.lium/config.ini``. Without this, CLI tests that exercise the
     "missing flag" code paths spuriously pass thanks to a config-file
-    fallback like ``[miner] hotkey = default``."""
+    fallback like ``[provider] hotkey = default``."""
     fake_home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(fake_home))
-    # Pop any LIUM_MINER_* env so tests start from a clean slate.
-    for key in ("LIUM_MINER_COLDKEY", "LIUM_MINER_HOTKEY", "LIUM_PORTAL_URL"):
+    # Pop any LIUM_PROVIDER_* env so tests start from a clean slate.
+    for key in ("LIUM_PROVIDER_COLDKEY", "LIUM_PROVIDER_HOTKEY", "LIUM_PORTAL_URL"):
         monkeypatch.delenv(key, raising=False)

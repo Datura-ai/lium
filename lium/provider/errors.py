@@ -1,10 +1,10 @@
-"""Error taxonomy for the miner SDK.
+"""Error taxonomy for the provider SDK.
 
 Every external failure surface (portal HTTP, SSH, wallet materialisation) is
 mapped onto a stable code with an actionable hint, so an agent driving the
 CLI can branch on machine-readable values rather than log strings.
 
-Exit-code mapping (used by ``lium/cli/miner/_render.py``):
+Exit-code mapping (used by ``lium/cli/provider/_render.py``):
 
     0  success
     1  user error (bad arg)
@@ -16,12 +16,12 @@ Exit-code mapping (used by ``lium/cli/miner/_render.py``):
 
 Each error code is exported as a string constant so callers can do::
 
-    from lium.miner.errors import HOTKEY_NOT_REGISTERED
+    from lium.provider.errors import HOTKEY_NOT_REGISTERED
     if err.code == HOTKEY_NOT_REGISTERED:
         ...
 
 PORTAL_LOGIN_REPLAY_DEBT is a *warning* code, not an error: emitted to stderr
-and surfaced under ``warnings[]`` in ``lium miner status --json`` until the
+and surfaced under ``warnings[]`` in ``lium provider status --json`` until the
 portal enforces ``AUTH_MESSAGE_MAX_AGE`` on ``/auth/login-flexible``
 (NEEDS-PORTAL-CHANGE filed).
 """
@@ -64,9 +64,9 @@ PORTAL_LOGIN_REPLAY_DEBT = "PORTAL_LOGIN_REPLAY_DEBT"
 _HINTS: dict[str, str] = {
     WALLET_NOT_FOUND: "Run `btcli wallet new_coldkey` then `btcli wallet new_hotkey`, or check --coldkey/--hotkey names.",
     HOTKEY_NOT_REGISTERED: "Run `btcli subnet register --netuid 51 --wallet.name <coldkey> --wallet.hotkey <hotkey>` first.",
-    PORTAL_AUTH_EXPIRED: "Run `lium miner portal login` to refresh the JWT.",
-    PORTAL_AUTH_INVALID: "Token rejected. Re-login with `lium miner portal login`.",
-    PORTAL_AUTH_REFRESH_RACE: "Another lium miner process is refreshing the token; retry in a moment.",
+    PORTAL_AUTH_EXPIRED: "Run `lium provider portal login` to refresh the JWT.",
+    PORTAL_AUTH_INVALID: "Token rejected. Re-login with `lium provider portal login`.",
+    PORTAL_AUTH_REFRESH_RACE: "Another lium provider process is refreshing the token; retry in a moment.",
     PORTAL_CONTRACT_DRIFT: "Portal payload schema mismatch. The portal API may have changed; report to maintainers.",
     PORTAL_NOT_FOUND: "The portal returned 404 for that resource (wrong UUID or already removed).",
     PORTAL_SERVER_ERROR: "Portal 5xx. Retry; if persistent, check portal status.",
@@ -87,8 +87,8 @@ _HINTS: dict[str, str] = {
 # --- Error classes -------------------------------------------------------
 
 
-class MinerError(Exception):
-    """Base error for the miner SDK.
+class ProviderError(Exception):
+    """Base error for the provider SDK.
 
     Attributes:
         code: stable string identifier (one of the constants above).
@@ -98,7 +98,7 @@ class MinerError(Exception):
         context: free-form ``dict[str, Any]``.
     """
 
-    default_code: str = "MINER_ERROR"
+    default_code: str = "PROVIDER_ERROR"
 
     def __init__(
         self,
@@ -133,33 +133,33 @@ class MinerError(Exception):
         }
 
 
-class MinerAuthError(MinerError):
+class ProviderAuthError(ProviderError):
     default_code = PORTAL_AUTH_INVALID
 
 
-class MinerNotFoundError(MinerError):
+class ProviderNotFoundError(ProviderError):
     default_code = PORTAL_NOT_FOUND
 
 
-class MinerServerError(MinerError):
+class ProviderServerError(ProviderError):
     default_code = PORTAL_SERVER_ERROR
 
 
-class MinerPortalContractError(MinerError):
+class ProviderPortalContractError(ProviderError):
     """Portal returned 422; payload schema almost certainly drifted."""
 
     default_code = PORTAL_CONTRACT_DRIFT
 
 
-class MinerSshError(MinerError):
+class ProviderSshError(ProviderError):
     default_code = SSH_UNREACHABLE
 
 
-class MinerInstallError(MinerError):
+class ProviderInstallError(ProviderError):
     default_code = INSTALLER_PARTIAL_FAIL
 
 
-class MinerConfigError(MinerError):
+class ProviderConfigError(ProviderError):
     default_code = CONFIG_MISSING
 
 
@@ -169,14 +169,14 @@ __all__ = [
     "EXECUTOR_UUID_MISMATCH",
     "HOTKEY_NOT_REGISTERED",
     "INSTALLER_PARTIAL_FAIL",
-    "MinerAuthError",
-    "MinerConfigError",
-    "MinerError",
-    "MinerInstallError",
-    "MinerNotFoundError",
-    "MinerPortalContractError",
-    "MinerServerError",
-    "MinerSshError",
+    "ProviderAuthError",
+    "ProviderConfigError",
+    "ProviderError",
+    "ProviderInstallError",
+    "ProviderNotFoundError",
+    "ProviderPortalContractError",
+    "ProviderServerError",
+    "ProviderSshError",
     "PORTAL_AUTH_EXPIRED",
     "PORTAL_AUTH_INVALID",
     "PORTAL_AUTH_REFRESH_RACE",
