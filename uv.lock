@@ -1578,6 +1578,8 @@ dependencies = [
     { name = "async-property" },
     { name = "async-substrate-interface", version = "1.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "async-substrate-interface", version = "1.6.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "asyncssh", version = "2.21.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "asyncssh", version = "2.22.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "backoff" },
     { name = "bittensor" },
     { name = "bittensor-cli" },
@@ -1593,6 +1595,7 @@ dependencies = [
     { name = "plotly" },
     { name = "pycryptodome" },
     { name = "pydantic" },
+    { name = "pyjwt" },
     { name = "python-dotenv", version = "1.2.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "python-dotenv", version = "1.2.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "python-levenshtein", version = "0.27.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
@@ -1625,22 +1628,15 @@ docs = [
     { name = "sphinx", version = "9.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "sphinx-rtd-theme" },
 ]
-provider = [
-    { name = "asyncssh", version = "2.21.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
-    { name = "asyncssh", version = "2.22.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
-    { name = "bittensor" },
-    { name = "pyjwt" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = "~=3.10.2" },
     { name = "async-property", specifier = "==0.2.2" },
     { name = "async-substrate-interface", specifier = ">=1.1.0" },
-    { name = "asyncssh", marker = "extra == 'provider'", specifier = ">=2.14" },
+    { name = "asyncssh", specifier = ">=2.14" },
     { name = "backoff", specifier = "~=2.2.1" },
-    { name = "bittensor", specifier = ">=9.8.3" },
-    { name = "bittensor", marker = "extra == 'provider'", specifier = ">=9.10.1" },
+    { name = "bittensor", specifier = ">=9.10.1" },
     { name = "bittensor-cli", specifier = ">=9.1.0" },
     { name = "black", marker = "extra == 'dev'" },
     { name = "docker", specifier = ">=7.1.0" },
@@ -1655,7 +1651,7 @@ requires-dist = [
     { name = "pycryptodome", specifier = ">=3.0.0,<4.0.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pyinstaller", marker = "extra == 'dev'", specifier = ">=6.0.0" },
-    { name = "pyjwt", marker = "extra == 'provider'", specifier = "~=2.8" },
+    { name = "pyjwt", specifier = "~=2.8" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.12" },
@@ -1671,7 +1667,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.12" },
     { name = "wheel", marker = "extra == 'dev'" },
 ]
-provides-extras = ["dev", "docs", "provider"]
+provides-extras = ["dev", "docs"]
 
 [[package]]
 name = "loguru"

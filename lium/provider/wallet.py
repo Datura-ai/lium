@@ -46,7 +46,7 @@ def load_hotkey_keypair(
             import bittensor  # type: ignore[import-not-found]
         except ImportError as e:  # pragma: no cover - dep missing
             raise ProviderConfigError(
-                "bittensor is required to load wallets; install with `pip install lium.io[provider]`",
+                "bittensor is required to load wallets; install with `pip install lium.io`",
                 cause=e,
             ) from e
         wallet_factory = bittensor.Wallet

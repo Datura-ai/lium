@@ -140,7 +140,7 @@ jobs:
           echo "Expected macOS runner architecture ${{ matrix.expected_machine }}, got $actual_machine" >&2
           exit 1
         fi
-        uv sync --frozen --extra dev --extra provider
+        uv sync --frozen --extra dev
         uv run pyinstaller lium.spec --clean
         mv dist/lium dist/${{ matrix.asset_name }}
         chmod +x dist/${{ matrix.asset_name }}

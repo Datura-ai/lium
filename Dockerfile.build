@@ -15,5 +15,5 @@ RUN pip install --no-cache-dir uv
 WORKDIR /app
 COPY . .
 
-RUN uv sync --frozen --extra dev --extra provider
+RUN uv sync --frozen --extra dev
 RUN uv run pyinstaller lium.spec --clean
