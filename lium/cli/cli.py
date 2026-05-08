@@ -23,6 +23,7 @@ from .theme import theme_command
 from .config import config_command
 
 # from .commands.image import image_command  # Disabled for beta.1
+from .balance import balance_command
 from .fund import fund_command
 from .gpu_splitting import gpu_splitting_command
 from .bk import bk_command
@@ -77,6 +78,7 @@ cli.add_command(rsync_command)
 cli.add_command(theme_command)
 cli.add_command(config_command)
 # cli.add_command(image_command)  # Disabled for beta.1
+cli.add_command(balance_command)
 cli.add_command(fund_command)
 cli.add_command(gpu_splitting_command)
 cli.add_command(bk_command, name="bk")

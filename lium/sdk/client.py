@@ -28,6 +28,8 @@ from .models import (
     BackupConfig,
     BackupLog,
     ExecutorInfo,
+    NowPaymentsCurrency,
+    NowPaymentsInvoice,
     PodInfo,
     SSHKey,
     Template,
@@ -1427,6 +1429,61 @@ class Lium:
             Floating-point balance value reported by ``/users/me``.
         """
         return float(self._request("GET", "/users/me").json().get("balance") or 0)
+
+    def nowpayments_currencies(self, *, refresh: bool = False) -> List[NowPaymentsCurrency]:
+        """List currencies available for NowPayments crypto funding.
+
+        Args:
+            refresh: Ask the backend to refresh its NowPayments currency cache.
+
+        Returns:
+            List of supported NowPayments currencies.
+        """
+        response = self._request(
+            "GET",
+            "/nowpayments/currencies",
+            params={"refresh": refresh},
+        ).json()
+        return [
+            NowPaymentsCurrency(
+                code=item.get("code", ""),
+                name=item.get("name", ""),
+                logo_url=item.get("logo_url", ""),
+                network=item.get("network", ""),
+            )
+            for item in response.get("currencies", [])
+        ]
+
+    def create_nowpayments_invoice(
+        self, *, amount_usd: float, pay_currency: str
+    ) -> NowPaymentsInvoice:
+        """Create a NowPayments invoice for funding the current account.
+
+        Args:
+            amount_usd: USD balance amount to fund.
+            pay_currency: NowPayments currency code to pay with.
+
+        Returns:
+            Invoice payment instructions from the backend.
+        """
+        data = self._request(
+            "POST",
+            "/nowpayments/create-invoice",
+            json={"amount": amount_usd, "pay_currency": pay_currency},
+        ).json()
+        return NowPaymentsInvoice(
+            invoice_url=data.get("invoice_url", ""),
+            invoice_id=str(data.get("invoice_id", "")),
+            transaction_id=str(data.get("transaction_id", "")),
+            target_address=data.get("target_address", ""),
+            target_currency=data.get("target_currency", ""),
+            target_amount=float(data.get("target_amount") or 0),
+            payment_id=str(data.get("payment_id", "")),
+            payment_status=data.get("payment_status", ""),
+            payin_extra_id=data.get("payin_extra_id"),
+            network=data.get("network"),
+            expires_at=data.get("expires_at"),
+        )
 
     def volumes(self) -> List[VolumeInfo]:
         """List all volumes for the current user.
