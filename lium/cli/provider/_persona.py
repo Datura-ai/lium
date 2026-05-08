@@ -2,7 +2,7 @@
 
 Why this exists: ``lium mine`` (renter rent flow) and ``lium provider`` (provider
 flow) live in adjacent namespaces. Spend-affecting subcommands -- adding /
-removing executors, switching validators, installing a node over SSH -- get
+removing nodes, installing a node over SSH -- get
 an explicit one-shot confirmation the first time they run in a shell
 session. After ack, subsequent invocations in the same shell are silent.
 
@@ -33,9 +33,9 @@ SPEND_AFFECTING_SUBCOMMANDS: frozenset[str] = frozenset(
     {
         "node-install",
         "node:install",
-        "executor-add",
-        "executor-remove",
-        "executor-update",
+        "node-add",
+        "node-remove",
+        "node-update",
         "validator-switch",
     }
 )
@@ -160,7 +160,7 @@ def confirm_persona(
     output = output_func or (lambda m: click.echo(m, err=True))
     output(
         "You are operating as a PROVIDER (provider persona), not a renter. "
-        "Spend-affecting actions (executor / node install) follow."
+        "Spend-affecting actions (node / install) follow."
     )
 
     reader = input_func or (

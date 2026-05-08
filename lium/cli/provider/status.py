@@ -54,7 +54,7 @@ def status_command(ctx: click.Context, netuid: int) -> None:
         else "registered=unknown"
     )
     summary_parts.append(f"portal={'active' if snapshot.portal_session_active else 'down'}")
-    summary_parts.append(f"executors={snapshot.executor_count or 0}")
+    summary_parts.append(f"nodes={snapshot.node_count or 0}")
     summary_parts.append(f"weights={len(snapshot.validator_weights)}")
     summary = "provider status: " + ", ".join(summary_parts)
     render(ctx, snapshot, summary=summary)

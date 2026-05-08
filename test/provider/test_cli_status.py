@@ -74,7 +74,7 @@ def test_status_default_human_summary(patched_status, fake_signer) -> None:
     result = runner.invoke(provider_command, ["--hotkey", "hk1", "status"])
     assert result.exit_code == 0, result.output
     assert "provider status:" in result.output
-    assert "executors=1" in result.output
+    assert "nodes=1" in result.output
 
 
 def test_status_json_envelope(patched_status, fake_signer) -> None:
@@ -97,7 +97,7 @@ def test_status_json_envelope(patched_status, fake_signer) -> None:
     assert payload["ok"] is True
     assert payload["data"]["provider_id"] == "m-1"
     assert payload["data"]["registered_on_subnet"] is True
-    assert payload["data"]["executor_count"] == 0
+    assert payload["data"]["node_count"] == 0
 
 
 def test_status_persona_gate_not_required(patched_status, fake_signer) -> None:

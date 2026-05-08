@@ -88,8 +88,8 @@ def test_status_aggregates_portal_executors_and_metagraph(
     snapshot = client.status(metagraph_factory=metagraph)
     assert snapshot.portal_session_active is True
     assert snapshot.provider_id == "m-99"
-    assert snapshot.executor_count == 2
-    assert {e.id for e in snapshot.executors} == {"exec-1", "exec-2"}
+    assert snapshot.node_count == 2
+    assert {e.id for e in snapshot.nodes} == {"exec-1", "exec-2"}
     assert snapshot.registered_on_subnet is True
     weight_map = {row.validator_hotkey: row.weight for row in snapshot.validator_weights}
     assert weight_map == {"v1": 0.5, "v3": 0.25}
@@ -129,8 +129,8 @@ def test_status_degrades_when_whoami_fails(
     client = _client(portal, tmp_token_store, fake_signer)
     snapshot = client.status(metagraph_factory=metagraph)
     assert snapshot.portal_session_active is False
-    # Executor list should not be queried when auth failed.
-    assert snapshot.executor_count is None
+    # Node list should not be queried when auth failed.
+    assert snapshot.node_count is None
     assert any(w.startswith("whoami:") for w in snapshot.warnings)
 
 

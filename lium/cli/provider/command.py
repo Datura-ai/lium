@@ -2,16 +2,23 @@
 
 Subcommands:
 
-- ``lium provider portal login|logout|whoami`` -- portal session management.
+- ``lium provider portal {login,logout,whoami}`` -- portal session management.
 - ``lium provider status`` -- aggregated provider snapshot.
+- ``lium provider node {list,get,add,rm,update-price,update-gpu,
+  min-gpu,pods,machine-requests,notice-period,notify-added}``
+  -- node lifecycle on the portal.
+- ``lium provider config {show,opt-in,opt-out,set-email,set-subscriptions}``
+  -- portal-account configuration. ``opt-in/opt-out`` toggles the lium.io
+  central miner server.
+- ``lium provider sync {from-miner-server,to-miner-server}`` -- batch sync
+  between the portal and the central miner.
+- ``lium provider {billing,machine-request,machine}``
+  -- read-only history queries.
 
 Hotkey registration on SN51 is handled directly by ``btcli subnet register``;
 the CLI persists ``--coldkey``/``--hotkey`` via ``lium config set
 provider.coldkey ...`` / ``provider.hotkey ...`` so subsequent commands inherit
 them without re-prompting.
-
-M3 will add ``executor add|list|update|remove`` and ``validator switch``;
-M4 will add ``node install|check``.
 """
 
 from __future__ import annotations
@@ -20,8 +27,16 @@ import click
 
 from lium.cli.provider._persona import confirm_persona
 from lium.cli.provider._render import emit_error, fatal
+from lium.cli.provider.config import config_command
+from lium.cli.provider.node import node_command
 from lium.cli.provider.portal import portal_command
+from lium.cli.provider.queries import (
+    billing_command,
+    machine_command,
+    machine_request_command,
+)
 from lium.cli.provider.status import status_command
+from lium.cli.provider.sync import sync_command
 from lium.cli.settings import ConfigManager
 from lium.provider.errors import ProviderError
 
@@ -88,7 +103,7 @@ def provider_command(
     """Provider-side commands for Subnet 51 mining.
 
     Use ``lium mine`` for renter workflows. ``lium provider ...`` is the
-    provider persona: portal session management, managing executors,
+    provider persona: portal session management, managing nodes,
     installing GPU nodes, and reporting validator weights. Hotkey
     registration on SN51 itself is done directly with ``btcli subnet
     register``.
@@ -126,6 +141,12 @@ def _provider_result(ctx: click.Context, result, **_kwargs) -> None:
 
 provider_command.add_command(portal_command, name="portal")
 provider_command.add_command(status_command, name="status")
+provider_command.add_command(node_command, name="node")
+provider_command.add_command(config_command, name="config")
+provider_command.add_command(sync_command, name="sync")
+provider_command.add_command(billing_command, name="billing")
+provider_command.add_command(machine_request_command, name="machine-request")
+provider_command.add_command(machine_command, name="machine")
 
 
 # Re-exported for symmetry with other CLI subgroups.
@@ -138,7 +159,7 @@ def enforce_persona_gate(ctx: click.Context) -> None:
     """Run the persona gate for spend-affecting subcommands.
 
     Called as the first action of any subcommand that takes a spend-affecting
-    or otherwise-irreversible action (register, executor mutations, node
+    or otherwise-irreversible action (register, node mutations,
     install). If the user declines, exits with ``ARG_INVALID`` exit code.
     """
     opts = (ctx.obj or {}).get("provider_opts") or {}

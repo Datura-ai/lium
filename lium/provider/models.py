@@ -21,11 +21,19 @@ from lium.provider.errors import PORTS_INVALID, ProviderError
 
 
 class SafeProviderResponse(BaseModel):
-    """Mirrors ``lium-miner-portal/src/dtos/provider.py::SafeProviderResponse``."""
+    """Mirrors ``lium-miner-portal/src/dtos/miner.py::SafeMinerResponse``.
+
+    The wire still uses protocol-level ``miner_coldkey``; the user-facing
+    rename ("Miner" -> "Provider") landed in the CLI/SDK but not the
+    portal payload. Both names are accepted here and exposed on the model
+    as ``provider_coldkey``.
+    """
+
+    model_config = {"populate_by_name": True}
 
     id: str
     miner_hotkey: str
-    provider_coldkey: str
+    provider_coldkey: str = Field(alias="miner_coldkey")
     email: str | None = None
     machine_request_subscription: list[str] = Field(default_factory=list)
     created_at: str
@@ -33,9 +41,16 @@ class SafeProviderResponse(BaseModel):
 
 
 class LoginResponse(BaseModel):
-    """Mirrors ``LoginResponse`` returned by ``POST /auth/login-flexible``."""
+    """Mirrors ``LoginResponse`` returned by ``POST /auth/login-flexible``.
 
-    provider: SafeProviderResponse
+    The wire field is ``miner`` (protocol-level naming); we expose it as
+    ``provider`` to match the user-facing rename. ``populate_by_name``
+    accepts either.
+    """
+
+    model_config = {"populate_by_name": True}
+
+    provider: SafeProviderResponse = Field(alias="miner")
     token: str
 
 
@@ -55,22 +70,81 @@ class ProviderCredentials(BaseModel):
 
 
 class AddExecutorPayload(BaseModel):
-    """Mirrors ``lium-miner-portal/src/dtos/executor.py::AddExecutorPayload``."""
+    """Mirrors ``lium-miner-portal/src/dtos/executor.py::AddExecutorPayload``.
 
-    gpu_type: str
-    ip_address: str
-    port: int
-    price_per_gpu: float
-    gpu_count: int
+    Field constraints mirror the portal's own validators so the CLI rejects
+    a bad request before the round-trip.
+    """
+
+    gpu_type: str = Field(min_length=1, max_length=64)
+    ip_address: str = Field(min_length=1, max_length=64)
+    port: int = Field(ge=1, le=65535)
+    price_per_gpu: float = Field(ge=0)
+    gpu_count: int = Field(ge=1, le=64)
 
 
 class UpdatePricePayload(BaseModel):
-    price_per_gpu: float
+    price_per_gpu: float = Field(ge=0)
 
 
 class UpdateGpuPayload(BaseModel):
-    gpu_type: str
-    gpu_count: int
+    gpu_type: str = Field(min_length=1, max_length=64)
+    gpu_count: int = Field(ge=1, le=64)
+
+
+class SetMinGpuCountForRentalPayload(BaseModel):
+    """Payload for ``POST /executors/{id}/min-gpu-count-for-rental``."""
+
+    min_gpu_count_for_rental: int = Field(ge=1, le=64)
+
+
+class NoticePeriodPayload(BaseModel):
+    """Payload for ``POST /executors/{id}/notice-period``.
+
+    The portal accepts an empty body today; we forbid extras so a future
+    portal change requires an SDK model bump rather than silently honouring
+    smuggled keys from a caller dict.
+    """
+
+    model_config = {"extra": "forbid"}
+
+
+class NotifyMachineAddedPayload(BaseModel):
+    """Payload for ``POST /executors/{id}/machine-added``."""
+
+    machine_request_id: str = Field(min_length=1, max_length=128)
+
+
+class SetEmailPayload(BaseModel):
+    """Payload for ``POST /auth/set-email``.
+
+    Light syntactic check; the portal performs full RFC-5322 validation.
+    """
+
+    email: str = Field(
+        min_length=3, max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+    )
+
+
+class SetMachineRequestSubscriptionPayload(BaseModel):
+    """Payload for ``POST /auth/set-machine-request-subscription``."""
+
+    machine_request_subscription: list[str] = Field(default_factory=list)
+
+
+class SetOptInRequest(BaseModel):
+    """Payload for ``POST /miners/opt-in``."""
+
+    opt_in_status: bool
+
+
+class OptInStatusResponse(BaseModel):
+    """Mirrors ``lium-miner-portal/src/dtos/miner.py::OptInStatusResponse``."""
+
+    miner_hotkey: str
+    miner_coldkey: str
+    central_miner_ip: str
+    central_miner_port: int
 
 
 class ExecutorInfo(BaseModel):
@@ -117,8 +191,8 @@ class ProviderStatus(BaseModel):
     netuid: int | None = None
     portal_session_active: bool | None = None
     provider_id: str | None = None
-    executor_count: int | None = None
-    executors: list[ExecutorInfo] = Field(default_factory=list)
+    node_count: int | None = None
+    nodes: list[ExecutorInfo] = Field(default_factory=list)
     validator_weights: list[ValidatorWeight] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
@@ -223,11 +297,18 @@ __all__ = [
     "AddExecutorPayload",
     "ExecutorInfo",
     "LoginResponse",
-    "ProviderCredentials",
-    "ProviderStatus",
     "NodeInstallResult",
     "NodePorts",
+    "NoticePeriodPayload",
+    "NotifyMachineAddedPayload",
+    "OptInStatusResponse",
+    "ProviderCredentials",
+    "ProviderStatus",
     "SafeProviderResponse",
+    "SetEmailPayload",
+    "SetMachineRequestSubscriptionPayload",
+    "SetMinGpuCountForRentalPayload",
+    "SetOptInRequest",
     "UpdateGpuPayload",
     "UpdatePricePayload",
     "ValidatorWeight",
