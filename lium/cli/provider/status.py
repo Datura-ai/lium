@@ -10,6 +10,7 @@ from __future__ import annotations
 import click
 
 from lium.cli.provider._client import build_client
+from lium.cli.provider._overrides import with_provider_overrides
 from lium.cli.provider._render import emit_error, render
 from lium.provider.errors import ARG_INVALID, ProviderError
 
@@ -22,6 +23,7 @@ from lium.provider.errors import ARG_INVALID, ProviderError
     show_default=True,
     help="Subnet to query for registration + validator weights.",
 )
+@with_provider_overrides
 @click.pass_context
 def status_command(ctx: click.Context, netuid: int) -> None:
     """Show a snapshot of registration, portal session, and executor count."""

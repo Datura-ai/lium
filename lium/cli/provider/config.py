@@ -22,6 +22,7 @@ from lium.cli.provider._guards import (
     require_hotkey,
     require_persona_ack,
 )
+from lium.cli.provider._overrides import with_provider_overrides
 from lium.cli.provider._render import render
 from lium.provider.errors import ProviderError
 
@@ -32,6 +33,7 @@ def config_command() -> None:
 
 
 @config_command.command("show", short_help="Full portal account profile.")
+@with_provider_overrides
 @click.pass_context
 def show(ctx: click.Context) -> None:
     require_hotkey(ctx, group="config")
@@ -68,12 +70,14 @@ def _set_opt_in(ctx: click.Context, value: bool) -> None:
 
 
 @config_command.command("opt-in", short_help="Use lium.io's central miner server.")
+@with_provider_overrides
 @click.pass_context
 def opt_in(ctx: click.Context) -> None:
     _set_opt_in(ctx, True)
 
 
 @config_command.command("opt-out", short_help="Run your own central miner server.")
+@with_provider_overrides
 @click.pass_context
 def opt_out(ctx: click.Context) -> None:
     _set_opt_in(ctx, False)
@@ -81,6 +85,7 @@ def opt_out(ctx: click.Context) -> None:
 
 @config_command.command("set-email", short_help="Update contact email.")
 @click.argument("email", required=True)
+@with_provider_overrides
 @click.pass_context
 def set_email(ctx: click.Context, email: str) -> None:
     require_hotkey(ctx, group="config")
@@ -104,6 +109,7 @@ def set_email(ctx: click.Context, email: str) -> None:
     multiple=True,
     help="GPU type to subscribe to (repeatable). Pass none to clear.",
 )
+@with_provider_overrides
 @click.pass_context
 def set_subscriptions(ctx: click.Context, gpu_types: tuple[str, ...]) -> None:
     require_hotkey(ctx, group="config")

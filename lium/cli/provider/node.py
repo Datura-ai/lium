@@ -33,6 +33,7 @@ from lium.cli.provider._guards import (
     require_hotkey,
     require_persona_ack,
 )
+from lium.cli.provider._overrides import with_provider_overrides
 from lium.cli.provider._render import render
 from lium.provider._shared_config import default_price_for_gpu, fetch_shared_config
 from lium.provider.errors import ProviderError
@@ -47,6 +48,7 @@ def node_command() -> None:
 @click.option("--miner-hotkey", "miner_hotkey", help="Filter by miner hotkey.")
 @click.option("--page", type=int, default=None, help="1-indexed page number.")
 @click.option("--limit", type=int, default=None, help="Page size.")
+@with_provider_overrides
 @click.pass_context
 def list_nodes(
     ctx: click.Context,
@@ -71,6 +73,7 @@ def list_nodes(
 
 @node_command.command("get", short_help="Show one node.")
 @click.argument("node_id", required=True)
+@with_provider_overrides
 @click.pass_context
 def get_node(ctx: click.Context, node_id: str) -> None:
     require_hotkey(ctx, group="node")
@@ -106,6 +109,7 @@ def get_node(ctx: click.Context, node_id: str) -> None:
 @click.option(
     "--gpu-count", type=int, default=1, show_default=True, help="Number of GPUs."
 )
+@with_provider_overrides
 @click.pass_context
 def add_node(
     ctx: click.Context,
@@ -150,6 +154,7 @@ def add_node(
 
 @node_command.command("rm", short_help="Delete a node.")
 @click.argument("node_id", required=True)
+@with_provider_overrides
 @click.pass_context
 def remove_node(ctx: click.Context, node_id: str) -> None:
     require_hotkey(ctx, group="node")
@@ -166,6 +171,7 @@ def remove_node(ctx: click.Context, node_id: str) -> None:
 @node_command.command("update-price", short_help="Set price-per-GPU.")
 @click.argument("node_id", required=True)
 @click.option("--price", "price_per_gpu", type=float, required=True)
+@with_provider_overrides
 @click.pass_context
 def update_price(ctx: click.Context, node_id: str, price_per_gpu: float) -> None:
     require_hotkey(ctx, group="node")
@@ -183,6 +189,7 @@ def update_price(ctx: click.Context, node_id: str, price_per_gpu: float) -> None
 @click.argument("node_id", required=True)
 @click.option("--gpu-type", required=True)
 @click.option("--gpu-count", type=int, required=True)
+@with_provider_overrides
 @click.pass_context
 def update_gpu(
     ctx: click.Context, node_id: str, gpu_type: str, gpu_count: int
@@ -210,6 +217,7 @@ def min_gpu_command() -> None:
 @min_gpu_command.command("set", short_help="Set min GPUs for rental.")
 @click.argument("node_id", required=True)
 @click.argument("count", type=int, required=True)
+@with_provider_overrides
 @click.pass_context
 def set_min_gpu(ctx: click.Context, node_id: str, count: int) -> None:
     require_hotkey(ctx, group="node")
@@ -225,6 +233,7 @@ def set_min_gpu(ctx: click.Context, node_id: str, count: int) -> None:
 
 @min_gpu_command.command("unset", short_help="Clear min GPUs for rental.")
 @click.argument("node_id", required=True)
+@with_provider_overrides
 @click.pass_context
 def unset_min_gpu(ctx: click.Context, node_id: str) -> None:
     require_hotkey(ctx, group="node")
@@ -240,6 +249,7 @@ def unset_min_gpu(ctx: click.Context, node_id: str) -> None:
 
 @node_command.command("pods", short_help="List pods rented on a node.")
 @click.argument("node_id", required=True)
+@with_provider_overrides
 @click.pass_context
 def list_pods(ctx: click.Context, node_id: str) -> None:
     require_hotkey(ctx, group="node")
@@ -256,6 +266,7 @@ def list_pods(ctx: click.Context, node_id: str) -> None:
 
 @node_command.command("machine-requests", short_help="List pending tenant asks.")
 @click.argument("node_id", required=True)
+@with_provider_overrides
 @click.pass_context
 def machine_requests(ctx: click.Context, node_id: str) -> None:
     require_hotkey(ctx, group="node")
@@ -277,6 +288,7 @@ def notice_period_command() -> None:
 
 @notice_period_command.command("set", short_help="Open a notice period.")
 @click.argument("node_id", required=True)
+@with_provider_overrides
 @click.pass_context
 def set_notice_period(ctx: click.Context, node_id: str) -> None:
     require_hotkey(ctx, group="node")
@@ -292,6 +304,7 @@ def set_notice_period(ctx: click.Context, node_id: str) -> None:
 
 @notice_period_command.command("unset", short_help="Cancel the notice period.")
 @click.argument("node_id", required=True)
+@with_provider_overrides
 @click.pass_context
 def unset_notice_period(ctx: click.Context, node_id: str) -> None:
     require_hotkey(ctx, group="node")
@@ -308,6 +321,7 @@ def unset_notice_period(ctx: click.Context, node_id: str) -> None:
 @node_command.command("notify-added", short_help="Mark a machine request fulfilled.")
 @click.argument("node_id", required=True)
 @click.option("--request-id", "machine_request_id", required=True)
+@with_provider_overrides
 @click.pass_context
 def notify_added(ctx: click.Context, node_id: str, machine_request_id: str) -> None:
     require_hotkey(ctx, group="node")

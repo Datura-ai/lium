@@ -5,6 +5,7 @@ from __future__ import annotations
 import click
 
 from lium.cli.provider._client import build_client
+from lium.cli.provider._overrides import with_provider_overrides
 from lium.cli.provider._render import emit_error, render
 from lium.provider.errors import ARG_INVALID, ProviderError
 
@@ -20,6 +21,7 @@ def portal_command() -> None:
     is_flag=True,
     help="Bypass the local token cache and re-authenticate.",
 )
+@with_provider_overrides
 @click.pass_context
 def login(ctx: click.Context, force: bool) -> None:
     opts = (ctx.obj or {}).get("provider_opts") or {}
@@ -54,6 +56,7 @@ def login(ctx: click.Context, force: bool) -> None:
 
 
 @portal_command.command("logout", short_help="Drop the cached JWT for this hotkey.")
+@with_provider_overrides
 @click.pass_context
 def logout(ctx: click.Context) -> None:
     opts = (ctx.obj or {}).get("provider_opts") or {}
@@ -89,6 +92,7 @@ def logout(ctx: click.Context) -> None:
 
 
 @portal_command.command("whoami", short_help="Call /auth/me with the cached token.")
+@with_provider_overrides
 @click.pass_context
 def whoami(ctx: click.Context) -> None:
     opts = (ctx.obj or {}).get("provider_opts") or {}

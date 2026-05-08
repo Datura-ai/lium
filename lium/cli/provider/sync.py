@@ -22,6 +22,7 @@ from lium.cli.provider._guards import (
     require_hotkey,
     require_persona_ack,
 )
+from lium.cli.provider._overrides import with_provider_overrides
 from lium.cli.provider._render import render
 from lium.provider.errors import ProviderError
 
@@ -35,6 +36,7 @@ def sync_command() -> None:
     "from-miner-server",
     short_help="Pull node state from the central miner server (frontend's 'Sync From Miner Server').",
 )
+@with_provider_overrides
 @click.pass_context
 def from_miner_server(ctx: click.Context) -> None:
     require_hotkey(ctx, group="sync")
@@ -52,6 +54,7 @@ def from_miner_server(ctx: click.Context) -> None:
     "to-miner-server",
     short_help="Push node state to the central miner server (frontend's 'Sync Into Miner Server').",
 )
+@with_provider_overrides
 @click.pass_context
 def to_miner_server(ctx: click.Context) -> None:
     require_hotkey(ctx, group="sync")

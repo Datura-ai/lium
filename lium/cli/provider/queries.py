@@ -11,6 +11,7 @@ import click
 
 from lium.cli.provider._client import build_client
 from lium.cli.provider._guards import handle_provider_error, require_hotkey
+from lium.cli.provider._overrides import with_provider_overrides
 from lium.cli.provider._render import render
 from lium.provider.errors import ProviderError
 
@@ -28,6 +29,7 @@ def billing_command() -> None:
 @click.option("--miner-hotkey", "miner_hotkey", help="Filter by miner hotkey.")
 @click.option("--page", type=int, default=None, help="1-indexed page number.")
 @click.option("--limit", type=int, default=None, help="Page size.")
+@with_provider_overrides
 @click.pass_context
 def list_billing(
     ctx: click.Context,
@@ -57,6 +59,7 @@ def machine_request_command() -> None:
 
 
 @machine_request_command.command("list", short_help="All pending tenant requests.")
+@with_provider_overrides
 @click.pass_context
 def list_machine_requests(ctx: click.Context) -> None:
     require_hotkey(ctx, group="machine-request")
@@ -73,6 +76,7 @@ def list_machine_requests(ctx: click.Context) -> None:
 
 @machine_request_command.command("get", short_help="Single tenant machine request.")
 @click.argument("request_id", required=True)
+@with_provider_overrides
 @click.pass_context
 def get_machine_request(ctx: click.Context, request_id: str) -> None:
     require_hotkey(ctx, group="machine-request")
@@ -95,6 +99,7 @@ def machine_command() -> None:
 
 
 @machine_command.command("list", short_help="Available GPU machine catalogue.")
+@with_provider_overrides
 @click.pass_context
 def list_machines(ctx: click.Context) -> None:
     require_hotkey(ctx, group="machine")
@@ -118,6 +123,7 @@ def list_machines(ctx: click.Context) -> None:
     default=None,
     help="Override price-per-GPU/hour for the estimate (optional).",
 )
+@with_provider_overrides
 @click.pass_context
 def estimate_rewards(
     ctx: click.Context,
