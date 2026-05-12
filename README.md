@@ -166,6 +166,28 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium config path` - Show configuration file path
 - `lium config reset` - Reset all configuration
 
+### Provider Commands
+
+`lium provider …` is the provider-side CLI for Bittensor Subnet 51 — full automation parity with the portal frontend at lium.io/portal: portal authentication, node lifecycle, central-miner-server configuration, batch sync, billing, and machine-request queries. Hotkey registration is still handled separately via `btcli subnet register`.
+
+Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, `--portal-url`, `--json`, `--debug`, `-y/--yes`, `--dry-run`. Persist wallet identity once with `lium config set provider.coldkey <NAME>` and `lium config set provider.hotkey <NAME>`. Spend-affecting subcommands run a persona prompt unless `--yes` or `LIUM_PROVIDER_ACK=1` is set.
+
+- `lium provider portal {login,logout,whoami}` - Manage the cached portal JWT
+- `lium provider status [--netuid 51]` - Aggregated provider snapshot (registration, portal session, nodes, validator weights)
+- `lium provider node list|get|add|rm|update-price|update-gpu` - Node lifecycle on the portal
+- `lium provider node min-gpu set|unset <NODE_ID> [COUNT]` - Min GPU count for rental matchmaking
+- `lium provider node pods <NODE_ID>` - Pods currently rented on a node
+- `lium provider node machine-requests <NODE_ID>` - Pending tenant requests on a node
+- `lium provider node notice-period set|unset <NODE_ID>` - Open/close a maintenance notice period
+- `lium provider node notify-added <NODE_ID> --request-id <REQ>` - Mark a tenant machine request fulfilled
+- `lium provider config show|opt-in|opt-out|set-email|set-subscriptions` - Portal-account configuration (incl. lium.io central miner server toggle)
+- `lium provider sync from-miner-server|to-miner-server` - Batch node-state sync between portal and the central miner server
+- `lium provider billing list [--miner-hotkey HK] [--page N] [--limit N]` - Paginated billing history
+- `lium provider machine-request list|get` - Pending tenant machine requests
+- `lium provider machine list|estimate` - Machine catalogue + reward estimates
+
+Full reference with every flag and runnable examples: <https://docs.lium.io/developers/cli/reference/provider>.
+
 ### Other Commands
 
 - `lium theme [THEME]` - Get or set UI theme (light/dark/auto)
@@ -193,6 +215,19 @@ lium up 1 --template_id <TEMPLATE_ID> --yes
 
 # Set up executor bootstrap flow
 lium mine --auto --hotkey <HOTKEY>
+
+# Provider-portal automation (same surface as the portal frontend)
+lium config set provider.coldkey miner-prod        # one-time: persist wallet identity
+lium config set provider.hotkey  miner-1
+lium provider portal login                         # JWT exchange via hotkey signature
+lium provider status                               # registration, portal session, nodes, weights
+lium provider node list --limit 50
+lium provider node add --gpu-type "NVIDIA H200 NVL" --gpu-count 8 \
+    --ip 203.0.113.42 --port 8080 --price 1.85 --yes
+lium provider node update-price <NODE_ID> --price 2.10 --yes
+lium provider config opt-in --yes                  # use lium.io's central miner server
+lium provider machine estimate --gpu-type "NVIDIA H200 NVL" --gpu-count 8
+lium provider --json status                        # JSON envelope for scripts/agents
 
 # Inspect or configure Docker storage for GPU splitting (Ubuntu/Debian + systemd, run setup as root)
 lium gpu-splitting check

@@ -28,6 +28,7 @@ from .fund import fund_command
 from .gpu_splitting import gpu_splitting_command
 from .bk import bk_command
 from .mine import mine_command
+from .provider import provider_command
 from .volumes import volumes_command
 from .ssh_keys import ssh_keys_command
 from .schedules import schedules_command
@@ -83,6 +84,7 @@ cli.add_command(fund_command)
 cli.add_command(gpu_splitting_command)
 cli.add_command(bk_command, name="bk")
 cli.add_command(mine_command)
+cli.add_command(provider_command)
 cli.add_command(volumes_command)
 cli.add_command(ssh_keys_command, name="ssh-keys")
 cli.add_command(schedules_command, name="schedules")
