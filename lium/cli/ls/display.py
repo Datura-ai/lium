@@ -145,6 +145,54 @@ def format_tip() -> str:
     return f"Tip: {console.get_styled('lium up <index>', 'success')} {console.get_styled('# e.g. lium up 1', 'dim')}"
 
 
+def compact_executor(exe: ExecutorInfo, is_pareto: bool, index: int) -> Dict[str, Any]:
+    """Slim, table-equivalent JSON view of an executor."""
+    s = _specs_row(exe)
+    return {
+        "index": index,
+        "id": exe.id,
+        "huid": exe.huid,
+        "config": _cfg(exe),
+        "gpu_type": exe.gpu_type,
+        "gpu_count": exe.gpu_count,
+        "price_per_gpu_hour": exe.price_per_gpu,
+        "price_per_hour": exe.price_per_hour,
+        "country": _country_name(exe.location),
+        "vram_gb": _intish(s["VRAM"]),
+        "ram_gb": _intish(s["RAM"]),
+        "disk_gb": _intish(s["Disk"]),
+        "upload_mbps": _intish(s["Upload"]),
+        "download_mbps": _intish(s["Download"]),
+        "available_ports": _intish(s["Ports"]),
+        "docker_in_docker": exe.docker_in_docker,
+        "is_pareto": is_pareto,
+    }
+
+
+def sort_executors(
+    executors: List[ExecutorInfo],
+    sort_by: str = "download",
+    limit: Optional[int] = None,
+    show_pareto: bool = True,
+) -> tuple[List[ExecutorInfo], List[bool]]:
+    """Apply Pareto-aware sort and limit. Returns (sorted_executors, pareto_flags)."""
+    if not executors:
+        return [], []
+
+    pareto_flags = calculate_pareto_frontier(executors) if show_pareto else [False] * len(executors)
+    pairs = list(zip(executors, pareto_flags))
+
+    if show_pareto:
+        pairs.sort(key=lambda x: (not x[1], _sort_key_factory(sort_by)(x[0])))
+    else:
+        pairs.sort(key=lambda x: _sort_key_factory(sort_by)(x[0]))
+
+    if isinstance(limit, int) and limit > 0:
+        pairs = pairs[:limit]
+
+    return [e for e, _ in pairs], [p for _, p in pairs]
+
+
 def build_executors_table(
     executors: List[ExecutorInfo],
     sort_by: str = "download",
@@ -156,31 +204,9 @@ def build_executors_table(
     if not executors:
         return None, [], "", ""
 
-    # Calculate Pareto frontier before sorting/limiting
-    pareto_flags = calculate_pareto_frontier(executors) if show_pareto else [False] * len(executors)
-
-    # Combine executors with their Pareto status for sorting
-    executors_with_pareto = list(zip(executors, pareto_flags))
-
-    # Sort with Pareto-optimal first, then by chosen criteria
-    if show_pareto:
-        executors_with_pareto = sorted(
-            executors_with_pareto,
-            key=lambda x: (not x[1], _sort_key_factory(sort_by)(x[0]))
-        )
-    else:
-        executors_with_pareto = sorted(
-            executors_with_pareto,
-            key=lambda x: _sort_key_factory(sort_by)(x[0])
-        )
-
-    # Apply limit
-    if isinstance(limit, int) and limit > 0:
-        executors_with_pareto = executors_with_pareto[:limit]
-
-    # Extract sorted executors and their Pareto flags
-    sorted_executors = [e for e, _ in executors_with_pareto]
-    pareto_flags = [p for _, p in executors_with_pareto]
+    sorted_executors, pareto_flags = sort_executors(
+        executors, sort_by=sort_by, limit=limit, show_pareto=show_pareto
+    )
 
     # Count Pareto-optimal in shown results
     pareto_count = sum(pareto_flags)

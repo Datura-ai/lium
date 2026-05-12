@@ -175,9 +175,37 @@ add_to_path() {
     export PATH="${INSTALL_DIR}:$PATH"
 }
 
+guard_against_sudo() {
+    if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+        return
+    fi
+    if [[ -z "${SUDO_USER:-}" ]]; then
+        return
+    fi
+    if [[ -n "${LIUM_INSTALL_DIR:-}" ]]; then
+        return
+    fi
+
+    cat >&2 <<EOF
+Error: do not run the Lium installer with sudo.
+The CLI installs into your home directory and adds itself to your shell PATH;
+running under sudo installs into root's home and breaks the PATH update for
+your normal user.
+
+Re-run without sudo:
+  curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-cli/main/scripts/install.sh | bash
+
+If you really need a system-wide install, set LIUM_INSTALL_DIR explicitly,
+e.g.: sudo LIUM_INSTALL_DIR=/usr/local/bin bash install.sh
+EOF
+    exit 1
+}
+
 main() {
     local asset_name version release_path temp_dir binary_url checksum_url
     local install_root version_dir cli_path versioned_binary
+
+    guard_against_sudo
 
     asset_name="$(detect_asset_name)"
     version="$(resolve_version)"

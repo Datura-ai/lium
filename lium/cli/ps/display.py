@@ -76,6 +76,45 @@ def _format_ports(ports: dict) -> str:
     return ", ".join(port_pairs)
 
 
+def compact_pod(pod: PodInfo) -> dict:
+    """Slim, table-equivalent JSON view of a pod."""
+    executor = pod.executor
+    return {
+        "id": pod.id,
+        "huid": pod.huid,
+        "name": pod.name,
+        "status": pod.status.upper() if pod.status else None,
+        "gpu_type": executor.gpu_type if executor else None,
+        "gpu_count": executor.gpu_count if executor else None,
+        "config": (
+            f"{executor.gpu_count}×{executor.gpu_type}"
+            if executor and executor.gpu_count and executor.gpu_count > 1
+            else (executor.gpu_type if executor else None)
+        ),
+        "template": _format_template_name(pod.template) if pod.template else None,
+        "price_per_hour": executor.price_per_hour if executor else None,
+        "spent_usd": _spent_usd(pod.created_at, executor.price_per_hour if executor else None),
+        "uptime": _format_uptime(pod.created_at),
+        "created_at": pod.created_at,
+        "ip": executor.ip if executor else None,
+        "ports": pod.ports or {},
+        "ssh_cmd": pod.ssh_cmd,
+        "removal_scheduled_at": pod.removal_scheduled_at,
+        "jupyter_url": pod.jupyter_url,
+    }
+
+
+def _spent_usd(created_at: str, price_per_hour: Optional[float]) -> Optional[float]:
+    """Numeric counterpart of _format_cost; None when unknown."""
+    if not created_at or price_per_hour is None:
+        return None
+    dt_created = _parse_timestamp(created_at)
+    if not dt_created:
+        return None
+    hours = (datetime.now(timezone.utc) - dt_created).total_seconds() / 3600
+    return round(hours * price_per_hour, 2)
+
+
 def format_header(pod_count: int) -> str:
     """Format header text for pods list."""
     return f"Pods  ({pod_count} active)"
