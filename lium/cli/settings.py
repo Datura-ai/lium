@@ -74,6 +74,10 @@ class ConfigManager:
         env_value = os.environ.get(env_key)
         if env_value is not None:
             return env_value
+        if key == "api.api_key":
+            env_value = os.environ.get("LIUM_API_KEY")
+            if env_value is not None:
+                return env_value
         
         try:
             return self._config.get(section, option)
