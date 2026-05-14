@@ -14,8 +14,9 @@ def format_logs_table(logs: list) -> Table:
     table.add_column("#", style="dim")
     table.add_column("Backup ID", style="cyan")
     table.add_column("Status")
+    table.add_column("Progress", justify="right")
     table.add_column("Created")
-    table.add_column("Size", justify="right")
+    table.add_column("Error")
 
     for idx, log in enumerate(logs, 1):
         backup_id_full = getattr(log, 'id', 'unknown')
@@ -37,17 +38,17 @@ def format_logs_table(logs: list) -> Table:
             except:
                 pass
 
-        size = ""
-        if hasattr(log, 'size_bytes') and log.size_bytes:
-            size_mb = log.size_bytes / (1024 * 1024)
-            size = f"{size_mb:.1f} MB"
+        progress = getattr(log, 'progress', None)
+        progress_text = f"{progress:.0f}%" if progress is not None else ""
+        error = getattr(log, 'error_message', None) or ""
 
         table.add_row(
             str(idx),
             backup_id_full,
             status,
+            progress_text,
             created,
-            size
+            error
         )
 
     return table
@@ -57,6 +58,9 @@ def format_single_backup(pod_name: str, log) -> str:
     """Format single backup details."""
     lines = [f"Pod: {pod_name}"]
     lines.append(f"Status: {getattr(log, 'status', 'Unknown')}")
+    progress = getattr(log, 'progress', None)
+    if progress is not None:
+        lines.append(f"Progress: {progress:.0f}%")
     lines.append(f"Created: {getattr(log, 'created_at', 'Unknown')}")
 
     if hasattr(log, 'completed_at') and log.completed_at:
@@ -66,7 +70,7 @@ def format_single_backup(pod_name: str, log) -> str:
         size_mb = log.size_bytes / (1024 * 1024)
         lines.append(f"Size: {size_mb:.2f} MB")
 
-    if hasattr(log, 'error') and log.error:
-        lines.append(f"Error: {log.error}")
+    if hasattr(log, 'error_message') and log.error_message:
+        lines.append(f"Error: {log.error_message}")
 
     return "\n".join(lines)

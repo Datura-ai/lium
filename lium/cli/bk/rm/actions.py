@@ -18,6 +18,6 @@ class RemoveBackupAction:
 
             lium.backup_delete(backup_config.id)
 
-            return ActionResult(ok=True, data={})
+            return ActionResult(ok=True, data={"backup_config_id": backup_config.id})
         except Exception as e:
             return ActionResult(ok=False, data={}, error=str(e))

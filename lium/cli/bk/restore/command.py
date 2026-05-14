@@ -59,3 +59,6 @@ def bk_restore_command(pod_id: str, backup_id: str, restore_path: str, yes: bool
 
     if not result.ok:
         ui.error(result.error)
+        return
+
+    ui.success(f"Restore started for {pod_name} at {restore_path}")

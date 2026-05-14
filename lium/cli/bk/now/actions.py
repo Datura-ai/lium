@@ -20,12 +20,12 @@ class TriggerBackupAction:
                 return ActionResult(ok=False, data={}, error="No backup configuration found")
 
             # Trigger backup
-            lium.backup_now(
+            backup_result = lium.backup_now(
                 pod=pod,
                 name=name,
                 description=description
             )
 
-            return ActionResult(ok=True, data={})
+            return ActionResult(ok=True, data={"backup": backup_result})
         except Exception as e:
             return ActionResult(ok=False, data={}, error=str(e))

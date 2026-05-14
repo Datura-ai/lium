@@ -72,3 +72,9 @@ def bk_set_command(pod_id: str, path: str, every: str, keep: str, yes: bool):
 
     if not result.ok:
         ui.error(result.error)
+        return
+
+    ui.success(
+        f"Backup configured for {pod_name}: "
+        f"path={backup_path}, every={frequency_hours}h, keep={retention_days}d"
+    )
