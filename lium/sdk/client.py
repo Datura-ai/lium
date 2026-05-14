@@ -774,13 +774,25 @@ class Lium:
             except (paramiko.SSHException, FileNotFoundError, PermissionError):
                 continue
 
-        if not key:
-            raise ValueError("Could not load SSH key")
-
         # Connect
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(hostname=host, port=port, username=user, pkey=key, timeout=timeout)
+        connect_kwargs = {
+            "hostname": host,
+            "port": port,
+            "username": user,
+            "timeout": timeout,
+            "look_for_keys": False,
+        }
+        if key:
+            connect_kwargs["pkey"] = key
+            connect_kwargs["allow_agent"] = False
+        else:
+            # System ssh can still work for encrypted keys via ssh-agent even when
+            # Paramiko cannot parse the private key file directly.
+            connect_kwargs["key_filename"] = str(self.config.ssh_key_path)
+            connect_kwargs["allow_agent"] = True
+        client.connect(**connect_kwargs)
 
         try:
             yield client
