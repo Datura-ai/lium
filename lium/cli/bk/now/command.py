@@ -59,3 +59,11 @@ def bk_now_command(pod_id: str, name: Optional[str], description: Optional[str])
 
     if not result.ok:
         ui.error(result.error)
+        return
+
+    backup = result.data.get("backup") or {}
+    backup_log_id = backup.get("backup_log_id")
+    if backup_log_id:
+        ui.success(f"Backup started for {pod_name} (id={backup_log_id[:8]})")
+    else:
+        ui.success(f"Backup started for {pod_name}")

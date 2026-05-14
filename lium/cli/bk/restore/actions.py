@@ -13,8 +13,8 @@ class RestoreBackupAction:
         restore_path: str = ctx["restore_path"]
 
         try:
-            lium.restore(pod=pod, backup_id=backup_id, restore_path=restore_path)
+            restore_result = lium.restore(pod=pod, backup_id=backup_id, restore_path=restore_path)
 
-            return ActionResult(ok=True, data={})
+            return ActionResult(ok=True, data={"restore": restore_result})
         except Exception as e:
             return ActionResult(ok=False, data={}, error=str(e))

@@ -62,6 +62,7 @@ def bk_show_command(pod_id: str):
         return
 
     if not result.data.get("has_config"):
+        ui.warning(f"No backup configuration found for {pod_name}")
         return
 
     # Display

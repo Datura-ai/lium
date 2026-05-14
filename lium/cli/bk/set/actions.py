@@ -21,13 +21,13 @@ class SetBackupAction:
                 lium.backup_delete(existing_config.id)
 
             # Create new backup config
-            lium.backup_create(
+            backup_config = lium.backup_create(
                 pod=pod,
                 path=path,
                 frequency_hours=frequency_hours,
                 retention_days=retention_days
             )
 
-            return ActionResult(ok=True, data={})
+            return ActionResult(ok=True, data={"backup_config": backup_config})
         except Exception as e:
             return ActionResult(ok=False, data={}, error=str(e))

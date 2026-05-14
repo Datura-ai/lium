@@ -65,3 +65,6 @@ def bk_rm_command(pod_id: str, yes: bool):
 
     if not result.ok:
         ui.error(result.error)
+        return
+
+    ui.success(f"Backup configuration removed for {pod_name}")
