@@ -141,7 +141,7 @@ def emit_error(ctx: click.Context, err: ProviderError) -> int:
 
 
 def emit_warning(ctx: click.Context, code: str, message: str) -> None:
-    """Surface a non-fatal warning (e.g. PORTAL_LOGIN_REPLAY_DEBT)."""
+    """Surface a non-fatal warning code + message on stderr."""
     if _json_mode(ctx):
         # The status command surfaces warnings via ProviderStatus.warnings;
         # for one-shot warnings we deliberately keep stdout clean.

@@ -6,39 +6,27 @@ This module implements:
   without touching ``ProviderClient`` call sites.
 - ``LocalKeypairSigner``, the default v1 implementation that wraps
   ``bittensor.Keypair``.
-- ``build_login_payload``, the *single* place that knows the wire format
-  (A2: mirrors ``AuthenticationPayload(timestamp, miner_hotkey).blob_for_signing()``
-  from ``lium-miner-portal/src/auth/signature_auth.py:30``).
+- ``build_login_payload``, the *single* place that knows the wire format.
 
-The portal's ``verify_miner_signature`` (``lium-miner-portal/src/common/subtensor.py``)
-currently accepts *any* signed string with no replay window. v1 ships
-interoperable; a NEEDS-PORTAL-CHANGE ticket is filed to enforce
-``AUTH_MESSAGE_MAX_AGE`` on ``/auth/login-flexible``. Until then this module
-emits a one-time ``PORTAL_LOGIN_REPLAY_DEBT`` warning per process so the
-SECURITY-DEBT marker is observable in stderr and structured logs.
+Wire format (DAH-2084)
+----------------------
+The portal's ``/auth/login-flexible`` endpoint authenticates the *signed
+message itself* as a freshness proof: the ``message`` field MUST be the
+current Unix timestamp as a decimal string, and the portal
+(``AuthService._verify_login_signature``) does ``int(message)`` and rejects
+anything outside ``LOGIN_SIGNATURE_MAX_AGE``, also burning a Redis nonce so a
+captured body cannot be replayed.
+
+Earlier revisions of this module signed a JSON blob
+(``{"miner_hotkey": ..., "timestamp": ...}``); that no longer parses as an
+int and is rejected by the hardened portal. ``build_login_payload`` now signs
+the bare timestamp string so the SDK stays interoperable with the fix.
 """
 
 from __future__ import annotations
 
-import json
-import logging
-import threading
 import time
 from typing import Any, Protocol, runtime_checkable
-
-logger = logging.getLogger("lium.provider.auth")
-
-# Module-level once-flag for the SECURITY-DEBT warning. Per-process, not per
-# call -- a follow-up issue tracks tuning the cadence.
-_REPLAY_DEBT_WARNED = False
-_REPLAY_DEBT_LOCK = threading.Lock()
-
-REPLAY_DEBT_MESSAGE = (
-    "[PORTAL_LOGIN_REPLAY_DEBT] portal /auth/login-flexible does not enforce "
-    "AUTH_MESSAGE_MAX_AGE; captured login bodies replay until the JWT expires. "
-    "Tracked as SECURITY-DEBT; see "
-    "https://github.com/Datura-ai/lium-miner-portal (NEEDS-PORTAL-CHANGE)."
-)
 
 
 @runtime_checkable
@@ -88,23 +76,6 @@ class LocalKeypairSigner:
         return self._kp.sign(message)
 
 
-def _build_blob(timestamp: int, hotkey_ss58: str) -> bytes:
-    """Compute ``AuthenticationPayload(...).blob_for_signing()`` exactly.
-
-    Mirrors the canonical serialisation used throughout lium-io:
-
-        json.dumps({"miner_hotkey": ..., "timestamp": ...}, sort_keys=True)
-
-    Bytes are UTF-8 encoded. The function is its own canonical form so unit
-    tests can assert against a known fixture.
-    """
-    payload: dict[str, Any] = {
-        "miner_hotkey": hotkey_ss58,
-        "timestamp": int(timestamp),
-    }
-    return json.dumps(payload, sort_keys=True).encode("utf-8")
-
-
 def build_login_payload(
     signer: Signer,
     *,
@@ -118,15 +89,15 @@ def build_login_payload(
         hotkey_ss58: hotkey to authenticate as. If ``None``, ``signer.ss58_address``
             is used. The two MUST agree if both supplied (defensive check).
         timestamp: explicit unix timestamp. ``None`` uses ``time.time()``.
+            Callers should leave this ``None`` outside of tests -- the portal
+            rejects stale timestamps (DAH-2084).
 
     Returns:
-        Dict with the three string fields the portal expects. ``signature``
-        is hex *without* the ``0x`` prefix; the portal adds the prefix
-        before calling ``verify_miner_signature`` (verified at
-        ``lium-miner-portal/src/services/auth_service.py``).
-
-    Side effect:
-        Emits ``REPLAY_DEBT_MESSAGE`` once per process via ``logger.warning``.
+        Dict with the three string fields the portal expects. ``message`` is
+        the current Unix timestamp as a decimal string -- the portal does
+        ``int(message)`` and enforces a freshness window. ``signature`` is hex
+        *without* the ``0x`` prefix; the portal adds the prefix before calling
+        ``verify_miner_signature``.
     """
     hotkey = hotkey_ss58 or signer.ss58_address
     if hotkey_ss58 is not None and hotkey_ss58 != signer.ss58_address:
@@ -136,45 +107,19 @@ def build_login_payload(
             f"hotkey mismatch: signer={signer.ss58_address!r} payload={hotkey_ss58!r}"
         )
     ts = int(timestamp) if timestamp is not None else int(time.time())
-    blob = _build_blob(ts, hotkey)
-    raw_sig = signer.sign(blob)
+    message = str(ts)
+    raw_sig = signer.sign(message.encode("utf-8"))
     if not isinstance(raw_sig, (bytes, bytearray)):
         raise TypeError(f"signer.sign must return bytes, got {type(raw_sig).__name__}")
-    _emit_replay_debt_warning_once()
     return {
         "miner_hotkey": hotkey,
-        "message": blob.decode("utf-8"),
+        "message": message,
         "signature": bytes(raw_sig).hex(),
     }
 
 
-def _emit_replay_debt_warning_once() -> None:
-    """Log the SECURITY-DEBT marker once per process.
-
-    Idempotent and thread-safe. ``ProviderClient`` consumers can suppress the
-    log by reconfiguring the ``lium.provider.auth`` logger.
-    """
-    global _REPLAY_DEBT_WARNED
-    if _REPLAY_DEBT_WARNED:
-        return
-    with _REPLAY_DEBT_LOCK:
-        if _REPLAY_DEBT_WARNED:
-            return
-        _REPLAY_DEBT_WARNED = True
-    logger.warning(REPLAY_DEBT_MESSAGE)
-
-
-def reset_replay_debt_warned() -> None:
-    """Test helper: reset the once-flag so warning re-emits."""
-    global _REPLAY_DEBT_WARNED
-    with _REPLAY_DEBT_LOCK:
-        _REPLAY_DEBT_WARNED = False
-
-
 __all__ = [
-    "REPLAY_DEBT_MESSAGE",
     "LocalKeypairSigner",
     "Signer",
     "build_login_payload",
-    "reset_replay_debt_warned",
 ]
