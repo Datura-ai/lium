@@ -16,6 +16,7 @@ class GetExecutorsAction:
         lat = ctx.get("lat")
         lon = ctx.get("lon")
         max_distance = ctx.get("max_distance")
+        min_cuda_version = ctx.get("min_cuda_version")
 
         try:
             executors = lium.ls(
@@ -24,6 +25,7 @@ class GetExecutorsAction:
                 lat=lat,
                 lon=lon,
                 max_distance_miles=max_distance,
+                min_cuda_version=min_cuda_version,
             )
             return ActionResult(
                 ok=True,

@@ -37,6 +37,7 @@ def ls_store_executor(gpu_type: Optional[str] = None, sort_by: str = "download")
 @click.command("ls")
 @click.option("--gpu", "gpu_type", shell_complete=get_gpu_completions, help="Filter by GPU type, e.g. A100")
 @click.option("--count", "gpu_count", type=int, help="Exact GPU count to match (e.g., 1, 8)")
+@click.option("--min-cuda", "min_cuda_version", type=float, help="Minimum CUDA version, e.g. 12.4 (NVIDIA drivers are backward compatible)")
 @click.option("--lat", type=float, help="Latitude for distance filtering")
 @click.option("--lon", type=float, help="Longitude for distance filtering")
 @click.option("--max-distance", "max_distance", type=int, help="Maximum distance in miles from --lat/--lon")
@@ -64,11 +65,12 @@ def ls_command(
     sort_by: str,
     limit: Optional[int],
     output_format: str,
+    min_cuda_version: Optional[float],
 ):
     """List available GPU executors."""
 
     # Validate
-    _, error = validation.validate(sort_by, limit, lat, lon, max_distance)
+    _, error = validation.validate(sort_by, limit, lat, lon, max_distance, min_cuda_version)
     if error:
         ui.error(error)
         return
@@ -82,6 +84,7 @@ def ls_command(
         "lat": lat,
         "lon": lon,
         "max_distance": max_distance,
+        "min_cuda_version": min_cuda_version,
     }
 
     action = GetExecutorsAction()

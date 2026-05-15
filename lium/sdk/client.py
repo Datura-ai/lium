@@ -162,6 +162,7 @@ class Lium:
             available_port_count=specs.get("available_port_count"),
             effective_upload_speed_mbps=executor_dict.get("effective_upload_speed_mbps"),
             effective_download_speed_mbps=executor_dict.get("effective_download_speed_mbps"),
+            max_cuda_version=executor_dict.get("max_cuda_version"),
         )
 
     def list_ssh_keys(self) -> List[SSHKey]:
@@ -417,6 +418,7 @@ class Lium:
         lat: Optional[float] = None,
         lon: Optional[float] = None,
         max_distance_miles: Optional[int] = None,
+        min_cuda_version: Optional[float] = None,
     ) -> List[ExecutorInfo]:
         """List available executors.
 
@@ -426,6 +428,9 @@ class Lium:
             lat: Optional latitude for geospatial filtering. Must be used together with ``lon`` and ``max_distance_miles``.
             lon: Optional longitude for geospatial filtering. Must be used together with ``lat`` and ``max_distance_miles``.
             max_distance_miles: Optional radius (in miles) for geospatial filtering. Must be used together with ``lat`` and ``lon``.
+            min_cuda_version: Optional minimum CUDA version to require (e.g. ``12.4``). Executors whose
+                ``max_cuda_version`` is ``None`` or below this threshold are excluded. NVIDIA drivers are
+                backward compatible, so an executor with a higher driver CUDA version satisfies the requirement.
 
         Returns:
             A list of :class:`ExecutorInfo` objects that satisfy the filters.
@@ -453,6 +458,12 @@ class Lium:
         data = self._request("GET", "/executors", params=params).json()
         executors = [self._dict_to_executor_info(d) for d in data]
         executors = [e for e in executors if e]  # Filter None values
+
+        if min_cuda_version is not None:
+            executors = [
+                e for e in executors
+                if e.max_cuda_version is not None and e.max_cuda_version >= min_cuda_version
+            ]
 
         return executors
 
