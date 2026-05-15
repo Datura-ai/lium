@@ -22,6 +22,7 @@ class ExecutorInfo:
     available_port_count: Optional[int] = None
     effective_upload_speed_mbps: Optional[float] = None
     effective_download_speed_mbps: Optional[float] = None
+    max_cuda_version: Optional[float] = None
 
     @property
     def driver_version(self) -> str:

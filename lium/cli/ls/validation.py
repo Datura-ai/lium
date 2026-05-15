@@ -7,6 +7,7 @@ def validate(
     lat: float | None,
     lon: float | None,
     max_distance: int | None,
+    min_cuda_version: float | None = None,
 ) -> tuple[bool, str | None]:
     """Validate ls command options, returns (is_valid, error_message)."""
 
@@ -27,5 +28,8 @@ def validate(
 
     if max_distance is not None and (lat is None or lon is None):
         return False, "--max-distance requires --lat and --lon"
+
+    if min_cuda_version is not None and min_cuda_version <= 0:
+        return False, "--min-cuda must be positive"
 
     return True, None
