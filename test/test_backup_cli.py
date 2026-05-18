@@ -4,6 +4,7 @@ from click.testing import CliRunner
 
 from lium.cli.bk.now import command as now_command
 from lium.cli.bk.logs import command as logs_command
+from lium.cli.bk.restore_logs import command as restore_logs_command
 from lium.cli.bk.restore import command as restore_command
 from lium.cli.bk.rm import command as rm_command
 from lium.cli.bk.set import command as set_command
@@ -158,6 +159,39 @@ def test_bk_restore_prints_success(monkeypatch):
 
     assert result.exit_code == 0
     assert "Restore started for backup-test at /root/restore" in result.output
+
+
+def test_bk_restore_logs_by_id_prints_status_progress_path_and_error(monkeypatch):
+    restore_log = SimpleNamespace(
+        id="9b6c8d90-1111-4222-9333-48b031f1f3eb",
+        backup_id="8fbb30f6-6026-4043-98c7-c4189dc09bef",
+        status="FAILED",
+        progress=30,
+        restore_path="/root/restore",
+        created_at="2026-05-14T12:00:00Z",
+        completed_at=None,
+        error_message="Restore failed",
+    )
+
+    class FakeLium:
+        def ps(self):
+            return [_pod()]
+
+        def restore_logs(self, pod):
+            assert pod.id == "pod-123"
+            return [restore_log]
+
+    _patch_backup_command(monkeypatch, restore_logs_command, FakeLium)
+
+    result = CliRunner().invoke(cli, ["bk", "restore-logs", "--id", "9b6c8d90"])
+
+    assert result.exit_code == 0
+    assert "Pod: backup-test" in result.output
+    assert "Status: FAILED" in result.output
+    assert "Progress: 30%" in result.output
+    assert "Restore Path: /root/restore" in result.output
+    assert "Backup ID: 8fbb30f6-6026-4043-98c7-c4189dc09bef" in result.output
+    assert "Error: Restore failed" in result.output
 
 
 def test_bk_show_warns_when_config_missing(monkeypatch):

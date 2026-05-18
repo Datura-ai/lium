@@ -31,6 +31,7 @@ from .models import (
     NowPaymentsCurrency,
     NowPaymentsInvoice,
     PodInfo,
+    RestoreLog,
     SSHKey,
     Template,
     VolumeInfo,
@@ -103,6 +104,23 @@ class Lium:
             progress=log_dict.get("progress"),
             backup_volume_id=log_dict.get("backup_volume_id"),
             created_at=log_dict.get("created_at")
+        )
+
+    def _dict_to_restore_log(self, log_dict: Dict) -> RestoreLog:
+        """Convert restore log dict to RestoreLog object."""
+        return RestoreLog(
+            id=log_dict.get("id", ""),
+            huid=generate_huid(log_dict.get("id", "")),
+            backup_id=log_dict.get("backup_id", ""),
+            pod_id=log_dict.get("pod_id", ""),
+            status=log_dict.get("status", "unknown"),
+            progress=log_dict.get("progress", 0),
+            started_at=log_dict.get("started_at"),
+            completed_at=log_dict.get("completed_at"),
+            error_message=log_dict.get("error_message"),
+            logs=log_dict.get("logs"),
+            restore_path=log_dict.get("restore_path"),
+            created_at=log_dict.get("created_at", ""),
         )
 
     def _dict_to_volume_info(self, volume_dict: Dict) -> VolumeInfo:
@@ -1421,6 +1439,27 @@ class Lium:
         }
         
         return self._request("POST", f"/pods/{pod.id}/restore", json=payload).json()
+
+    def restore_logs(self, pod: PodInfo) -> List[RestoreLog]:
+        """Get recent restore logs for a pod.
+
+        Args:
+            pod: Pod to inspect.
+
+        Returns:
+            List of :class:`RestoreLog` entries (possibly empty).
+        """
+        try:
+            response = self._request("GET", f"/pods/{pod.id}/restore-logs").json()
+
+            if isinstance(response, dict) and "items" in response:
+                logs = response["items"]
+            else:
+                logs = response if isinstance(response, list) else []
+
+            return [self._dict_to_restore_log(log) for log in logs]
+        except LiumNotFoundError:
+            return []
 
     def get_deployment_estimate(self, executor_id: str, template_id: str) -> dict:
         """Estimate deployment time for a template on an executor.

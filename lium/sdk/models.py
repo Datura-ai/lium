@@ -120,6 +120,23 @@ class BackupLog:
 
 
 @dataclass
+class RestoreLog:
+    """Restore log information."""
+    id: str
+    huid: str
+    backup_id: str
+    pod_id: str
+    status: str
+    progress: float
+    created_at: str
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    error_message: Optional[str] = None
+    logs: Optional[List[str]] = None
+    restore_path: Optional[str] = None
+
+
+@dataclass
 class SSHKey:
     """Public SSH key registered for the current user."""
     id: str
@@ -175,6 +192,7 @@ __all__ = [
     "Template",
     "BackupConfig",
     "BackupLog",
+    "RestoreLog",
     "VolumeInfo",
     "SSHKey",
     "NowPaymentsCurrency",
