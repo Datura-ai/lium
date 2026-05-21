@@ -33,7 +33,7 @@ pip install lium.io
 ### Binary install (macOS amd64/arm64 / Linux amd64/arm64)
 
 ```bash
-curl -fsSL https://github.com/Datura-ai/lium-cli/releases/latest/download/install.sh | bash
+curl -fsSL https://lium.io/install.sh | bash
 ```
 
 Fresh binary installs place a managed symlink at `~/.lium/bin/lium` that points to a

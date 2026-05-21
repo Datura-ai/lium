@@ -1,15 +1,9 @@
-Lium SDK Documentation
-======================
+lium.io SDK Documentation Has Moved
+===================================
 
-Welcome to the developer documentation for the `lium` Python package. The SDK
-provides a clean, Unix-inspired interface for provisioning GPU pods, managing
-volumes, and executing remote workloads. These docs are generated directly from
-the source tree using Sphinx + autodoc so that Read the Docs can stay in sync
-with each release.
+The lium.io SDK documentation has moved to the main Lium documentation site:
 
-.. toctree::
-   :maxdepth: 2
+- SDK docs: https://docs.lium.io/developers/sdk
+- SDK reference: https://docs.lium.io/developers/sdk/reference
 
-   getting-started
-   binary-builds
-   api
+Please use the new docs site for the current installation guide, examples, and SDK reference.

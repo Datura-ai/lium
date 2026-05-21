@@ -36,7 +36,15 @@ autodoc_typehints = "description"
 autodoc_mock_imports = ["paramiko", "requests", "dotenv"]
 
 templates_path = ["_templates"]
-exclude_patterns: list[str] = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns: list[str] = [
+    "_build",
+    "Thumbs.db",
+    ".DS_Store",
+    "api.rst",
+    "api/*",
+    "binary-builds.rst",
+    "getting-started.rst",
+]
 
 html_theme = "sphinx_rtd_theme"
 html_theme_options = {
