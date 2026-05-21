@@ -15,7 +15,7 @@
   <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
   <a href="https://docs.lium.io/category/cli">CLI Docs</a>
   <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
-  <a href="https://lium-docs.readthedocs.io/en/latest/index.html">SDK Docs</a>
+  <a href="https://docs.lium.io/developers/sdk">SDK Docs</a>
   <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
   <a href="https://discord.gg/lium">Discord</a>
 </div>
@@ -33,7 +33,7 @@ pip install lium.io
 ### Binary install (macOS amd64/arm64 / Linux amd64/arm64)
 
 ```bash
-curl -fsSL https://github.com/Datura-ai/lium-cli/releases/latest/download/install.sh | bash
+curl -fsSL https://lium.io/install.sh | bash
 ```
 
 Fresh binary installs place a managed symlink at `~/.lium/bin/lium` that points to a
@@ -103,12 +103,12 @@ print(lium.exec(ready, command="nvidia-smi")["stdout"])
 lium.down(ready)
 ```
 
-Full API reference: https://lium-docs.readthedocs.io/en/latest/index.html
+Full API reference: https://docs.lium.io/developers/sdk/reference
 
 ## Documentation
 
 - **CLI docs:** https://docs.lium.io/category/cli
-- **SDK docs:** https://lium-docs.readthedocs.io/en/latest/index.html
+- **SDK docs:** https://docs.lium.io/developers/sdk
 
 ## Binary Releases
 
@@ -356,16 +356,6 @@ cd lium
 pip install -e .
 ```
 
-### Building the SDK docs
-
-The SDK and decorator API ship with Sphinx-powered docs that are ready for Read the Docs. Build them locally with:
-
-```bash
-pip install -e .[docs]
-sphinx-build -b html docs docs/_build/html
-```
-
-The generated HTML lives in `docs/_build/html`. Publishing to Read the Docs only requires connecting this repository; the `.readthedocs.yaml` file points RTD at `docs/conf.py`.
 
 ## License
 
