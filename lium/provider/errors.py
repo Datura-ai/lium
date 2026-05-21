@@ -19,11 +19,6 @@ Each error code is exported as a string constant so callers can do::
     from lium.provider.errors import HOTKEY_NOT_REGISTERED
     if err.code == HOTKEY_NOT_REGISTERED:
         ...
-
-PORTAL_LOGIN_REPLAY_DEBT is a *warning* code, not an error: emitted to stderr
-and surfaced under ``warnings[]`` in ``lium provider status --json`` until the
-portal enforces ``AUTH_MESSAGE_MAX_AGE`` on ``/auth/login-flexible``
-(NEEDS-PORTAL-CHANGE filed).
 """
 
 from __future__ import annotations
@@ -57,9 +52,6 @@ PORTS_INVALID = "PORTS_INVALID"
 ARG_INVALID = "ARG_INVALID"
 CONFIG_MISSING = "CONFIG_MISSING"
 
-# Warnings (not raised; surfaced as info)
-PORTAL_LOGIN_REPLAY_DEBT = "PORTAL_LOGIN_REPLAY_DEBT"
-
 # Default hint table -- keep human and short. Empty string => no hint.
 _HINTS: dict[str, str] = {
     WALLET_NOT_FOUND: "Run `btcli wallet new_coldkey` then `btcli wallet new_hotkey`, or check --coldkey/--hotkey names.",
@@ -79,8 +71,6 @@ _HINTS: dict[str, str] = {
     PORTS_INVALID: "Use the form HTTP=8080,SSH=2200,RANGE=2000-2005 with positive integers.",
     ARG_INVALID: "Check the argument value and consult --help.",
     CONFIG_MISSING: "Run `lium init` or set the missing config value.",
-    PORTAL_LOGIN_REPLAY_DEBT: "Portal /auth/login-flexible does not enforce AUTH_MESSAGE_MAX_AGE; "
-    "captured login bodies replay until the JWT expires. Tracked as SECURITY-DEBT.",
 }
 
 
@@ -181,7 +171,6 @@ __all__ = [
     "PORTAL_AUTH_INVALID",
     "PORTAL_AUTH_REFRESH_RACE",
     "PORTAL_CONTRACT_DRIFT",
-    "PORTAL_LOGIN_REPLAY_DEBT",
     "PORTAL_NOT_FOUND",
     "PORTAL_RATE_LIMIT",
     "PORTAL_SERVER_ERROR",

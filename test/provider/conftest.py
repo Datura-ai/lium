@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from lium.provider.auth import LocalKeypairSigner, reset_replay_debt_warned
+from lium.provider.auth import LocalKeypairSigner
 from lium.provider.token_store import TokenStore
 
 
@@ -44,14 +43,6 @@ def fake_signer(fake_keypair: FakeKeypair) -> LocalKeypairSigner:
 def tmp_token_store(tmp_path: Path) -> TokenStore:
     """A TokenStore rooted in a tmp dir so tests don't touch ~/.lium."""
     return TokenStore(path=tmp_path / "provider-portal-token.json")
-
-
-@pytest.fixture(autouse=True)
-def _reset_replay_debt_flag() -> Any:
-    """Reset the once-per-process replay-debt flag between tests."""
-    reset_replay_debt_warned()
-    yield
-    reset_replay_debt_warned()
 
 
 @pytest.fixture(autouse=True)

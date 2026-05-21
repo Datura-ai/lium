@@ -117,8 +117,9 @@ def test_login_posts_login_flexible_with_correct_payload(
     assert path == "/auth/login-flexible"
     assert auth is False  # login is unauthenticated
     assert set(body.keys()) == {"miner_hotkey", "message", "signature"}
-    decoded = json.loads(body["message"])
-    assert decoded["miner_hotkey"] == fake_signer.ss58_address
+    assert body["miner_hotkey"] == fake_signer.ss58_address
+    # DAH-2084: message is the bare Unix timestamp string the portal validates.
+    assert int(body["message"]) > 0
     # Signature is hex without the 0x prefix
     assert not body["signature"].startswith("0x")
 
