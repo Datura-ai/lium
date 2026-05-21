@@ -118,6 +118,7 @@ download() {
 verify_checksum() {
     local asset_name="$1"
     local install_root="$2"
+    local checksum_line
 
     if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
         echo "Warning: sha256sum/shasum not available; skipping checksum verification." >&2
@@ -126,10 +127,16 @@ verify_checksum() {
 
     (
         cd "$install_root"
+        checksum_line="$(grep " ${asset_name}\$" checksums.txt || true)"
+        if [[ -z "$checksum_line" ]]; then
+            echo "Error: checksum for ${asset_name} was not found in checksums.txt." >&2
+            exit 1
+        fi
+
         if command -v sha256sum >/dev/null 2>&1; then
-            grep " ${asset_name}\$" checksums.txt | sha256sum --check --status
+            printf '%s\n' "$checksum_line" | sha256sum --check --status -
         else
-            grep " ${asset_name}\$" checksums.txt | shasum -a 256 --check --status
+            printf '%s\n' "$checksum_line" | shasum -a 256 --check --status -
         fi
     )
 }
