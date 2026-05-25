@@ -30,7 +30,7 @@ def ssh_keys_list_command():
 
     if not keys:
         ui.info("No SSH keys registered yet.")
-        ui.dim("Tip: lium up <executor>  # auto-registers your local key")
+        ui.dim("Tip: lium up <node>  # auto-registers your local key")
         return
 
     table, header = build_ssh_keys_table(keys)

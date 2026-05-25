@@ -586,7 +586,7 @@ def resolve_executor_indices(indices: List[str]) -> Tuple[List[str], Optional[st
     
     executors = last_selection.get('executors', [])
     if not executors:
-        return [], "No executors in last selection."
+        return [], "No nodes in last selection."
     
     resolved_ids = []
     failed_resolutions = []

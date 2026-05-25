@@ -300,7 +300,7 @@ class Lium:
         """
         executor_info = self.get_executor(executor_id)
         if not executor_info:
-            raise ValueError(f"Executor with ID '{executor_id}' not found")
+            raise ValueError(f"Node with ID '{executor_id}' not found")
 
         if template_id is None:
             selected_template = self.default_docker_template(executor_info.id)
@@ -611,7 +611,7 @@ class Lium:
         """
         executor = self.get_executor(executor_id)
         if not executor:
-            raise ValueError(f"No executor found with id {executor_id}")
+            raise ValueError(f"No node found with id {executor_id}")
 
         default_images = self.get_default_images(executor.gpu_model, executor.driver_version)
 
@@ -630,7 +630,7 @@ class Lium:
         if fallback:
             return fallback
 
-        raise ValueError("No templates available to use for executor")
+        raise ValueError("No templates available to use for node")
 
 
     def templates(self, filter: Optional[str] = None, only_my: bool = False) -> List[Template]:

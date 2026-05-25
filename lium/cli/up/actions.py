@@ -26,19 +26,19 @@ class ResolveExecutorAction:
                 if executor_id.isdigit():
                     resolved_ids, error = resolve_executor_indices([executor_id])
                     if error or not resolved_ids:
-                        return ActionResult(ok=False, data={}, error=error or "Failed to resolve executor index")
+                        return ActionResult(ok=False, data={}, error=error or "Failed to resolve node index")
                     executor_id = resolved_ids[0]
 
                 executor = lium.get_executor(executor_id)
                 if not executor:
-                    return ActionResult(ok=False, data={}, error=f"Executor '{executor_id}' not found")
+                    return ActionResult(ok=False, data={}, error=f"Node '{executor_id}' not found")
 
                 if ports and (not executor.available_port_count or executor.available_port_count < ports):
                     available = executor.available_port_count or 0
                     return ActionResult(
                         ok=False,
                         data={},
-                        error=f"Executor {executor.huid} has insufficient ports (available: {available}, required: {ports})"
+                        error=f"Node {executor.huid} has insufficient ports (available: {available}, required: {ports})"
                     )
             else:
                 executors = lium.ls(gpu_type=gpu)
@@ -67,7 +67,7 @@ class ResolveExecutorAction:
                     if ports:
                         filters.append(f"min ports={ports}")
                     filter_desc = ', '.join(filters) if filters else "specified filters"
-                    return ActionResult(ok=False, data={}, error=f"No executors available with {filter_desc}")
+                    return ActionResult(ok=False, data={}, error=f"No nodes available with {filter_desc}")
 
                 from lium.cli.ls.command import ls_store_executor
                 ls_store_executor(gpu_type=gpu)

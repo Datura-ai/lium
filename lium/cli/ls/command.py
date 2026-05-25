@@ -13,7 +13,7 @@ from .actions import GetExecutorsAction
 
 
 def ls_store_executor(gpu_type: Optional[str] = None, sort_by: str = "download") -> List[ExecutorInfo]:
-    """Load and store executors without displaying them."""
+    """Load and store nodes without displaying them."""
     lium = Lium()
     executors = lium.ls(gpu_type=gpu_type)
 
@@ -67,7 +67,7 @@ def ls_command(
     output_format: str,
     min_cuda_version: Optional[float],
 ):
-    """List available GPU executors."""
+    """List available GPU nodes."""
 
     # Validate
     _, error = validation.validate(sort_by, limit, lat, lon, max_distance, min_cuda_version)
@@ -91,7 +91,7 @@ def ls_command(
     if output_format == "json":
         result = action.execute(ctx)
     else:
-        result = ui.load("Loading executors", lambda: action.execute(ctx))
+        result = ui.load("Loading nodes", lambda: action.execute(ctx))
 
     if not result.ok:
         ui.error(result.error)

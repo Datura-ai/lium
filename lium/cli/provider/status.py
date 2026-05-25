@@ -26,7 +26,7 @@ from lium.provider.errors import ARG_INVALID, ProviderError
 @with_provider_overrides
 @click.pass_context
 def status_command(ctx: click.Context, netuid: int) -> None:
-    """Show a snapshot of registration, portal session, and executor count."""
+    """Show a snapshot of registration, portal session, and node count."""
     opts = (ctx.obj or {}).get("provider_opts") or {}
     if not opts.get("hotkey"):
         ctx.exit(

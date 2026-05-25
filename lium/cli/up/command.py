@@ -20,14 +20,14 @@ from .actions import (
 
 
 @click.command("up")
-@click.argument("executor_id", required=False)
+@click.argument("executor_id", required=False, metavar="NODE_ID")
 @click.option("--name", "-n", help="Custom pod name")
 @click.option("--template_id", "-t", help="Template ID")
 @click.option("--volume", "-v", help="Volume spec: 'id:<HUID>' or 'new:name=<NAME>[,desc=<DESC>]'")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
-@click.option("--gpu", help="Filter executors by GPU type (e.g., H200, A6000)", shell_complete=get_gpu_completions)
+@click.option("--gpu", help="Filter nodes by GPU type (e.g., H200, A6000)", shell_complete=get_gpu_completions)
 @click.option("--count", "-c", type=int, help="Number of GPUs per pod")
-@click.option("--country", help="Filter executors by ISO country code (e.g., US, FR)")
+@click.option("--country", help="Filter nodes by ISO country code (e.g., US, FR)")
 @click.option("--ports", "-p", type=int, help="Minimum number of available ports required")
 @click.option("--ttl", help="Auto-terminate after duration (e.g., 6h, 45m, 2d)")
 @click.option("--until", help="Auto-terminate at time in local timezone (e.g., 'today 23:00', 'tomorrow 01:00', '2025-10-20 15:30')")
@@ -60,17 +60,17 @@ def up_command(
     ssh_name: Optional[str],
 ):
     """\b
-    Create a new GPU pod on an executor.
+    Create a new GPU pod on a node.
     \b
-    EXECUTOR_ID: Executor UUID, HUID, or index from last 'lium ls'.
-    If not provided, uses filters to auto-select best executor.
+    NODE_ID: Node UUID, HUID, or index from last 'lium ls'.
+    If not provided, uses filters to auto-select best node.
     \b
     Examples:
-      lium up cosmic-hawk-f2                # Create pod on specific executor
-      lium up 1                             # Create pod on executor #1 from last ls
-      lium up --gpu H200                    # Auto-select best H200 executor
-      lium up --gpu A6000 -c 2              # Auto-select best 2×A6000 executor
-      lium up --country US                  # Auto-select best executor in US
+      lium up cosmic-hawk-f2                # Create pod on specific node
+      lium up 1                             # Create pod on node #1 from last ls
+      lium up --gpu H200                    # Auto-select best H200 node
+      lium up --gpu A6000 -c 2              # Auto-select best 2×A6000 node
+      lium up --country US                  # Auto-select best node in US
       lium up --gpu H200 --country FR       # Combine multiple filters
       lium up --ports 5                     # Auto-select with minimum 5 ports
       lium up 1 --name my-pod               # Create with custom name

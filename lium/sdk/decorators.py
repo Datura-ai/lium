@@ -49,7 +49,7 @@ def machine(
                         break
 
                 if not matching_executor:
-                    raise LiumError(f"No executor found matching machine type: {machine}")
+                    raise LiumError(f"No node found matching machine type: {machine}")
 
                 # Step 2: Create pod
                 pod_name = f"remote-{func.__name__}-{int(time.time())}"

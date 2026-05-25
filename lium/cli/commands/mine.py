@@ -82,15 +82,15 @@ def _exists(cmd: str) -> bool:
 
 
 def _show_setup_summary():
-    table = Table(title="Executor Setup Plan", show_header=False, box=box.SIMPLE_HEAVY)
+    table = Table(title="Node Setup Plan", show_header=False, box=box.SIMPLE_HEAVY)
     table.add_column("Step", style="cyan", no_wrap=True)
     table.add_column("What happens")
     table.add_row("1", "Clone or update compute-subnet repo")
-    table.add_row("2", "Install executor dependencies")
+    table.add_row("2", "Install node dependencies")
     table.add_row("3", "Prerequisite check (Docker, NVIDIA GPU)")
-    table.add_row("4", "Configure executor .env (ports, hotkey)")
-    table.add_row("5", "Start executor with docker compose")
-    table.add_row("6", "Validate executor configuration")
+    table.add_row("4", "Configure node .env (ports, hotkey)")
+    table.add_row("5", "Start node with docker compose")
+    table.add_row("6", "Validate node configuration")
     console.print(table)
     console.print()
 
@@ -246,7 +246,7 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180):
             if health_status == "healthy":
                 return
         time.sleep(3)
-    raise Exception(f"Executor health check timed out after {wait_secs}s")
+    raise Exception(f"Node health check timed out after {wait_secs}s")
 
 def _apply_env_overrides(
     executor_dir: Path,
@@ -290,9 +290,9 @@ def _gather_inputs(
         ))
     else:
         # Show informative header about port configuration
-        console.print("\n[bold]We're setting up how your executor can be reached.[/bold]\n")
-        console.print("• [cyan]Service port[/cyan] → where the executor's HTTP API listens (default 8080).")
-        console.print("• [cyan]Executor SSH port[/cyan] → used by validators to SSH into the container (default 2200).")
+        console.print("\n[bold]We're setting up how your node can be reached.[/bold]\n")
+        console.print("• [cyan]Service port[/cyan] → where the node's HTTP API listens (default 8080).")
+        console.print("• [cyan]Node SSH port[/cyan] → used by validators to SSH into the container (default 2200).")
         console.print("• [cyan]Public SSH port[/cyan] → only if your server is behind NAT and you forward a different public port.")
         console.print("• [cyan]Renting port range[/cyan] → optional, used only if your firewall limits outbound ports.\n")
         
@@ -312,10 +312,10 @@ def _gather_inputs(
                 console.warning("Port must be an integer between 1 and 65535.")
         
         # Service ports
-        service_port = ask_port("Service port (where the executor API will be reachable)", 8080)
+        service_port = ask_port("Service port (where the node API will be reachable)", 8080)
         answers["internal_port"] = service_port
         answers["external_port"] = service_port  # Set external same as internal
-        answers["ssh_port"] = ask_port("Executor SSH port (used by validator to SSH into the container)", 2200)
+        answers["ssh_port"] = ask_port("Node SSH port (used by validator to SSH into the container)", 2200)
         
         # Optional ports
         ssh_public = Prompt.ask("Public SSH port (optional, only if behind NAT and forwarding a different port)", default="")
@@ -372,7 +372,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose):
         with timed_step_status(1, TOTAL_STEPS, "Ensuring repository"):
             _clone_or_update_repo(target_dir, branch)
 
-        with timed_step_status(2, TOTAL_STEPS, "Installing executor tools"):
+        with timed_step_status(2, TOTAL_STEPS, "Installing node tools"):
             _install_executor_tools(target_dir)
 
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
@@ -381,7 +381,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose):
         with timed_step_status(4, TOTAL_STEPS, "Configuring environment"):
             executor_dir = target_dir / "neurons" / "executor"
             if not executor_dir.exists():
-                raise Exception(f"Executor directory not found at {executor_dir}")
+                raise Exception(f"Node directory not found at {executor_dir}")
 
             _setup_executor_env(
                 str(executor_dir),
@@ -397,10 +397,10 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose):
                 rng=answers["port_range"],
             )
 
-        with timed_step_status(5, TOTAL_STEPS, "Starting executor"):
+        with timed_step_status(5, TOTAL_STEPS, "Starting node"):
             _start_executor(executor_dir)
 
-        with timed_step_status(6, TOTAL_STEPS, "Validating executor"):
+        with timed_step_status(6, TOTAL_STEPS, "Validating node"):
             # Pass any extra arguments to the validator
             _validate_executor(ctx.args if ctx.args else None)
 
@@ -415,7 +415,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose):
     # Get the external port from answers
     external_port = answers.get("external_port", "8080")
     
-    console.success("\n✨ Executor setup complete!")
+    console.success("\n✨ Node setup complete!")
     console.print()
     
     details_table = Table(show_header=False, box=None)
@@ -427,7 +427,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose):
     details_table.add_row("📂 Directory", str(executor_dir))
     details_table.add_row("🔑 Hotkey", answers.get("hotkey", "Not set")[:20] + "..." if len(answers.get("hotkey", "")) > 20 else answers.get("hotkey", "Not set"))
     
-    console.print(Panel(details_table, title="[bold]Executor Details[/bold]", border_style="green"))
+    console.print(Panel(details_table, title="[bold]Node Details[/bold]", border_style="green"))
     
     # Generate URL for adding executor via web interface
     from urllib.parse import urlencode
@@ -444,5 +444,5 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose):
     # Build full URL with proper encoding
     add_url = f"https://provider.lium.io/executors?{urlencode(params)}"
     
-    console.print("\n[bold cyan]Add this executor via web interface:[/bold cyan]")
+    console.print("\n[bold cyan]Add this node via web interface:[/bold cyan]")
     console.print(f"[yellow]{add_url}[/yellow]\n")

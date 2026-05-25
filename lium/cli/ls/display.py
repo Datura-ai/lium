@@ -136,9 +136,9 @@ def _add_table_columns(t: Table) -> None:
 def format_header(executor_count: int, pareto_count: int, show_pareto: bool) -> str:
     """Format header text for executors list."""
     if show_pareto and pareto_count > 0:
-        return f"Executors  ({executor_count} shown, ★ {pareto_count} optimal)"
+        return f"Nodes  ({executor_count} shown, ★ {pareto_count} optimal)"
     else:
-        return f"Executors  ({executor_count} shown)"
+        return f"Nodes  ({executor_count} shown)"
 
 
 def format_tip() -> str:
