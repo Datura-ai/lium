@@ -161,31 +161,6 @@ class VolumeInfo:
     last_metrics_update: Optional[str] = None
 
 
-@dataclass
-class NowPaymentsCurrency:
-    """NowPayments currency information."""
-    code: str
-    name: str
-    logo_url: str
-    network: str
-
-
-@dataclass
-class NowPaymentsInvoice:
-    """NowPayments invoice payment instructions."""
-    invoice_url: str
-    invoice_id: str
-    transaction_id: str
-    target_address: str
-    target_currency: str
-    target_amount: float
-    payment_id: str
-    payment_status: str
-    payin_extra_id: Optional[str] = None
-    network: Optional[str] = None
-    expires_at: Optional[str] = None
-
-
 __all__ = [
     "ExecutorInfo",
     "PodInfo",
@@ -195,6 +170,4 @@ __all__ = [
     "RestoreLog",
     "VolumeInfo",
     "SSHKey",
-    "NowPaymentsCurrency",
-    "NowPaymentsInvoice",
 ]
