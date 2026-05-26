@@ -47,14 +47,14 @@ versioned binary under `~/.lium/versions/<version>/lium`.
 # First-time setup
 lium init
 
-# List available executors (GPU machines)
+# List available nodes (GPU machines)
 lium ls
 
-# Create a pod using executor index
-lium up 1  # Use executor #1 from previous ls
+# Create a pod using node index
+lium up 1  # Use node #1 from previous ls
 
 # Or create a pod using filters
-lium up --gpu A100  # Auto-select best A100 executor
+lium up --gpu A100  # Auto-select best A100 node
 
 # List your pods
 lium ps
@@ -96,8 +96,8 @@ Direct SDK usage follows the same pattern:
 from lium.sdk import Lium
 
 lium = Lium()
-executor = lium.ls(gpu_type="A100")[0]
-pod = lium.up(executor=executor.id, name="demo")
+node = lium.ls(gpu_type="A100")[0]
+pod = lium.up(executor_id=node.id, name="demo")
 ready = lium.wait_ready(pod, timeout=600)
 print(lium.exec(ready, command="nvidia-smi")["stdout"])
 lium.down(ready)
@@ -123,8 +123,8 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 ### Core Commands
 
 - `lium init` - Initialize configuration (API key, SSH keys)
-- `lium ls [GPU_TYPE]` - List available executors
-- `lium up [EXECUTOR_ID]` - Create a pod (use executor ID or filters like `--gpu`, `--count`, `--country`)
+- `lium ls [GPU_TYPE]` - List available nodes
+- `lium up [NODE_ID]` - Create a pod (use node ID or filters like `--gpu`, `--count`, `--country`)
 - `lium ps` - List active pods
 - `lium ssh <POD>` - SSH into a pod
 - `lium exec <POD> <COMMAND>` - Execute command on pod
@@ -191,7 +191,7 @@ Full reference with every flag and runnable examples: <https://docs.lium.io/deve
 ### Other Commands
 
 - `lium theme [THEME]` - Get or set UI theme (light/dark/auto)
-- `lium mine` - Set up a compute subnet executor/miner
+- `lium mine` - Set up a compute subnet node/miner
 - `sudo lium gpu-splitting setup [--device /dev/...] [--yes]` - Prepare Docker storage for LIUM GPU splitting
 - `lium gpu-splitting check [--device /dev/...]` - Inspect the host and print the GPU-splitting plan
 - `lium gpu-splitting verify` - Verify Docker storage matches LIUM GPU-splitting requirements
@@ -199,21 +199,21 @@ Full reference with every flag and runnable examples: <https://docs.lium.io/deve
 ### Command Examples
 
 ```bash
-# Filter executors by GPU type
+# Filter nodes by GPU type
 lium ls H100
 lium ls A100
 
-# Create pod with executor index
+# Create pod with node index
 lium up 1 --name my-pod --yes
 
-# Create pod with filters (auto-selects best executor)
+# Create pod with filters (auto-selects best node)
 lium up --gpu A100 --count 8 --name my-pod --yes
 lium up --gpu H200 --country US
 
 # Create pod with specific template
 lium up 1 --template_id <TEMPLATE_ID> --yes
 
-# Set up executor bootstrap flow
+# Set up node bootstrap flow
 lium mine --auto --hotkey <HOTKEY>
 
 # Provider-portal automation (same surface as the portal frontend)
@@ -312,8 +312,8 @@ lium fund -w mywal -a 0.5 -y       # Skip confirmation
 ## Features
 
 - **Dual Interface**: Same package ships both the `lium` CLI and a Python SDK (`lium.sdk.Lium` + `@lium.machine` decorator)
-- **Pareto Optimization**: `ls` command shows optimal executors with ★ indicator
-- **Flexible Pod Creation**: Use executor index or auto-select with filters (GPU type, count, country)
+- **Pareto Optimization**: `ls` command shows optimal nodes with ★ indicator
+- **Flexible Pod Creation**: Use node index or auto-select with filters (GPU type, count, country)
 - **Index Selection**: Use numbers from `ls` output in commands
 - **Full-Width Tables**: Clean, readable terminal output
 - **Cost Tracking**: See spending and hourly rates in `ps`
