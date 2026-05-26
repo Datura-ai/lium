@@ -134,6 +134,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium reboot <POD>` - Reboot a pod
 - `lium update <POD>` - Install Jupyter on a pod
 - `lium templates [SEARCH]` - List available Docker templates
+- `lium fund` - Fund account with TAO from Bittensor wallet
 
 ### Volume Commands
 
@@ -301,6 +302,11 @@ lium config edit
 lium theme          # Show current theme
 lium theme dark     # Set to dark theme
 lium theme auto     # Auto-detect based on system
+
+# Fund account with TAO
+lium fund                           # Interactive mode
+lium fund -w default -a 1.5        # Fund with specific wallet and amount
+lium fund -w mywal -a 0.5 -y       # Skip confirmation
 ```
 
 ## Features
