@@ -88,15 +88,15 @@ def compose_up(ctx, file: str, detach: bool):
         # Get available executors
         executors = lium.ls(gpu_type=gpu_type)
         if not executors:
-            click.echo(f"No executors available for {gpu_type}", err=True)
+            click.echo(f"No nodes available for {gpu_type}", err=True)
             continue
-        
+
         # Start pod
         executor = executors[0]
         pod = lium.up(
-            executor=executor.id,
+            executor_id=executor.id,
             name=model_name,
-            template=template_id,
+            template_id=template_id,
         )
         
         click.echo(f"✓ Started {model_name} on {executor.huid}")

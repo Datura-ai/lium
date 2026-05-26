@@ -442,7 +442,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose):
     }
     
     # Build full URL with proper encoding
-    add_url = f"https://provider.lium.io/executors?{urlencode(params)}"
+    add_url = f"https://provider.lium.io/nodes?{urlencode(params)}"
     
     console.print("\n[bold cyan]Add this node via web interface:[/bold cyan]")
     console.print(f"[yellow]{add_url}[/yellow]\n")

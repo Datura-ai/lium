@@ -49,8 +49,8 @@ Direct SDK usage follows the same pattern:
    from lium.sdk import Lium
 
    lium = Lium()
-   executor = lium.ls(gpu_type="A100")[0]
-   pod = lium.up(executor=executor.id, name="demo")
+   node = lium.ls(gpu_type="A100")[0]
+   pod = lium.up(executor_id=node.id, name="demo")
    ready = lium.wait_ready(pod, timeout=600)
    print(lium.exec(ready, command="nvidia-smi")["stdout"])
 

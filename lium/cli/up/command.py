@@ -121,7 +121,7 @@ def up_command(
 
     action = ResolveExecutorAction()
     result = ui.load(
-        "Finding executor",
+        "Finding node",
         lambda: action.execute({
             "lium": lium,
             "executor_id": executor_id,

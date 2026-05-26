@@ -282,12 +282,12 @@ class Lium:
         ssh_keys: Optional[List[str]] = None,
         ssh_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Start a new pod on a specific executor.
+        """Start a new pod on a specific node.
 
         Args:
-            executor_id: Target executor ID string.
+            executor_id: Target node ID string.
             name: Human-friendly pod name (defaults to ``"Your Pod"``).
-            template_id: Template ID. Defaults to the executor's default template.
+            template_id: Template ID. Defaults to the node's default template.
             volume_id: Optional volume ID to attach on spawn.
             ports: Number of exposed ports to request.
             ssh_keys: SSH public keys to authorize. Defaults to the keys discovered by the Config.
@@ -353,7 +353,7 @@ class Lium:
             pod_id: The unique identifier of the pod to retrieve.
 
         Returns:
-            Raw pod data dictionary including template, executor, status, and connection info.
+            Raw pod data dictionary including template, node, status, and connection info.
         """
         return self._request("GET", f"/pods/{pod_id}").json()
 
@@ -438,7 +438,7 @@ class Lium:
         max_distance_miles: Optional[int] = None,
         min_cuda_version: Optional[float] = None,
     ) -> List[ExecutorInfo]:
-        """List available executors.
+        """List available nodes.
 
         Args:
             gpu_type: Optional GPU filter such as ``"A100"`` or ``"H200"``.
@@ -446,9 +446,9 @@ class Lium:
             lat: Optional latitude for geospatial filtering. Must be used together with ``lon`` and ``max_distance_miles``.
             lon: Optional longitude for geospatial filtering. Must be used together with ``lat`` and ``max_distance_miles``.
             max_distance_miles: Optional radius (in miles) for geospatial filtering. Must be used together with ``lat`` and ``lon``.
-            min_cuda_version: Optional minimum CUDA version to require (e.g. ``12.4``). Executors whose
+            min_cuda_version: Optional minimum CUDA version to require (e.g. ``12.4``). Nodes whose
                 ``max_cuda_version`` is ``None`` or below this threshold are excluded. NVIDIA drivers are
-                backward compatible, so an executor with a higher driver CUDA version satisfies the requirement.
+                backward compatible, so a node with a higher driver CUDA version satisfies the requirement.
 
         Returns:
             A list of :class:`ExecutorInfo` objects that satisfy the filters.
@@ -598,16 +598,16 @@ class Lium:
         return templates[0]
 
     def default_docker_template(self, executor_id: str) -> Template:
-        """Resolve the best default template for an executor ID.
+        """Resolve the best default template for a node ID.
 
         Args:
-            executor_id: Executor identifier returned by :meth:`ls`.
+            executor_id: Node identifier returned by :meth:`ls`.
 
         Returns:
-            :class:`Template` best suited for the executor.
+            :class:`Template` best suited for the node.
 
         Raises:
-            ValueError: If no matching executor or template exists.
+            ValueError: If no matching node or template exists.
         """
         executor = self.get_executor(executor_id)
         if not executor:
@@ -672,10 +672,10 @@ class Lium:
 
 
     def get_executor(self, executor: str) -> Optional[ExecutorInfo]:
-        """Resolve an executor by ID.
+        """Resolve a node by ID.
 
         Args:
-            executor: Executor ID string.
+            executor: Node ID string.
 
         Returns:
             Matching :class:`ExecutorInfo` or ``None`` if not found.
@@ -1462,10 +1462,10 @@ class Lium:
             return []
 
     def get_deployment_estimate(self, executor_id: str, template_id: str) -> dict:
-        """Estimate deployment time for a template on an executor.
+        """Estimate deployment time for a template on a node.
 
         Args:
-            executor_id: Executor UUID.
+            executor_id: Node UUID.
             template_id: Template UUID.
 
         Returns:
