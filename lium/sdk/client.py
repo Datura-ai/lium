@@ -1485,6 +1485,44 @@ class Lium:
         """
         return float(self._request("GET", "/users/me").json().get("balance") or 0)
 
+    def topup_currencies(self, refresh: bool = False) -> List[Dict[str, Any]]:
+        """List stablecoin currencies/networks supported for self-serve top-ups.
+
+        Args:
+            refresh: Bypass the server-side cache and re-fetch from the provider.
+
+        Returns:
+            List of ``{"code", "network", "decimals", "display_decimals"}`` dicts.
+        """
+        params = {"refresh": "true"} if refresh else None
+        data = self._request("GET", "/tmc-pay/currencies", params=params).json()
+        return data.get("currencies", [])
+
+    def topup_create_invoice(
+        self, amount: float, crypto_currency: str, crypto_network: str
+    ) -> Dict[str, Any]:
+        """Create a stablecoin top-up invoice for the current account.
+
+        The returned ``deposit_address`` is where the exact ``crypto_amount`` of
+        ``crypto_currency`` (on ``crypto_network``) must be sent. Once the provider
+        confirms the transfer, the account balance is credited automatically.
+
+        Args:
+            amount: Top-up amount in USD.
+            crypto_currency: Stablecoin code (e.g. ``"USDT"``), see :meth:`topup_currencies`.
+            crypto_network: Network the stablecoin is sent on (e.g. ``"tron"``).
+
+        Returns:
+            Invoice dict including ``invoice_id``, ``deposit_address``, ``crypto_amount``,
+            ``crypto_currency``, ``crypto_network``, ``exchange_rate`` and ``expires_at``.
+        """
+        payload = {
+            "amount": amount,
+            "crypto_currency": crypto_currency,
+            "crypto_network": crypto_network,
+        }
+        return self._request("POST", "/tmc-pay/create-invoice", json=payload).json()
+
     def volumes(self) -> List[VolumeInfo]:
         """List all volumes for the current user.
 
