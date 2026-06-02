@@ -10,7 +10,7 @@ import json
 
 import click
 
-from lium.sdk import Lium
+from lium.sdk import Lium, LiumError
 from lium.cli import ui
 from lium.cli.utils import handle_errors
 
@@ -40,12 +40,16 @@ def currencies_command(refresh: bool, json_output: bool):
     """
     currencies = Lium().topup_currencies(refresh=refresh)
 
+    # Treat an empty list as an error in both modes: a caller (human or agent)
+    # cannot top up with no supported currency. Raising routes it through
+    # handle_errors, which emits a JSON error envelope (non-zero exit) under
+    # --json and a readable message otherwise — instead of silently printing
+    # `{"currencies": []}` that an agent would mistake for success.
+    if not currencies:
+        raise LiumError("No supported currencies returned")
+
     if json_output:
         click.echo(json.dumps({"currencies": currencies}, sort_keys=True))
-        return
-
-    if not currencies:
-        ui.warning("No supported currencies returned")
         return
 
     rows = [

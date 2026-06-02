@@ -45,6 +45,36 @@ def test_topup_currencies_json_success(monkeypatch):
     }
 
 
+def test_topup_currencies_empty_json_emits_error_envelope(monkeypatch):
+    # An empty list must not look like success under --json: the agent would
+    # otherwise read `{"currencies": []}` and proceed with nothing to pay in.
+    class FakeLium:
+        def topup_currencies(self, refresh=False):
+            return []
+
+    monkeypatch.setattr(topup_module, "Lium", FakeLium)
+
+    result = CliRunner().invoke(cli, ["topup", "currencies", "--json"])
+
+    assert result.exit_code != 0
+    assert result.stdout == ""
+    payload = json.loads(result.stderr)
+    assert payload["ok"] is False
+    assert "No supported currencies" in payload["error"]["message"]
+
+
+def test_topup_currencies_empty_human_errors(monkeypatch):
+    class FakeLium:
+        def topup_currencies(self, refresh=False):
+            return []
+
+    monkeypatch.setattr(topup_module, "Lium", FakeLium)
+
+    result = CliRunner().invoke(cli, ["topup", "currencies"])
+
+    assert "Error: No supported currencies returned" in result.output
+
+
 def test_topup_create_json_error_is_json_envelope_on_stderr(monkeypatch):
     class FakeLium:
         def topup_create_invoice(self, amount, crypto_currency, crypto_network):
