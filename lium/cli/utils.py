@@ -243,25 +243,53 @@ def timed_step_status(step: int = 0, total_steps: int = 0, message: str = ""):
         raise
 
 
+def _emit_json_error(code: str, message: str) -> None:
+    """Print a machine-readable error envelope to stderr and exit non-zero.
+
+    Keeps stdout clean for JSON consumers (agents): on success stdout carries
+    the result JSON, on failure stdout is empty, the error JSON goes to stderr,
+    and the process exits with a non-zero status so callers can detect it.
+    """
+    envelope = {"ok": False, "error": {"code": code, "message": message}}
+    click.echo(json.dumps(envelope, sort_keys=True), err=True)
+    raise SystemExit(1)
+
+
 def handle_errors(func):
-    """Decorator to handle CLI errors gracefully."""
+    """Decorator to handle CLI errors gracefully.
+
+    When the wrapped command was invoked with ``--json`` (a ``json_output``
+    flag), errors are rendered as a JSON envelope on stderr and the process
+    exits non-zero, so machine consumers get parseable output instead of
+    Rich-formatted text on stdout. Otherwise the human-readable rendering is
+    preserved.
+    """
     @wraps(func)
     def wrapper(*args, **kwargs):
+        json_output = bool(kwargs.get("json_output"))
         try:
             return func(*args, **kwargs)
         except (click.ClickException, click.Abort):
             raise
         except ValueError as e:
-            # Check if it's the API key error from SDK
-            if "No API key found" in str(e):
+            is_missing_api_key = "No API key found" in str(e)
+            if json_output:
+                _emit_json_error(
+                    "no_api_key" if is_missing_api_key else "value_error", str(e)
+                )
+            elif is_missing_api_key:
                 console.error("No API key configured")
                 console.warning("Please run 'lium init' to set up your API key")
                 console.dim("Or set LIUM_API_KEY environment variable")
             else:
                 console.error(f"Error: {e}")
         except LiumError as e:
+            if json_output:
+                _emit_json_error("lium_error", str(e))
             console.error(f"Error: {e}")
         except Exception as e:
+            if json_output:
+                _emit_json_error("unexpected_error", str(e))
             console.error(f"Unexpected error: {e}")
     return wrapper
 
