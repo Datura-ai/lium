@@ -25,6 +25,7 @@ from .config import config_command
 # from .commands.image import image_command  # Disabled for beta.1
 from .balance import balance_command
 from .fund import fund_command
+from .topup import topup_command
 from .gpu_splitting import gpu_splitting_command
 from .bk import bk_command
 from .mine import mine_command
@@ -81,6 +82,7 @@ cli.add_command(config_command)
 # cli.add_command(image_command)  # Disabled for beta.1
 cli.add_command(balance_command)
 cli.add_command(fund_command)
+cli.add_command(topup_command)
 cli.add_command(gpu_splitting_command)
 cli.add_command(bk_command, name="bk")
 cli.add_command(mine_command)
