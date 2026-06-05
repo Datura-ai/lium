@@ -9,6 +9,8 @@ import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Dict, Generator, List, Optional, Union
 from urllib.parse import parse_qs, urlparse
 
@@ -38,6 +40,26 @@ from .ssh_key_cache import fingerprint, load_cache, save_cache
 from .utils import expand_gpu_shorthand, extract_gpu_type, generate_huid, with_retry
 
 load_dotenv()
+
+# Public API key for the pay API (pay-tao-api-v2). Single source of truth so the
+# literal is not re-typed across every pay-API call site.
+_PAY_API_KEY = "6RhXQ788J9BdnqeLua8z7ZSkXBDahclxhwjMB17qW1M"
+
+
+@dataclass(frozen=True)
+class AlphaQuote:
+    """USD -> alpha quote from ``GET /balance/convert/alpha``.
+
+    ``netuid`` is the subnet the alpha must be transferred on (the same subnet the
+    pay-tao-api-v2 listener credits), so it — not a hardcoded constant — drives the
+    on-chain ``transfer_stake``.
+    """
+
+    usd: Decimal           # echoes the API's ``original``
+    alpha_amount: Decimal  # the API's ``converted`` (raw Decimal; floored by the caller)
+    rate: Decimal          # the API's ``rate`` = USD per alpha
+    netuid: int            # the API's ``netuid`` — drives the transfer
+
 
 # Main SDK Class
 class Lium:
@@ -1245,7 +1267,7 @@ class Lium:
             Raw wallet records returned by the pay API.
         """
         user = self._request("GET", "/users/me").json()
-        pay_headers = {"X-API-KEY": "6RhXQ788J9BdnqeLua8z7ZSkXBDahclxhwjMB17qW1M"}
+        pay_headers = {"X-API-KEY": _PAY_API_KEY}
         resp = self._request(
             "GET",
             f"/wallet/available-wallets/{user['stripe_customer_id']}",
@@ -1254,28 +1276,55 @@ class Lium:
         )
         return resp.json()
 
-    def add_wallet(self, bt_wallet: Any) -> None:
+    def _create_transfer_app_credentials(self) -> tuple[str, str]:
+        """Read ``(app_id, customer_id)`` from the ``/tao/create-transfer`` redirect.
+
+        This is the single parse both :meth:`add_wallet` and :meth:`_discover_app_id`
+        share, so the alpha flow never issues more than one ``/tao/create-transfer``
+        round-trip.
+
+        Note the deliberate HTTP shape: this call uses the DEFAULT ``base_url`` (the
+        main Lium API) and NO pay ``X-API-KEY`` header — unlike the pay-API calls
+        (:meth:`wallets`, :meth:`convert_alpha`, :meth:`company_wallet`). Do not
+        "harmonize" it onto ``base_pay_url`` / the pay key; that returns 401/404.
+        """
+        create_transfer_response = self._request(
+            "POST", "/tao/create-transfer", json={"amount": 10}
+        )
+        redirect_url = create_transfer_response.json()["url"]
+        params = parse_qs(urlparse(redirect_url).query)
+        return params["app_id"][0], params["customer_id"][0]
+
+    def _discover_app_id(self, bt_wallet: Any = None) -> str:
+        """Resolve the pay-app id without registering a wallet.
+
+        Reuses :meth:`_create_transfer_app_credentials`, so it works identically
+        whether or not the coldkey is already registered. ``bt_wallet`` is accepted
+        for call-site symmetry but unused (the create-transfer parse needs no wallet).
+        """
+        app_id, _ = self._create_transfer_app_credentials()
+        return app_id
+
+    def add_wallet(self, bt_wallet: Any) -> tuple[str, str]:
         """Link a Bittensor wallet with the user account.
 
         Args:
             bt_wallet: Wallet object exposing ``coldkey``/``coldkeypub`` for signing.
 
+        Returns:
+            ``(app_id, customer_id)`` parsed from the ``/tao/create-transfer``
+            redirect — surfaced so the alpha funding flow can reuse the same single
+            round-trip for company-wallet lookup instead of issuing a second POST.
+
         Raises:
             LiumError: If verification or wallet polling fails.
         """
-        pay_headers = {"X-API-KEY": "6RhXQ788J9BdnqeLua8z7ZSkXBDahclxhwjMB17qW1M"}
+        pay_headers = {"X-API-KEY": _PAY_API_KEY}
         access_key = self._request(
             "GET", "/token/generate", base_url=self.config.base_pay_url, headers=pay_headers
         ).json()["access_key"]
         sig = bt_wallet.coldkey.sign(access_key.encode()).hex()
-        create_transfer_response = self._request("POST", "/tao/create-transfer", json={"amount": 10})
-        redirect_url = create_transfer_response.json()["url"]
-        
-        # Parse URL parameters elegantly
-        parsed_url = urlparse(redirect_url)
-        params = parse_qs(parsed_url.query)
-        app_id = params["app_id"][0]
-        stripe_customer_id = params["customer_id"][0]
+        app_id, stripe_customer_id = self._create_transfer_app_credentials()
 
         verify_response = self._request(
             "POST",
@@ -1296,9 +1345,49 @@ class Lium:
         for i in range(5):
             wallets = [w.get('wallet_hash', '') for w in self.wallets()]
             if bt_wallet.coldkeypub.ss58_address in wallets:
-                return
+                return app_id, stripe_customer_id
             time.sleep(2)
         raise LiumError("Failed to add wallet. Wallet not found after 5 attempts.")
+
+    def convert_alpha(self, usd: Any) -> AlphaQuote:
+        """Quote ``usd`` (USD) -> alpha via ``GET /balance/convert/alpha``.
+
+        The response carries both the alpha amount to transfer (``converted``) and
+        the subnet ``netuid`` the transfer must happen on. Hard-fails (no fallback)
+        on a pay-API error: ``_request`` maps 503 -> ``LiumServerError`` (a
+        ``LiumError``), so a down subtensor / unavailable alpha price aborts the
+        fund before any on-chain call.
+        """
+        pay_headers = {"X-API-KEY": _PAY_API_KEY}
+        resp = self._request(
+            "GET",
+            "/balance/convert/alpha",
+            base_url=self.config.base_pay_url,
+            headers=pay_headers,
+            params={"amount": str(usd)},
+        ).json()
+        return AlphaQuote(
+            usd=Decimal(str(resp["original"])),
+            alpha_amount=Decimal(str(resp["converted"])),
+            rate=Decimal(str(resp["rate"])),
+            netuid=int(resp["netuid"]),
+        )
+
+    def company_wallet(self, app_id: str) -> str:
+        """Resolve the Lium destination coldkey via ``GET /wallet/company/?app_id=``.
+
+        Returns the company ``wallet_hash`` (the SS58 the pay-tao-api-v2 listener
+        credits). Hard-fails (no fallback): a 404 (app has no wallet) maps to
+        ``LiumNotFoundError`` (a ``LiumError``), aborting before any on-chain call.
+        """
+        resp = self._request(
+            "GET",
+            "/wallet/company/",
+            base_url=self.config.base_pay_url,
+            headers={"X-API-KEY": _PAY_API_KEY},
+            params={"app_id": app_id},
+        ).json()
+        return resp["wallet_hash"]
 
     def backup_create(
         self,

@@ -1,6 +1,6 @@
 """Public SDK exports."""
 
-from .client import Lium
+from .client import AlphaQuote, Lium
 from .config import Config
 from .decorators import machine
 from .exceptions import (
@@ -23,6 +23,7 @@ from .models import (
 
 __all__ = [
     "Lium",
+    "AlphaQuote",
     "Config",
     "ExecutorInfo",
     "PodInfo",
