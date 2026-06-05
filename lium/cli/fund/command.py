@@ -9,7 +9,7 @@ from rich.prompt import Prompt
 
 from lium.sdk import Lium, LiumError
 from lium.cli import ui
-from lium.cli.utils import handle_errors
+from lium.cli.utils import handle_errors, _emit_json_error
 from lium.cli.settings import config
 from . import validation
 from .actions import (
@@ -128,10 +128,22 @@ def _alpha_fund(
     except ImportError:
         raise LiumError("Bittensor library not installed (pip install bittensor)")
 
+    # In non-interactive (--json) mode we never prompt, so every required arg must be
+    # supplied up front. Validate presence here — hotkey, then wallet, then amount —
+    # so the error deterministically names the first missing arg regardless of the
+    # resolution order below.
+    if json_output:
+        if not hotkey:
+            raise LiumError(
+                "hotkey is required for --alpha: pass --hotkey (SS58 or wallet hotkey name)"
+            )
+        if not wallet:
+            raise LiumError("wallet is required: pass --wallet")
+        if not amount:
+            raise LiumError("amount is required: pass --amount")
+
     # Resolve the wallet (coldkey).
     if not wallet:
-        if json_output:
-            raise LiumError("wallet is required: pass --wallet")
         default_wallet = config.get("funding.default_wallet", "default")
         wallet = Prompt.ask("Bittensor wallet name", default=default_wallet).strip()
 
@@ -139,10 +151,6 @@ def _alpha_fund(
     # wallet hotkey NAME (resolved against --wallet), mirroring btcli's stake-move.
     # --wallet is already resolved above, which a name lookup requires.
     if not hotkey:
-        if json_output:
-            raise LiumError(
-                "hotkey is required for --alpha: pass --hotkey (SS58 or wallet hotkey name)"
-            )
         hotkey = Prompt.ask(
             "Origin hotkey (SS58 or wallet hotkey name) the alpha is staked under"
         ).strip()
@@ -158,8 +166,6 @@ def _alpha_fund(
 
     # Resolve and validate the USD amount (fail fast, before any network call).
     if not amount:
-        if json_output:
-            raise LiumError("amount is required: pass --amount")
         amount = Prompt.ask("Enter USD amount to fund").strip()
     usd_amount, error = validation.validate_amount(amount)
     if error:
@@ -268,6 +274,13 @@ def _alpha_fund(
     }
     result = ExecuteAlphaTransferAction().execute(exec_ctx)
     if not result.ok:
+        # A signed transfer the chain rejected is a hard failure: exit non-zero so
+        # callers (and CI) detect it — unlike the pre-flight guard aborts above
+        # (insufficient/no/ambiguous stake), which print and exit 0.
+        if result.data.get("transfer_attempted"):
+            if json_output:
+                _emit_json_error("transfer_failed", result.error)  # exits non-zero
+            raise click.ClickException(result.error)
         raise LiumError(result.error)
 
     fee_modeled = result.data.get("fee_modeled", fee_modeled)

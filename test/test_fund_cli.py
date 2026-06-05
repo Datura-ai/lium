@@ -171,7 +171,13 @@ class FakeStakeInfo:
 
 
 def _stake(hotkey=HK, netuid=51, stake=5.0, locked=0.0):
-    return FakeStakeInfo(hotkey, netuid, FakeBalance(stake, 51), FakeBalance(locked, 51))
+    # A real StakeInfo's stake/locked Balances live on the stake's OWN subnet, so the
+    # FakeBalance unit must track ``netuid`` (not a hardcoded 51) — otherwise a
+    # non-51 netuid would trip the cross-currency guard against the (netuid-correct)
+    # transfer amount.
+    return FakeStakeInfo(
+        hotkey, netuid, FakeBalance(stake, netuid), FakeBalance(locked, netuid)
+    )
 
 
 class FakeSubtensor:

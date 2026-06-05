@@ -321,7 +321,12 @@ class ExecuteAlphaTransferAction:
                     or getattr(resp, "error", None)
                     or "transfer_stake failed"
                 )
-                return ActionResult(ok=False, data={}, error=str(msg))
+                # The extrinsic was signed and submitted; the chain rejected it. Flag
+                # it so the caller can exit non-zero (distinct from the pre-flight
+                # guard aborts above, which never reach the chain).
+                return ActionResult(
+                    ok=False, data={"transfer_attempted": True}, error=str(msg)
+                )
 
             return ActionResult(
                 ok=True,

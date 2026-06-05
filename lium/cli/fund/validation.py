@@ -75,8 +75,8 @@ def resolve_hotkey(hotkey: str, wallet_name: str, bt) -> tuple[str | None, str]:
 
     if not ss58 or not bt.utils.is_valid_ss58_address(ss58):
         return None, (
-            f"hotkey '{raw}' is neither a valid SS58 address nor a hotkey in "
-            f"wallet '{wallet_name}'"
+            f"hotkey '{raw}' in wallet '{wallet_name}' is neither a valid SS58 "
+            f"address nor a known hotkey name"
         )
     return ss58, ""
 
