@@ -1139,7 +1139,6 @@ class Lium:
                 - environment (Dict[str, str]): Environment variables.
                 - entrypoint (str): Container entrypoint.
                 - one_time_template (bool): Whether to delete template after pod removal.
-                - is_temporary (bool): Whether template is an internal temporary clone.
 
         Returns:
             Newly created :class:`Template`.
@@ -1158,6 +1157,7 @@ class Lium:
             "environment": kwargs.get("environment") or {},
             "is_private": kwargs.get("is_private", True),
             "one_time_template": kwargs.get("one_time_template", False),
+            # Internal backend clone marker; intentionally omitted from the public SDK docs.
             "is_temporary": kwargs.get("is_temporary", False),
             "readme": kwargs.get("readme", name),
             "volumes": kwargs.get("volumes", ["/workspace"]),
