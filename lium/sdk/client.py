@@ -1155,7 +1155,7 @@ class Lium:
             "container_start_immediately": kwargs.get("container_start_immediately", True),
             "description": kwargs.get("description", name),
             "entrypoint": kwargs.get("entrypoint", ""),
-            "environment": kwargs.get("environment", {}),
+            "environment": kwargs.get("environment") or {},
             "is_private": kwargs.get("is_private", True),
             "one_time_template": kwargs.get("one_time_template", False),
             "is_temporary": kwargs.get("is_temporary", False),
