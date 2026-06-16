@@ -34,6 +34,7 @@ from .actions import (
 @click.option("--jupyter", is_flag=True, help="Install Jupyter Notebook (automatically selects available port)")
 @click.option("--image", help="Docker image to run (e.g., pytorch/pytorch:2.0, nvidia/cuda:12.0)")
 @click.option("--internal-ports", help="Internal ports to expose (comma-separated, e.g., 22,8000,8080)")
+@click.option("--dockerfile", type=click.Path(exists=True, dir_okay=False, readable=True), help="Path to a Dockerfile to build the pod image from (custom build; mutually exclusive with --image/--template_id)")
 @click.option("-e", "--env", multiple=True, help="Environment variables (KEY=VALUE), can be repeated")
 @click.option("--entrypoint", default="", help="Container entrypoint")
 @click.option("--cmd", default="", help="Command to run in the container")
@@ -54,6 +55,7 @@ def up_command(
     jupyter: bool,
     image: Optional[str],
     internal_ports: Optional[str],
+    dockerfile: Optional[str],
     env: Tuple[str, ...],
     entrypoint: Optional[str],
     cmd: Optional[str],
@@ -89,13 +91,20 @@ def up_command(
       lium up --gpu A6000 --image python:3.11 --cmd "python -c 'print(1+1)'"
       lium up --gpu A4000 --image myimg --entrypoint /bin/sh --cmd "-c 'echo hi'"
       lium up --gpu A4000 --image myimg --internal-ports 22,8000,8080
+    \b
+    Custom Dockerfile build (image built remotely from your Dockerfile):
+      lium up --gpu A4000 --dockerfile ./Dockerfile
+      lium up cosmic-hawk-f2 --dockerfile ./Dockerfile --name my-build
     """
     ensure_config()
 
-    # Check if we're in docker-run mode
+    # Check if we're in docker-run mode or custom-Dockerfile build mode
     docker_run_mode = image is not None
+    dockerfile_mode = dockerfile is not None
 
-    valid, error = validation.validate(executor_id, gpu, count, country, ttl, until, image, template_id)
+    valid, error = validation.validate(
+        executor_id, gpu, count, country, ttl, until, image, template_id, dockerfile
+    )
     if not valid:
         ui.error(error)
         return
@@ -116,6 +125,48 @@ def up_command(
     termination_time = parsed.get("termination_time")
     volume_id = parsed.get("volume_id")
     volume_create_params = parsed.get("volume_create_params")
+
+    # Custom-Dockerfile build: read the Dockerfile text the CLI will send to the
+    # backend (the image is built remotely; no build context is uploaded).
+    dockerfile_content = None
+    if dockerfile_mode:
+        from pathlib import Path
+
+        # These flags only apply to template/--image mode. In a custom build the
+        # Dockerfile itself defines the image's env/entrypoint/command/ports, so
+        # reject them explicitly rather than silently dropping them.
+        unsupported = [
+            flag
+            for flag, supplied in (
+                ("--env", bool(env)),
+                ("--entrypoint", bool(entrypoint)),
+                ("--cmd", bool(cmd)),
+                ("--internal-ports", bool(internal_ports)),
+            )
+            if supplied
+        ]
+        if unsupported:
+            ui.error(
+                f"{', '.join(unsupported)} cannot be combined with --dockerfile "
+                "(the Dockerfile defines the image's env, entrypoint, command, and ports)"
+            )
+            return
+
+        try:
+            dockerfile_content = Path(dockerfile).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            ui.error(f"Could not read Dockerfile: {exc}")
+            return
+        if not dockerfile_content.strip():
+            ui.error("Dockerfile is empty")
+            return
+        max_bytes = 64 * 1024
+        size_bytes = len(dockerfile_content.encode("utf-8"))
+        if size_bytes > max_bytes:
+            ui.error(
+                f"Dockerfile is too large ({size_bytes} bytes); max is {max_bytes} bytes (64 KiB)"
+            )
+            return
 
     lium = Lium(source="cli")
 
@@ -146,8 +197,12 @@ def up_command(
         if is_slow and warning_msg:
             ui.warning(f"Warning: {warning_msg}")
 
-    # Resolve or create template
-    if docker_run_mode:
+    # Resolve or create template (skipped for custom Dockerfile builds, which are
+    # built remotely from the supplied Dockerfile and use no template).
+    template = None
+    if dockerfile_mode:
+        pass
+    elif docker_run_mode:
         # Parse internal ports (default to [22] if not specified)
         ports_list = [22]
         if internal_ports:
@@ -172,6 +227,10 @@ def up_command(
                 "ports": ports_list,
             })
         )
+        if not result.ok:
+            ui.error(result.error)
+            return
+        template = result.data["template"]
     else:
         action = ResolveTemplateAction()
         result = action.execute({
@@ -179,28 +238,25 @@ def up_command(
             "template_id": template_id,
             "executor": executor
         })
-
-        if result.ok:
-            template = result.data["template"]
-            # API-based estimate using resolved template ID
-            try:
-                estimate = lium.get_deployment_estimate(executor.id, template.id)
-                est_secs = estimate.get("estimated_seconds")
-                if est_secs:
-                    dl_speed = executor.download_speed
-                    raw_bytes = estimate.get("docker_image_size")
-                    img_gb = raw_bytes / 1e9 if raw_bytes is not None else None
-                    _show_estimate(
-                        est_secs, dl_speed, img_gb,
-                        estimate.get("is_slow_machine", False),
-                        estimate.get("warning_message"),
-                    )
-            except Exception:
-                pass
-
-    if not result.ok:
-        ui.error(result.error)
-        return
+        if not result.ok:
+            ui.error(result.error)
+            return
+        template = result.data["template"]
+        # API-based estimate using resolved template ID
+        try:
+            estimate = lium.get_deployment_estimate(executor.id, template.id)
+            est_secs = estimate.get("estimated_seconds")
+            if est_secs:
+                dl_speed = executor.download_speed
+                raw_bytes = estimate.get("docker_image_size")
+                img_gb = raw_bytes / 1e9 if raw_bytes is not None else None
+                _show_estimate(
+                    est_secs, dl_speed, img_gb,
+                    estimate.get("is_slow_machine", False),
+                    estimate.get("warning_message"),
+                )
+        except Exception:
+            pass
 
     if not yes:
         confirm_msg = (
@@ -210,8 +266,6 @@ def up_command(
         )
         if not ui.confirm(confirm_msg):
             return
-
-    template = result.data["template"]
 
     if volume_create_params:
         action = CreateVolumeAction()
@@ -236,6 +290,7 @@ def up_command(
             "lium": lium,
             "executor": executor,
             "template": template,
+            "dockerfile_content": dockerfile_content,
             "name": name,
             "volume_id": volume_id,
             "ports": ports,

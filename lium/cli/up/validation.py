@@ -12,6 +12,7 @@ def validate(
     until: str | None,
     image: str | None = None,
     template_id: str | None = None,
+    dockerfile: str | None = None,
 ) -> tuple[bool, str]:
     """Validate up command inputs."""
     if executor_id and (gpu or count or country):
@@ -25,6 +26,12 @@ def validate(
 
     if image and template_id:
         return False, "Cannot specify both --image and --template_id"
+
+    if dockerfile and image:
+        return False, "Cannot specify both --dockerfile and --image"
+
+    if dockerfile and template_id:
+        return False, "Cannot specify both --dockerfile and --template_id"
 
     return True, ""
 
