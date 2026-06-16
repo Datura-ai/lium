@@ -1138,7 +1138,8 @@ class Lium:
                 - description (str): Template description.
                 - environment (Dict[str, str]): Environment variables.
                 - entrypoint (str): Container entrypoint.
-                - one_time_template (bool): Whether to delete template after pod removal.
+                - one_time_template (bool): Whether to delete template after pod removal
+                  (defaults to ``False``).
 
         Returns:
             Newly created :class:`Template`.
