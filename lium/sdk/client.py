@@ -1,6 +1,7 @@
 """Lium SDK - Clean, Unix-style SDK for GPU pod management."""
 
 import getpass
+import os
 import re
 import shlex
 import socket
@@ -11,12 +12,15 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Dict, Generator, List, Optional, Union
 from urllib.parse import parse_qs, urlparse
 
 import paramiko
 import requests
 from dotenv import load_dotenv
+
+from lium.__about__ import __version__ as fallback_version
 
 from .config import Config
 from .exceptions import (
@@ -46,6 +50,13 @@ load_dotenv()
 _PAY_API_KEY = "6RhXQ788J9BdnqeLua8z7ZSkXBDahclxhwjMB17qW1M"
 
 
+def _get_client_version() -> str:
+    try:
+        return version("lium.io")
+    except PackageNotFoundError:
+        return os.environ.get("LIUM_BUILD_VERSION", fallback_version)
+
+
 @dataclass(frozen=True)
 class AlphaQuote:
     """USD -> alpha quote from ``GET /balance/convert/alpha``.
@@ -67,7 +78,11 @@ class Lium:
 
     def __init__(self, config: Optional[Config] = None, source: str = "sdk"):
         self.config = config or Config.load()
-        self.headers = {"X-API-KEY": self.config.api_key, "X-Source": source}
+        self.headers = {
+            "X-API-KEY": self.config.api_key,
+            "X-Source": source,
+            "X-Lium-Client-Version": _get_client_version(),
+        }
 
     @with_retry()
     def _request(
@@ -1123,6 +1138,8 @@ class Lium:
                 - description (str): Template description.
                 - environment (Dict[str, str]): Environment variables.
                 - entrypoint (str): Container entrypoint.
+                - one_time_template (bool): Whether to delete template after pod removal.
+                - is_temporary (bool): Whether template is an internal temporary clone.
 
         Returns:
             Newly created :class:`Template`.
@@ -1140,6 +1157,8 @@ class Lium:
             "entrypoint": kwargs.get("entrypoint", ""),
             "environment": kwargs.get("environment", {}),
             "is_private": kwargs.get("is_private", True),
+            "one_time_template": kwargs.get("one_time_template", False),
+            "is_temporary": kwargs.get("is_temporary", False),
             "readme": kwargs.get("readme", name),
             "volumes": kwargs.get("volumes", ["/workspace"]),
         }
