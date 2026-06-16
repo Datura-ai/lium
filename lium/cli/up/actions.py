@@ -139,6 +139,7 @@ class CreateEphemeralTemplateAction:
                 entrypoint=entrypoint,
                 environment=env if env else None,
                 is_private=True,
+                one_time_template=True,
             )
 
             return ActionResult(ok=True, data={"template": template})
