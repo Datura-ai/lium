@@ -35,8 +35,28 @@ def test_create_template_forwards_one_time_and_temporary_flags(monkeypatch):
 
     assert captured["method"] == "POST"
     assert captured["endpoint"] == "/templates"
+    assert captured["json"]["environment"] == {}
     assert captured["json"]["one_time_template"] is True
     assert captured["json"]["is_temporary"] is False
+
+
+def test_create_template_coerces_none_environment_to_empty_dict(monkeypatch):
+    captured = {}
+
+    def fake_request(self, method, endpoint, **kwargs):
+        captured["json"] = kwargs["json"]
+        return _Response()
+
+    monkeypatch.setattr(Lium, "_request", fake_request)
+
+    client = Lium(Config(api_key="test"))
+    client.create_template(
+        name="ephemeral-test",
+        docker_image="alpine",
+        environment=None,
+    )
+
+    assert captured["json"]["environment"] == {}
 
 
 def test_create_ephemeral_template_action_marks_template_one_time():
@@ -70,3 +90,34 @@ def test_create_ephemeral_template_action_marks_template_one_time():
     assert captured["name"].startswith("ephemeral-")
     assert captured["is_private"] is True
     assert captured["one_time_template"] is True
+
+
+def test_create_ephemeral_template_action_uses_empty_environment_when_no_env():
+    captured = {}
+
+    class FakeLium:
+        def create_template(self, **kwargs):
+            captured.update(kwargs)
+            return Template(
+                id="template-123",
+                huid="brave-fox-12",
+                name=kwargs["name"],
+                docker_image=kwargs["docker_image"],
+                docker_image_tag=kwargs["docker_image_tag"],
+                category="DOCKER",
+                status="VERIFY_SUCCESS",
+            )
+
+    result = CreateEphemeralTemplateAction().execute(
+        {
+            "lium": FakeLium(),
+            "image": "alpine:latest",
+            "env": {},
+            "entrypoint": "",
+            "cmd": "echo ok",
+            "ports": [22],
+        }
+    )
+
+    assert result.ok is True
+    assert captured["environment"] == {}

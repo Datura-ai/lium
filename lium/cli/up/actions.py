@@ -137,7 +137,7 @@ class CreateEphemeralTemplateAction:
                 ports=ports,
                 start_command=cmd,
                 entrypoint=entrypoint,
-                environment=env if env else None,
+                environment=env or {},
                 is_private=True,
                 one_time_template=True,
             )
