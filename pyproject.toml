@@ -4,22 +4,20 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lium.io"
-version = "0.0.22"
+version = "0.0.23"
 description = "A custom CLI tool for Lium. Lium CLI provides tools for interacting with the Lium ecosystem from the command line."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [
-    {name = "Lium", email = "support@lium.io"}
-]
+authors = [{ name = "Lium", email = "support@lium.io" }]
 classifiers = [
-  "Development Status :: 4 - Beta",
-  "Intended Audience :: Developers",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Operating System :: OS Independent"
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
 ]
 dependencies = [
     "typer>=0.12",
