@@ -35,6 +35,7 @@ class SafeProviderResponse(BaseModel):
     miner_hotkey: str
     provider_coldkey: str = Field(alias="miner_coldkey")
     email: str | None = None
+    discord_id: str | None = None
     machine_request_subscription: list[str] = Field(default_factory=list)
     created_at: str
     updated_at: str
@@ -64,6 +65,12 @@ class ProviderCredentials(BaseModel):
     miner_hotkey: str
     message: str
     signature: str
+
+
+class SetPasswordPayload(ProviderCredentials):
+    """Wire payload for ``POST /auth/set-password``."""
+
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 # --- Executors ----------------------------------------------------------
@@ -191,6 +198,8 @@ class ProviderStatus(BaseModel):
     netuid: int | None = None
     portal_session_active: bool | None = None
     provider_id: str | None = None
+    discord_connected: bool | None = None
+    extra_incentive_eligible: bool | None = None
     node_count: int | None = None
     nodes: list[ExecutorInfo] = Field(default_factory=list)
     validator_weights: list[ValidatorWeight] = Field(default_factory=list)

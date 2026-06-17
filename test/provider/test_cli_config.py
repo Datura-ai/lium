@@ -25,6 +25,8 @@ class _Portal:
 
     def get(self, path, *, params=None, auth=True):
         self.gets.append((path, params, auth))
+        if isinstance(self._get_body, dict) and path in self._get_body:
+            return self._get_body[path]
         return self._get_body or {}
 
     def post(self, path, *, json_body=None, auth=True):
@@ -74,6 +76,55 @@ def test_config_show(patched_build_client) -> None:
         ["--hotkey", "hk1", "config", "show"],
     )
     assert result.exit_code == 0, result.output
+
+
+def test_config_show_json_adds_discord_eligibility(patched_build_client) -> None:
+    portal = _Portal(
+        get_body={
+            "miner_hotkey": "5Foo",
+            "miner_uid": 7,
+            "discord_id": None,
+        }
+    )
+    patched_build_client(portal)
+    runner = CliRunner()
+    result = runner.invoke(
+        provider_command,
+        ["--hotkey", "hk1", "--json", "config", "show"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip())
+    assert payload["data"]["discord_connected"] is False
+    assert payload["data"]["extra_incentive_eligible"] is False
+    assert payload["warnings"] == [
+        {
+            "code": "DISCORD_REQUIRED_FOR_EXTRA_INCENTIVES",
+            "message": "Discord is not connected. No Discord = no extra incentives. Run `lium provider config connect-discord` to become eligible.",
+        }
+    ]
+
+
+def test_config_show_human_renders_discord_hint_inline(patched_build_client) -> None:
+    portal = _Portal(
+        get_body={
+            "miner_hotkey": "5Foo",
+            "miner_uid": 7,
+            "discord_id": None,
+        }
+    )
+    patched_build_client(portal)
+    runner = CliRunner()
+    result = runner.invoke(
+        provider_command,
+        ["--hotkey", "hk1", "config", "show"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Discord Connected" in result.output
+    assert "Extra Incentives" in result.output
+    assert "No Discord = no extra incentives" in result.output
+    assert "lium provider config connect-discord" in result.output
+    assert "Extra Incentive Eligible" not in result.output
+    assert "DISCORD_REQUIRED_FOR_EXTRA_INCENTIVES" not in result.output
 
 
 def test_config_opt_in_renders_central_endpoints(patched_build_client) -> None:
@@ -158,6 +209,135 @@ def test_config_set_email_rejects_invalid(patched_build_client) -> None:
     )
     assert result.exit_code != 0, result.output
     assert portal.posts == []
+
+
+def test_config_set_password_posts_signature_payload(
+    patched_build_client, monkeypatch
+) -> None:
+    portal = _Portal(post_body={"message": "Password set successfully"})
+    patched_build_client(portal)
+    monkeypatch.setattr(
+        "lium.provider.client._wait_until_next_timestamp_second",
+        lambda: None,
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        provider_command,
+        [
+            "--hotkey",
+            "hk1",
+            "--json",
+            "config",
+            "set-password",
+            "--password",
+            "change-me-8+",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    path, payload, auth = portal.posts[0]
+    assert path == "/auth/set-password"
+    assert auth is False
+    assert payload["new_password"] == "change-me-8+"
+    assert payload["message"].isdigit()
+
+
+def test_config_set_password_json_requires_password(patched_build_client) -> None:
+    portal = _Portal(post_body={"data": {}})
+    patched_build_client(portal)
+    runner = CliRunner()
+    result = runner.invoke(
+        provider_command,
+        ["--hotkey", "hk1", "--json", "config", "set-password"],
+    )
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output.strip())
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "ARG_INVALID"
+    assert portal.posts == []
+
+
+def test_config_connect_discord_no_wait_json(patched_build_client, monkeypatch) -> None:
+    portal = _Portal(
+        get_body={
+            "/auth/me/discord/oauth-url": {
+                "authorization_url": "https://discord.com/oauth2/authorize?x=1"
+            },
+            "/auth/me": {"discord_id": None},
+        }
+    )
+    patched_build_client(portal)
+    monkeypatch.setattr(
+        "lium.cli.provider.config._open_authorization_url",
+        lambda url: False,
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        provider_command,
+        [
+            "--hotkey",
+            "hk1",
+            "--json",
+            "config",
+            "connect-discord",
+            "--no-wait",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip())
+    assert payload["data"] == {
+        "authorization_url": "https://discord.com/oauth2/authorize?x=1",
+        "browser_opened": False,
+        "discord_connected": False,
+        "extra_incentive_eligible": False,
+        "next_action": "open_authorization_url_and_complete_discord_oauth",
+    }
+    assert payload["warnings"] == [
+        {
+            "code": "DISCORD_REQUIRED_FOR_EXTRA_INCENTIVES",
+            "message": "Discord is not connected. No Discord = no extra incentives. Run `lium provider config connect-discord` to become eligible.",
+        }
+    ]
+    assert [call[0] for call in portal.gets] == [
+        "/auth/me/discord/oauth-url",
+        "/auth/me",
+    ]
+
+
+def test_config_connect_discord_no_wait_human_omits_agent_fields(
+    patched_build_client, monkeypatch
+) -> None:
+    portal = _Portal(
+        get_body={
+            "/auth/me/discord/oauth-url": {
+                "authorization_url": "https://discord.com/oauth2/authorize?x=1"
+            },
+            "/auth/me": {"discord_id": None},
+        }
+    )
+    patched_build_client(portal)
+    monkeypatch.setattr(
+        "lium.cli.provider.config._open_authorization_url",
+        lambda url: False,
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        provider_command,
+        [
+            "--hotkey",
+            "hk1",
+            "config",
+            "connect-discord",
+            "--no-wait",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.count("https://discord.com/oauth2/authorize?x=1") == 1
+    assert "Next Action" not in result.output
+    assert "open_authorization_url_and_complete_discord_oauth" not in result.output
+    assert "Discord Connected" in result.output
+    assert "Extra Incentives" in result.output
+    assert "No Discord = no extra incentives" in result.output
+    assert "Browser Status" in result.output
 
 
 def test_config_set_subscriptions_multiple(patched_build_client) -> None:

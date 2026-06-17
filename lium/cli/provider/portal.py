@@ -6,7 +6,12 @@ import click
 
 from lium.cli.provider._client import build_client
 from lium.cli.provider._overrides import with_provider_overrides
-from lium.cli.provider._render import emit_error, render
+from lium.cli.provider._render import (
+    discord_incentive_warnings,
+    emit_error,
+    render,
+)
+from lium.provider.client import discord_connected_from_profile
 from lium.provider.errors import ARG_INVALID, ProviderError
 
 
@@ -43,6 +48,13 @@ def login(ctx: click.Context, force: bool) -> None:
         ctx.exit(emit_error(ctx, e))
         return
 
+    discord_connected: bool | None = None
+    try:
+        discord_connected = discord_connected_from_profile(client.whoami())
+    except ProviderError:
+        if response.provider.discord_id is not None:
+            discord_connected = bool(response.provider.discord_id)
+
     summary = f"logged in as provider_id={response.provider.id} (hotkey {response.provider.miner_hotkey})"
     render(
         ctx,
@@ -50,8 +62,13 @@ def login(ctx: click.Context, force: bool) -> None:
             "provider_id": response.provider.id,
             "hotkey": response.provider.miner_hotkey,
             "token_present": bool(response.token),
+            "discord_connected": discord_connected,
+            "extra_incentive_eligible": discord_connected
+            if discord_connected is not None
+            else None,
         },
         summary=summary,
+        warnings=discord_incentive_warnings(discord_connected),
     )
 
 

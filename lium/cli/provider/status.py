@@ -56,6 +56,12 @@ def status_command(ctx: click.Context, netuid: int) -> None:
         else "registered=unknown"
     )
     summary_parts.append(f"portal={'active' if snapshot.portal_session_active else 'down'}")
+    if snapshot.discord_connected is not None:
+        summary_parts.append(f"discord_connected={snapshot.discord_connected}")
+    if snapshot.extra_incentive_eligible is not None:
+        summary_parts.append(
+            f"extra_incentive_eligible={snapshot.extra_incentive_eligible}"
+        )
     summary_parts.append(f"nodes={snapshot.node_count or 0}")
     summary_parts.append(f"weights={len(snapshot.validator_weights)}")
     summary = "provider status: " + ", ".join(summary_parts)

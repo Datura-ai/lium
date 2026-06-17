@@ -69,6 +69,39 @@ def test_set_email_posts_payload(client) -> None:
     assert portal.posts[0] == ("/auth/set-email", {"email": "a@b.co"}, True)
 
 
+def test_set_password_posts_signature_payload(client) -> None:
+    portal = _Portal(post_body={"message": "Password set successfully"})
+    c = client(portal)
+    c.set_password("change-me-8+", wait_for_fresh_timestamp=False)
+    path, payload, auth = portal.posts[0]
+    assert path == "/auth/set-password"
+    assert auth is False
+    assert payload["miner_hotkey"] == c.hotkey_ss58
+    assert payload["new_password"] == "change-me-8+"
+    assert payload["message"].isdigit()
+    assert payload["signature"]
+
+
+def test_create_discord_oauth_authorization_url(client) -> None:
+    portal = _Portal(
+        get_body={"authorization_url": "https://discord.com/oauth2/authorize?x=1"}
+    )
+    c = client(portal)
+    assert (
+        c.create_discord_oauth_authorization_url()
+        == "https://discord.com/oauth2/authorize?x=1"
+    )
+    assert portal.gets[0] == ("/auth/me/discord/oauth-url", None, True)
+
+
+def test_create_discord_oauth_authorization_url_rejects_drift(client) -> None:
+    portal = _Portal(get_body={"unexpected": "shape"})
+    c = client(portal)
+    with pytest.raises(ProviderError) as exc_info:
+        c.create_discord_oauth_authorization_url()
+    assert exc_info.value.code == "PORTAL_CONTRACT_DRIFT"
+
+
 def test_set_machine_request_subscription(client) -> None:
     portal = _Portal(post_body={"data": {}})
     c = client(portal)
@@ -341,5 +374,4 @@ def test_path_segment_validators_reject_unsafe_inputs(
         method(*args)
     assert exc_info.value.code == "ARG_INVALID"
     assert portal.gets == [] and portal.posts == [] and portal.deletes == []
-
 
