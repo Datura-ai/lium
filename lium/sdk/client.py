@@ -312,6 +312,7 @@ class Lium:
         executor_id: str,
         name: str = "Your Pod",
         template_id: Optional[str] = None,
+        dockerfile_content: Optional[str] = None,
         volume_id: Optional[str] = None,
         ports: Optional[int] = None,
         ssh_keys: Optional[List[str]] = None,
@@ -323,6 +324,12 @@ class Lium:
             executor_id: Target node ID string.
             name: Human-friendly pod name (defaults to ``"Your Pod"``).
             template_id: Template ID. Defaults to the node's default template.
+                Mutually exclusive with ``dockerfile_content``.
+            dockerfile_content: Raw Dockerfile text to build the pod image from on
+                the node (custom build). Mutually exclusive with ``template_id`` —
+                pass exactly one. The image is built remotely with no network
+                access, so the Dockerfile must be self-contained (no ``ADD <url>``
+                or ``ADD ${var}`` directives).
             volume_id: Optional volume ID to attach on spawn.
             ports: Number of exposed ports to request.
             ssh_keys: SSH public keys to authorize. Defaults to the keys discovered by the Config.
@@ -333,11 +340,16 @@ class Lium:
         Returns:
             Pod metadata as returned by the rent API (id, name, status, ssh command, etc.).
         """
+        if template_id is not None and dockerfile_content is not None:
+            raise ValueError(
+                "Provide either template_id or dockerfile_content, not both"
+            )
+
         executor_info = self.get_executor(executor_id)
         if not executor_info:
             raise ValueError(f"Node with ID '{executor_id}' not found")
 
-        if template_id is None:
+        if template_id is None and dockerfile_content is None:
             selected_template = self.default_docker_template(executor_info.id)
             template_id = selected_template.id
 
@@ -350,6 +362,7 @@ class Lium:
         payload = {
             "pod_name": name,
             "template_id": template_id,
+            "dockerfile_content": dockerfile_content,
             "volume_id": volume_id,
             "user_public_key": ssh_material,
             "initial_port_count": ports,

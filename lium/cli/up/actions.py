@@ -170,7 +170,8 @@ class RentPodAction:
     def execute(self, ctx: dict) -> ActionResult:
         lium: Lium = ctx["lium"]
         executor: ExecutorInfo = ctx["executor"]
-        template: Template = ctx["template"]
+        template: Optional[Template] = ctx.get("template")
+        dockerfile_content: Optional[str] = ctx.get("dockerfile_content")
         name: Optional[str] = ctx.get("name")
         volume_id: Optional[str] = ctx.get("volume_id")
         ports: Optional[int] = ctx.get("ports")
@@ -184,6 +185,7 @@ class RentPodAction:
                 executor_id=executor.id,
                 name=name,
                 template_id=template.id if template else None,
+                dockerfile_content=dockerfile_content,
                 volume_id=volume_id,
                 ports=ports,
                 ssh_name=ssh_name,
