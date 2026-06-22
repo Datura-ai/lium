@@ -216,6 +216,7 @@ class Lium:
             effective_upload_speed_mbps=executor_dict.get("effective_upload_speed_mbps"),
             effective_download_speed_mbps=executor_dict.get("effective_download_speed_mbps"),
             max_cuda_version=executor_dict.get("max_cuda_version"),
+            tier=executor_dict.get("tier"),
         )
 
     def list_ssh_keys(self) -> List[SSHKey]:
