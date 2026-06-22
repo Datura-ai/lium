@@ -113,11 +113,13 @@ def test_portal_login_json_envelope(patched_build_client, fake_signer) -> None:
                 "id": "m-7",
                 "miner_hotkey": fake_signer.ss58_address,
                 "provider_coldkey": "5CK",
+                "discord_id": "5477543105",
                 "created_at": "x",
                 "updated_at": "x",
             },
             "token": _make_jwt(int(time.time()) + 3600),
-        }
+        },
+        get_body={"discord_id": "5477543105"},
     )
     patched_build_client(portal)
 
@@ -130,6 +132,83 @@ def test_portal_login_json_envelope(patched_build_client, fake_signer) -> None:
     payload = json.loads(result.output.strip())
     assert payload["ok"] is True
     assert payload["data"]["provider_id"] == "m-7"
+    assert payload["data"]["discord_connected"] is True
+    assert payload["data"]["extra_incentive_eligible"] is True
+
+
+def test_portal_login_warns_when_discord_missing(
+    patched_build_client, fake_signer
+) -> None:
+    portal = _Portal(
+        post_body={
+            "provider": {
+                "id": "m-7",
+                "miner_hotkey": fake_signer.ss58_address,
+                "provider_coldkey": "5CK",
+                "discord_id": None,
+                "created_at": "x",
+                "updated_at": "x",
+            },
+            "token": _make_jwt(int(time.time()) + 3600),
+        },
+        get_body={"discord_id": None},
+    )
+    patched_build_client(portal)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        provider_command,
+        ["--hotkey", "hk1", "portal", "login"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Token Present" in result.output
+    assert "Discord Connected" in result.output
+    assert "Extra Incentives" in result.output
+    assert (
+        result.output.index("Token Present")
+        < result.output.index("Discord Connected")
+        < result.output.index("Extra Incentives")
+    )
+    assert "No Discord = no extra incentives" in result.output
+    assert "lium provider config connect-discord" in result.output
+    assert "Extra Incentive Eligible" not in result.output
+    assert "DISCORD_REQUIRED_FOR_EXTRA_INCENTIVES" not in result.output
+
+
+def test_portal_login_json_warns_when_discord_missing(
+    patched_build_client, fake_signer
+) -> None:
+    portal = _Portal(
+        post_body={
+            "provider": {
+                "id": "m-7",
+                "miner_hotkey": fake_signer.ss58_address,
+                "provider_coldkey": "5CK",
+                "discord_id": None,
+                "created_at": "x",
+                "updated_at": "x",
+            },
+            "token": _make_jwt(int(time.time()) + 3600),
+        },
+        get_body={"discord_id": None},
+    )
+    patched_build_client(portal)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        provider_command,
+        ["--hotkey", "hk1", "--json", "portal", "login"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip())
+    assert payload["data"]["discord_connected"] is False
+    assert payload["data"]["extra_incentive_eligible"] is False
+    assert payload["warnings"] == [
+        {
+            "code": "DISCORD_REQUIRED_FOR_EXTRA_INCENTIVES",
+            "message": "Discord is not connected. No Discord = no extra incentives. Run `lium provider config connect-discord` to become eligible.",
+        }
+    ]
 
 
 def test_portal_login_auth_error_returns_exit_2(patched_build_client) -> None:

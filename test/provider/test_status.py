@@ -118,6 +118,45 @@ def test_status_extracts_provider_id_from_flat_whoami_shape(
     assert snapshot.provider_id == "flat-1"
 
 
+def test_status_surfaces_discord_incentive_eligibility(
+    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
+) -> None:
+    portal = _Portal(
+        me_body={
+            "miner_id": "m-1",
+            "miner_hotkey": fake_signer.ss58_address,
+            "discord_id": "5477543105",
+        },
+        executors=[],
+    )
+    metagraph = _stub_metagraph_factory(hotkeys=[], weights=[])
+    client = _client(portal, tmp_token_store, fake_signer)
+    snapshot = client.status(metagraph_factory=metagraph)
+    assert snapshot.provider_id == "m-1"
+    assert snapshot.discord_connected is True
+    assert snapshot.extra_incentive_eligible is True
+    assert not any(w.startswith("discord:") for w in snapshot.warnings)
+
+
+def test_status_warns_when_discord_missing(
+    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
+) -> None:
+    portal = _Portal(
+        me_body={
+            "miner_id": "m-1",
+            "miner_hotkey": fake_signer.ss58_address,
+            "discord_id": None,
+        },
+        executors=[],
+    )
+    metagraph = _stub_metagraph_factory(hotkeys=[], weights=[])
+    client = _client(portal, tmp_token_store, fake_signer)
+    snapshot = client.status(metagraph_factory=metagraph)
+    assert snapshot.discord_connected is False
+    assert snapshot.extra_incentive_eligible is False
+    assert "discord: not connected; extra incentives are disabled" in snapshot.warnings
+
+
 def test_status_degrades_when_whoami_fails(
     fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
 ) -> None:

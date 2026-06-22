@@ -13,8 +13,10 @@ executor). Re-add only when a corresponding portal route is re-enabled.
 LOGIN_FLEXIBLE = "/auth/login-flexible"
 LOGOUT = "/auth/logout"
 ME = "/auth/me"
+DISCORD_OAUTH_URL = "/auth/me/discord/oauth-url"
 SET_EMAIL = "/auth/set-email"
 SET_MACHINE_REQUEST_SUBSCRIPTION = "/auth/set-machine-request-subscription"
+SET_PASSWORD = "/auth/set-password"
 
 # Provider / miner
 PROVIDER_OPT_IN = "/providers/opt-in"
@@ -54,6 +56,7 @@ ESTIMATED_REWARDS = "/machines/estimated-rewards"
 __all__ = [
     "BILLING",
     "BILLING_BY_MINER",
+    "DISCORD_OAUTH_URL",
     "ESTIMATED_REWARDS",
     "EXECUTOR_BY_ID",
     "EXECUTOR_MACHINE_ADDED",
@@ -73,6 +76,7 @@ __all__ = [
     "PROVIDER_OPT_IN",
     "SET_EMAIL",
     "SET_MACHINE_REQUEST_SUBSCRIPTION",
+    "SET_PASSWORD",
     "SYNC_EXECUTOR_CENTRAL_MINER",
     "SYNC_EXECUTOR_CENTRAL_PROVIDER",
     "SYNC_EXECUTOR_MINER_PORTAL",

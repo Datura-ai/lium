@@ -47,6 +47,14 @@ from lium.provider.errors import (
 from lium.provider.models import ProviderStatus
 
 
+DISCORD_INCENTIVE_WARNING_CODE = "DISCORD_REQUIRED_FOR_EXTRA_INCENTIVES"
+DISCORD_INCENTIVE_WARNING_MESSAGE = (
+    "Discord is not connected. No Discord = no extra incentives. "
+    "Run `lium provider config connect-discord` to become eligible."
+)
+DISCORD_CONNECT_COMMAND = "lium provider config connect-discord"
+_DISCORD_STATUS_WARNING = "discord: not connected; extra incentives are disabled"
+
 # code -> exit-code mapping. Anything missing falls back to ``1``.
 _EXIT_CODES: dict[str, int] = {
     # 1: user/arg errors
@@ -82,6 +90,7 @@ def render(
     payload: Any,
     *,
     summary: str | None = None,
+    warnings: Iterable[Mapping[str, str]] | None = None,
 ) -> None:
     """Render a successful result.
 
@@ -89,8 +98,11 @@ def render(
     prints ``summary`` (if provided) followed by a Rich table or panel
     chosen by payload shape.
     """
+    structured_warnings = _normalise_warnings(warnings)
     if _json_mode(ctx):
         envelope = {"ok": True, "data": _to_serialisable(payload)}
+        if structured_warnings:
+            envelope["warnings"] = structured_warnings
         click.echo(json.dumps(envelope, sort_keys=True, default=str))
         return
 
@@ -146,10 +158,20 @@ def emit_warning(ctx: click.Context, code: str, message: str) -> None:
         # The status command surfaces warnings via ProviderStatus.warnings;
         # for one-shot warnings we deliberately keep stdout clean.
         return
-    click.echo(
-        click.style(f"[{code}]", fg="yellow", bold=True) + f" {message}",
-        err=True,
-    )
+    _emit_structured_warnings([{"code": code, "message": message}])
+
+
+def discord_incentive_warnings(
+    discord_connected: bool | None,
+) -> list[dict[str, str]]:
+    if discord_connected is not False:
+        return []
+    return [
+        {
+            "code": DISCORD_INCENTIVE_WARNING_CODE,
+            "message": DISCORD_INCENTIVE_WARNING_MESSAGE,
+        }
+    ]
 
 
 def _json_mode(ctx: click.Context) -> bool:
@@ -174,6 +196,29 @@ def _to_serialisable(payload: Any) -> Any:
     if isinstance(payload, (list, tuple)):
         return [_to_serialisable(v) for v in payload]
     return payload
+
+
+def _normalise_warnings(
+    warnings: Iterable[Mapping[str, str]] | None,
+) -> list[dict[str, str]]:
+    if not warnings:
+        return []
+    normalised: list[dict[str, str]] = []
+    for warning in warnings:
+        code = str(warning.get("code", "")).strip()
+        message = str(warning.get("message", "")).strip()
+        if code and message:
+            normalised.append({"code": code, "message": message})
+    return normalised
+
+
+def _emit_structured_warnings(warnings: Iterable[Mapping[str, str]]) -> None:
+    for warning in warnings:
+        click.echo(
+            click.style(f"[{warning['code']}]", fg="yellow", bold=True)
+            + f" {warning['message']}",
+            err=True,
+        )
 
 
 def fatal(ctx: click.Context, err: ProviderError) -> None:
@@ -533,8 +578,17 @@ def _render_record(body: Mapping[str, Any]) -> None:
     table = _new_table(headers=False, expand=False)
     table.add_column("Field", style="dim", justify="right", no_wrap=True)
     table.add_column("Value", overflow="fold")
+    extra_incentives_disabled = body.get("extra_incentive_eligible") is False
+    extra_incentive_note_rendered = False
     for key, value in body.items():
+        if key == "extra_incentive_eligible" and extra_incentives_disabled:
+            continue
         table.add_row(_human_label(key), _format_record_value(key, value))
+        if key == "discord_connected" and extra_incentives_disabled:
+            table.add_row("Extra Incentives", _format_discord_incentive_next_step())
+            extra_incentive_note_rendered = True
+    if extra_incentives_disabled and not extra_incentive_note_rendered:
+        table.add_row("Extra Incentives", _format_discord_incentive_next_step())
     console.print(table)
 
 
@@ -565,6 +619,12 @@ def _format_record_value(key: str, value: Any) -> str:
     a single record is the right place to reveal full identifiers."""
     if value is None or value == "":
         return console.get_styled("—", "dim")
+    if key == "extra_incentive_eligible" and value is False:
+        return _format_extra_incentive_eligible(
+            value,
+            true_label="true",
+            false_label="false",
+        )
     if isinstance(value, bool):
         return _bool_icon(value, true_label="true", false_label="false")
     if isinstance(value, (list, tuple)):
@@ -603,6 +663,26 @@ def _format_record_value(key: str, value: Any) -> str:
     return text
 
 
+def _format_extra_incentive_eligible(
+    value: Any,
+    *,
+    true_label: str = "yes",
+    false_label: str = "no",
+) -> str:
+    return _bool_icon(value, true_label=true_label, false_label=false_label)
+
+
+def _format_discord_connect_command() -> str:
+    return console.get_styled(DISCORD_CONNECT_COMMAND, "warning")
+
+
+def _format_discord_incentive_next_step() -> str:
+    return (
+        "No Discord = no extra incentives.\nRun: "
+        + _format_discord_connect_command()
+    )
+
+
 def _render_provider_status(status: ProviderStatus) -> None:
     """Multi-section render for the aggregated ``status`` command."""
     overview = _new_table(headers=False, expand=False)
@@ -623,6 +703,19 @@ def _render_provider_status(status: ProviderStatus) -> None:
         else console.get_styled("inactive", "warning"),
     )
     overview.add_row("Provider id", _format_record_value("provider_id", status.provider_id))
+    overview.add_row(
+        "Discord connected",
+        _bool_icon(status.discord_connected)
+        if status.discord_connected is not None
+        else console.get_styled("unknown", "dim"),
+    )
+    if status.extra_incentive_eligible is False:
+        overview.add_row("Extra incentives", _format_discord_incentive_next_step())
+    elif status.extra_incentive_eligible is not None:
+        overview.add_row(
+            "Extra incentive eligible",
+            _format_extra_incentive_eligible(status.extra_incentive_eligible),
+        )
     overview.add_row("Nodes", _value_or_dash(status.node_count))
     console.print(overview)
 
@@ -638,15 +731,19 @@ def _render_provider_status(status: ProviderStatus) -> None:
         )
         _render_rows([w.model_dump() for w in status.validator_weights])
 
-    if status.warnings:
+    visible_warnings = [
+        warning for warning in status.warnings if warning != _DISCORD_STATUS_WARNING
+    ]
+    if visible_warnings:
         console.print(
-            console.get_styled(f"\nWarnings ({len(status.warnings)})", "warning")
+            console.get_styled(f"\nWarnings ({len(visible_warnings)})", "warning")
         )
-        for w in status.warnings:
+        for w in visible_warnings:
             console.print("  " + console.get_styled(f"⚠ {w}", "warning"))
 
 
 __all__ = [
+    "discord_incentive_warnings",
     "emit_error",
     "emit_warning",
     "exit_code_for",

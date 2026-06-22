@@ -19,11 +19,13 @@ from __future__ import annotations
 
 import logging
 import re as _re
+import time
 from typing import Any
 
 from lium.provider._routes import (
     BILLING,
     BILLING_BY_MINER,
+    DISCORD_OAUTH_URL,
     ESTIMATED_REWARDS,
     EXECUTOR_BY_ID,
     EXECUTOR_MACHINE_ADDED,
@@ -40,6 +42,7 @@ from lium.provider._routes import (
     MINER_OPT_IN,
     SET_EMAIL,
     SET_MACHINE_REQUEST_SUBSCRIPTION,
+    SET_PASSWORD,
     SYNC_EXECUTOR_CENTRAL_MINER,
     SYNC_EXECUTOR_MINER_PORTAL,
     UPDATE_GPU,
@@ -64,6 +67,7 @@ from lium.provider.models import (
     SetMachineRequestSubscriptionPayload,
     SetMinGpuCountForRentalPayload,
     SetOptInRequest,
+    SetPasswordPayload,
     UpdateGpuPayload,
     UpdatePricePayload,
     ValidatorWeight,
@@ -230,11 +234,22 @@ class ProviderClient:
         try:
             me_body = self.whoami()
             out.portal_session_active = True
+            out.discord_connected = discord_connected_from_profile(me_body)
+            if out.discord_connected is not None:
+                out.extra_incentive_eligible = out.discord_connected
+                if not out.discord_connected:
+                    warnings.append(
+                        "discord: not connected; extra incentives are disabled"
+                    )
             # /auth/me returns a flat dict: {provider_id, miner_hotkey, ...}.
             # Older / alternate shapes (nested {provider: {id: ...}}) are also
             # accepted so unit fixtures and any future portal rev land cleanly.
             if isinstance(me_body, dict):
-                provider_id = me_body.get("provider_id") or me_body.get("id")
+                provider_id = (
+                    me_body.get("provider_id")
+                    or me_body.get("miner_id")
+                    or me_body.get("id")
+                )
                 if not provider_id:
                     nested = me_body.get("provider")
                     if isinstance(nested, dict):
@@ -307,6 +322,41 @@ class ProviderClient:
         """
         payload = _build_payload(SetEmailPayload, email=email)
         return self._http.post(SET_EMAIL, json_body=payload)
+
+    def set_password(
+        self, new_password: str, *, wait_for_fresh_timestamp: bool = True
+    ) -> dict[str, Any]:
+        """``POST /auth/set-password`` using fresh hotkey signature auth.
+
+        The backend replay guard keys nonces by ``(hotkey, timestamp)``.
+        Waiting for a new second avoids flakiness when automation calls
+        ``portal login`` and ``config set-password`` back-to-back.
+        """
+        if wait_for_fresh_timestamp:
+            _wait_until_next_timestamp_second()
+        payload = {
+            **build_login_payload(self.signer),
+            "new_password": new_password,
+        }
+        return self._http.post(
+            SET_PASSWORD,
+            json_body=_build_payload(SetPasswordPayload, **payload),
+            auth=False,
+        )
+
+    def create_discord_oauth_authorization_url(self) -> str:
+        """``GET /auth/me/discord/oauth-url`` and return the OAuth URL."""
+        body = self._http.get(DISCORD_OAUTH_URL)
+        authorization_url = (
+            body.get("authorization_url") if isinstance(body, dict) else None
+        )
+        if not isinstance(authorization_url, str) or not authorization_url:
+            raise ProviderError(
+                "portal returned an unexpected Discord OAuth URL response shape",
+                code="PORTAL_CONTRACT_DRIFT",
+                context={"body": _summarise_body(body)},
+            )
+        return authorization_url
 
     def set_machine_request_subscription(self, gpu_types: list[str]) -> dict[str, Any]:
         """``POST /auth/set-machine-request-subscription``.
@@ -665,6 +715,33 @@ def _summarise_body(body: Any, *, max_chars: int = 240) -> str:
     return text if len(text) <= max_chars else text[:max_chars] + "..."
 
 
+def discord_connected_from_profile(profile: dict[str, Any] | None) -> bool | None:
+    """Return Discord connection state from a portal profile body.
+
+    ``None`` means the field was unavailable, which is different from a
+    known disconnected provider where ``discord_id`` is present but empty.
+    """
+    if not isinstance(profile, dict) or "discord_id" not in profile:
+        return None
+    return bool(profile.get("discord_id"))
+
+
+def with_discord_eligibility(profile: dict[str, Any]) -> dict[str, Any]:
+    """Copy a profile dict and add Discord incentive readiness fields."""
+    enriched = dict(profile)
+    connected = discord_connected_from_profile(enriched)
+    enriched["discord_connected"] = connected
+    enriched["extra_incentive_eligible"] = connected if connected is not None else None
+    return enriched
+
+
+def _wait_until_next_timestamp_second() -> None:
+    """Wait until ``int(time.time())`` advances at least once."""
+    start = int(time.time())
+    while int(time.time()) <= start:
+        time.sleep(0.05)
+
+
 def _read_metagraph(
     *,
     hotkey_ss58: str | None,
@@ -718,4 +795,8 @@ def _read_metagraph(
     return True, rows
 
 
-__all__ = ["ProviderClient"]
+__all__ = [
+    "ProviderClient",
+    "discord_connected_from_profile",
+    "with_discord_eligibility",
+]
