@@ -23,6 +23,7 @@ class ExecutorInfo:
     effective_upload_speed_mbps: Optional[float] = None
     effective_download_speed_mbps: Optional[float] = None
     max_cuda_version: Optional[float] = None
+    tier: Optional[str] = None  # "spot" or "secure"; reclaim/penalty risk signal
 
     @property
     def driver_version(self) -> str:

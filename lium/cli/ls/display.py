@@ -41,6 +41,17 @@ def _money(v: Optional[float]) -> str:
     return f"{v:>6.2f}" if v is not None else "—"
 
 
+def _tier_display(exe: ExecutorInfo) -> str:
+    """Render tier with a risk-signalling colour: spot (reclaimable, no fee withheld)
+    in warning, secure in success, unknown as a dash."""
+    tier = (exe.tier or "").strip().lower()
+    if tier == "spot":
+        return console.get_styled("spot", "warning")
+    if tier == "secure":
+        return console.get_styled("secure", "success")
+    return "—"
+
+
 def _intish(x: Any) -> Optional[int]:
     """Convert to int safely."""
     try:
@@ -122,6 +133,7 @@ def _add_table_columns(t: Table) -> None:
     t.add_column("", justify="right", width=3, no_wrap=True, style="dim")
     t.add_column("Id", justify="left", ratio=8, min_width=24, overflow="fold")
     t.add_column("Config", justify="left", width=12, no_wrap=True)
+    t.add_column("Tier", justify="left", width=8, no_wrap=True)
     t.add_column("Max CUDA", justify="right", width=10, no_wrap=True)
     t.add_column("$/GPU·h", justify="right", width=8, no_wrap=True)
     t.add_column("Location", justify="left", ratio=4, min_width=10, overflow="fold")
@@ -168,6 +180,7 @@ def compact_executor(exe: ExecutorInfo, is_pareto: bool, index: int) -> Dict[str
         "docker_in_docker": exe.docker_in_docker,
         "is_pareto": is_pareto,
         "max_cuda_version": exe.max_cuda_version,
+        "tier": exe.tier,
     }
 
 
@@ -247,6 +260,7 @@ def build_executors_table(
             str(idx),
             huid_display,
             _cfg(exe),
+            _tier_display(exe),
             cuda_display,
             console.get_styled(_money(exe.price_per_gpu), 'success'),
             _country_name(exe.location),
