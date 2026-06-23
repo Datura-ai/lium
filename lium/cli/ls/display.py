@@ -22,7 +22,10 @@ def _mid_ellipsize(s: str, width: int = 28) -> str:
 
 def _cfg(exe: ExecutorInfo) -> str:
     """Format GPU configuration string."""
-    return f"{exe.gpu_count}×{exe.gpu_type}"
+    base = f"{exe.gpu_count}×{exe.gpu_type}"
+    if exe.min_gpu_count_for_rental is not None:
+        base += f" ↯ from {exe.min_gpu_count_for_rental}"
+    return base
 
 
 def _country_name(loc: Optional[Dict]) -> str:
@@ -181,6 +184,7 @@ def compact_executor(exe: ExecutorInfo, is_pareto: bool, index: int) -> Dict[str
         "is_pareto": is_pareto,
         "max_cuda_version": exe.max_cuda_version,
         "tier": exe.tier,
+        "min_gpu_count_for_rental": exe.min_gpu_count_for_rental,
     }
 
 
