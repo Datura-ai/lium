@@ -26,6 +26,7 @@ class GetExecutorsAction:
                 lon=lon,
                 max_distance_miles=max_distance,
                 min_cuda_version=min_cuda_version,
+                widen_for_splitting=True,
             )
             return ActionResult(
                 ok=True,
