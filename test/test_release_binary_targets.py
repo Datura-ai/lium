@@ -90,7 +90,8 @@ def make_fake_release(tmp_path: Path, version: str) -> Path:
     # Build a onedir bundle: a "lium/" directory holding the executable, then
     # package it as the released tarball.
     stage = tmp_path / f"stage-{version}" / "lium"
-    stage.mkdir(parents=True)
+    (stage / "_internal").mkdir(parents=True)
+    (stage / "_internal" / "marker").write_text("x", encoding="utf-8")
     binary = stage / "lium"
     binary.write_text(
         "#!/bin/sh\n"

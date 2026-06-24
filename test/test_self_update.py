@@ -1,5 +1,8 @@
+import hashlib
+import io
 import json
 import os
+import tarfile
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -34,10 +37,6 @@ def static_file_server(root: Path):
 
 
 def write_release(root: Path, version: str, *, checksum_matches: bool = True) -> None:
-    import hashlib
-    import io
-    import tarfile
-
     release_dir = root / "releases" / "download" / f"v{version}"
     release_dir.mkdir(parents=True, exist_ok=True)
 
@@ -50,6 +49,10 @@ def write_release(root: Path, version: str, *, checksum_matches: bool = True) ->
         info.size = len(binary_body)
         info.mode = 0o755
         tar.addfile(info, io.BytesIO(binary_body))
+        # _internal/ marks a structurally valid onedir bundle.
+        internal = tarfile.TarInfo("lium/_internal/marker")
+        internal.size = 1
+        tar.addfile(internal, io.BytesIO(b"x"))
 
     digest = hashlib.sha256(asset_path.read_bytes()).hexdigest()
     if not checksum_matches:
@@ -143,6 +146,9 @@ def test_perform_startup_update_aborts_on_checksum_mismatch(
     assert result.checked is True
     assert result.updated is False
     assert "checksum verification failed" in (result.error or "")
+    # A checksum mismatch is transient/ambiguous, not a missing asset — it must
+    # stay quiet and retry, not nag the user to reinstall.
+    assert result.needs_reinstall is False
     assert os.readlink(cli_path) == "../versions/0.1.3/lium/lium"
     assert not (home / ".lium" / "versions" / "0.1.4").exists()
 
@@ -175,6 +181,24 @@ def test_perform_startup_update_flags_reinstall_when_asset_missing(
     assert result.updated is False
     assert result.needs_reinstall is True
     assert os.readlink(cli_path) == "../versions/0.1.3/lium/lium"
+
+
+def test_is_missing_asset_error_classification():
+    from urllib.error import HTTPError
+
+    def http(code: int) -> HTTPError:
+        return HTTPError("http://x", code, "msg", {}, None)
+
+    # Asset genuinely absent → reinstall-worthy.
+    assert self_update._is_missing_asset_error(self_update.AssetNotFoundError("x")) is True
+    assert self_update._is_missing_asset_error(http(404)) is True
+    assert self_update._is_missing_asset_error(http(410)) is True
+    # Transient / ambiguous failures stay quiet (retry next cycle).
+    assert self_update._is_missing_asset_error(
+        RuntimeError("checksum verification failed for x")
+    ) is False
+    assert self_update._is_missing_asset_error(http(503)) is False
+    assert self_update._is_missing_asset_error(OSError("network down")) is False
 
 
 def test_maybe_perform_startup_update_warns_with_reinstall_command(monkeypatch):

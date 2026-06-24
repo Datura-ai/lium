@@ -238,9 +238,23 @@ main() {
     download "$checksum_url" "$temp_dir/checksums.txt"
     verify_checksum "$asset_name" "$temp_dir"
 
+    # Extract into a staging dir on the same filesystem, validate, then swap into
+    # place. The slow tar never touches the live bundle, so an interrupted or
+    # corrupt extract can't destroy a working install (mirrors the in-CLI
+    # self-updater's stage-then-replace).
+    staging_dir="${version_dir}/.lium.tmp"
+    rm -rf "$staging_dir"
+    mkdir -p "$staging_dir"
+    tar -xzf "$temp_dir/${asset_name}" -C "$staging_dir"
+    if [[ ! -x "$staging_dir/lium/lium" || ! -d "$staging_dir/lium/_internal" ]]; then
+        echo "Error: downloaded archive is not a valid lium onedir bundle." >&2
+        rm -rf "$staging_dir"
+        exit 1
+    fi
+    chmod +x "$staging_dir/lium/lium"
     rm -rf "$bundle_dir"
-    tar -xzf "$temp_dir/${asset_name}" -C "$version_dir"
-    chmod +x "$versioned_binary"
+    mv "$staging_dir/lium" "$bundle_dir"
+    rm -rf "$staging_dir"
     ln -sfn "../versions/${version}/lium/lium" "$cli_path"
     add_to_path
 

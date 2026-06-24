@@ -25,6 +25,15 @@ DEFAULT_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 STALE_LOCK_SECONDS = 60 * 60
 STATE_FILE_NAME = "self-update.json"
 LOCK_FILE_NAME = "self-update.lock"
+
+
+class AssetNotFoundError(RuntimeError):
+    """The release does not carry the asset name this binary expects.
+
+    Signals a distribution-format change a reinstall resolves, so the failure is
+    surfaced as a reinstall prompt rather than a quiet retry. A typed exception
+    (not an error-message match) keeps that decision robust to message wording.
+    """
 REINSTALL_COMMAND = "curl -fsSL https://lium.io/install.sh | bash"
 
 
@@ -262,16 +271,16 @@ def discover_managed_install(
         return None
 
     try:
-        relative_binary = current_binary.relative_to(versions_dir)
+        # Resolve versions_dir too: current_binary is already resolved, so a
+        # symlink anywhere in the home path (e.g. NFS automount) would otherwise
+        # break relative_to and silently mark a managed install as unmanaged.
+        relative_binary = current_binary.relative_to(versions_dir.resolve())
     except ValueError:
         return None
 
     parts = relative_binary.parts
-    # New onedir layout: versions/<ver>/lium/lium. Legacy single-file layout:
-    # versions/<ver>/lium (still accepted so a stale symlink is recognized).
-    if len(parts) == 3 and parts[1] == "lium":
-        current_version = parts[0]
-    elif len(parts) == 2:
+    # onedir layout: versions/<ver>/lium/lium; legacy single-file: versions/<ver>/lium.
+    if len(parts) == 2 or (len(parts) == 3 and parts[1] == "lium"):
         current_version = parts[0]
     else:
         return None
@@ -379,7 +388,7 @@ def verify_checksum(
             break
 
     if not expected_checksum:
-        raise RuntimeError(f"missing checksum for asset {asset_name}")
+        raise AssetNotFoundError(f"missing checksum for asset {asset_name}")
 
     actual_checksum = hashlib.sha256(asset_bytes).hexdigest()
     if actual_checksum != expected_checksum:
@@ -413,8 +422,8 @@ def install_versioned_binary(
 
         extracted_bundle = staging_dir / "lium"
         target_binary = extracted_bundle / "lium"
-        if not target_binary.exists():
-            raise RuntimeError("release tarball missing lium/lium executable")
+        if not target_binary.exists() or not (extracted_bundle / "_internal").is_dir():
+            raise RuntimeError("release tarball is not a valid onedir bundle")
         target_binary.chmod(0o755)
 
         if bundle_dir.exists():
@@ -557,17 +566,17 @@ def _write_state(path: Path, payload: Dict[str, object]) -> None:
 def _is_missing_asset_error(exc: BaseException) -> bool:
     """True when the update failed because the expected release asset is absent.
 
-    Covers a 404 on the asset/checksum download and a checksums.txt with no entry
-    for the asset — both mean the release does not carry the asset name this
-    binary expects (a distribution-format change), which a reinstall resolves.
-    Transient network errors deliberately return False so they stay quiet.
+    Covers a 404/410 on the asset/checksum download and a checksums.txt with no
+    entry for the asset (AssetNotFoundError) — both mean the release does not
+    carry the asset name this binary expects (a distribution-format change),
+    which a reinstall resolves. Transient errors (network blips, a corrupt
+    download failing checksum verification) deliberately return False so they
+    stay quiet and retry on the next cycle.
     """
 
-    if isinstance(exc, HTTPError) and exc.code == 404:
+    if isinstance(exc, AssetNotFoundError):
         return True
-    if isinstance(exc, RuntimeError) and str(exc).startswith(
-        "missing checksum for asset"
-    ):
+    if isinstance(exc, HTTPError) and exc.code in (404, 410):
         return True
     return False
 
