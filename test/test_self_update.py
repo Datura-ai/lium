@@ -7,10 +7,14 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from lium.cli import self_update
 from lium.cli.self_update import (
+    REINSTALL_COMMAND,
     STATE_FILE_NAME,
+    UpdateResult,
     cleanup_old_versions,
     discover_managed_install,
+    maybe_perform_startup_update,
     perform_startup_update,
 )
 
@@ -141,6 +145,55 @@ def test_perform_startup_update_aborts_on_checksum_mismatch(
     assert "checksum verification failed" in (result.error or "")
     assert os.readlink(cli_path) == "../versions/0.1.3/lium/lium"
     assert not (home / ".lium" / "versions" / "0.1.4").exists()
+
+
+def test_perform_startup_update_flags_reinstall_when_asset_missing(
+    tmp_path: Path, monkeypatch
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    cli_path = create_managed_install(home, "0.1.3")
+    release_root = tmp_path / "release-root"
+    # A newer release that ships no binary asset for this platform: the asset
+    # download 404s, standing in for a distribution-format change.
+    (release_root / "releases" / "download" / "v0.1.4").mkdir(parents=True)
+
+    monkeypatch.setenv("LIUM_UPDATE_AUTO_CHECK", "true")
+    monkeypatch.setenv("LIUM_SELF_UPDATE_CHECK_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("LIUM_INSTALLER_UNAME_S", "Linux")
+    monkeypatch.setenv("LIUM_INSTALLER_UNAME_M", "x86_64")
+
+    with static_file_server(release_root) as base_url:
+        monkeypatch.setenv(
+            "LIUM_INSTALLER_RELEASE_URL", f"{base_url}/releases/tag/v0.1.4"
+        )
+        result = perform_startup_update(
+            home=home, argv0=str(cli_path), executable=str(cli_path)
+        )
+
+    assert result.checked is True
+    assert result.updated is False
+    assert result.needs_reinstall is True
+    assert os.readlink(cli_path) == "../versions/0.1.3/lium/lium"
+
+
+def test_maybe_perform_startup_update_warns_with_reinstall_command(monkeypatch):
+    monkeypatch.setattr(
+        self_update,
+        "perform_startup_update",
+        lambda: UpdateResult(needs_reinstall=True, error="HTTP Error 404: Not Found"),
+    )
+    warnings: list[str] = []
+    debugs: list[str] = []
+    monkeypatch.setattr(self_update.ui, "warning", warnings.append)
+    monkeypatch.setattr(self_update.ui, "debug", debugs.append)
+
+    result = maybe_perform_startup_update()
+
+    assert result.needs_reinstall is True
+    assert len(warnings) == 1
+    assert REINSTALL_COMMAND in warnings[0]
+    assert debugs == []  # a missing-asset failure must not stay debug-only
 
 
 def test_perform_startup_update_skips_non_managed_installs(tmp_path: Path, monkeypatch):

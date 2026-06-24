@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Sequence
+from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -24,6 +25,7 @@ DEFAULT_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 STALE_LOCK_SECONDS = 60 * 60
 STATE_FILE_NAME = "self-update.json"
 LOCK_FILE_NAME = "self-update.lock"
+REINSTALL_COMMAND = "curl -fsSL https://lium.io/install.sh | bash"
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,10 @@ class UpdateResult:
     current_version: Optional[str] = None
     latest_version: Optional[str] = None
     error: Optional[str] = None
+    # Set when the failure is a missing release asset (404 / not in checksums),
+    # i.e. a distribution-format mismatch that a reinstall fixes — as opposed to
+    # a transient network error, which should stay quiet.
+    needs_reinstall: bool = False
     cleaned_versions: Sequence[str] = field(default_factory=tuple)
 
 
@@ -107,6 +113,13 @@ def maybe_perform_startup_update() -> UpdateResult:
         ui.info(
             f"Updated Lium CLI from {result.current_version} to {result.latest_version}; "
             "the new version will be used on the next launch."
+        )
+    elif result.needs_reinstall:
+        ui.warning(
+            "Lium CLI could not auto-update: this release no longer ships the "
+            "package format your installed binary expects. Reinstall to keep "
+            "getting updates:\n"
+            f"  {REINSTALL_COMMAND}"
         )
     elif result.error:
         ui.debug(f"Managed binary auto-update skipped after error: {result.error}")
@@ -212,6 +225,7 @@ def perform_startup_update(
             return result
         except Exception as exc:  # noqa: BLE001 - startup must not break CLI execution
             result.error = str(exc)
+            result.needs_reinstall = _is_missing_asset_error(exc)
             _write_state(
                 state_path,
                 {
@@ -538,6 +552,24 @@ def _write_state(path: Path, payload: Dict[str, object]) -> None:
             json.dump(payload, handle, indent=2, sort_keys=True)
     except OSError:
         return
+
+
+def _is_missing_asset_error(exc: BaseException) -> bool:
+    """True when the update failed because the expected release asset is absent.
+
+    Covers a 404 on the asset/checksum download and a checksums.txt with no entry
+    for the asset — both mean the release does not carry the asset name this
+    binary expects (a distribution-format change), which a reinstall resolves.
+    Transient network errors deliberately return False so they stay quiet.
+    """
+
+    if isinstance(exc, HTTPError) and exc.code == 404:
+        return True
+    if isinstance(exc, RuntimeError) and str(exc).startswith(
+        "missing checksum for asset"
+    ):
+        return True
+    return False
 
 
 def _download_bytes(url: str) -> bytes:
