@@ -32,7 +32,7 @@ detect_asset_name() {
 
     case "$os/$arch" in
         linux/amd64|linux/arm64|darwin/amd64|darwin/arm64)
-            printf 'lium-%s-%s' "$os" "$arch"
+            printf 'lium-%s-%s.tar.gz' "$os" "$arch"
             ;;
         *)
             echo "Error: unsupported platform: ${os}-${arch}. Supported binaries: darwin-amd64, darwin-arm64, linux-amd64, linux-arm64." >&2
@@ -209,8 +209,8 @@ EOF
 }
 
 main() {
-    local asset_name version release_path temp_dir binary_url checksum_url
-    local install_root version_dir cli_path versioned_binary
+    local asset_name version release_path temp_dir bundle_url checksum_url
+    local install_root version_dir cli_path bundle_dir versioned_binary
 
     guard_against_sudo
 
@@ -220,7 +220,9 @@ main() {
     install_root="$(dirname "$INSTALL_DIR")"
     version_dir="${install_root}/versions/${version}"
     cli_path="${INSTALL_DIR}/lium"
-    versioned_binary="${version_dir}/lium"
+    # onedir bundle extracts to ${version_dir}/lium/ (executable + _internal/)
+    bundle_dir="${version_dir}/lium"
+    versioned_binary="${bundle_dir}/lium"
 
     temp_dir="$(mktemp -d)"
     trap "rm -rf \"$temp_dir\"" EXIT
@@ -228,16 +230,18 @@ main() {
     mkdir -p "$INSTALL_DIR" "$version_dir"
     ensure_managed_cli_path "$cli_path"
 
-    binary_url="${release_path}/${asset_name}"
+    bundle_url="${release_path}/${asset_name}"
     checksum_url="${release_path}/checksums.txt"
 
-    echo "Downloading ${asset_name} from ${binary_url}"
-    download "$binary_url" "$temp_dir/${asset_name}"
+    echo "Downloading ${asset_name} from ${bundle_url}"
+    download "$bundle_url" "$temp_dir/${asset_name}"
     download "$checksum_url" "$temp_dir/checksums.txt"
     verify_checksum "$asset_name" "$temp_dir"
 
-    install -m 0755 "$temp_dir/${asset_name}" "$versioned_binary"
-    ln -sfn "../versions/${version}/lium" "$cli_path"
+    rm -rf "$bundle_dir"
+    tar -xzf "$temp_dir/${asset_name}" -C "$version_dir"
+    chmod +x "$versioned_binary"
+    ln -sfn "../versions/${version}/lium/lium" "$cli_path"
     add_to_path
 
     echo

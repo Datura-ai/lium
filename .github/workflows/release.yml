@@ -105,33 +105,34 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Build Linux binary in Docker
+    - name: Build Linux bundle in Docker
       run: |
         mkdir -p dist
+        rm -rf dist/lium
         docker rm -f lium-extract >/dev/null 2>&1 || true
         docker build --platform ${{ matrix.platform }} -f Dockerfile.build -t lium-build:${GITHUB_SHA}-${{ matrix.asset_name }} .
         docker create --name lium-extract lium-build:${GITHUB_SHA}-${{ matrix.asset_name }} true
-        docker cp lium-extract:/app/dist/lium dist/${{ matrix.asset_name }}
+        docker cp lium-extract:/app/dist/lium dist/lium
         docker rm -f lium-extract
-        chmod +x dist/${{ matrix.asset_name }}
+        tar -czf dist/${{ matrix.asset_name }}.tar.gz -C dist lium
 
-    - name: Smoke test Linux binary
+    - name: Smoke test Linux bundle
       run: |
-        ./dist/${{ matrix.asset_name }} --version
-        ./dist/${{ matrix.asset_name }} --help >/dev/null
+        ./dist/lium/lium --version
+        ./dist/lium/lium --help >/dev/null
 
     - name: Generate Linux checksum
       run: |
         cd dist
-        sha256sum ${{ matrix.asset_name }} > ${{ matrix.asset_name }}.sha256
+        sha256sum ${{ matrix.asset_name }}.tar.gz > ${{ matrix.asset_name }}.tar.gz.sha256
 
     - name: Upload Linux artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.asset_name }}
         path: |
-          dist/${{ matrix.asset_name }}
-          dist/${{ matrix.asset_name }}.sha256
+          dist/${{ matrix.asset_name }}.tar.gz
+          dist/${{ matrix.asset_name }}.tar.gz.sha256
 
   build-macos-binary:
     name: Build macOS binary (${{ matrix.asset_name }})
@@ -167,27 +168,27 @@ jobs:
           exit 1
         fi
         uv sync --frozen --extra dev
+        rm -rf dist/lium
         uv run pyinstaller lium.spec --clean
-        mv dist/lium dist/${{ matrix.asset_name }}
-        chmod +x dist/${{ matrix.asset_name }}
+        tar -czf dist/${{ matrix.asset_name }}.tar.gz -C dist lium
 
-    - name: Smoke test macOS binary
+    - name: Smoke test macOS bundle
       run: |
-        ./dist/${{ matrix.asset_name }} --version
-        ./dist/${{ matrix.asset_name }} --help >/dev/null
+        ./dist/lium/lium --version
+        ./dist/lium/lium --help >/dev/null
 
     - name: Generate macOS checksum
       run: |
         cd dist
-        shasum -a 256 ${{ matrix.asset_name }} > ${{ matrix.asset_name }}.sha256
+        shasum -a 256 ${{ matrix.asset_name }}.tar.gz > ${{ matrix.asset_name }}.tar.gz.sha256
 
     - name: Upload macOS artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.asset_name }}
         path: |
-          dist/${{ matrix.asset_name }}
-          dist/${{ matrix.asset_name }}.sha256
+          dist/${{ matrix.asset_name }}.tar.gz
+          dist/${{ matrix.asset_name }}.tar.gz.sha256
 
   release-assets:
     name: Publish GitHub release assets
@@ -239,10 +240,10 @@ jobs:
         cp scripts/install.sh release-assets/install.sh
         chmod +x release-assets/install.sh
         {
-          cat release-assets/linux-amd64/lium-linux-amd64.sha256
-          cat release-assets/linux-arm64/lium-linux-arm64.sha256
-          cat release-assets/darwin-amd64/lium-darwin-amd64.sha256
-          cat release-assets/darwin-arm64/lium-darwin-arm64.sha256
+          cat release-assets/linux-amd64/lium-linux-amd64.tar.gz.sha256
+          cat release-assets/linux-arm64/lium-linux-arm64.tar.gz.sha256
+          cat release-assets/darwin-amd64/lium-darwin-amd64.tar.gz.sha256
+          cat release-assets/darwin-arm64/lium-darwin-arm64.tar.gz.sha256
         } > release-assets/checksums.txt
 
     - name: Create or update GitHub release
@@ -258,14 +259,14 @@ jobs:
         gh release upload "$RELEASE_TAG" \
           release-assets/install.sh \
           release-assets/checksums.txt \
-          release-assets/linux-amd64/lium-linux-amd64 \
-          release-assets/linux-amd64/lium-linux-amd64.sha256 \
-          release-assets/linux-arm64/lium-linux-arm64 \
-          release-assets/linux-arm64/lium-linux-arm64.sha256 \
-          release-assets/darwin-amd64/lium-darwin-amd64 \
-          release-assets/darwin-amd64/lium-darwin-amd64.sha256 \
-          release-assets/darwin-arm64/lium-darwin-arm64 \
-          release-assets/darwin-arm64/lium-darwin-arm64.sha256 \
+          release-assets/linux-amd64/lium-linux-amd64.tar.gz \
+          release-assets/linux-amd64/lium-linux-amd64.tar.gz.sha256 \
+          release-assets/linux-arm64/lium-linux-arm64.tar.gz \
+          release-assets/linux-arm64/lium-linux-arm64.tar.gz.sha256 \
+          release-assets/darwin-amd64/lium-darwin-amd64.tar.gz \
+          release-assets/darwin-amd64/lium-darwin-amd64.tar.gz.sha256 \
+          release-assets/darwin-arm64/lium-darwin-arm64.tar.gz \
+          release-assets/darwin-arm64/lium-darwin-arm64.tar.gz.sha256 \
           release-assets/python-dist/* \
           --clobber
 

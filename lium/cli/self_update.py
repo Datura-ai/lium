@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import sys
+import tarfile
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -251,10 +252,15 @@ def discover_managed_install(
     except ValueError:
         return None
 
-    if len(relative_binary.parts) != 2:
+    parts = relative_binary.parts
+    # New onedir layout: versions/<ver>/lium/lium. Legacy single-file layout:
+    # versions/<ver>/lium (still accepted so a stale symlink is recognized).
+    if len(parts) == 3 and parts[1] == "lium":
+        current_version = parts[0]
+    elif len(parts) == 2:
+        current_version = parts[0]
+    else:
         return None
-
-    current_version = relative_binary.parts[0]
     candidate_paths = tuple(_candidate_paths(argv0=argv0, executable=executable))
 
     if candidate_paths:
@@ -296,7 +302,7 @@ def detect_asset_name() -> str:
     if os_name not in {"linux", "darwin"}:
         raise RuntimeError(f"unsupported platform: {os_name}-{arch}")
 
-    return f"lium-{os_name}-{arch}"
+    return f"lium-{os_name}-{arch}.tar.gz"
 
 
 def normalize_version(version: str) -> str:
@@ -369,16 +375,41 @@ def verify_checksum(
 def install_versioned_binary(
     *, layout: ManagedInstallLayout, version: str, staged_asset: Path
 ) -> Path:
-    """Install the staged binary into the managed versions directory."""
+    """Extract the staged onedir tarball into the managed versions directory.
+
+    The release tarball's top-level directory is ``lium/`` and the executable is
+    ``lium/lium``. The bundle is extracted into a staging dir and atomically
+    swapped into place so a half-extracted bundle is never left live.
+    """
 
     version_dir = layout.versions_dir / version
     version_dir.mkdir(parents=True, exist_ok=True)
-    target_binary = version_dir / "lium"
-    temp_target = version_dir / ".lium.tmp"
-    shutil.copy2(staged_asset, temp_target)
-    temp_target.chmod(0o755)
-    os.replace(temp_target, target_binary)
-    return target_binary
+    bundle_dir = version_dir / "lium"
+    staging_dir = version_dir / ".lium.tmp"
+
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir()
+    try:
+        with tarfile.open(staged_asset, "r:gz") as tar:
+            try:
+                tar.extractall(staging_dir, filter="data")
+            except TypeError:  # the filter kwarg predates Python 3.12
+                tar.extractall(staging_dir)
+
+        extracted_bundle = staging_dir / "lium"
+        target_binary = extracted_bundle / "lium"
+        if not target_binary.exists():
+            raise RuntimeError("release tarball missing lium/lium executable")
+        target_binary.chmod(0o755)
+
+        if bundle_dir.exists():
+            shutil.rmtree(bundle_dir)
+        os.replace(extracted_bundle, bundle_dir)
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+    return bundle_dir / "lium"
 
 
 def switch_cli_symlink(*, layout: ManagedInstallLayout, version: str) -> None:
@@ -390,7 +421,7 @@ def switch_cli_symlink(*, layout: ManagedInstallLayout, version: str) -> None:
         temp_link.unlink()
     except FileNotFoundError:
         pass
-    temp_link.symlink_to(Path("..") / "versions" / version / "lium")
+    temp_link.symlink_to(Path("..") / "versions" / version / "lium" / "lium")
     os.replace(temp_link, layout.cli_symlink)
 
 

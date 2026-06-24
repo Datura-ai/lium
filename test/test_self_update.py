@@ -30,22 +30,29 @@ def static_file_server(root: Path):
 
 
 def write_release(root: Path, version: str, *, checksum_matches: bool = True) -> None:
+    import hashlib
+    import io
+    import tarfile
+
     release_dir = root / "releases" / "download" / f"v{version}"
     release_dir.mkdir(parents=True, exist_ok=True)
 
-    asset_path = release_dir / "lium-linux-amd64"
-    asset_body = f"#!/bin/sh\nprintf 'lium {version}\\n'\n"
-    asset_path.write_text(asset_body, encoding="utf-8")
-    asset_path.chmod(0o755)
-
-    import hashlib
+    # onedir bundle tarball: top-level dir "lium/" with the executable at lium/lium.
+    asset_name = "lium-linux-amd64.tar.gz"
+    asset_path = release_dir / asset_name
+    binary_body = f"#!/bin/sh\nprintf 'lium {version}\\n'\n".encode("utf-8")
+    with tarfile.open(asset_path, "w:gz") as tar:
+        info = tarfile.TarInfo("lium/lium")
+        info.size = len(binary_body)
+        info.mode = 0o755
+        tar.addfile(info, io.BytesIO(binary_body))
 
     digest = hashlib.sha256(asset_path.read_bytes()).hexdigest()
     if not checksum_matches:
         digest = "0" * len(digest)
 
     (release_dir / "checksums.txt").write_text(
-        f"{digest}  lium-linux-amd64\n",
+        f"{digest}  {asset_name}\n",
         encoding="utf-8",
     )
 
@@ -60,14 +67,14 @@ def create_managed_install(
 
     versions = (current_version, *extra_versions)
     for version in versions:
-        version_dir = versions_dir / version
-        version_dir.mkdir(parents=True, exist_ok=True)
-        binary = version_dir / "lium"
+        bundle_dir = versions_dir / version / "lium"
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        binary = bundle_dir / "lium"
         binary.write_text(f"#!/bin/sh\nprintf 'lium {version}\\n'\n", encoding="utf-8")
         binary.chmod(0o755)
 
     cli_path = bin_dir / "lium"
-    cli_path.symlink_to(Path("..") / "versions" / current_version / "lium")
+    cli_path.symlink_to(Path("..") / "versions" / current_version / "lium" / "lium")
     return cli_path
 
 
@@ -97,9 +104,9 @@ def test_perform_startup_update_installs_new_version_and_cleans_old_versions(
     assert result.updated is True
     assert result.current_version == "0.1.3"
     assert result.latest_version == "0.1.4"
-    assert os.readlink(cli_path) == "../versions/0.1.4/lium"
-    assert (home / ".lium" / "versions" / "0.1.4" / "lium").exists()
-    assert (home / ".lium" / "versions" / "0.1.3" / "lium").exists()
+    assert os.readlink(cli_path) == "../versions/0.1.4/lium/lium"
+    assert (home / ".lium" / "versions" / "0.1.4" / "lium" / "lium").exists()
+    assert (home / ".lium" / "versions" / "0.1.3" / "lium" / "lium").exists()
     assert not (home / ".lium" / "versions" / "0.1.2").exists()
 
     state = json.loads((home / ".lium" / STATE_FILE_NAME).read_text(encoding="utf-8"))
@@ -132,7 +139,7 @@ def test_perform_startup_update_aborts_on_checksum_mismatch(
     assert result.checked is True
     assert result.updated is False
     assert "checksum verification failed" in (result.error or "")
-    assert os.readlink(cli_path) == "../versions/0.1.3/lium"
+    assert os.readlink(cli_path) == "../versions/0.1.3/lium/lium"
     assert not (home / ".lium" / "versions" / "0.1.4").exists()
 
 
@@ -185,7 +192,7 @@ def test_discover_managed_install_accepts_active_versioned_binary_path(tmp_path:
     home = tmp_path / "home"
     home.mkdir()
     cli_path = create_managed_install(home, "0.1.3")
-    current_binary = home / ".lium" / "versions" / "0.1.3" / "lium"
+    current_binary = home / ".lium" / "versions" / "0.1.3" / "lium" / "lium"
 
     layout = discover_managed_install(
         home=home,
