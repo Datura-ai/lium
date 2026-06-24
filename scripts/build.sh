@@ -42,6 +42,21 @@ package_bundle() {
     )
 }
 
+# Publish the legacy single-file binary under the bare lium-<os>-<arch> name.
+# The self-update shipped in pre-onedir releases fetches this single-file asset;
+# keeping it lets those installs keep auto-updating. Remove once old installs
+# have migrated.
+package_legacy() {
+    local source="$1" asset="$2"
+    rm -f "$DIST_DIR/${asset}" "$DIST_DIR/${asset}.sha256"
+    cp "$source" "$DIST_DIR/${asset}"
+    chmod +x "$DIST_DIR/${asset}"
+    (
+        cd "$DIST_DIR"
+        sha256_file "$asset"
+    )
+}
+
 build_macos() {
     if [[ "$(uname -s)" != "Darwin" ]]; then
         echo "Skipping macOS build: host is not macOS."
@@ -56,7 +71,8 @@ build_macos() {
     uv run pyinstaller lium.spec --clean
     smoke_test "$DIST_DIR/lium/lium"
     package_bundle "lium-darwin-arm64.tar.gz"
-    echo "✓ macOS bundle: $DIST_DIR/lium-darwin-arm64.tar.gz"
+    package_legacy "$DIST_DIR/lium-onefile" "lium-darwin-arm64"
+    echo "✓ macOS bundle: $DIST_DIR/lium-darwin-arm64.tar.gz (+ legacy lium-darwin-arm64)"
 }
 
 build_linux() {
@@ -69,13 +85,15 @@ build_linux() {
     docker create --name lium-extract lium-build true >/dev/null
     rm -rf "$DIST_DIR/lium"
     docker cp lium-extract:/app/dist/lium "$DIST_DIR/lium"
+    docker cp lium-extract:/app/dist/lium-onefile "$DIST_DIR/lium-onefile"
     docker rm -f lium-extract >/dev/null
 
     if [[ "$(uname -s)" == "Linux" ]]; then
         smoke_test "$DIST_DIR/lium/lium"
     fi
     package_bundle "lium-linux-amd64.tar.gz"
-    echo "✓ Linux bundle: $DIST_DIR/lium-linux-amd64.tar.gz"
+    package_legacy "$DIST_DIR/lium-onefile" "lium-linux-amd64"
+    echo "✓ Linux bundle: $DIST_DIR/lium-linux-amd64.tar.gz (+ legacy lium-linux-amd64)"
 }
 
 case "${1:-all}" in
@@ -94,4 +112,4 @@ esac
 
 echo
 echo "=== Build results ==="
-ls -lh "$DIST_DIR"/lium-*.tar.gz "$DIST_DIR"/*.sha256 2>/dev/null || echo "No bundles found"
+ls -lh "$DIST_DIR"/lium-*.tar.gz "$DIST_DIR"/lium-linux-* "$DIST_DIR"/lium-darwin-* "$DIST_DIR"/*.sha256 2>/dev/null || echo "No bundles found"

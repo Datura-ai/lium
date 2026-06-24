@@ -205,6 +205,30 @@ def test_discover_managed_install_accepts_active_versioned_binary_path(tmp_path:
     assert layout.current_version == "0.1.3"
 
 
+def test_discover_managed_install_accepts_legacy_single_file_layout(tmp_path: Path):
+    # Pre-onedir installs symlink bin/lium -> versions/<ver>/lium (a single file).
+    # discover must still recognize them so they can self-update onto onedir.
+    home = tmp_path / "home"
+    root = home / ".lium"
+    bin_dir = root / "bin"
+    version_dir = root / "versions" / "0.1.3"
+    version_dir.mkdir(parents=True)
+    bin_dir.mkdir(parents=True)
+    legacy_binary = version_dir / "lium"
+    legacy_binary.write_text("#!/bin/sh\nprintf 'lium 0.1.3\\n'\n", encoding="utf-8")
+    legacy_binary.chmod(0o755)
+    cli_path = bin_dir / "lium"
+    cli_path.symlink_to(Path("..") / "versions" / "0.1.3" / "lium")
+
+    layout = discover_managed_install(
+        home=home, argv0=str(legacy_binary), executable=str(legacy_binary)
+    )
+
+    assert layout is not None
+    assert layout.cli_symlink == cli_path
+    assert layout.current_version == "0.1.3"
+
+
 def test_cleanup_old_versions_keeps_requested_versions(tmp_path: Path):
     home = tmp_path / "home"
     home.mkdir()
