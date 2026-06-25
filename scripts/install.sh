@@ -32,7 +32,7 @@ detect_asset_name() {
 
     case "$os/$arch" in
         linux/amd64|linux/arm64|darwin/amd64|darwin/arm64)
-            printf 'lium-%s-%s' "$os" "$arch"
+            printf 'lium-%s-%s.tar.gz' "$os" "$arch"
             ;;
         *)
             echo "Error: unsupported platform: ${os}-${arch}. Supported binaries: darwin-amd64, darwin-arm64, linux-amd64, linux-arm64." >&2
@@ -209,8 +209,8 @@ EOF
 }
 
 main() {
-    local asset_name version release_path temp_dir binary_url checksum_url
-    local install_root version_dir cli_path versioned_binary
+    local asset_name version release_path temp_dir bundle_url checksum_url
+    local install_root version_dir cli_path bundle_dir versioned_binary
 
     guard_against_sudo
 
@@ -220,7 +220,9 @@ main() {
     install_root="$(dirname "$INSTALL_DIR")"
     version_dir="${install_root}/versions/${version}"
     cli_path="${INSTALL_DIR}/lium"
-    versioned_binary="${version_dir}/lium"
+    # onedir bundle extracts to ${version_dir}/lium/ (executable + _internal/)
+    bundle_dir="${version_dir}/lium"
+    versioned_binary="${bundle_dir}/lium"
 
     temp_dir="$(mktemp -d)"
     trap "rm -rf \"$temp_dir\"" EXIT
@@ -228,16 +230,32 @@ main() {
     mkdir -p "$INSTALL_DIR" "$version_dir"
     ensure_managed_cli_path "$cli_path"
 
-    binary_url="${release_path}/${asset_name}"
+    bundle_url="${release_path}/${asset_name}"
     checksum_url="${release_path}/checksums.txt"
 
-    echo "Downloading ${asset_name} from ${binary_url}"
-    download "$binary_url" "$temp_dir/${asset_name}"
+    echo "Downloading ${asset_name} from ${bundle_url}"
+    download "$bundle_url" "$temp_dir/${asset_name}"
     download "$checksum_url" "$temp_dir/checksums.txt"
     verify_checksum "$asset_name" "$temp_dir"
 
-    install -m 0755 "$temp_dir/${asset_name}" "$versioned_binary"
-    ln -sfn "../versions/${version}/lium" "$cli_path"
+    # Extract into a staging dir on the same filesystem, validate, then swap into
+    # place. The slow tar never touches the live bundle, so an interrupted or
+    # corrupt extract can't destroy a working install (mirrors the in-CLI
+    # self-updater's stage-then-replace).
+    staging_dir="${version_dir}/.lium.tmp"
+    rm -rf "$staging_dir"
+    mkdir -p "$staging_dir"
+    tar -xzf "$temp_dir/${asset_name}" -C "$staging_dir"
+    if [[ ! -x "$staging_dir/lium/lium" || ! -d "$staging_dir/lium/_internal" ]]; then
+        echo "Error: downloaded archive is not a valid lium onedir bundle." >&2
+        rm -rf "$staging_dir"
+        exit 1
+    fi
+    chmod +x "$staging_dir/lium/lium"
+    rm -rf "$bundle_dir"
+    mv "$staging_dir/lium" "$bundle_dir"
+    rm -rf "$staging_dir"
+    ln -sfn "../versions/${version}/lium/lium" "$cli_path"
     add_to_path
 
     echo

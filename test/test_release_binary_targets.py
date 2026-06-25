@@ -1,11 +1,16 @@
 import hashlib
 import os
 import subprocess
+import tarfile
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
+
+# Release assets are onedir bundles packaged as gzip tarballs (top-level dir
+# "lium/"). The platform map holds the base asset id; the suffix is appended.
+ASSET_SUFFIX = ".tar.gz"
 
 SUPPORTED_TARGETS = {
     ("Linux", "x86_64"): "lium-linux-amd64",
@@ -15,7 +20,7 @@ SUPPORTED_TARGETS = {
 }
 
 DEFAULT_PLATFORM = ("Linux", "x86_64")
-DEFAULT_ASSET = SUPPORTED_TARGETS[DEFAULT_PLATFORM]
+DEFAULT_ASSET = SUPPORTED_TARGETS[DEFAULT_PLATFORM] + ASSET_SUFFIX
 
 
 def run_bash(command: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -82,13 +87,22 @@ def make_fake_release(tmp_path: Path, version: str) -> Path:
     release_dir = tmp_path / f"release-{version}"
     release_dir.mkdir()
 
-    asset_path = release_dir / DEFAULT_ASSET
-    asset_body = (
+    # Build a onedir bundle: a "lium/" directory holding the executable, then
+    # package it as the released tarball.
+    stage = tmp_path / f"stage-{version}" / "lium"
+    (stage / "_internal").mkdir(parents=True)
+    (stage / "_internal" / "marker").write_text("x", encoding="utf-8")
+    binary = stage / "lium"
+    binary.write_text(
         "#!/bin/sh\n"
-        f"printf 'lium {version}\\n'\n"
+        f"printf 'lium {version}\\n'\n",
+        encoding="utf-8",
     )
-    asset_path.write_text(asset_body, encoding="utf-8")
-    asset_path.chmod(0o755)
+    binary.chmod(0o755)
+
+    asset_path = release_dir / DEFAULT_ASSET
+    with tarfile.open(asset_path, "w:gz") as tar:
+        tar.add(stage, arcname="lium")
 
     digest = hashlib.sha256(asset_path.read_bytes()).hexdigest()
     (release_dir / "checksums.txt").write_text(
@@ -121,11 +135,11 @@ def make_install_env(home_dir: Path, release_dir: Path, version: str) -> dict[st
 
 
 def test_install_script_supports_every_released_binary_target():
-    for detected_platform, expected_asset in SUPPORTED_TARGETS.items():
+    for detected_platform, expected_base in SUPPORTED_TARGETS.items():
         result = run_detect_asset_name(*detected_platform)
 
         assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == expected_asset
+        assert result.stdout.strip() == expected_base + ASSET_SUFFIX
 
 
 def test_install_script_rejects_unsupported_targets():
@@ -147,13 +161,19 @@ def test_install_script_resolves_version_from_release_url_override():
     assert result.stdout.strip() == "0.1.3"
 
 
-def test_release_workflow_mentions_every_supported_binary_target():
+def test_release_workflow_publishes_onedir_and_legacy_assets():
     workflow_text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
-    for asset_name in SUPPORTED_TARGETS.values():
-        assert f"name: {asset_name}" in workflow_text
-        assert f"{asset_name}.sha256" in workflow_text
-        assert asset_name in workflow_text
+    for base in SUPPORTED_TARGETS.values():
+        asset = base + ASSET_SUFFIX
+        assert f"name: {base}" in workflow_text
+        # Primary onedir bundle.
+        assert asset in workflow_text
+        assert f"{asset}.sha256" in workflow_text
+        # Legacy single-file asset kept for the self-update shipped in
+        # pre-onedir releases. f"{base}.sha256" is not a substring of
+        # f"{base}.tar.gz.sha256", so this genuinely asserts the bare checksum.
+        assert f"{base}.sha256" in workflow_text
 
 
 def test_install_script_fresh_install_uses_versioned_symlink_layout(tmp_path: Path):
@@ -165,11 +185,11 @@ def test_install_script_fresh_install_uses_versioned_symlink_layout(tmp_path: Pa
     result = run_bash("bash scripts/install.sh", env=make_install_env(home_dir, release_dir, version))
 
     cli_path = home_dir / ".lium" / "bin" / "lium"
-    versioned_binary = home_dir / ".lium" / "versions" / version / "lium"
+    versioned_binary = home_dir / ".lium" / "versions" / version / "lium" / "lium"
 
     assert result.returncode == 0, result.stderr
     assert cli_path.is_symlink()
-    assert os.readlink(cli_path) == f"../versions/{version}/lium"
+    assert os.readlink(cli_path) == f"../versions/{version}/lium/lium"
     assert versioned_binary.exists()
     assert versioned_binary.read_text(encoding="utf-8").startswith("#!/bin/sh")
     assert f"Managed binary location: {versioned_binary}" in result.stdout
@@ -186,12 +206,12 @@ def test_install_script_reinstall_same_version_is_idempotent(tmp_path: Path):
     second = run_bash("bash scripts/install.sh", env=env)
 
     cli_path = home_dir / ".lium" / "bin" / "lium"
-    versioned_binary = home_dir / ".lium" / "versions" / version / "lium"
+    versioned_binary = home_dir / ".lium" / "versions" / version / "lium" / "lium"
 
     assert first.returncode == 0, first.stderr
     assert second.returncode == 0, second.stderr
     assert cli_path.is_symlink()
-    assert os.readlink(cli_path) == f"../versions/{version}/lium"
+    assert os.readlink(cli_path) == f"../versions/{version}/lium/lium"
     assert versioned_binary.exists()
 
 
@@ -218,9 +238,9 @@ def test_install_script_updates_symlink_for_newer_versions(tmp_path: Path):
     assert first_result.returncode == 0, first_result.stderr
     assert second_result.returncode == 0, second_result.stderr
     assert cli_path.is_symlink()
-    assert os.readlink(cli_path) == f"../versions/{second_version}/lium"
-    assert (home_dir / ".lium" / "versions" / first_version / "lium").exists()
-    assert (home_dir / ".lium" / "versions" / second_version / "lium").exists()
+    assert os.readlink(cli_path) == f"../versions/{second_version}/lium/lium"
+    assert (home_dir / ".lium" / "versions" / first_version / "lium" / "lium").exists()
+    assert (home_dir / ".lium" / "versions" / second_version / "lium" / "lium").exists()
 
 
 def test_install_script_refuses_existing_regular_file_install(tmp_path: Path):
