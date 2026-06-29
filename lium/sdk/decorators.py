@@ -41,6 +41,12 @@ def machine(
 
             try:
                 # Step 1: Find executor matching machine type
+                # NOTE (DAH-2254): @machine intentionally calls sdk.ls() with no gpu_count
+                # kwarg and filters post-fetch via substring match on executor.machine_name
+                # (see line below). The widen_for_splitting kwarg therefore never fires
+                # from this path — @machine retains strict "exact machine_name substring"
+                # semantics regardless of CLI widen behavior. If you ever add gpu_count=...
+                # to this call, decide explicitly whether widen_for_splitting should be True.
                 executors = sdk.ls()
                 matching_executor = None
                 for executor in executors:

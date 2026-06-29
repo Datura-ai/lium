@@ -36,7 +36,7 @@ def ls_store_executor(gpu_type: Optional[str] = None, sort_by: str = "download")
 
 @click.command("ls")
 @click.option("--gpu", "gpu_type", shell_complete=get_gpu_completions, help="Filter by GPU type, e.g. A100")
-@click.option("--count", "gpu_count", type=int, help="Exact GPU count to match (e.g., 1, 8)")
+@click.option("--count", "gpu_count", type=int, help="Renter-intent GPU count (widens to splittable nodes where min <= N <= available)")
 @click.option("--min-cuda", "min_cuda_version", type=float, help="Minimum CUDA version, e.g. 12.4 (NVIDIA drivers are backward compatible)")
 @click.option("--lat", type=float, help="Latitude for distance filtering")
 @click.option("--lon", type=float, help="Longitude for distance filtering")

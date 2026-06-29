@@ -24,6 +24,8 @@ class ExecutorInfo:
     effective_download_speed_mbps: Optional[float] = None
     max_cuda_version: Optional[float] = None
     tier: Optional[str] = None  # "spot" or "secure"; reclaim/penalty risk signal
+    min_gpu_count_for_rental: Optional[int] = None
+    available_gpu_count: Optional[int] = None
 
     @property
     def driver_version(self) -> str:

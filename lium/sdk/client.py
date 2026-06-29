@@ -72,6 +72,21 @@ class AlphaQuote:
     netuid: int            # the API's ``netuid`` — drives the transfer
 
 
+def _is_splittable_for_count(ex: "ExecutorInfo", wanted: int) -> bool:
+    """Return True if *ex* is a splittable node that can serve *wanted* GPUs.
+
+    PREDICATE PARITY: must match matchesGpuCountFilter in
+    lium-io-frontend/src/contexts/PodFiltersProvider.tsx.  Shared fixture:
+    lium/test/fixtures/splittable_executors.json mirrored in
+    lium-io-frontend/src/contexts/__fixtures__/splittable-executors.json.
+    """
+    minc = ex.min_gpu_count_for_rental  # None-safe per CLAUDE.md
+    avail = ex.available_gpu_count
+    if minc is None or avail is None:
+        return False
+    return minc <= wanted <= avail
+
+
 # Main SDK Class
 class Lium:
     """Clean Unix-style SDK for Lium."""
@@ -217,6 +232,8 @@ class Lium:
             effective_download_speed_mbps=executor_dict.get("effective_download_speed_mbps"),
             max_cuda_version=executor_dict.get("max_cuda_version"),
             tier=executor_dict.get("tier"),
+            min_gpu_count_for_rental=executor_dict.get("min_gpu_count_for_rental"),
+            available_gpu_count=executor_dict.get("available_gpu_count"),
         )
 
     def list_ssh_keys(self) -> List[SSHKey]:
@@ -486,6 +503,7 @@ class Lium:
         lon: Optional[float] = None,
         max_distance_miles: Optional[int] = None,
         min_cuda_version: Optional[float] = None,
+        widen_for_splitting: bool = False,
     ) -> List[ExecutorInfo]:
         """List available nodes.
 
@@ -498,6 +516,9 @@ class Lium:
             min_cuda_version: Optional minimum CUDA version to require (e.g. ``12.4``). Nodes whose
                 ``max_cuda_version`` is ``None`` or below this threshold are excluded. NVIDIA drivers are
                 backward compatible, so a node with a higher driver CUDA version satisfies the requirement.
+            widen_for_splitting: When ``True`` and ``gpu_count`` is set, also include splittable nodes
+                where ``min_gpu_count_for_rental <= gpu_count <= available_gpu_count``.  Defaults to
+                ``False`` so all existing callers (including ``@machine``) retain strict equality semantics.
 
         Returns:
             A list of :class:`ExecutorInfo` objects that satisfy the filters.
@@ -512,8 +533,12 @@ class Lium:
                 # If no match found, use the input as-is (might be already a full name)
                 params["machine_names"] = gpu_type
         if gpu_count:
-            params["gpu_count_gte"] = gpu_count
-            params["gpu_count_lte"] = gpu_count
+            # When widening for splitting we omit the server-side gpu_count_gte/lte so the
+            # backend returns the full candidate set; client-side filtering below selects
+            # both native-count matches and splittable nodes.
+            if not widen_for_splitting:
+                params["gpu_count_gte"] = gpu_count
+                params["gpu_count_lte"] = gpu_count
         if lat is not None and lon is not None:
             params["lat"] = lat
             params["lon"] = lon
@@ -525,6 +550,15 @@ class Lium:
         data = self._request("GET", "/executors", params=params).json()
         executors = [self._dict_to_executor_info(d) for d in data]
         executors = [e for e in executors if e]  # Filter None values
+
+        if gpu_count is not None:
+            if widen_for_splitting:
+                executors = [
+                    e for e in executors
+                    if e.available_gpu_count == gpu_count or _is_splittable_for_count(e, gpu_count)
+                ]
+            else:
+                executors = [e for e in executors if e.available_gpu_count == gpu_count]
 
         if min_cuda_version is not None:
             executors = [

@@ -1,0 +1,50 @@
+[
+  {
+    "id": "exec-split-min1",
+    "huid": "split-min1",
+    "machine_name": "8xH200",
+    "gpu_type": "H200",
+    "gpu_count": 8,
+    "available_gpu_count": 8,
+    "min_gpu_count_for_rental": 1,
+    "price_per_gpu": 2.5,
+    "price_per_hour": 20.0,
+    "status": "available"
+  },
+  {
+    "id": "exec-split-min4",
+    "huid": "split-min4",
+    "machine_name": "8xH200",
+    "gpu_type": "H200",
+    "gpu_count": 8,
+    "available_gpu_count": 8,
+    "min_gpu_count_for_rental": 4,
+    "price_per_gpu": 2.5,
+    "price_per_hour": 20.0,
+    "status": "available"
+  },
+  {
+    "id": "exec-full",
+    "huid": "full",
+    "machine_name": "8xH200",
+    "gpu_type": "H200",
+    "gpu_count": 8,
+    "available_gpu_count": 8,
+    "min_gpu_count_for_rental": null,
+    "price_per_gpu": 2.5,
+    "price_per_hour": 20.0,
+    "status": "available"
+  },
+  {
+    "id": "exec-native1",
+    "huid": "native1",
+    "machine_name": "1xH100",
+    "gpu_type": "H100",
+    "gpu_count": 1,
+    "available_gpu_count": 1,
+    "min_gpu_count_for_rental": null,
+    "price_per_gpu": 3.0,
+    "price_per_hour": 3.0,
+    "status": "available"
+  }
+]
