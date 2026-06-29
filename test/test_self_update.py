@@ -1,5 +1,8 @@
+import hashlib
+import io
 import json
 import os
+import tarfile
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -7,10 +10,14 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from lium.cli import self_update
 from lium.cli.self_update import (
+    REINSTALL_COMMAND,
     STATE_FILE_NAME,
+    UpdateResult,
     cleanup_old_versions,
     discover_managed_install,
+    maybe_perform_startup_update,
     perform_startup_update,
 )
 
@@ -33,19 +40,26 @@ def write_release(root: Path, version: str, *, checksum_matches: bool = True) ->
     release_dir = root / "releases" / "download" / f"v{version}"
     release_dir.mkdir(parents=True, exist_ok=True)
 
-    asset_path = release_dir / "lium-linux-amd64"
-    asset_body = f"#!/bin/sh\nprintf 'lium {version}\\n'\n"
-    asset_path.write_text(asset_body, encoding="utf-8")
-    asset_path.chmod(0o755)
-
-    import hashlib
+    # onedir bundle tarball: top-level dir "lium/" with the executable at lium/lium.
+    asset_name = "lium-linux-amd64.tar.gz"
+    asset_path = release_dir / asset_name
+    binary_body = f"#!/bin/sh\nprintf 'lium {version}\\n'\n".encode("utf-8")
+    with tarfile.open(asset_path, "w:gz") as tar:
+        info = tarfile.TarInfo("lium/lium")
+        info.size = len(binary_body)
+        info.mode = 0o755
+        tar.addfile(info, io.BytesIO(binary_body))
+        # _internal/ marks a structurally valid onedir bundle.
+        internal = tarfile.TarInfo("lium/_internal/marker")
+        internal.size = 1
+        tar.addfile(internal, io.BytesIO(b"x"))
 
     digest = hashlib.sha256(asset_path.read_bytes()).hexdigest()
     if not checksum_matches:
         digest = "0" * len(digest)
 
     (release_dir / "checksums.txt").write_text(
-        f"{digest}  lium-linux-amd64\n",
+        f"{digest}  {asset_name}\n",
         encoding="utf-8",
     )
 
@@ -60,14 +74,14 @@ def create_managed_install(
 
     versions = (current_version, *extra_versions)
     for version in versions:
-        version_dir = versions_dir / version
-        version_dir.mkdir(parents=True, exist_ok=True)
-        binary = version_dir / "lium"
+        bundle_dir = versions_dir / version / "lium"
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        binary = bundle_dir / "lium"
         binary.write_text(f"#!/bin/sh\nprintf 'lium {version}\\n'\n", encoding="utf-8")
         binary.chmod(0o755)
 
     cli_path = bin_dir / "lium"
-    cli_path.symlink_to(Path("..") / "versions" / current_version / "lium")
+    cli_path.symlink_to(Path("..") / "versions" / current_version / "lium" / "lium")
     return cli_path
 
 
@@ -97,9 +111,9 @@ def test_perform_startup_update_installs_new_version_and_cleans_old_versions(
     assert result.updated is True
     assert result.current_version == "0.1.3"
     assert result.latest_version == "0.1.4"
-    assert os.readlink(cli_path) == "../versions/0.1.4/lium"
-    assert (home / ".lium" / "versions" / "0.1.4" / "lium").exists()
-    assert (home / ".lium" / "versions" / "0.1.3" / "lium").exists()
+    assert os.readlink(cli_path) == "../versions/0.1.4/lium/lium"
+    assert (home / ".lium" / "versions" / "0.1.4" / "lium" / "lium").exists()
+    assert (home / ".lium" / "versions" / "0.1.3" / "lium" / "lium").exists()
     assert not (home / ".lium" / "versions" / "0.1.2").exists()
 
     state = json.loads((home / ".lium" / STATE_FILE_NAME).read_text(encoding="utf-8"))
@@ -132,8 +146,78 @@ def test_perform_startup_update_aborts_on_checksum_mismatch(
     assert result.checked is True
     assert result.updated is False
     assert "checksum verification failed" in (result.error or "")
-    assert os.readlink(cli_path) == "../versions/0.1.3/lium"
+    # A checksum mismatch is transient/ambiguous, not a missing asset — it must
+    # stay quiet and retry, not nag the user to reinstall.
+    assert result.needs_reinstall is False
+    assert os.readlink(cli_path) == "../versions/0.1.3/lium/lium"
     assert not (home / ".lium" / "versions" / "0.1.4").exists()
+
+
+def test_perform_startup_update_flags_reinstall_when_asset_missing(
+    tmp_path: Path, monkeypatch
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    cli_path = create_managed_install(home, "0.1.3")
+    release_root = tmp_path / "release-root"
+    # A newer release that ships no binary asset for this platform: the asset
+    # download 404s, standing in for a distribution-format change.
+    (release_root / "releases" / "download" / "v0.1.4").mkdir(parents=True)
+
+    monkeypatch.setenv("LIUM_UPDATE_AUTO_CHECK", "true")
+    monkeypatch.setenv("LIUM_SELF_UPDATE_CHECK_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("LIUM_INSTALLER_UNAME_S", "Linux")
+    monkeypatch.setenv("LIUM_INSTALLER_UNAME_M", "x86_64")
+
+    with static_file_server(release_root) as base_url:
+        monkeypatch.setenv(
+            "LIUM_INSTALLER_RELEASE_URL", f"{base_url}/releases/tag/v0.1.4"
+        )
+        result = perform_startup_update(
+            home=home, argv0=str(cli_path), executable=str(cli_path)
+        )
+
+    assert result.checked is True
+    assert result.updated is False
+    assert result.needs_reinstall is True
+    assert os.readlink(cli_path) == "../versions/0.1.3/lium/lium"
+
+
+def test_is_missing_asset_error_classification():
+    from urllib.error import HTTPError
+
+    def http(code: int) -> HTTPError:
+        return HTTPError("http://x", code, "msg", {}, None)
+
+    # Asset genuinely absent → reinstall-worthy.
+    assert self_update._is_missing_asset_error(self_update.AssetNotFoundError("x")) is True
+    assert self_update._is_missing_asset_error(http(404)) is True
+    assert self_update._is_missing_asset_error(http(410)) is True
+    # Transient / ambiguous failures stay quiet (retry next cycle).
+    assert self_update._is_missing_asset_error(
+        RuntimeError("checksum verification failed for x")
+    ) is False
+    assert self_update._is_missing_asset_error(http(503)) is False
+    assert self_update._is_missing_asset_error(OSError("network down")) is False
+
+
+def test_maybe_perform_startup_update_warns_with_reinstall_command(monkeypatch):
+    monkeypatch.setattr(
+        self_update,
+        "perform_startup_update",
+        lambda: UpdateResult(needs_reinstall=True, error="HTTP Error 404: Not Found"),
+    )
+    warnings: list[str] = []
+    debugs: list[str] = []
+    monkeypatch.setattr(self_update.ui, "warning", warnings.append)
+    monkeypatch.setattr(self_update.ui, "debug", debugs.append)
+
+    result = maybe_perform_startup_update()
+
+    assert result.needs_reinstall is True
+    assert len(warnings) == 1
+    assert REINSTALL_COMMAND in warnings[0]
+    assert debugs == []  # a missing-asset failure must not stay debug-only
 
 
 def test_perform_startup_update_skips_non_managed_installs(tmp_path: Path, monkeypatch):
@@ -185,12 +269,36 @@ def test_discover_managed_install_accepts_active_versioned_binary_path(tmp_path:
     home = tmp_path / "home"
     home.mkdir()
     cli_path = create_managed_install(home, "0.1.3")
-    current_binary = home / ".lium" / "versions" / "0.1.3" / "lium"
+    current_binary = home / ".lium" / "versions" / "0.1.3" / "lium" / "lium"
 
     layout = discover_managed_install(
         home=home,
         argv0=str(current_binary),
         executable=str(current_binary),
+    )
+
+    assert layout is not None
+    assert layout.cli_symlink == cli_path
+    assert layout.current_version == "0.1.3"
+
+
+def test_discover_managed_install_accepts_legacy_single_file_layout(tmp_path: Path):
+    # Pre-onedir installs symlink bin/lium -> versions/<ver>/lium (a single file).
+    # discover must still recognize them so they can self-update onto onedir.
+    home = tmp_path / "home"
+    root = home / ".lium"
+    bin_dir = root / "bin"
+    version_dir = root / "versions" / "0.1.3"
+    version_dir.mkdir(parents=True)
+    bin_dir.mkdir(parents=True)
+    legacy_binary = version_dir / "lium"
+    legacy_binary.write_text("#!/bin/sh\nprintf 'lium 0.1.3\\n'\n", encoding="utf-8")
+    legacy_binary.chmod(0o755)
+    cli_path = bin_dir / "lium"
+    cli_path.symlink_to(Path("..") / "versions" / "0.1.3" / "lium")
+
+    layout = discover_managed_install(
+        home=home, argv0=str(legacy_binary), executable=str(legacy_binary)
     )
 
     assert layout is not None

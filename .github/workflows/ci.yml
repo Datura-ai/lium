@@ -85,26 +85,31 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Build Linux binary in Docker
+    - name: Build Linux bundle in Docker
       run: |
         mkdir -p dist
+        rm -rf dist/lium
         docker rm -f lium-extract >/dev/null 2>&1 || true
         docker build --platform ${{ matrix.platform }} -f Dockerfile.build -t lium-build:${GITHUB_SHA}-${{ matrix.asset_name }} .
         docker create --name lium-extract lium-build:${GITHUB_SHA}-${{ matrix.asset_name }} true
-        docker cp lium-extract:/app/dist/lium dist/${{ matrix.asset_name }}
+        docker cp lium-extract:/app/dist/lium dist/lium
+        docker cp lium-extract:/app/dist/lium-onefile dist/${{ matrix.asset_name }}
         docker rm -f lium-extract
         chmod +x dist/${{ matrix.asset_name }}
+        tar -czf dist/${{ matrix.asset_name }}.tar.gz -C dist lium
 
-    - name: Smoke test Linux binary
+    - name: Smoke test Linux bundle
       run: |
-        ./dist/${{ matrix.asset_name }} --version
-        ./dist/${{ matrix.asset_name }} --help >/dev/null
+        ./dist/lium/lium --version
+        ./dist/lium/lium --help >/dev/null
 
     - name: Upload Linux artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.asset_name }}
-        path: dist/${{ matrix.asset_name }}
+        path: |
+          dist/${{ matrix.asset_name }}.tar.gz
+          dist/${{ matrix.asset_name }}
         retention-days: 7
 
   build-macos-binary:
@@ -141,18 +146,22 @@ jobs:
           exit 1
         fi
         uv sync --frozen --extra dev
+        rm -rf dist/lium
         uv run pyinstaller lium.spec --clean
-        mv dist/lium dist/${{ matrix.asset_name }}
+        cp dist/lium-onefile dist/${{ matrix.asset_name }}
         chmod +x dist/${{ matrix.asset_name }}
+        tar -czf dist/${{ matrix.asset_name }}.tar.gz -C dist lium
 
-    - name: Smoke test macOS binary
+    - name: Smoke test macOS bundle
       run: |
-        ./dist/${{ matrix.asset_name }} --version
-        ./dist/${{ matrix.asset_name }} --help >/dev/null
+        ./dist/lium/lium --version
+        ./dist/lium/lium --help >/dev/null
 
     - name: Upload macOS artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.asset_name }}
-        path: dist/${{ matrix.asset_name }}
+        path: |
+          dist/${{ matrix.asset_name }}.tar.gz
+          dist/${{ matrix.asset_name }}
         retention-days: 7

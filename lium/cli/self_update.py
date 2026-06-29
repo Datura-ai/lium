@@ -7,11 +7,13 @@ import json
 import os
 import shutil
 import sys
+import tarfile
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Sequence
+from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -23,6 +25,16 @@ DEFAULT_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 STALE_LOCK_SECONDS = 60 * 60
 STATE_FILE_NAME = "self-update.json"
 LOCK_FILE_NAME = "self-update.lock"
+
+
+class AssetNotFoundError(RuntimeError):
+    """The release does not carry the asset name this binary expects.
+
+    Signals a distribution-format change a reinstall resolves, so the failure is
+    surfaced as a reinstall prompt rather than a quiet retry. A typed exception
+    (not an error-message match) keeps that decision robust to message wording.
+    """
+REINSTALL_COMMAND = "curl -fsSL https://lium.io/install.sh | bash"
 
 
 @dataclass(frozen=True)
@@ -47,6 +59,10 @@ class UpdateResult:
     current_version: Optional[str] = None
     latest_version: Optional[str] = None
     error: Optional[str] = None
+    # Set when the failure is a missing release asset (404 / not in checksums),
+    # i.e. a distribution-format mismatch that a reinstall fixes — as opposed to
+    # a transient network error, which should stay quiet.
+    needs_reinstall: bool = False
     cleaned_versions: Sequence[str] = field(default_factory=tuple)
 
 
@@ -106,6 +122,13 @@ def maybe_perform_startup_update() -> UpdateResult:
         ui.info(
             f"Updated Lium CLI from {result.current_version} to {result.latest_version}; "
             "the new version will be used on the next launch."
+        )
+    elif result.needs_reinstall:
+        ui.warning(
+            "Lium CLI could not auto-update: this release no longer ships the "
+            "package format your installed binary expects. Reinstall to keep "
+            "getting updates:\n"
+            f"  {REINSTALL_COMMAND}"
         )
     elif result.error:
         ui.debug(f"Managed binary auto-update skipped after error: {result.error}")
@@ -211,6 +234,7 @@ def perform_startup_update(
             return result
         except Exception as exc:  # noqa: BLE001 - startup must not break CLI execution
             result.error = str(exc)
+            result.needs_reinstall = _is_missing_asset_error(exc)
             _write_state(
                 state_path,
                 {
@@ -247,14 +271,19 @@ def discover_managed_install(
         return None
 
     try:
-        relative_binary = current_binary.relative_to(versions_dir)
+        # Resolve versions_dir too: current_binary is already resolved, so a
+        # symlink anywhere in the home path (e.g. NFS automount) would otherwise
+        # break relative_to and silently mark a managed install as unmanaged.
+        relative_binary = current_binary.relative_to(versions_dir.resolve())
     except ValueError:
         return None
 
-    if len(relative_binary.parts) != 2:
+    parts = relative_binary.parts
+    # onedir layout: versions/<ver>/lium/lium; legacy single-file: versions/<ver>/lium.
+    if len(parts) == 2 or (len(parts) == 3 and parts[1] == "lium"):
+        current_version = parts[0]
+    else:
         return None
-
-    current_version = relative_binary.parts[0]
     candidate_paths = tuple(_candidate_paths(argv0=argv0, executable=executable))
 
     if candidate_paths:
@@ -296,7 +325,7 @@ def detect_asset_name() -> str:
     if os_name not in {"linux", "darwin"}:
         raise RuntimeError(f"unsupported platform: {os_name}-{arch}")
 
-    return f"lium-{os_name}-{arch}"
+    return f"lium-{os_name}-{arch}.tar.gz"
 
 
 def normalize_version(version: str) -> str:
@@ -359,7 +388,7 @@ def verify_checksum(
             break
 
     if not expected_checksum:
-        raise RuntimeError(f"missing checksum for asset {asset_name}")
+        raise AssetNotFoundError(f"missing checksum for asset {asset_name}")
 
     actual_checksum = hashlib.sha256(asset_bytes).hexdigest()
     if actual_checksum != expected_checksum:
@@ -369,16 +398,41 @@ def verify_checksum(
 def install_versioned_binary(
     *, layout: ManagedInstallLayout, version: str, staged_asset: Path
 ) -> Path:
-    """Install the staged binary into the managed versions directory."""
+    """Extract the staged onedir tarball into the managed versions directory.
+
+    The release tarball's top-level directory is ``lium/`` and the executable is
+    ``lium/lium``. The bundle is extracted into a staging dir and atomically
+    swapped into place so a half-extracted bundle is never left live.
+    """
 
     version_dir = layout.versions_dir / version
     version_dir.mkdir(parents=True, exist_ok=True)
-    target_binary = version_dir / "lium"
-    temp_target = version_dir / ".lium.tmp"
-    shutil.copy2(staged_asset, temp_target)
-    temp_target.chmod(0o755)
-    os.replace(temp_target, target_binary)
-    return target_binary
+    bundle_dir = version_dir / "lium"
+    staging_dir = version_dir / ".lium.tmp"
+
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir()
+    try:
+        with tarfile.open(staged_asset, "r:gz") as tar:
+            try:
+                tar.extractall(staging_dir, filter="data")
+            except TypeError:  # the filter kwarg predates Python 3.12
+                tar.extractall(staging_dir)
+
+        extracted_bundle = staging_dir / "lium"
+        target_binary = extracted_bundle / "lium"
+        if not target_binary.exists() or not (extracted_bundle / "_internal").is_dir():
+            raise RuntimeError("release tarball is not a valid onedir bundle")
+        target_binary.chmod(0o755)
+
+        if bundle_dir.exists():
+            shutil.rmtree(bundle_dir)
+        os.replace(extracted_bundle, bundle_dir)
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+    return bundle_dir / "lium"
 
 
 def switch_cli_symlink(*, layout: ManagedInstallLayout, version: str) -> None:
@@ -390,7 +444,7 @@ def switch_cli_symlink(*, layout: ManagedInstallLayout, version: str) -> None:
         temp_link.unlink()
     except FileNotFoundError:
         pass
-    temp_link.symlink_to(Path("..") / "versions" / version / "lium")
+    temp_link.symlink_to(Path("..") / "versions" / version / "lium" / "lium")
     os.replace(temp_link, layout.cli_symlink)
 
 
@@ -507,6 +561,24 @@ def _write_state(path: Path, payload: Dict[str, object]) -> None:
             json.dump(payload, handle, indent=2, sort_keys=True)
     except OSError:
         return
+
+
+def _is_missing_asset_error(exc: BaseException) -> bool:
+    """True when the update failed because the expected release asset is absent.
+
+    Covers a 404/410 on the asset/checksum download and a checksums.txt with no
+    entry for the asset (AssetNotFoundError) — both mean the release does not
+    carry the asset name this binary expects (a distribution-format change),
+    which a reinstall resolves. Transient errors (network blips, a corrupt
+    download failing checksum verification) deliberately return False so they
+    stay quiet and retry on the next cycle.
+    """
+
+    if isinstance(exc, AssetNotFoundError):
+        return True
+    if isinstance(exc, HTTPError) and exc.code in (404, 410):
+        return True
+    return False
 
 
 def _download_bytes(url: str) -> bytes:

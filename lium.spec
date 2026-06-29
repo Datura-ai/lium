@@ -64,17 +64,54 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# onedir build: the bundle is laid out as dist/lium/ (executable + _internal/)
+# so startup does NOT self-extract on every launch. upx is off — it only adds
+# decompression cost at startup for marginal size savings.
 exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="lium",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="lium",
+)
+
+# Legacy onefile build (dist/lium-onefile), published under the bare
+# lium-<os>-<arch> asset name. The self-update shipped in pre-onedir releases
+# downloads a single-file asset; keeping it lets those installs keep
+# auto-updating instead of 404ing. Reuses the same Analysis as the onedir
+# build, so it adds only the EXE assembly step. Remove once old installs have
+# migrated off the single-file layout.
+exe_onefile = EXE(
     pyz,
     a.scripts,
     a.binaries,
     a.datas,
     [],
-    name="lium",
+    name="lium-onefile",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,
