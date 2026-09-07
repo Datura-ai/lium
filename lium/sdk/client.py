@@ -852,6 +852,7 @@ class Lium:
         enable_volume_encryption: bool | None = True,
         backup_id: Optional[str] = None,
         restore_path: Optional[str] = None,
+        gpu_count: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Start a new pod on a specific node.
 
@@ -885,6 +886,10 @@ class Lium:
             backup_id: Optional backup ID to restore after the pod starts.
             restore_path: New or empty subdirectory where the backup is restored.
                 Required when ``backup_id`` is provided.
+            gpu_count: Rent only this many of the node's GPUs (GPU splitting). ``None``
+                takes every GPU that is free on the node right now (the whole node when
+                none of it is rented). The API rejects a count above the free GPUs, below
+                the provider's minimum, or on nodes that do not allow splitting.
 
         Returns:
             Pod metadata as returned by the rent API (id, name, status, ssh command, etc.).
@@ -931,6 +936,8 @@ class Lium:
             "backup_log_id": backup_id,
             "restore_path": restore_path,
         }
+        if gpu_count is not None:
+            payload["gpu_count"] = gpu_count
 
         # The rent call is not idempotent, so it is never retried blindly. A
         # timeout or a 5xx may have created the pod anyway; look for it before

@@ -20,11 +20,14 @@ def validate(
     # `--min-cpus 0` as "no filter given" and answer with the wrong sentence.
     if min_cpus is not None and min_cpus <= 0:
         return False, "--min-cpus must be a positive integer"
+    if count is not None and count < 1:
+        return False, "--count must be at least 1"
+
+    # With a node ID, -c/--count is not a filter: it is how many of that node's GPUs to rent (GPU splitting).
+    if executor_id and (gpu or country or min_cpus is not None):
+        return False, "Cannot use filters (--gpu, --country, --min-cpus) when specifying a node ID"
 
     has_filters = bool(gpu or count or country) or min_cpus is not None
-    if executor_id and has_filters:
-        return False, "Cannot use filters (--gpu, --count, --country, --min-cpus) when specifying a node ID"
-
     if not executor_id and not has_filters:
         return False, "Must provide either NODE_ID or filters (--gpu, --count, --country, --min-cpus)"
 

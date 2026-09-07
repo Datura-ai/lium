@@ -17,15 +17,17 @@ from click.testing import CliRunner
 
 from lium.cli.cli import cli
 from lium.cli.up import command as up_module
+from lium.cli.up import validation as up_validation
 from lium.cli.up.actions import (
     SSH_RETRY_INTERVAL,
     VISIBLE_GPU_COUNT_COMMAND,
+    RentPodAction,
     VerifyGpuCountAction,
     billed_gpu_count,
     parse_visible_gpu_count,
     rented_gpu_count,
 )
-from lium.cli.utils import EXIT_GENERAL_ERROR
+from lium.cli.utils import EXIT_CONFIGURATION_ERROR, EXIT_GENERAL_ERROR
 from lium.sdk import Config, Lium
 
 NODE_ID = "id-brave-orbit-b9"
@@ -83,6 +85,7 @@ class _FakeLium:
     exec_commands: list[str] = []
     # a server without workspaces: `up` reads it for its workspace line
     workspaces = SimpleNamespace(current=lambda: None)
+    up_kwargs: dict = {}   # what the CLI asked the SDK to rent
 
     def __init__(self, *args, **kwargs):
         pass
@@ -103,6 +106,7 @@ class _FakeLium:
         return {}
 
     def up(self, **kwargs):
+        _FakeLium.up_kwargs = dict(kwargs)
         return {"id": "pod-uuid-1234", "name": "brave-orbit-b9"}
 
     def ps(self):
@@ -124,8 +128,9 @@ class _FakeLium:
         _FakeLium.removed.append(pod.huid)
 
 
-def _run_up(monkeypatch, *args, node_gpus=8, free=WHOLE_HOST, billed=8, visible=8, exec_error=None):
-    """Run `up`. `-c` cannot be combined with a node id, so it selects by --gpu filter."""
+def _run_up(monkeypatch, *args, node_gpus=8, free=WHOLE_HOST, billed=8, visible=8, exec_error=None, by_node=False, yes=True):
+    """Run `up`. A `-c` selects by --gpu filter (the count as a filter) unless `by_node`, where it is
+    the number of the named node's GPUs to rent (DAH-3074). `yes=False` leaves the confirm prompt in."""
     _FakeLium.node_gpus = node_gpus
     _FakeLium.node_free = free
     _FakeLium.billed_gpus = billed
@@ -133,11 +138,12 @@ def _run_up(monkeypatch, *args, node_gpus=8, free=WHOLE_HOST, billed=8, visible=
     _FakeLium.exec_error = exec_error
     _FakeLium.removed = []
     _FakeLium.exec_commands = []
+    _FakeLium.up_kwargs = {}
     monkeypatch.setattr(up_module, "Lium", _FakeLium)
     monkeypatch.setattr(up_module, "ensure_config", lambda: None)
     monkeypatch.setattr("lium.cli.ls.command.ls_store_executor", lambda **kwargs: [])
-    target = ["--gpu", "H200"] if "-c" in args else ["some-node-id"]
-    return CliRunner().invoke(cli, ["up", *target, "-y", "--no-ssh", *args])
+    target = ["some-node-id"] if by_node or "-c" not in args else ["--gpu", "H200"]
+    return CliRunner().invoke(cli, ["up", *target, *(["-y"] if yes else []), "--no-ssh", *args])
 
 
 def test_up_succeeds_when_the_pod_has_the_requested_gpus(monkeypatch):
@@ -463,3 +469,149 @@ def test_verify_does_not_retry_a_configuration_error():
     assert result.data["mismatch"] is False
     assert lium.calls == 1
     assert naps == []
+
+
+# `lium up <node> -c N` rents N GPUs of a splittable node (DAH-3074). Before, `-c` was only a filter
+# for auto-selection and was rejected next to a node id, so a renter could not ask for 1 GPU of a
+# 3×RTX 3090 node from the CLI although the API allows it. These check that --count is allowed with a
+# node id, that the SDK sends `gpu_count` only when one was asked for, and that the rent action threads it.
+class _Resp:
+    def __init__(self, data):
+        self._data = data
+
+    def json(self):
+        return self._data
+
+
+def _stub_up(monkeypatch, client, captured):
+    monkeypatch.setattr(client, "get_executor", lambda executor_id: SimpleNamespace(id="exec-1"))
+    monkeypatch.setattr(client, "default_docker_template", lambda executor_id: SimpleNamespace(id="tmpl-default"))
+    monkeypatch.setattr(client, "_ensure_ssh_keys_registered", lambda *a, **k: None)
+
+    def fake_request(method, endpoint, json=None, **kwargs):
+        captured["payload"] = json
+        return _Resp({"id": "pod-1", "name": (json or {}).get("pod_name"), "status": "PENDING"})
+
+    monkeypatch.setattr(client, "_request", fake_request)
+
+
+def test_up_node_with_count_rents_that_many_gpus(monkeypatch):
+    """`lium up <node> -c 1` on an 8-GPU node: the rent asks for 1 and the pod billed for 1 passes."""
+    result = _run_up(monkeypatch, "-c", "1", by_node=True, node_gpus=8, billed=1, visible=1)
+
+    assert result.exit_code == 0, result.output
+    assert _FakeLium.up_kwargs["gpu_count"] == 1
+    assert _FakeLium.removed == []
+
+
+def test_up_node_with_the_host_total_still_sends_the_count(monkeypatch):
+    """`-c 8` on an 8-GPU node with 1 free: the count goes to the API, which refuses what it cannot
+    serve, instead of being dropped and renting the one free GPU under an 8-GPU prompt."""
+    result = _run_up(monkeypatch, "-c", "8", by_node=True, node_gpus=8, free=1, billed=8)
+
+    assert result.exit_code == 0, result.output
+    assert _FakeLium.up_kwargs["gpu_count"] == 8
+
+
+def test_up_node_without_count_sends_no_count(monkeypatch):
+    result = _run_up(monkeypatch, by_node=True, node_gpus=8, billed=8)
+
+    assert result.exit_code == 0, result.output
+    assert _FakeLium.up_kwargs["gpu_count"] is None
+
+
+def test_up_prompt_names_the_split_count_and_its_price(monkeypatch):
+    """Without -y, `-c 1` of a 2-GPU node at $8/GPU is confirmed as 1 of 2 at $8.00/h."""
+    asked: list[str] = []
+    monkeypatch.setattr(up_module.ui, "confirm", lambda message, default=False: asked.append(message) or False)
+
+    result = _run_up(monkeypatch, "-c", "1", by_node=True, node_gpus=2, yes=False)
+
+    assert result.exit_code == 0, result.output
+    assert asked == ["Acquire pod on brave-orbit-b9 (1×H200 of 2) at $8.00/h?"]
+    assert _FakeLium.up_kwargs == {}   # declined: nothing was rented
+
+
+def test_up_prompt_without_count_names_the_free_gpus(monkeypatch):
+    """No -c on a 4-GPU node with 2 free: the rent takes the 2 free GPUs, so the prompt says 2 of 4."""
+    asked: list[str] = []
+    monkeypatch.setattr(up_module.ui, "confirm", lambda message, default=False: asked.append(message) or False)
+
+    result = _run_up(monkeypatch, by_node=True, node_gpus=4, free=2, yes=False)
+
+    assert result.exit_code == 0, result.output
+    assert asked == ["Acquire pod on brave-orbit-b9 (2×H200 of 4) at $16.00/h?"]
+
+
+def test_up_refuses_before_the_prompt_when_no_gpu_is_free(monkeypatch):
+    """A fully rented 4-GPU node without -c: refused before the prompt could offer 0×H200 at $0.00/h."""
+    asked: list[str] = []
+    monkeypatch.setattr(up_module.ui, "confirm", lambda message, default=False: asked.append(message) or True)
+
+    result = _run_up(monkeypatch, by_node=True, node_gpus=4, free=0, yes=False)
+
+    assert result.exit_code == EXIT_GENERAL_ERROR, result.output
+    assert "No GPU of brave-orbit-b9 is free" in result.output
+    assert asked == [] and _FakeLium.up_kwargs == {}
+
+
+def test_up_refuses_a_count_above_the_nodes_gpus(monkeypatch):
+    """-c 5 on a 2-GPU node is refused here, not by the API after a prompt that said 5×H200 of 2."""
+    result = _run_up(monkeypatch, "-c", "5", by_node=True, node_gpus=2, yes=False)
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
+    assert "-c 5: brave-orbit-b9 has 2 GPU(s)" in result.output
+    assert _FakeLium.up_kwargs == {}
+
+
+def test_validate_allows_count_with_node_id():
+    ok, error = up_validation.validate("brave-fox-3a", None, 1, None, None, None)
+    assert ok is True and error == ""
+
+
+@pytest.mark.parametrize("gpu, country", [("H100", None), (None, "DE")])
+def test_validate_still_rejects_real_filters_with_node_id(gpu, country):
+    ok, error = up_validation.validate("brave-fox-3a", gpu, None, country, None, None)
+    assert ok is False and "--gpu, --country" in error
+
+
+def test_validate_rejects_non_positive_count():
+    ok, error = up_validation.validate("brave-fox-3a", None, 0, None, None, None)
+    assert ok is False and "--count" in error
+
+
+def test_sdk_up_sends_gpu_count_when_given(monkeypatch):
+    client = Lium(Config(api_key="test"))
+    captured: dict = {}
+    _stub_up(monkeypatch, client, captured)
+
+    client.up(executor_id="exec-1", name="one-of-three", ssh_keys=["ssh-ed25519 AAA"], gpu_count=1)
+
+    assert captured["payload"]["gpu_count"] == 1
+
+
+def test_sdk_up_omits_gpu_count_for_a_whole_node(monkeypatch):
+    client = Lium(Config(api_key="test"))
+    captured: dict = {}
+    _stub_up(monkeypatch, client, captured)
+
+    client.up(executor_id="exec-1", name="whole", ssh_keys=["ssh-ed25519 AAA"])
+
+    assert "gpu_count" not in captured["payload"]
+
+
+def test_rent_pod_action_threads_gpu_count():
+    captured: dict = {}
+
+    class FakeLium:
+        def up(self, **kwargs):
+            captured.update(kwargs)
+            return {"id": "pod-1", "name": kwargs["name"]}
+
+    result = RentPodAction().execute(
+        {"lium": FakeLium(), "executor": SimpleNamespace(id="exec-1", huid="brave-fox-3a"), "template": None,
+         "name": "one-of-three", "gpu_count": 1}
+    )
+
+    assert result.ok
+    assert captured["gpu_count"] == 1
