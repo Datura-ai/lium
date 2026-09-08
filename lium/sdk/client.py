@@ -24,7 +24,6 @@ from typing import Any, Callable, Dict, Generator, List, Optional, Sequence, Tup
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
-import paramiko
 import requests
 from dotenv import load_dotenv
 
@@ -381,6 +380,18 @@ def permission_error(
         code=code,
         **context,
     )
+
+
+def __getattr__(name: str):
+    # paramiko is a quarter of the CLI's import time (140 ms on a pod, seconds on a cold disk) and
+    # only ssh_connection() needs it, so it is imported there; `lium.sdk.client.paramiko` still
+    # resolves for callers and tests that patch it (DAH-3053).
+    if name == "paramiko":
+        import paramiko
+
+        globals()["paramiko"] = paramiko
+        return paramiko
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _response_error_message(response: requests.Response) -> str:
@@ -1511,6 +1522,7 @@ class Lium:
         min_cpus: Optional[int] = None,
         nvlink: Optional[bool] = None,
         min_download_mbps: Optional[float] = None,
+        view: str = "summary",
     ) -> List[ExecutorInfo]:
         """List available nodes.
 
@@ -1531,11 +1543,17 @@ class Lium:
             min_download_mbps: Minimum Download in Mbps, judged on
                 :attr:`ExecutorInfo.effective_download_speed_mbps` (the figure ``lium ls`` shows as
                 Download). Nodes with no figure are excluded.
+            view: ``"summary"`` (default) asks the API for the fields a listing reads — price, GPU/CPU/RAM/disk
+                headline specs, location, tier, network — about a tenth of the full row. ``"full"`` returns the
+                whole validator scrape in :attr:`ExecutorInfo.specs` (docker info, verified ports, per-GPU
+                telemetry, checksums).
 
         Returns:
             A list of :class:`ExecutorInfo` objects that satisfy the filters.
         """
-        params: Dict[str, Any] = {"size": 1000}
+        # no `size`: the API applies it only together with `page`, and a bare `size` made the
+        # request miss the server's listing cache (DAH-3052)
+        params: Dict[str, Any] = {"view": view}
         # Sent to the server (which filters when it knows the parameters) AND applied below, so the
         # result is the same against a backend that predates them.
         if nvlink:
@@ -2301,6 +2319,8 @@ class Lium:
 
         if not self.config.ssh_key_path:
             raise ValueError("No SSH key configured")
+
+        import paramiko
 
         # The same shape check the OpenSSH path (ssh_argv, pod_ssh_command) applies: only
         # `ssh <user>@<host> [-p <port>]` reaches connect(); anything else is a ValueError here.
