@@ -40,6 +40,7 @@ PORTAL_CONTRACT_DRIFT = "PORTAL_CONTRACT_DRIFT"
 PORTAL_NOT_FOUND = "PORTAL_NOT_FOUND"
 PORTAL_SERVER_ERROR = "PORTAL_SERVER_ERROR"
 PORTAL_RATE_LIMIT = "PORTAL_RATE_LIMIT"
+PORTAL_REQUEST_REJECTED = "PORTAL_REQUEST_REJECTED"
 
 # SSH / install
 SSH_UNREACHABLE = "SSH_UNREACHABLE"
@@ -65,6 +66,7 @@ _HINTS: dict[str, str] = {
     PORTAL_NOT_FOUND: "The portal returned 404 for that resource (wrong UUID or already removed).",
     PORTAL_SERVER_ERROR: "Portal 5xx. Retry; if persistent, check portal status.",
     PORTAL_RATE_LIMIT: "Backing off; retry shortly.",
+    PORTAL_REQUEST_REJECTED: "The portal refused this request (see message). Fix the input; retrying the same call will not help.",
     SSH_UNREACHABLE: "SSH host unreachable. Check IP, port, firewall, and SSH key.",
     SSH_AUTH_FAILED: "SSH key/user combination rejected by the host.",
     INSTALLER_PARTIAL_FAIL: "mine.sh did not complete cleanly. Check /tmp/lium-mine.log on the host.",
@@ -176,6 +178,7 @@ __all__ = [
     "PORTAL_CONTRACT_DRIFT",
     "PORTAL_NOT_FOUND",
     "PORTAL_RATE_LIMIT",
+    "PORTAL_REQUEST_REJECTED",
     "PORTAL_SERVER_ERROR",
     "PORTS_INVALID",
     "SSH_AUTH_FAILED",

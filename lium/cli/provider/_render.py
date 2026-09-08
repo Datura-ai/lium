@@ -40,6 +40,7 @@ from lium.provider.errors import (
     PORTAL_FORBIDDEN,
     PORTAL_NOT_FOUND,
     PORTAL_RATE_LIMIT,
+    PORTAL_REQUEST_REJECTED,
     PORTAL_SERVER_ERROR,
     PORTS_INVALID,
     SSH_AUTH_FAILED,
@@ -64,6 +65,7 @@ _EXIT_CODES: dict[str, int] = {
     ARG_INVALID: 1,
     PORTS_INVALID: 1,
     HOTKEY_NOT_REGISTERED: 1,
+    PORTAL_REQUEST_REJECTED: 1,  # the portal refused our input; not a portal fault
     # 2: auth errors, and a valid token refused for this hotkey
     PORTAL_AUTH_INVALID: 2,
     PORTAL_AUTH_EXPIRED: 2,
