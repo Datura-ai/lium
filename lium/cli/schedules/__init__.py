@@ -13,7 +13,7 @@ def schedules_command(ctx):
     \b
     Examples:
       lium schedules                 # same as 'lium schedules list'
-      lium schedules rm my-pod       # cancel the scheduled removal
+      lium schedules rm 1            # cancel by index from the list
       lium rm my-pod --in 6h         # create one
     """
     # If no subcommand is provided, default to list
