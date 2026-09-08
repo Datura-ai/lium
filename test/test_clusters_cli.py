@@ -1,7 +1,6 @@
 """`lium clusters` — list fabrics, rent a cluster, inspect members, remove — with the SDK mocked."""
 
 import json
-from types import SimpleNamespace
 
 from click.testing import CliRunner
 

@@ -5,13 +5,12 @@ The API has had cluster endpoints since DAH-2620/DAH-2664 (`GET /executors/infin
 pod); the SDK could not reach any of it, so a multi-node job could only be started from the web UI.
 """
 
-import json
 import time
 from types import SimpleNamespace
 
 import pytest
 
-from lium.sdk import Cluster, ClusterOffer, Config, Lium, LiumError, LiumNotFoundError, PodInfo, Template
+from lium.sdk import Cluster, ClusterOffer, Config, Lium, LiumError, LiumNotFoundError, Template
 from lium.sdk.exceptions import LiumServerError
 
 FABRIC = "hot:infiniband:0x3:0x7fff:NVIDIA H100 80GB HBM3:8"
