@@ -5,11 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-- Multi-node clusters. CLI: `lium clusters` lists fabrics with free nodes (`--format json`), `lium clusters up <fabric> --nodes N -n <name> [--ttl] [--wait/--no-wait]` rents N whole nodes as one all-or-nothing cluster, `lium clusters ps`, `lium clusters show <cluster> [--hostfile | --torchrun RANK]`, `lium clusters rm <cluster>`. SDK: `Lium.clusters()` → `ClusterOffer` (`cheapest(n)`), `Lium.up_cluster(executor_ids, name=, wait=)` → `Cluster` (`master_addr`, `hostfile()`, `torchrun_args(pod)`, `status`, `price_per_hour`), `Lium.my_clusters()`, `Lium.cluster(id)`, `Lium.wait_cluster_ready()`, `Lium.rm_cluster()`, `Lium.cluster_template()`; `PodInfo` gains `cluster_id`, `cluster_node_index`, `cluster_overlay_ip`.
-
 ## [0.4.3] - 2025-10-23
 
 ### Added
