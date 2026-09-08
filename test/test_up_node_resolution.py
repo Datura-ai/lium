@@ -19,12 +19,12 @@ from lium.cli.utils import EXIT_GENERAL_ERROR
 from lium.sdk import Config, Lium
 from lium.sdk.utils import generate_huid
 
-NODE_UUID = "6751b3b1-0d2a-4b0e-9a5f-3c2f1e8d7a60"
-OTHER_UUID = "0e1d2c3b-4a59-4687-9fa0-b1c2d3e4f5a6"
+NODE_ID = "6751b3b1-0d2a-4b0e-9a5f-3c2f1e8d7a60"
+OTHER_ID = "0e1d2c3b-4a59-4687-9fa0-b1c2d3e4f5a6"
 
 
-def _listed(uuid: str) -> SimpleNamespace:
-    return SimpleNamespace(id=uuid, huid=generate_huid(uuid), gpu_count=1, gpu_type="H100", available_port_count=5)
+def _listed(node_id: str) -> SimpleNamespace:
+    return SimpleNamespace(id=node_id, huid=generate_huid(node_id), gpu_count=1, gpu_type="H100", available_port_count=5)
 
 
 def _client(monkeypatch, listing: list) -> Lium:
@@ -40,31 +40,31 @@ def _client(monkeypatch, listing: list) -> Lium:
 
 def test_get_executor_resolves_the_huid_ls_prints(monkeypatch):
     # Arrange
-    client = _client(monkeypatch, [_listed(OTHER_UUID), _listed(NODE_UUID)])
+    client = _client(monkeypatch, [_listed(OTHER_ID), _listed(NODE_ID)])
 
     # Act
-    found = client.get_executor(generate_huid(NODE_UUID))
+    found = client.get_executor(generate_huid(NODE_ID))
 
     # Assert
     assert found is not None
-    assert found.id == NODE_UUID
+    assert found.id == NODE_ID
 
 
 def test_get_executor_still_resolves_the_uuid(monkeypatch):
-    client = _client(monkeypatch, [_listed(NODE_UUID)])
+    client = _client(monkeypatch, [_listed(NODE_ID)])
 
-    assert client.get_executor(NODE_UUID).id == NODE_UUID
+    assert client.get_executor(NODE_ID).id == NODE_ID
 
 
 def test_get_executor_returns_none_for_an_unlisted_id(monkeypatch):
-    client = _client(monkeypatch, [_listed(NODE_UUID)])
+    client = _client(monkeypatch, [_listed(NODE_ID)])
 
     assert client.get_executor("cosmic-hawk-f2") is None
 
 
 def test_up_names_the_id_it_looked_up_and_points_at_ls_json(monkeypatch):
     # Arrange
-    client = _client(monkeypatch, [_listed(NODE_UUID)])
+    client = _client(monkeypatch, [_listed(NODE_ID)])
 
     # Act / Assert
     with pytest.raises(ValueError) as failure:
@@ -79,16 +79,16 @@ def test_up_names_the_id_it_looked_up_and_points_at_ls_json(monkeypatch):
 
 
 def test_resolve_executor_action_accepts_a_huid(monkeypatch):
-    client = _client(monkeypatch, [_listed(NODE_UUID)])
+    client = _client(monkeypatch, [_listed(NODE_ID)])
 
-    result = ResolveExecutorAction().execute({"lium": client, "executor_id": generate_huid(NODE_UUID)})
+    result = ResolveExecutorAction().execute({"lium": client, "executor_id": generate_huid(NODE_ID)})
 
     assert result.ok is True
-    assert result.data["executor"].id == NODE_UUID
+    assert result.data["executor"].id == NODE_ID
 
 
 def test_resolve_executor_action_error_names_the_id_and_the_next_command(monkeypatch):
-    client = _client(monkeypatch, [_listed(NODE_UUID)])
+    client = _client(monkeypatch, [_listed(NODE_ID)])
 
     result = ResolveExecutorAction().execute({"lium": client, "executor_id": "cosmic-hawk-f2"})
 
@@ -100,7 +100,7 @@ def test_resolve_executor_action_error_names_the_id_and_the_next_command(monkeyp
 def test_up_with_an_unlisted_huid_fails_fast_with_the_lookup_in_the_message(monkeypatch):
     # Arrange — a configured CLI whose listing does not contain the requested node
     monkeypatch.setattr(up_command, "ensure_config", lambda: None)
-    monkeypatch.setattr(up_command, "Lium", lambda **kwargs: _client(monkeypatch, [_listed(NODE_UUID)]))
+    monkeypatch.setattr(up_command, "Lium", lambda **kwargs: _client(monkeypatch, [_listed(NODE_ID)]))
 
     # Act
     result = CliRunner().invoke(up_command.up_command, ["cosmic-hawk-f2", "--yes", "--no-ssh"])
