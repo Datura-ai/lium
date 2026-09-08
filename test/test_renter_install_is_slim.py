@@ -117,16 +117,28 @@ def test_provider_status_surfaces_the_missing_stack_as_a_warning():
     assert 'warnings.append(f"metagraph: {e}")' in source
 
 
-def test_the_missing_stack_message_names_the_right_fix(monkeypatch):
+def _plain_venv(monkeypatch, tmp_path):
+    """A plain venv, wherever pytest itself runs from: on a developer machine whose venv lives
+    under …/uv/tools/… or …/pipx/venvs/… (the installs this change targets) the venv-path
+    branch would otherwise answer `uv tool …` and the pip expectations below would be wrong."""
+    from lium.provider import chain_stack
+
+    monkeypatch.setattr(chain_stack.sys, "version_info", (3, 12, 0, "final", 0))
+    monkeypatch.setattr(chain_stack.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(chain_stack.sys, "prefix", str(tmp_path))
+    monkeypatch.setattr(chain_stack.sys, "executable", str(tmp_path / "bin" / "python"))
+    monkeypatch.delenv("UV_TOOL_DIR", raising=False)
+    return chain_stack
+
+
+def test_the_missing_stack_message_names_the_right_fix(monkeypatch, tmp_path):
     """Two different situations, two different fixes.
 
     Absent because it was never installed: add the extra. Absent because it
     cannot build on this interpreter: adding the extra will not help, so the
     message has to say to change Python or take the binary.
     """
-    from lium.provider import chain_stack
-
-    monkeypatch.setattr(chain_stack.sys, "version_info", (3, 12, 0, "final", 0))
+    chain_stack = _plain_venv(monkeypatch, tmp_path)
     assert 'pip install "lium.io[provider]"' in chain_stack.missing_chain_stack_message()
 
     monkeypatch.setattr(chain_stack.sys, "version_info", (3, 14, 0, "final", 0))
@@ -134,6 +146,63 @@ def test_the_missing_stack_message_names_the_right_fix(monkeypatch):
     assert "3.14" in on_new_python
     assert "lium.io/install.sh" in on_new_python
     assert "pip install" not in on_new_python
+
+
+def test_the_install_command_matches_how_lium_was_installed(monkeypatch, tmp_path):
+    """DAH-2943: `lium provider portal login` on a `uv tool` / mine.sh install answered
+    CONFIG_MISSING with `pip install "lium.io[provider]"` — a command that installs the extra
+    into some other Python, not the one the CLI runs from. Name the installer that owns this
+    venv: uv tool (uv-receipt.toml at the venv root), pipx (pipx_metadata.json), the frozen
+    binary (reinstall it — it ships the stack), else pip."""
+    chain_stack = _plain_venv(monkeypatch, tmp_path)
+
+    assert chain_stack.install_command() == 'pip install "lium.io[provider]"'
+
+    (tmp_path / "uv-receipt.toml").write_text("[tool]\n")
+    assert chain_stack.install_command() == 'uv tool install --force "lium.io[provider]"'
+    assert "uv tool install" in chain_stack.missing_chain_stack_message()
+    assert "pip install" not in chain_stack.missing_chain_stack_message()
+
+    (tmp_path / "uv-receipt.toml").unlink()
+    (tmp_path / "pipx_metadata.json").write_text("{}")
+    assert chain_stack.install_command() == 'pipx install --force "lium.io[provider]"'
+
+    monkeypatch.setattr(chain_stack.sys, "frozen", True, raising=False)
+    assert "lium.io/install.sh" in chain_stack.install_command()
+
+
+def test_chain_stack_errors_do_not_tell_a_provider_to_run_lium_init(monkeypatch):
+    """The generic CONFIG_MISSING hint is 'Run lium init …' — a renter step that cannot
+    install the chain stack. The chain-stack raises carry the fix in their reason, so they must
+    not append it (DAH-2943, seen on `lium provider portal login`)."""
+    import builtins
+
+    from lium.provider.client import _read_metagraph
+    from lium.provider.errors import ProviderConfigError
+    from lium.provider.wallet import load_hotkey_keypair
+
+    real_import = builtins.__import__
+
+    def _no_bittensor(name, *args, **kwargs):
+        if name == "bittensor":
+            raise ImportError("No module named 'bittensor'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_bittensor)
+    # on an interpreter past LAST_SUPPORTED_PYTHON the message names the Python, not the extra — pin the install case
+    from lium.provider import chain_stack
+    monkeypatch.setattr(chain_stack.sys, "version_info", (3, 12, 0, "final", 0))
+
+    with pytest.raises(ProviderConfigError) as registration:
+        _read_metagraph(hotkey_ss58="5FakeHotkey", netuid=51, factory=None)
+    with pytest.raises(ProviderConfigError) as wallet:
+        load_hotkey_keypair(coldkey="default", hotkey="default", wallet_factory=None)
+
+    for raised in (registration.value, wallet.value):
+        assert raised.code == "CONFIG_MISSING"
+        assert "lium.io[provider]" in raised.message
+        assert raised.hint == ""
+        assert "lium init" not in str(raised)
 
 
 def test_the_extra_is_gated_on_python_version():
@@ -207,3 +276,58 @@ def test_both_fund_paths_report_the_same_machine_readable_code(monkeypatch, comm
     envelope = json.loads(result.stderr)
     assert envelope["error"]["code"] == "provider_extra_missing"
     assert result.exit_code == EXIT_CONFIGURATION_ERROR
+
+
+def test_the_venv_root_names_the_installer_when_the_marker_is_missing(monkeypatch, tmp_path):
+    """uv tool / pipx installs are also recognised by where the venv lives (DAH-2943 #202) — from the venv root
+    (`sys.prefix`) as well as the unresolved interpreter path: a venv's `bin/python` is a symlink to the base
+    interpreter and resolving it loses the installer's directory."""
+    real_python = Path(sys.executable).resolve()   # before _plain_venv points sys.executable at a path that does not exist
+    chain_stack = _plain_venv(monkeypatch, tmp_path)
+
+    for root, expected in (
+        (tmp_path / ".local/share/uv/tools/lium-io", 'uv tool install --force "lium.io[provider]"'),
+        (tmp_path / ".local/pipx/venvs/lium-io", 'pipx install --force "lium.io[provider]"'),
+    ):
+        # a real venv layout: bin/python is a symlink to an interpreter outside the venv, as venv/uv/pipx make it
+        (root / "bin").mkdir(parents=True)
+        (root / "bin" / "python").symlink_to(real_python)
+        assert (root / "bin" / "python").resolve() == real_python
+        monkeypatch.setattr(chain_stack.sys, "prefix", str(root))
+        monkeypatch.setattr(chain_stack.sys, "executable", str(root / "bin" / "python"))
+        assert chain_stack.install_command() == expected
+
+    monkeypatch.setenv("UV_TOOL_DIR", str(tmp_path / "tools"))
+    monkeypatch.setattr(chain_stack.sys, "prefix", str(tmp_path / "tools/lium-io"))
+    monkeypatch.setattr(chain_stack.sys, "executable", str(tmp_path / "tools/lium-io/bin/python"))
+    assert chain_stack.install_command() == 'uv tool install --force "lium.io[provider]"'
+    monkeypatch.setattr(chain_stack.sys, "prefix", str(tmp_path / "tools-other/lium-io"))   # a sibling dir is not inside it
+    monkeypatch.setattr(chain_stack.sys, "executable", str(tmp_path / "tools-other/lium-io/bin/python"))
+    assert chain_stack.install_command() == 'pip install "lium.io[provider]"'
+
+
+def test_a_uv_tool_dir_spelled_through_a_symlink_still_matches(monkeypatch, tmp_path):
+    """macOS CPython hands out `sys.prefix` with directory symlinks resolved (`/tmp` → `/private/tmp`), so
+    `$UV_TOOL_DIR` as typed and the venv root as reported can differ in spelling; both sides are compared resolved."""
+    chain_stack = _plain_venv(monkeypatch, tmp_path)
+    (tmp_path / "uvtools").mkdir()
+    (tmp_path / "uvtools-link").symlink_to(tmp_path / "uvtools")
+    venv_root = tmp_path / "uvtools" / "lium-io"
+    (venv_root / "bin").mkdir(parents=True)
+
+    monkeypatch.setenv("UV_TOOL_DIR", str(tmp_path / "uvtools-link"))          # typed through the symlink
+    monkeypatch.setattr(chain_stack.sys, "prefix", str(venv_root.resolve()))   # reported resolved
+    monkeypatch.setattr(chain_stack.sys, "executable", str(venv_root.resolve() / "bin" / "python"))
+    assert chain_stack.install_command() == 'uv tool install --force "lium.io[provider]"'
+
+    monkeypatch.setenv("UV_TOOL_DIR", str((tmp_path / "uvtools").resolve()))   # typed resolved
+    monkeypatch.setattr(chain_stack.sys, "prefix", str(tmp_path / "uvtools-link" / "lium-io"))   # reported through the link
+    monkeypatch.setattr(chain_stack.sys, "executable", str(tmp_path / "uvtools-link" / "lium-io" / "bin" / "python"))
+    assert chain_stack.install_command() == 'uv tool install --force "lium.io[provider]"'
+
+
+def test_the_reinstall_command_is_the_self_update_one():
+    from lium.cli import self_update
+    from lium.provider import chain_stack
+
+    assert chain_stack.REINSTALL_COMMAND == self_update.REINSTALL_COMMAND
