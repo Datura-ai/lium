@@ -20,9 +20,21 @@ from .actions import RebootPodsAction
 @click.argument("targets", required=False)
 @click.option("--all", "-a", is_flag=True, help="Reboot all active pods")
 @click.option("--volume-id", help="Volume ID to attach when rebooting")
+@click.option("--yes", "-y", is_flag=True, help="Accepted for symmetry with rm and up; reboot never prompts")
 @handle_errors
-def reboot_command(targets: Optional[str], all: bool, volume_id: Optional[str]):
-    """Reboot GPU pods."""
+def reboot_command(targets: Optional[str], all: bool, volume_id: Optional[str], yes: bool):
+    """Reboot GPU pods.
+
+    \b
+    TARGETS: a pod name, huid, id or index from 'lium ps'; comma-separated
+    for several; or --all.
+    \b
+    Examples:
+      lium reboot my-pod
+      lium reboot 1,2
+      lium reboot all
+      lium reboot my-pod --volume-id <VOLUME_ID>
+    """
 
     # Validate
     valid, error = validation.validate(targets, all)

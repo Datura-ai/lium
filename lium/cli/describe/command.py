@@ -28,6 +28,11 @@ def describe_command(pod_id: str, json_output: bool, output_format: str):
     A pod that is no longer listed can still be described by its id: the command
     prints the events the backend kept for it (the delete and its reason, a failed
     reboot's cause) instead of "not found".
+
+    \b
+    Examples:
+      lium describe my-pod
+      lium describe 1 --json | jq .ssh
     """
     json_output = resolve_output_format(output_format, json_output) == "json"
 

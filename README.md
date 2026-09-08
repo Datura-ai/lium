@@ -167,6 +167,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 
 - `lium signup` - Create an account from the terminal and store its API key
 - `lium init` - Initialize configuration for an existing account (API key, SSH keys); `--api-key <key>` for machines without a browser
+- `lium completion [bash|zsh|fish] [--install]` - Print or install shell tab completion
 - `lium balance` - Show the account balance (add `--format json` for machine-readable output)
 - `lium whoami` - Show which API key is in use, where it came from, and the account it belongs to
 - `lium ls [--gpu TYPE] [--count N] [--country CODE] [--min-vram GB] [--max-price USD] [--tier spot|secure] [--format json]` - List available nodes
