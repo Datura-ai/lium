@@ -133,9 +133,11 @@ class ResolveExecutorAction:
             pareto_flags = calculate_pareto_frontier(executors)
             pareto_executors = [e for e, is_pareto in zip(executors, pareto_flags) if is_pareto]
             candidates = pareto_executors or executors
-            # Cheapest $/GPU·h of the optimal set; min() keeps the first of a
-            # tie, so equal prices fall back to the listing order as before.
-            executor = min(candidates, key=lambda e: e.price_per_gpu or float("inf"))
+            # Cheapest total $/h of the optimal set: the renter pays
+            # price_per_gpu * gpu_count, and without -c the set mixes GPU counts,
+            # so a cheaper-per-GPU 8x node must not beat a 1x node. min() keeps
+            # the first of a tie, so equal prices fall back to the listing order.
+            executor = min(candidates, key=lambda e: e.price_per_hour or float("inf"))
             return ActionResult(
                 ok=True,
                 data={"executor": executor, "auto_selected": True, "candidates": len(candidates)},

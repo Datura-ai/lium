@@ -18,18 +18,27 @@ from lium.sdk import ExecutorInfo
 GIB_KB = 1024 * 1024
 
 
-def _executor(huid: str, price: float, ram_gb: int = 64, download: float = 1000.0) -> ExecutorInfo:
+def _executor(
+    huid: str,
+    price: float,
+    ram_gb: int = 64,
+    download: float = 1000.0,
+    gpu_count: int = 1,
+    country: tuple = ("Germany", "DE"),
+) -> ExecutorInfo:
+    # `price` is per GPU per hour, the API's `price_per_gpu`; the SDK derives the
+    # hourly total the renter pays as price_per_gpu * gpu_count.
     return ExecutorInfo(
         id=f"id-{huid}",
         huid=huid,
         machine_name="NVIDIA GeForce RTX 4090",
         gpu_type="RTX4090",
-        gpu_count=1,
-        price_per_hour=price,
+        gpu_count=gpu_count,
+        price_per_hour=price * gpu_count,
         price_per_gpu=price,
-        location={"country": "Germany", "country_code": "DE"},
+        location={"country": country[0], "country_code": country[1]},
         specs={
-            "gpu": {"count": 1, "details": [{"name": "RTX 4090", "capacity": 24564, "pcie_speed": 16}]},
+            "gpu": {"count": gpu_count, "details": [{"name": "RTX 4090", "capacity": 24564, "pcie_speed": 16}]},
             "ram": {"total": ram_gb * GIB_KB},
             "hard_disk": {"total": 1000 * GIB_KB},
         },
@@ -136,6 +145,33 @@ def test_auto_select_picks_the_cheapest_pareto_node(monkeypatch):
     assert result.data["executor"].huid == "thrifty-node-bb"
     assert result.data["auto_selected"] is True
     assert result.data["candidates"] == 2
+
+
+def test_without_count_the_cheapest_hourly_node_wins_over_the_cheapest_per_gpu(monkeypatch):
+    # Both Pareto-optimal: the 8× node is cheaper per GPU, the 1× node is in the
+    # US. Per GPU the 8× wins ($0.25 < $0.30); per hour the renter pays $2.00
+    # against $0.30, so with no -c the 1× node must be the pick.
+    eight = _executor("octet-node-ee", 0.25, gpu_count=8)
+    single = _executor("solo-node-ff", 0.30, gpu_count=1, country=("United States", "US"))
+    monkeypatch.setattr(_FakeLium, "ls", lambda self, **kwargs: [eight, single])
+
+    result = _resolve(monkeypatch, gpu="RTX4090")
+
+    assert result.data["candidates"] == 2
+    assert result.data["executor"].huid == "solo-node-ff"
+    assert result.data["executor"].price_per_hour == 0.30
+
+
+def test_with_count_only_that_count_is_ranked(monkeypatch):
+    eight_cheap = _executor("octet-node-ee", 0.25, gpu_count=8)
+    eight_dear = _executor("octet-node-gg", 0.28, gpu_count=8)
+    single = _executor("solo-node-ff", 0.30, gpu_count=1, country=("United States", "US"))
+    monkeypatch.setattr(_FakeLium, "ls", lambda self, **kwargs: [eight_dear, eight_cheap, single])
+
+    result = _resolve(monkeypatch, gpu="RTX4090", count=8)
+
+    assert result.data["executor"].huid == "octet-node-ee"
+    assert result.data["executor"].price_per_hour == 2.0
 
 
 def test_equal_prices_keep_the_listing_order(monkeypatch):
