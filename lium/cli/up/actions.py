@@ -37,7 +37,7 @@ class ResolveExecutorAction:
 
             executor = lium.get_executor(executor_id)
             if not executor:
-                return ActionResult(ok=False, data={}, error=f"Node '{executor_id}' not found")
+                return ActionResult(ok=False, data={}, error=Lium.executor_not_found_message(executor_id))
 
             if ports and (not executor.available_port_count or executor.available_port_count < ports):
                 available = executor.available_port_count or 0
