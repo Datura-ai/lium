@@ -61,8 +61,9 @@ def get_version():
 
 
 # Command groups imported the first time they are invoked (or listed by --help/completion). The
-# provider group alone is a quarter of the CLI's import time — pydantic models, JWT, the portal
-# client — and `lium ls`/`ps`/`up` never touch it (DAH-3053).
+# provider group and the package behind it — pydantic models, JWT, the portal client — are a fifth of
+# the CLI's import time warm (89 of 440 ms on a pod) and 40 % cold (281 of 696 ms on a fresh box);
+# `lium ls`/`ps`/`up` never touch it (DAH-3053).
 LAZY_COMMANDS = {"provider": "lium.cli.provider:provider_command"}
 
 

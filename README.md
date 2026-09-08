@@ -460,7 +460,7 @@ One object per node, sorted as the table is; the names are stable and pinned by 
 | `max_cuda_version` | highest CUDA the driver supports |
 | `tier` | `secure` or `spot` (reclaimable) |
 
-The listing comes from `GET /executors?view=summary`, about a tenth of the full row; `Lium.ls(view="full")` returns the whole validator scrape in `ExecutorInfo.specs`.
+The listing asks for `GET /executors?view=summary`. Today's API returns the full row whatever the view; once lium-platform#216 (not released) is deployed the summary is about a tenth of the size. `Lium.ls(view="full")` returns the whole validator scrape in `ExecutorInfo.specs`.
 
 ## Features
 

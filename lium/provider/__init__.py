@@ -12,10 +12,10 @@ Public surface:
     from lium.provider.auth import Signer, LocalKeypairSigner
     from lium.provider.errors import ProviderError, ProviderAuthError
 
-The names are resolved on first use: every ``lium`` command imports
-``lium.provider.errors`` or ``lium.provider.chain_stack`` for its error text,
-and a renter command must not pay for the portal client (asyncssh, JWT) it
-never calls (DAH-3053).
+The names are resolved on first use: ``lium/cli/fund/command.py`` imports
+``lium.provider.chain_stack`` for its error text and ``cli.py`` imports ``fund``
+at start-up, so every ``lium`` command paid for the portal client (pydantic
+models, JWT) that only ``lium provider`` calls (DAH-3053).
 """
 
 from importlib import import_module
