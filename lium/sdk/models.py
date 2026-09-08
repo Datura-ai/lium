@@ -119,6 +119,11 @@ class PodInfo:
     # workspaces or for a pod from before them.
     workspace_id: Optional[str] = None
 
+    # Set on every member of a multi-node cluster rental; None on an ordinary pod.
+    cluster_id: Optional[str] = None
+    cluster_node_index: Optional[int] = None
+    cluster_overlay_ip: Optional[str] = None
+
     def eta_hint(self) -> Optional[str]:
         """One line for a pod that is still starting, e.g. ``est. ready in ~18 s (phase: pulling image)``.
 
@@ -170,6 +175,112 @@ class PodInfo:
     def default_restore_path(self) -> str:
         """Return a safe restore destination below the local volume mount."""
         return f"{self.volume_path.rstrip('/')}/restored"
+
+
+@dataclass
+class ClusterOffer:
+    """A group of free nodes on one RDMA fabric that can be rented as a single multi-node job.
+
+    ``node_count`` is the whole fabric; ``nodes`` are the members free right now. Every node
+    of a cluster rental is taken whole (all its GPUs), so the price of an N-node cluster is
+    the sum of the N nodes' ``price_per_hour``.
+    """
+
+    fabric_id: str
+    fabric_type: str  # "infiniband" or "roce"
+    link_rate: Optional[str]
+    fabric_measured: bool
+    node_count: int
+    nodes: List[ExecutorInfo]
+
+    @property
+    def free_count(self) -> int:
+        return len(self.nodes)
+
+    @property
+    def gpu_type(self) -> str:
+        return self.nodes[0].gpu_type if self.nodes else ""
+
+    @property
+    def gpus_per_node(self) -> int:
+        return self.nodes[0].gpu_count if self.nodes else 0
+
+    @property
+    def price_per_node_hour(self) -> float:
+        """Hourly price of the cheapest free node (whole host)."""
+        return min((n.price_per_hour for n in self.nodes), default=0.0)
+
+    def cheapest(self, count: int) -> List[ExecutorInfo]:
+        """The ``count`` cheapest free nodes, or ``ValueError`` when fewer are free."""
+        if count < 1:
+            raise ValueError("A cluster needs at least one node")
+        if count > len(self.nodes):
+            raise ValueError(
+                f"Only {len(self.nodes)} of {self.node_count} nodes on fabric {self.fabric_id} are free; "
+                f"{count} requested"
+            )
+        return sorted(self.nodes, key=lambda n: (n.price_per_hour, n.id))[:count]
+
+
+@dataclass
+class Cluster:
+    """The pods of one multi-node rental, in node-rank order.
+
+    Node 0 is the natural ``MASTER_ADDR`` for ``torchrun``; every member reaches every other
+    over the private overlay (``10.42.0.<rank+1>``) that the cluster image raises on start.
+    """
+
+    id: str
+    pods: List[PodInfo]
+
+    def __post_init__(self) -> None:
+        self.pods = sorted(self.pods, key=lambda p: (p.cluster_node_index is None, p.cluster_node_index or 0))
+
+    @property
+    def size(self) -> int:
+        return len(self.pods)
+
+    @property
+    def master(self) -> Optional[PodInfo]:
+        return self.pods[0] if self.pods else None
+
+    @property
+    def master_addr(self) -> Optional[str]:
+        """Overlay address of node 0 — what ``torchrun --master_addr`` and NCCL's bootstrap want."""
+        return self.master.cluster_overlay_ip if self.master else None
+
+    @property
+    def status(self) -> str:
+        """``RUNNING`` only when every member is; otherwise the first member state that is not."""
+        states = [p.status.upper() for p in self.pods]
+        if not states:
+            return "EMPTY"
+        return "RUNNING" if all(s == "RUNNING" for s in states) else next(s for s in states if s != "RUNNING")
+
+    @property
+    def price_per_hour(self) -> float:
+        return sum(p.executor.price_per_hour for p in self.pods if p.executor)
+
+    def node_rank(self, pod: PodInfo) -> int:
+        for rank, member in enumerate(self.pods):
+            if member.id == pod.id:
+                return rank
+        raise ValueError(f"Pod {pod.name or pod.id} is not a member of cluster {self.id}")
+
+    def hostfile(self, slots: Optional[int] = None) -> str:
+        """An ``mpirun``/DeepSpeed hostfile: one ``<overlay ip> slots=<gpus>`` line per node."""
+        lines = []
+        for pod in self.pods:
+            n = slots if slots is not None else (pod.executor.gpu_count if pod.executor else 1)
+            lines.append(f"{pod.cluster_overlay_ip or pod.host} slots={n}")
+        return "\n".join(lines) + "\n"
+
+    def torchrun_args(self, pod: PodInfo, *, master_port: int = 29500) -> str:
+        """The ``torchrun`` rendezvous flags for ``pod``: ``--nnodes N --node_rank R --master_addr A --master_port P``."""
+        return (
+            f"--nnodes {self.size} --node_rank {self.node_rank(pod)} "
+            f"--master_addr {self.master_addr} --master_port {master_port}"
+        )
 
 
 @dataclass

@@ -19,6 +19,8 @@ from .exceptions import (
 from .models import (
     BackupConfig,
     BackupLog,
+    Cluster,
+    ClusterOffer,
     ExecutorInfo,
     PodInfo,
     RentResult,
@@ -42,6 +44,8 @@ __all__ = [
     "ExecutorInfo",
     "PodInfo",
     "RentResult",
+    "Cluster",
+    "ClusterOffer",
     "Template",
     "VolumeInfo",
     "BackupConfig",

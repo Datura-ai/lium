@@ -122,6 +122,18 @@ lium.down(ready)
 
 `wait_ready()` raises `PodStartError` — with `.pod`, `.status`, `.history` and `.cause` (what the backend recorded, e.g. `Container creation failed due to ... (failure_step: ssh_connect)`) — when the pod reaches `FAILED`/`CREATION_FAILED`/`STOPPED`/`BROKEN` or disappears from the pod list, so a dead pod is not mistaken for a slow one. Pass `on_poll=lambda pod, status, elapsed: ...` to be told about every poll. `lium up` is bounded by `--timeout SECONDS` (default 900) for the whole rent, prints `waiting for <pod>… <STATUS> (<n> s)` while it waits, and exits 1 naming the pod when the budget runs out; `--ready-timeout` caps only the wait.
 
+Multi-node clusters — N whole nodes on one InfiniBand/RoCE fabric, rented as one order, each with a private overlay address:
+
+```python
+offer = lium.clusters()[0]                                   # fabrics with free nodes
+cluster = lium.up_cluster([n.id for n in offer.cheapest(2)], name="train", wait=True)
+print(cluster.master_addr)                                   # 10.42.0.1 — MASTER_ADDR for torchrun
+for pod in cluster.pods:
+    lium.exec(pod, command=f"torchrun {cluster.torchrun_args(pod)} --nproc_per_node 8 train.py")
+open("hostfile", "w").write(cluster.hostfile())              # mpirun / DeepSpeed
+lium.rm_cluster(cluster)                                     # every member
+```
+
 Full API reference: https://docs.lium.io/developers/sdk/reference
 
 `lium.ssh(pod)` returns the pod's ssh command with `-i <key>` and the pinned host-key options
@@ -181,6 +193,14 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium volumes list` - List all volumes
 - `lium volumes new <NAME>` - Create a new volume
 - `lium volumes rm <VOLUME>` - Remove a volume
+
+### Cluster Commands
+
+- `lium clusters` - Fabrics (InfiniBand/RoCE) with free nodes that can be rented as one multi-node cluster
+- `lium clusters up <FABRIC> --nodes N -n <NAME>` - Rent N whole nodes of one fabric as a single all-or-nothing cluster
+- `lium clusters ps` - Your clusters
+- `lium clusters show <CLUSTER> [--hostfile | --torchrun RANK]` - Members with rank, overlay IP and SSH; launcher material
+- `lium clusters rm <CLUSTER>` - Remove every member
 
 ### Backup Commands
 
@@ -356,6 +376,13 @@ lium update my-pod
 lium volumes list
 lium volumes new mydata -d "My dataset"
 lium volumes rm <VOLUME_HUID>
+
+# Multi-node clusters
+lium clusters                                  # fabrics with free nodes
+lium clusters up 1 --nodes 2 -n train --ttl 6h # 2 whole nodes of fabric #1, one order
+lium clusters show train --hostfile            # 10.42.0.1 slots=8 / 10.42.0.2 slots=8
+lium clusters show train --torchrun 1          # --nnodes 2 --node_rank 1 --master_addr 10.42.0.1 --master_port 29500
+lium clusters rm train -y
 
 # Manage backups
 lium bk show my-pod

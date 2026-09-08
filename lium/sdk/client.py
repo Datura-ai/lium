@@ -43,6 +43,8 @@ from .exceptions import (
 from .models import (
     BackupConfig,
     BackupLog,
+    Cluster,
+    ClusterOffer,
     ExecutorInfo,
     PodInfo,
     RentResult,
@@ -1478,6 +1480,9 @@ class Lium:
                 phase=d.get("phase"),
                 gpu_count=pod_gpu_count,
                 workspace_id=d.get("workspace_id"),
+                cluster_id=d.get("cluster_id"),
+                cluster_node_index=d.get("cluster_node_index"),
+                cluster_overlay_ip=d.get("cluster_overlay_ip"),
             ))
 
         return pods
@@ -1525,6 +1530,193 @@ class Lium:
         # connection re-pins rather than tripping over the old key.
         forget_host_key(pod)
         return result
+
+    # -- multi-node clusters ---------------------------------------------------------------------
+
+    #: Only an image with this prefix reads the injected overlay config; the API refuses any other.
+    CLUSTER_IMAGE_PREFIX = "daturaai/lium-cluster"
+
+    def clusters(self) -> List[ClusterOffer]:
+        """Groups of free nodes that sit on one RDMA fabric and can be rented as one cluster.
+
+        ``GET /executors/infiniband-clusters``. Each offer names the fabric, whether it is
+        InfiniBand or RoCE, whether the wire between the members was measured, how many
+        nodes the fabric has and which of them are free right now.
+        """
+        data = self._request("GET", "/executors/infiniband-clusters").json()
+        offers: List[ClusterOffer] = []
+        for d in data or []:
+            nodes = [self._dict_to_executor_info(n) for n in d.get("nodes") or []]
+            offers.append(ClusterOffer(
+                fabric_id=d.get("fabric_id", ""),
+                fabric_type=d.get("fabric_type") or "infiniband",
+                link_rate=d.get("link_rate"),
+                fabric_measured=bool(d.get("fabric_measured", False)),
+                node_count=int(d.get("node_count") or len(nodes)),
+                nodes=[n for n in nodes if n is not None],
+            ))
+        return offers
+
+    def cluster_offer(self, fabric_id: str) -> Optional[ClusterOffer]:
+        """The offer for one fabric (exact id, or a unique prefix of it)."""
+        offers = self.clusters()
+        exact = [o for o in offers if o.fabric_id == fabric_id]
+        if exact:
+            return exact[0]
+        prefix = [o for o in offers if o.fabric_id.startswith(fabric_id)]
+        return prefix[0] if len(prefix) == 1 else None
+
+    def cluster_template(self) -> Template:
+        """The template every cluster rental must use (``daturaai/lium-cluster``); newest tag wins."""
+        candidates = [t for t in self.templates() if (t.docker_image or "").startswith(self.CLUSTER_IMAGE_PREFIX)]
+        if not candidates:
+            raise LiumNotFoundError(f"No template with image {self.CLUSTER_IMAGE_PREFIX} is available")
+
+        def tag_key(t: Template):
+            return tuple(int(p) if p.isdigit() else -1 for p in re.split(r"[.\-]", t.docker_image_tag or "0"))
+
+        return max(candidates, key=tag_key)
+
+    def up_cluster(
+        self,
+        executor_ids: List[str],
+        *,
+        name: str,
+        template_id: Optional[str] = None,
+        ssh_keys: Optional[List[str]] = None,
+        ssh_name: Optional[str] = None,
+        ports: Optional[int] = None,
+        enable_volume_encryption: bool | None = True,
+        wait: bool = False,
+        timeout: int = 900,
+    ) -> Cluster:
+        """Rent several nodes of one fabric as a single all-or-nothing cluster.
+
+        ``POST /executors/cluster/rent``. Every node is taken whole and runs the cluster
+        template, which raises the private overlay each member uses to find its peers.
+        The same ``name`` is given to every member pod; the members share ``cluster_id``.
+
+        Args:
+            executor_ids: Nodes to rent; they must all be on one fabric (see :meth:`clusters`).
+            name: Pod name applied to every member.
+            template_id: Defaults to :meth:`cluster_template`.
+            ssh_keys: Public keys to install; defaults to the configured key.
+            ports: Ports to expose per node.
+            enable_volume_encryption: As for :meth:`up`.
+            wait: Block until every member is RUNNING with SSH (``timeout`` seconds).
+
+        Raises:
+            ValueError: fewer than two nodes, or no SSH key.
+            LiumError: the API refused the group (mixed fabrics, split hosts, wrong image) or the
+                rental timed out and no member appeared.
+        """
+        ids = [str(i) for i in executor_ids]
+        if len(ids) < 2:
+            raise ValueError("A cluster needs at least two nodes")
+        if len(set(ids)) != len(ids):
+            raise ValueError("executor_ids contains duplicates")
+        ssh_material = ssh_keys or self.config.ssh_public_keys
+        if not ssh_material:
+            raise ValueError("No SSH keys found")
+        self._ensure_ssh_keys_registered(ssh_material, name=ssh_name)
+        if template_id is None:
+            template_id = self.cluster_template().id
+
+        payload = {
+            "pod_name": name,
+            "template_id": template_id,
+            "executor_uuids": ids,
+            "user_public_key": ssh_material,
+            "initial_port_count": ports,
+            "enable_volume_encryption": enable_volume_encryption,
+        }
+        # Not idempotent and not retried: a timeout may have rented the group anyway, so look
+        # for it by name before reporting failure rather than sending the order twice.
+        try:
+            response = self._request("POST", "/executors/cluster/rent", json=payload).json()
+        except (requests.RequestException, LiumServerError, LiumRateLimitError):
+            response = None
+        pod_ids: List[str] = [str(p) for p in (response or {}).get("pod_ids") or []]
+
+        cluster = self._find_cluster(pod_ids=pod_ids, name=name, attempts=3, interval=3)
+        if cluster is None:
+            if response is not None and not response.get("success", True):
+                raise LiumError(f"Cluster rental refused: {response.get('message') or response}")
+            raise LiumError(f"Cluster rental of {len(ids)} nodes did not produce pods named {name!r}")
+        if wait:
+            cluster = self.wait_cluster_ready(cluster, timeout=timeout)
+        return cluster
+
+    def _find_cluster(self, *, pod_ids: List[str], name: str, attempts: int, interval: float) -> Optional[Cluster]:
+        for attempt in range(attempts):
+            pods = self.ps()
+            members = [p for p in pods if p.id in pod_ids] if pod_ids else [p for p in pods if p.name == name and p.cluster_id]
+            cluster_ids = {p.cluster_id for p in members if p.cluster_id}
+            if members and len(cluster_ids) == 1:
+                cid = cluster_ids.pop()
+                return Cluster(id=cid, pods=[p for p in pods if p.cluster_id == cid])
+            if attempt < attempts - 1:
+                time.sleep(interval)
+        return None
+
+    def my_clusters(self) -> List[Cluster]:
+        """The caller's cluster rentals, one :class:`Cluster` per ``cluster_id`` found in :meth:`ps`."""
+        groups: Dict[str, List[PodInfo]] = {}
+        for pod in self.ps():
+            if pod.cluster_id:
+                groups.setdefault(pod.cluster_id, []).append(pod)
+        return [Cluster(id=cid, pods=members) for cid, members in groups.items()]
+
+    def cluster(self, cluster_id: str) -> Cluster:
+        """One cluster by id (exact, or a unique prefix), from the caller's pods.
+
+        Raises:
+            LiumNotFoundError: no pod carries that cluster id.
+        """
+        mine = self.my_clusters()
+        exact = [c for c in mine if c.id == cluster_id]
+        if exact:
+            return exact[0]
+        prefix = [c for c in mine if c.id.startswith(cluster_id)]
+        if len(prefix) == 1:
+            return prefix[0]
+        raise LiumNotFoundError(
+            f"No cluster {cluster_id!r} among your pods" + (" (ambiguous prefix)" if len(prefix) > 1 else "")
+        )
+
+    def wait_cluster_ready(self, cluster: Cluster, *, timeout: int = 900, poll_interval: int = 10) -> Cluster:
+        """Poll until every member of ``cluster`` is RUNNING with SSH metadata.
+
+        Raises:
+            TimeoutError: some member was still not ready after ``timeout`` seconds (all members keep billing).
+        """
+        deadline = time.time() + timeout
+        while True:
+            pods = [p for p in self.ps() if p.cluster_id == cluster.id]
+            fresh = Cluster(id=cluster.id, pods=pods)
+            if pods and len(pods) >= cluster.size and all(p.status.upper() == "RUNNING" and p.ssh_cmd for p in pods):
+                return fresh
+            if time.time() >= deadline:
+                pending = [f"{p.name or p.huid}={p.status}" for p in pods if p.status.upper() != "RUNNING" or not p.ssh_cmd]
+                raise TimeoutError(
+                    f"Cluster {cluster.id} not ready after {timeout}s: {', '.join(pending) or 'members missing'}"
+                )
+            time.sleep(poll_interval)
+
+    def rm_cluster(self, cluster: Cluster) -> List[Dict[str, Any]]:
+        """Remove every member pod of a cluster. Returns one ``{"pod", "success", "error"}`` per member.
+
+        The API has no single "terminate cluster" order; each member is deleted in turn and a
+        failure on one does not stop the others, so nothing is left billing by accident.
+        """
+        results: List[Dict[str, Any]] = []
+        for pod in cluster.pods:
+            try:
+                self.rm(pod)
+                results.append({"pod": pod.id, "success": True, "error": None})
+            except Exception as exc:  # keep going: the other members must still be released
+                results.append({"pod": pod.id, "success": False, "error": str(exc)})
+        return results
 
     def get_default_images(self, gpu_model: Optional[str], driver_version: Optional[str]) -> list[dict]:
         """Get default images for GPU type and driver version."""

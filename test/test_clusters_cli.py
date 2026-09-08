@@ -1,0 +1,274 @@
+"""`lium clusters` — list fabrics, rent a cluster, inspect members, remove — with the SDK mocked."""
+
+import json
+from types import SimpleNamespace
+
+from click.testing import CliRunner
+
+from lium.cli.cli import cli
+from lium.cli.clusters import command as clusters_command
+from lium.sdk import Cluster, ClusterOffer, ExecutorInfo, LiumNotFoundError, PodInfo
+
+FABRIC = "hot:infiniband:0x3:0x7fff:NVIDIA H100 80GB HBM3:8"
+
+
+def _node(i: int, price: float = 16.0) -> ExecutorInfo:
+    return ExecutorInfo(
+        id=f"exec-{i}", huid=f"node-{i}", machine_name="NVIDIA H100 80GB HBM3", gpu_type="H100", gpu_count=8,
+        price_per_hour=price, price_per_gpu=price / 8, location={"country": "US"}, specs={}, status="active",
+        docker_in_docker=False, ip=f"10.0.0.{i}", tier="secure",
+    )
+
+
+def _offer(free: int = 3) -> ClusterOffer:
+    return ClusterOffer(fabric_id=FABRIC, fabric_type="infiniband", link_rate="400 Gb/sec (4X NDR)", fabric_measured=True,
+                        node_count=4, nodes=[_node(i, price=16.0 + i) for i in range(free)])
+
+
+def _pod(i: int, status: str = "RUNNING", cluster_id: str = "c-1", name: str = "job") -> PodInfo:
+    return PodInfo(
+        id=f"pod-{i}", name=name, status=status, huid=f"pod-huid-{i}",
+        ssh_cmd=f"ssh root@1.2.3.{i} -p 2200{i}" if status == "RUNNING" else None, ports={"22": 22000 + i},
+        created_at="", updated_at="", executor=_node(i), template={"id": "tpl-c"}, removal_scheduled_at=None,
+        jupyter_installation_status=None, jupyter_url=None,
+        cluster_id=cluster_id, cluster_node_index=i, cluster_overlay_ip=f"10.42.0.{i + 1}",
+    )
+
+
+class FakeLium:
+    offers = [_offer()]
+    mine = [Cluster(id="c-1", pods=[_pod(0), _pod(1)])]
+    up_calls: list = []
+    removed: list = []
+    scheduled: list = []
+    up_result = None
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def clusters(self):
+        return list(self.offers)
+
+    def cluster_offer(self, fabric):
+        exact = [o for o in self.offers if o.fabric_id == fabric]
+        prefix = [o for o in self.offers if o.fabric_id.startswith(fabric)]
+        return (exact or (prefix if len(prefix) == 1 else [None]))[0]
+
+    def my_clusters(self):
+        return list(self.mine)
+
+    def cluster(self, cluster_id):
+        for c in self.mine:
+            if c.id == cluster_id or c.id.startswith(cluster_id):
+                return c
+        raise LiumNotFoundError(cluster_id)
+
+    def up_cluster(self, executor_ids, **kwargs):
+        FakeLium.up_calls.append((list(executor_ids), kwargs))
+        if isinstance(self.up_result, Exception):
+            raise self.up_result
+        return self.up_result or self.mine[0]
+
+    def schedule_termination(self, pod, *, termination_time):
+        FakeLium.scheduled.append((pod.id, termination_time))
+        return {}
+
+    def rm_cluster(self, cluster):
+        FakeLium.removed.append(cluster.id)
+        return [{"pod": p.id, "success": p.id != "pod-1" or not getattr(self, "fail_one", False), "error": None} for p in cluster.pods]
+
+
+def _patch(monkeypatch, tmp_path, **overrides):
+    FakeLium.up_calls, FakeLium.removed, FakeLium.scheduled, FakeLium.up_result = [], [], [], None
+    for k, v in overrides.items():
+        setattr(FakeLium, k, v)
+    monkeypatch.setattr(clusters_command, "Lium", FakeLium)
+    monkeypatch.setattr(clusters_command, "ensure_config", lambda: None)
+    monkeypatch.setattr(clusters_command, "_selection_file", lambda: tmp_path / "last_cluster_selection.json")
+    # A wide console, so Rich does not ellipsize the table cells the assertions look for.
+    from lium.cli import utils
+
+    monkeypatch.setattr(utils.console, "_width", 250)
+    monkeypatch.setattr(utils.console, "_height", 60)
+
+
+def _run(*args, input=None):
+    return CliRunner().invoke(cli, ["clusters", *args], input=input, catch_exceptions=False)
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+# --- list -----------------------------------------------------------------------------------------
+
+def test_clusters_lists_fabrics_and_caches_the_selection(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    result = _run()
+
+    assert result.exit_code == 0, result.output
+    assert "8×H100" in result.output and "3/4" in result.output and "infiniband" in result.output
+    assert json.loads((tmp_path / "last_cluster_selection.json").read_text())["fabrics"] == [FABRIC]
+
+
+def test_clusters_format_json_is_machine_readable(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    result = _run("--format", "json")
+
+    data = json.loads(result.output)
+    assert data[0]["fabric_id"] == FABRIC and data[0]["free_count"] == 3 and data[0]["gpus_per_node"] == 8
+    assert data[0]["nodes"][0] == {"id": "exec-0", "huid": "node-0", "gpu_type": "H100", "gpu_count": 8,
+                                   "price_per_hour": 16.0, "country": "US", "tier": "secure"}
+
+
+def test_clusters_list_with_no_offers(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path, offers=[])
+
+    result = _run("list")
+
+    assert result.exit_code == 0 and "No fabric has free nodes" in result.output
+    FakeLium.offers = [_offer()]
+
+
+# --- up -------------------------------------------------------------------------------------------
+
+def test_clusters_up_by_index_rents_the_cheapest_nodes(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    _run()  # caches fabric #1
+
+    result = _run("up", "1", "--nodes", "2", "-n", "job", "-y", "--ttl", "2h")
+
+    assert result.exit_code == 0, result.output
+    ids, kwargs = FakeLium.up_calls[0]
+    assert ids == ["exec-0", "exec-1"] and kwargs["name"] == "job" and kwargs["wait"] is True
+    assert "Cluster c-1 (2 nodes" in result.output and "MASTER_ADDR=10.42.0.1" in result.output
+    assert [p for p, _ in FakeLium.scheduled] == ["pod-0", "pod-1"]
+
+
+def test_clusters_up_json_prints_the_cluster_record(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "--format", "json", "--no-wait")
+
+    data = json.loads(result.output)
+    assert data["id"] == "c-1" and data["master_addr"] == "10.42.0.1" and data["size"] == 2
+    assert data["hostfile"] == "10.42.0.1 slots=8\n10.42.0.2 slots=8\n"
+    assert data["pods"][1]["node_rank"] == 1 and data["pods"][1]["overlay_ip"] == "10.42.0.2"
+    assert FakeLium.up_calls[0][1]["wait"] is False
+
+
+def test_clusters_up_asks_before_spending_and_names_the_price(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", input="n\n")
+
+    assert result.exit_code == 0 and "$33.00/h" in result.output and FakeLium.up_calls == []
+
+
+def test_clusters_up_refuses_more_nodes_than_are_free(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    result = _run("up", FABRIC, "--nodes", "4", "-n", "job", "-y")
+
+    assert result.exit_code != 0 and "Only 3 of 4 nodes" in result.output and FakeLium.up_calls == []
+
+
+def test_clusters_up_rejects_a_single_node_and_a_bad_ttl(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    assert "--nodes must be at least 2" in _run("up", FABRIC, "--nodes", "1", "-n", "job", "-y").output
+    assert "Invalid TTL" in _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--ttl", "soon").output
+    assert FakeLium.up_calls == []
+
+
+def test_clusters_up_without_a_cached_listing_says_so(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    result = _run("up", "1", "--nodes", "2", "-n", "job", "-y")
+
+    assert result.exit_code != 0 and "Run 'lium clusters' first" in result.output
+
+
+def test_clusters_up_timeout_says_the_members_are_billing(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path, up_result=TimeoutError("Cluster c-1 not ready after 900s: job=PENDING"))
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y")
+
+    assert result.exit_code != 0 and "rented and billing" in _flat(result.output)
+
+
+# --- ps / show ------------------------------------------------------------------------------------
+
+def test_clusters_ps_lists_my_clusters(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    result = _run("ps")
+
+    assert result.exit_code == 0 and "c-1" in result.output and "RUNNING" in result.output and "10.42.0.1" in result.output
+
+
+def test_clusters_ps_json(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    data = json.loads(_run("ps", "--format", "json").output)
+
+    assert data[0]["id"] == "c-1" and data[0]["status"] == "RUNNING" and len(data[0]["pods"]) == 2
+
+
+def test_clusters_show_by_id_prefix_or_name(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    by_prefix = _run("show", "c-")
+    by_name = _run("show", "job")
+
+    assert by_prefix.exit_code == 0 and "10.42.0.2" in by_prefix.output and "ssh root@1.2.3.1 -p 22001" in by_prefix.output
+    assert by_name.exit_code == 0 and "Cluster c-1" in by_name.output
+
+
+def test_clusters_show_hostfile_and_torchrun(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    assert _run("show", "c-1", "--hostfile").output == "10.42.0.1 slots=8\n10.42.0.2 slots=8\n"
+    assert _run("show", "c-1", "--torchrun", "1").output.strip() == "--nnodes 2 --node_rank 1 --master_addr 10.42.0.1 --master_port 29500"
+    assert "no node with rank 7" in _run("show", "c-1", "--torchrun", "7").output
+
+
+def test_clusters_show_unknown(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    result = _run("show", "nope")
+
+    assert result.exit_code != 0 and "No cluster 'nope'" in result.output
+
+
+# --- rm -------------------------------------------------------------------------------------------
+
+def test_clusters_rm_removes_every_member(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    result = _run("rm", "job", "-y")
+
+    assert result.exit_code == 0, result.output
+    assert FakeLium.removed == ["c-1"] and "pod-0" in result.output and "removed" in result.output
+
+
+def test_clusters_rm_asks_first(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    result = _run("rm", "c-1", input="n\n")
+
+    assert result.exit_code == 0 and FakeLium.removed == []
+
+
+def test_clusters_rm_reports_a_member_that_stayed(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path, fail_one=True)
+
+    result = _run("rm", "c-1", "-y", "--format", "json")
+
+    assert result.exit_code == 3
+    payload = json.loads(result.output)
+    assert payload["ok"] is False and [r["success"] for r in payload["results"]] == [True, False]
+    assert "still billing" in payload["error"]
+    FakeLium.fail_one = False
