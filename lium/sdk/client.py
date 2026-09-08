@@ -2020,11 +2020,30 @@ class Lium:
 
         Returns:
             Matching :class:`ExecutorInfo` or ``None`` if no listed node has that id.
+
+        Raises:
+            ValueError: the HUID names more than one listed node. HUIDs are
+                client-side draws (10 adjectives × 10 nouns × 256 tails), so a
+                full listing can hold two nodes with the same one; picking the
+                first in API order would rent a different node than the one
+                ``lium ls`` showed, so the caller is asked for the UUID instead.
         """
-        for e in self.ls():
-            if executor in (e.id, e.huid):
-                return e
-        return None
+        matches = [e for e in self.ls() if executor in (e.id, e.huid)]
+        if len(matches) > 1:
+            exact = [e for e in matches if e.id == executor]
+            if len(exact) == 1:
+                return exact[0]
+            raise ValueError(self.ambiguous_executor_message(executor, matches))
+        return matches[0] if matches else None
+
+    @staticmethod
+    def ambiguous_executor_message(executor: str, matches: List[ExecutorInfo]) -> str:
+        """The sentence for a HUID that is shared by several listed nodes."""
+        ids = ", ".join(f"{e.id} ({e.gpu_count}×{e.gpu_type})" for e in matches)
+        return (
+            f"Node id '{executor}' matches {len(matches)} listed nodes: {ids}. "
+            "Use the UUID ('lium ls --format json' shows both) so the right node is rented."
+        )
 
     @staticmethod
     def executor_not_found_message(executor: str) -> str:

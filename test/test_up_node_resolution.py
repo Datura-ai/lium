@@ -56,6 +56,41 @@ def test_get_executor_still_resolves_the_uuid(monkeypatch):
     assert client.get_executor(NODE_ID).id == NODE_ID
 
 
+def test_get_executor_refuses_a_huid_shared_by_two_nodes(monkeypatch):
+    """A HUID is a 25,600-value draw; two listed nodes can share one. The first in API order must
+    not win silently under `lium up <huid> --yes`."""
+    twin_a, twin_b = _listed(NODE_ID), _listed(OTHER_ID)
+    twin_b.huid = twin_a.huid
+    client = _client(monkeypatch, [twin_a, twin_b])
+
+    with pytest.raises(ValueError) as collision:
+        client.get_executor(twin_a.huid)
+
+    message = str(collision.value)
+    assert "matches 2 listed nodes" in message and NODE_ID in message and OTHER_ID in message
+    assert "lium ls --format json" in message
+
+
+def test_get_executor_uuid_wins_over_a_huid_collision(monkeypatch):
+    """An exact UUID is unambiguous even when another node's HUID happens to equal it."""
+    twin_a, twin_b = _listed(NODE_ID), _listed(OTHER_ID)
+    twin_b.huid = NODE_ID
+    client = _client(monkeypatch, [twin_b, twin_a])
+
+    assert client.get_executor(NODE_ID).id == NODE_ID
+
+
+def test_resolve_executor_action_reports_a_huid_collision(monkeypatch):
+    twin_a, twin_b = _listed(NODE_ID), _listed(OTHER_ID)
+    twin_b.huid = twin_a.huid
+    client = _client(monkeypatch, [twin_a, twin_b])
+
+    result = ResolveExecutorAction().execute({"lium": client, "executor_id": twin_a.huid})
+
+    assert result.ok is False
+    assert "matches 2 listed nodes" in result.error
+
+
 def test_get_executor_returns_none_for_an_unlisted_id(monkeypatch):
     client = _client(monkeypatch, [_listed(NODE_ID)])
 
