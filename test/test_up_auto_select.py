@@ -117,6 +117,60 @@ def test_up_names_the_pick_and_its_price_before_renting(monkeypatch):
         def wait_ready(self, pod, *, timeout=None, poll_interval=None, on_poll=None):
             # the CLI waits through Lium.wait_ready (DAH-2558); the pod here is ready on the first look
             return self.ps()[0]
+    def ls(self, gpu_type=None, **kwargs):
+        return [EXPENSIVE, CHEAP, SLOW_AND_CHEAP]
+
+    def get_executor(self, executor_id):
+        return EXPENSIVE
+
+
+def _resolve(monkeypatch, **ctx):
+    monkeypatch.setattr("lium.cli.ls.command.ls_store_executor", lambda **kwargs: [])
+    return ResolveExecutorAction().execute({"lium": _FakeLium(), **ctx})
+
+
+def test_auto_select_picks_the_cheapest_pareto_node(monkeypatch):
+    result = _resolve(monkeypatch, gpu="RTX4090")
+
+    assert result.ok
+    assert result.data["executor"].huid == "thrifty-node-bb"
+    assert result.data["auto_selected"] is True
+    assert result.data["candidates"] == 2
+
+
+def test_equal_prices_keep_the_listing_order(monkeypatch):
+    same_price = _executor("same-price-dd", 0.30, ram_gb=64)
+    monkeypatch.setattr(_FakeLium, "ls", lambda self, **kwargs: [same_price, CHEAP])
+
+    result = _resolve(monkeypatch, gpu="RTX4090")
+
+    assert result.data["executor"].huid == "same-price-dd"
+
+
+def test_explicit_node_id_is_not_re_ranked(monkeypatch):
+    result = _resolve(monkeypatch, executor_id="id-pricey-node-aa")
+
+    assert result.data["executor"] is EXPENSIVE
+    assert "auto_selected" not in result.data
+
+
+def test_up_names_the_pick_and_its_price_before_renting(monkeypatch):
+    rented: dict = {}
+
+    class _RentingLium(_FakeLium):
+        def default_docker_template(self, executor_id):
+            return SimpleNamespace(id="tpl-1", name="pytorch")
+
+        def get_deployment_estimate(self, executor_id, template_id):
+            return {}
+
+        def up(self, **kwargs):
+            rented.update(kwargs)
+            return {"id": "pod-uuid-1", "name": kwargs["name"]}
+
+        def ps(self):
+            return [SimpleNamespace(id="pod-uuid-1", huid="thrifty-node-bb", name="thrifty-node-bb",
+                                    status="RUNNING", ssh_cmd="ssh root@1.2.3.4", ports={"22": 10022})]
 
     monkeypatch.setattr(up_module, "Lium", _RentingLium)
     monkeypatch.setattr(up_module, "ensure_config", lambda: None)
