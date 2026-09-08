@@ -394,6 +394,7 @@ def test_completion_notice_goes_to_stderr(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setenv("SHELL", "/bin/zsh")
+    monkeypatch.setattr("lium.cli.interactive.is_interactive", lambda: True)
 
     completion.ensure_completion()
 

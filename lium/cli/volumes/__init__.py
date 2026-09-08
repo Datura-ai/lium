@@ -10,7 +10,15 @@ from .rm.command import volumes_rm_command
 @click.group(invoke_without_command=True)
 @click.pass_context
 def volumes_command(ctx):
-    """Manage persistent volumes."""
+    """Manage persistent volumes.
+
+    \b
+    Examples:
+      lium volumes                        # same as 'lium volumes list'
+      lium volumes new datasets -d "training data"
+      lium volumes rm <VOLUME> --yes
+      lium up --gpu H100 -v id:<VOLUME_HUID>
+    """
     if ctx.invoked_subcommand is None:
         ctx.invoke(volumes_list_command)
 

@@ -13,7 +13,16 @@ from .reset.command import config_reset_command
 
 @click.group(name="config")
 def config_command():
-    """Manage Lium CLI configuration."""
+    """Manage Lium CLI configuration.
+
+    \b
+    Examples:
+      lium config show
+      lium config get api.api_key
+      lium config set ssh.key_path ~/.ssh/id_ed25519
+      lium config unset template.default_id
+      lium config reset --yes
+    """
     pass
 
 

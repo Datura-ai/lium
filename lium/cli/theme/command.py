@@ -11,7 +11,13 @@ from .actions import SwitchThemeAction
 @click.argument("theme_name", type=click.Choice(["dark", "light"]))
 @handle_errors
 def theme_command(theme_name: str):
-    """Set CLI color theme (dark or light)."""
+    """Set CLI color theme (dark or light).
+
+    \b
+    Examples:
+      lium theme dark
+      lium theme light
+    """
     console = ThemedConsole()
 
     ctx = {"console": console, "theme_name": theme_name}

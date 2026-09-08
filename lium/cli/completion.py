@@ -15,8 +15,36 @@ SHELLS: Dict[str, Tuple[str, str]] = {
 }
 
 
+def completion_script(shell: str) -> str:
+    """The line a shell rc file needs for `lium` tab completion."""
+    if shell not in SHELLS:
+        raise ValueError(f"Unsupported shell '{shell}'; choose one of {', '.join(SHELLS)}")
+    return SHELLS[shell][1]
+
+
+def install_completion(shell: str) -> Tuple[bool, str]:
+    """Append the completion line to the shell's rc file. Returns ``(changed, rc_path)``."""
+    config_file, script = SHELLS[shell]
+    config_path = Path(config_file).expanduser()
+    if config_path.exists() and "_LIUM_COMPLETE" in config_path.read_text():
+        return False, str(config_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with config_path.open("a") as f:
+        f.write(f"\n# Lium CLI completion\n{script}\n")
+    return True, str(config_path)
+
+
 def ensure_completion() -> None:
-    """Silently ensure shell completion is installed."""
+    """Silently ensure shell completion is installed.
+
+    Only when a person is at a terminal: a script, a CI job or an agent
+    piping `lium` must not have its rc files edited as a side effect.
+    """
+    from .interactive import is_interactive
+
+    if not is_interactive():
+        return
+
     # Check if already processed this installation
     marker_file = Path.home() / ".lium_completion_installed"
     if marker_file.exists():

@@ -174,6 +174,12 @@ def rm_command(
     \b
     Each removed pod is reported with its uptime and estimated spend
     (uptime × $/h, marked ≈ because the API returns no billed figure).
+    Examples:
+      lium rm my-pod
+      lium rm 1,2 --yes                 # no confirmation
+      lium rm my-pod --in 6h            # schedule removal
+      lium rm my-pod --at "23:00"
+      lium rm --all --yes               # every pod on the account
     """
     lium = Lium()
     # --format json: stdout is one JSON document, so the workspace context line goes to stderr
