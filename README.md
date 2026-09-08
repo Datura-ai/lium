@@ -441,6 +441,27 @@ lium fund -w default -a 1.5        # Fund with specific wallet and amount
 lium fund -w mywal -a 0.5 -y       # Skip confirmation
 ```
 
+### `lium ls --format json` fields
+
+One object per node, sorted as the table is; the names are stable and pinned by `test/test_ls_speed.py`:
+
+| field | meaning |
+|---|---|
+| `index` | row number, what `lium up <index>` takes |
+| `id`, `huid` | node UUID (what the API wants) and its human id (`lium up <huid>`) |
+| `config`, `gpu_type`, `gpu_count` | `8×H100`, `H100`, `8` |
+| `price_per_gpu_hour`, `price_per_hour` | USD per GPU-hour and for the whole node |
+| `country` | country name |
+| `vram_gb`, `ram_gb`, `disk_gb` | per-GPU VRAM, host RAM, host disk (GiB) |
+| `upload_mbps`, `download_mbps` | the backend's effective speeds |
+| `available_ports` | ports free for `--ports` |
+| `docker_in_docker` | sysbox runtime, i.e. `docker run` works inside the pod |
+| `is_pareto` | the ★ mark |
+| `max_cuda_version` | highest CUDA the driver supports |
+| `tier` | `secure` or `spot` (reclaimable) |
+
+The listing comes from `GET /executors?view=summary`, about a tenth of the full row; `Lium.ls(view="full")` returns the whole validator scrape in `ExecutorInfo.specs`.
+
 ## Features
 
 - **Dual Interface**: Same package ships both the `lium` CLI and a Python SDK (`lium.sdk.Lium` + `@lium.machine` decorator)
