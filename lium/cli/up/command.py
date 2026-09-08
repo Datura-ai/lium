@@ -23,6 +23,7 @@ from lium.cli.utils import (
     EXIT_GENERAL_ERROR,
     EXIT_SSH_ERROR,
     _api_error_data,
+    MIN_DOWNLOAD_MBPS,
     ensure_config,
     handle_errors,
 )
@@ -214,7 +215,10 @@ def up_command(
     With --gpu the backend chooses: the cheapest $/GPU·h node matching the filters
     (one GPU unless -c) with ≥ 100 Mbps ingress, rented in the same call; a pick taken
     meanwhile falls through to the next node at or below the confirmed price. Without
-    --gpu (or on an older backend) the cheapest ★ optimal node of 'lium ls' is rented.
+    --gpu (or on an older backend) the cheapest optimal node of 'lium ls' is rented:
+    the Pareto frontier is drawn among nodes renting the same GPU count (-c, else the
+    node's free GPUs; 'lium ls' stars it over all counts), then the lowest total $/h
+    wins; ties keep the 'lium ls' order.
     \b
     Examples:
       lium up cosmic-hawk-f2                # Create pod on specific node
@@ -367,23 +371,30 @@ def up_command(
         raise CliFailure("node_selection_failed", result.error, EXIT_GENERAL_ERROR, data=data or None, hint=hint)
 
     executor = result.data["executor"]
-    # What the rental bills: the server's figure when it picked (a split of a larger node
-    # costs price_per_gpu × count, not the node's total), else the node's total $/h.
-    server_price_per_hour = result.data.get("price_per_hour")
-    price_per_hour = server_price_per_hour or executor.price_per_hour
-    # The GPUs the rental gets, next to what they cost: on the spec path the server may rent a
-    # split of a larger node, so the node's own count would overstate it.
-    gpu_count = result.data.get("gpu_count") or executor.gpu_count
+    # What this rent takes and costs. Spec path: the server's figure when it picked (a split
+    # of a larger node costs price_per_gpu × count, not the node's total). Pareto path: the
+    # auto-select's rented count and its total $/h (a split host rents its free GPUs). Else
+    # the host as named by the renter.
     spec = result.data.get("spec")
+    server_price_per_hour = result.data.get("price_per_hour")
+    gpu_count = result.data.get("gpu_count") or result.data.get("rent_count") or executor.gpu_count
+    price_per_hour = server_price_per_hour or result.data.get("rent_price") or executor.price_per_hour
     if result.data.get("auto_selected"):
-        # Name the pick and its total $/h before anything is billed: with -y the
-        # confirmation below is skipped and the price would first appear in `ps`.
+        # Name the pick, what the rent takes and its total $/h before anything is
+        # billed: with -y the confirmation below is skipped and the price would
+        # first appear in `ps`.
         country = (executor.location or {}).get("country") or (executor.location or {}).get("country_code")
+        n = result.data["candidates"]
+        if spec:
+            origin = f"cheapest of {n} matching node(s)"
+        elif result.data.get("pareto", True):
+            origin = f"cheapest of {n} optimal node(s)"
+        else:
+            origin = f"cheapest of {n} matching node(s); none is optimal (download below {MIN_DOWNLOAD_MBPS:.0f} Mbps)"
         ui.info(
             f"Selected {ui.styled(executor.huid, 'id')} "
             f"({gpu_count}×{executor.gpu_type}{', ' + country if country else ''}) "
-            f"at ${price_per_hour:.2f}/h — cheapest of {result.data['candidates']} "
-            f"{'matching' if spec else 'optimal'} node(s)"
+            f"at ${price_per_hour:.2f}/h — {origin}"
         )
 
     def _show_estimate(est_secs, dl_speed, img_gb, is_slow, warning_msg):
