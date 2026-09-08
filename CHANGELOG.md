@@ -5,11 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Fixed
-- `lium up` with filters (`--gpu`, `--count`, `--country`, `--ports`) now rents the cheapest `$/GPU·h` node of the Pareto-optimal set instead of the first one the API returned, prints the selected node and its total `$/h` before renting, and the help text says so. Explicit `NODE_ID` picks are unchanged. (DAH-2980)
-
 ## [0.4.3] - 2025-10-23
 
 ### Added
