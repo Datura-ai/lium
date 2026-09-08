@@ -41,6 +41,8 @@ class FakeLium:
     removed: list = []
     scheduled: list = []
     up_result = None
+    wait_result = None
+    wait_calls: list = []
 
     def __init__(self, *args, **kwargs):
         pass
@@ -72,6 +74,12 @@ class FakeLium:
         FakeLium.scheduled.append((pod.id, termination_time))
         return {}
 
+    def wait_cluster_ready(self, cluster, *, timeout):
+        FakeLium.wait_calls.append((cluster.id, timeout))
+        if isinstance(self.wait_result, Exception):
+            raise self.wait_result
+        return self.wait_result or cluster
+
     def rm_cluster(self, cluster):
         FakeLium.removed.append(cluster.id)
         return [{"pod": p.id, "success": p.id != "pod-1" or not getattr(self, "fail_one", False), "error": None} for p in cluster.pods]
@@ -79,6 +87,7 @@ class FakeLium:
 
 def _patch(monkeypatch, tmp_path, **overrides):
     FakeLium.up_calls, FakeLium.removed, FakeLium.scheduled, FakeLium.up_result = [], [], [], None
+    FakeLium.wait_calls, FakeLium.wait_result = [], None
     for k, v in overrides.items():
         setattr(FakeLium, k, v)
     monkeypatch.setattr(clusters_command, "Lium", FakeLium)
@@ -141,9 +150,19 @@ def test_clusters_up_by_index_rents_the_cheapest_nodes(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     ids, kwargs = FakeLium.up_calls[0]
-    assert ids == ["exec-0", "exec-1"] and kwargs["name"] == "job" and kwargs["wait"] is True
+    assert ids == ["exec-0", "exec-1"] and kwargs["name"] == "job" and kwargs["wait"] is False
+    assert FakeLium.wait_calls == [("c-1", 900)]
     assert "Cluster c-1 (2 nodes" in result.output and "MASTER_ADDR=10.42.0.1" in result.output
     assert [p for p, _ in FakeLium.scheduled] == ["pod-0", "pod-1"]
+
+
+def test_clusters_up_no_wait_does_not_wait(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--no-wait")
+
+    assert result.exit_code == 0, result.output
+    assert FakeLium.wait_calls == []
 
 
 def test_clusters_up_json_prints_the_cluster_record(monkeypatch, tmp_path):
@@ -191,11 +210,22 @@ def test_clusters_up_without_a_cached_listing_says_so(monkeypatch, tmp_path):
 
 
 def test_clusters_up_timeout_says_the_members_are_billing(monkeypatch, tmp_path):
-    _patch(monkeypatch, tmp_path, up_result=TimeoutError("Cluster c-1 not ready after 900s: job=PENDING"))
+    _patch(monkeypatch, tmp_path, wait_result=TimeoutError("Cluster c-1 not ready after 900s: job=PENDING"))
 
     result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y")
 
     assert result.exit_code != 0 and "rented and billing" in _flat(result.output)
+
+
+def test_clusters_up_schedules_the_ttl_before_waiting(monkeypatch, tmp_path):
+    """A --wait timeout must not leave N nodes billing with nothing scheduled."""
+    _patch(monkeypatch, tmp_path, wait_result=TimeoutError("Cluster c-1 not ready after 900s: job=PENDING"))
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--ttl", "2h")
+
+    assert result.exit_code != 0
+    assert [p for p, _ in FakeLium.scheduled] == ["pod-0", "pod-1"]
+    assert "terminates at" in _flat(result.output)
 
 
 # --- ps / show ------------------------------------------------------------------------------------

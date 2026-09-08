@@ -165,20 +165,31 @@ def clusters_up_command(
             return
 
     def rent() -> Cluster:
-        return lium.up_cluster([n.id for n in chosen], name=name, template_id=template_id, ports=ports,
-                               wait=wait, timeout=timeout)
+        return lium.up_cluster([n.id for n in chosen], name=name, template_id=template_id, ports=ports, wait=False)
 
-    try:
-        cluster = ui.load(f"Renting {node_count}-node cluster", rent) if output_format == "table" else rent()
-    except TimeoutError as exc:
-        raise CliFailure("cluster_not_ready", f"{exc}. The members are rented and billing; see 'lium clusters ps'.",
-                         EXIT_API_ERROR) from exc
+    cluster = ui.load(f"Renting {node_count}-node cluster", rent) if output_format == "table" else rent()
 
+    # The TTL is scheduled before any waiting: a --wait timeout must not leave N
+    # nodes billing with nothing scheduled.
     scheduled = None
     if ttl_delta is not None:
         scheduled = datetime.now(timezone.utc) + ttl_delta
         for pod in cluster.pods:
             lium.schedule_termination(pod, termination_time=scheduled.isoformat())
+
+    if wait:
+        def ready() -> Cluster:
+            return lium.wait_cluster_ready(cluster, timeout=timeout)
+
+        try:
+            cluster = ui.load(f"Waiting for {node_count} members", ready) if output_format == "table" else ready()
+        except TimeoutError as exc:
+            billing = (
+                f"every member terminates at {scheduled.strftime('%Y-%m-%d %H:%M UTC')}" if scheduled
+                else "the members are rented and billing"
+            )
+            raise CliFailure("cluster_not_ready", f"{exc}. {billing[0].upper() + billing[1:]}; see 'lium clusters ps'.",
+                             EXIT_API_ERROR) from exc
 
     if output_format == "json":
         data = cluster_to_dict(cluster)

@@ -1631,14 +1631,17 @@ class Lium:
             "enable_volume_encryption": enable_volume_encryption,
         }
         # Not idempotent and not retried: a timeout may have rented the group anyway, so look
-        # for it by name before reporting failure rather than sending the order twice.
+        # for it by name before reporting failure rather than sending the order twice. The
+        # by-name lookup only accepts a cluster that did not exist before this call: an older
+        # cluster reusing the pod name must not be handed back (and then, say, --ttl'd).
+        known_clusters = self._cluster_ids_now()
         try:
             response = self._request("POST", "/executors/cluster/rent", json=payload).json()
         except (requests.RequestException, LiumServerError, LiumRateLimitError):
             response = None
         pod_ids: List[str] = [str(p) for p in (response or {}).get("pod_ids") or []]
 
-        cluster = self._find_cluster(pod_ids=pod_ids, name=name, attempts=3, interval=3)
+        cluster = self._find_cluster(pod_ids=pod_ids, name=name, attempts=3, interval=3, exclude=known_clusters)
         if cluster is None:
             if response is not None and not response.get("success", True):
                 raise LiumError(f"Cluster rental refused: {response.get('message') or response}")
@@ -1647,10 +1650,24 @@ class Lium:
             cluster = self.wait_cluster_ready(cluster, timeout=timeout)
         return cluster
 
-    def _find_cluster(self, *, pod_ids: List[str], name: str, attempts: int, interval: float) -> Optional[Cluster]:
+    def _cluster_ids_now(self) -> frozenset:
+        """Cluster ids present in ``ps`` right now; empty when the listing fails (best effort)."""
+        try:
+            return frozenset(p.cluster_id for p in self.ps() if p.cluster_id)
+        except Exception:  # noqa: BLE001 - a listing failure must not fail the rental
+            return frozenset()
+
+    def _find_cluster(
+        self, *, pod_ids: List[str], name: str, attempts: int, interval: float, exclude: frozenset = frozenset()
+    ) -> Optional[Cluster]:
+        """The cluster the rental produced: by member pod ids when the API named them, else the
+        cluster of that ``name`` that is not in ``exclude`` (the ones that existed before)."""
         for attempt in range(attempts):
             pods = self.ps()
-            members = [p for p in pods if p.id in pod_ids] if pod_ids else [p for p in pods if p.name == name and p.cluster_id]
+            if pod_ids:
+                members = [p for p in pods if p.id in pod_ids]
+            else:
+                members = [p for p in pods if p.name == name and p.cluster_id and p.cluster_id not in exclude]
             cluster_ids = {p.cluster_id for p in members if p.cluster_id}
             if members and len(cluster_ids) == 1:
                 cid = cluster_ids.pop()

@@ -254,6 +254,31 @@ def test_up_cluster_does_not_resend_after_a_server_error_but_finds_the_pods_by_n
     assert sum(1 for c in client.calls if c[0] == "POST") == 1
 
 
+def test_up_cluster_by_name_ignores_a_cluster_that_existed_before_the_call(monkeypatch):
+    """An older cluster reusing the pod name is not the one this rental produced."""
+    stale = _pods([_pod_payload(7, cluster_id="c-old"), _pod_payload(8, cluster_id="c-old")])
+    client = _Client(
+        routes={("POST", "/executors/cluster/rent"): LiumServerError("Server error: 504")},
+        ps_sequence=[stale, stale],
+    )
+
+    with pytest.raises(LiumError, match="did not produce pods named 'job'"):
+        client.up_cluster(["exec-0", "exec-1"], name="job", template_id="tpl-x")
+
+
+def test_up_cluster_by_name_takes_the_new_cluster_next_to_a_stale_one(monkeypatch):
+    stale = _pods([_pod_payload(7, cluster_id="c-old"), _pod_payload(8, cluster_id="c-old")])
+    fresh = _pods([_pod_payload(0), _pod_payload(1)])
+    client = _Client(
+        routes={("POST", "/executors/cluster/rent"): LiumServerError("Server error: 504")},
+        ps_sequence=[stale, stale + fresh],
+    )
+
+    cluster = client.up_cluster(["exec-0", "exec-1"], name="job", template_id="tpl-x")
+
+    assert cluster.id == "c-1" and [p.id for p in cluster.pods] == ["pod-0", "pod-1"]
+
+
 def test_up_cluster_reports_when_nothing_appeared(monkeypatch):
     client = _Client(routes={("POST", "/executors/cluster/rent"): LiumServerError("Server error: 504")}, ps_sequence=[[]])
 
