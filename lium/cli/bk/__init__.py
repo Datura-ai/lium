@@ -18,12 +18,12 @@ def bk_command():
 
     \b
     Examples:
-      lium bk set my-pod            # configure periodic backups (interactive)
+      lium bk set my-pod --path /root --every 6h --keep 7d   # configure periodic backups
       lium bk show my-pod
-      lium bk now my-pod            # back up right now
+      lium bk now my-pod                                     # back up right now
       lium bk logs my-pod
-      lium bk restore my-pod        # restore a backup into the pod
-      lium bk rm my-pod             # stop backing the pod up
+      lium bk restore my-pod --id <BACKUP_ID>                # restore a backup into the pod
+      lium bk rm my-pod                                      # stop backing the pod up
     """
     pass
 

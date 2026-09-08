@@ -16,7 +16,7 @@ def volumes_command(ctx):
     Examples:
       lium volumes                        # same as 'lium volumes list'
       lium volumes new datasets -d "training data"
-      lium volumes rm <VOLUME> --yes
+      lium volumes rm 1 --yes             # index from 'lium volumes'
       lium up --gpu H100 -v id:<VOLUME_HUID>
     """
     if ctx.invoked_subcommand is None:
