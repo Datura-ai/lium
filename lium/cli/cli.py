@@ -2,6 +2,7 @@
 
 import click
 import os
+import sys
 from importlib.metadata import version, PackageNotFoundError
 from lium.__about__ import __version__ as fallback_version
 from .themed_console import ThemedConsole
@@ -136,9 +137,12 @@ def main():
     """Main entry point for the CLI."""
     if not os.environ.get("_LIUM_COMPLETE"):
         maybe_perform_startup_update()
-        from .completion import ensure_completion
+        # `lium completion ...` manages the rc file itself: the silent install must not run first,
+        # or `lium completion bash >> ~/.bashrc` on a fresh install would write the line twice.
+        if sys.argv[1:2] != ["completion"]:
+            from .completion import ensure_completion
 
-        ensure_completion()
+            ensure_completion()
 
     cli()
 

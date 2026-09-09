@@ -6,6 +6,7 @@ explicit `lium completion --install`, the silent path only runs for a person
 at a terminal, and every command's help shows how it is used.
 """
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,38 @@ def test_ensure_completion_installs_for_a_person(rc_home, monkeypatch):
     assert (rc_home / ".lium_completion_installed").exists()
 
 
+def test_ensure_completion_appends_once_and_is_quiet_when_the_line_is_there(rc_home, monkeypatch, capsys):
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    monkeypatch.setattr("lium.cli.interactive.is_interactive", lambda: True)
+    rc = rc_home / ".zshrc"
+    rc.write_text("# mine\n" + completion.completion_script("zsh") + "\n")
+
+    completion.ensure_completion()
+
+    assert rc.read_text().count("_LIUM_COMPLETE") == 1
+    assert (rc_home / ".lium_completion_installed").exists()
+    assert "configured" not in capsys.readouterr().err
+
+
+def test_main_does_not_run_the_silent_install_for_the_completion_command(rc_home, monkeypatch):
+    """`lium completion bash >> ~/.bashrc` on a fresh install must write the line once, not twice."""
+    from lium.cli import cli as cli_module
+
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    monkeypatch.delenv("_LIUM_COMPLETE", raising=False)
+    monkeypatch.setattr("lium.cli.interactive.is_interactive", lambda: True)
+    monkeypatch.setattr(cli_module, "maybe_perform_startup_update", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["lium", "completion", "bash"])
+    printed = []
+    monkeypatch.setattr(cli_module, "cli", lambda: printed.append(CliRunner().invoke(cli, ["completion", "bash"]).output))
+
+    cli_module.main()
+
+    assert not (rc_home / ".bashrc").exists(), "the startup path edited the rc file"
+    assert not (rc_home / ".lium_completion_installed").exists()
+    assert "_LIUM_COMPLETE=bash_source" in printed[0]
+
+
 # --- help ----------------------------------------------------------------------------------
 
 def _leaf_commands(group, prefix=()):
@@ -118,6 +151,8 @@ TOP_LEVEL_WITHOUT_EXAMPLES_YET = {
     # examples arrive with the branches that rework these commands (ls filters, ps sort/filter,
     # rsync options, templates arch); listed here so this test does not conflict with them
     "ls", "ps", "rsync", "templates",
+    # new groups on lium#183 (DAH-3033 workspaces CLI): drop from here once that branch adds Examples
+    "keys", "workspaces",
 }
 
 
