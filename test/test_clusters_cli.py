@@ -2,12 +2,14 @@
 
 import json
 
+import pytest
+import requests
 from click.testing import CliRunner
 
 from lium.cli import interactive
 from lium.cli.cli import cli
 from lium.cli.clusters import command as clusters_command
-from lium.sdk import Cluster, ClusterOffer, ExecutorInfo, LiumError, LiumNotFoundError, PodInfo
+from lium.sdk import Cluster, ClusterOffer, ExecutorInfo, LiumNotFoundError, LiumServerError, PodInfo
 
 FABRIC = "hot:infiniband:0x3:0x7fff:NVIDIA H100 80GB HBM3:8"
 
@@ -45,6 +47,7 @@ class FakeLium:
     wait_result = None
     wait_calls: list = []
     schedule_fail_on = None
+    schedule_error: Exception = LiumServerError("Server error: 502")
     fail_one = False
 
     def __init__(self, *args, **kwargs):
@@ -75,7 +78,7 @@ class FakeLium:
 
     def schedule_termination(self, pod, *, termination_time):
         if self.schedule_fail_on == pod.id:
-            raise LiumError(f"API error 502 on {pod.id}")
+            raise self.schedule_error   # the SDK's messages carry no pod id: the CLI has to name the member
         FakeLium.scheduled.append((pod.id, termination_time))
         return {}
 
@@ -93,6 +96,7 @@ class FakeLium:
 def _patch(monkeypatch, tmp_path, **overrides):
     FakeLium.up_calls, FakeLium.removed, FakeLium.scheduled, FakeLium.up_result = [], [], [], None
     FakeLium.wait_calls, FakeLium.wait_result, FakeLium.schedule_fail_on = [], None, None
+    FakeLium.schedule_error = LiumServerError("Server error: 502")
     for k, v in overrides.items():
         monkeypatch.setattr(FakeLium, k, v)
     monkeypatch.setattr(clusters_command, "Lium", FakeLium)
@@ -249,23 +253,28 @@ def test_clusters_up_schedules_the_ttl_before_waiting(monkeypatch, tmp_path):
     assert "terminates at" in _flat(result.output)
 
 
-def test_clusters_up_ttl_failure_names_the_cluster_and_the_unscheduled_member(monkeypatch, tmp_path):
-    """Every member is tried; the error names the billing cluster and who has no TTL."""
-    _patch(monkeypatch, tmp_path, schedule_fail_on="pod-0")
+@pytest.mark.parametrize("error", [LiumServerError("Server error: 502"), requests.ConnectionError("connection reset")])
+def test_clusters_up_ttl_failure_names_the_cluster_and_the_unscheduled_member(monkeypatch, tmp_path, error):
+    """Every member is tried, whatever the failure; the error names the billing cluster and the member (rank + huid —
+    every member shares the pod name) that has no TTL."""
+    _patch(monkeypatch, tmp_path, schedule_fail_on="pod-0", schedule_error=error)
 
     result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--ttl", "2h", "--no-wait")
 
     assert result.exit_code == 3
-    assert [p for p, _ in FakeLium.scheduled] == ["pod-1"]
+    assert [p for p, _ in FakeLium.scheduled] == ["pod-1"]   # pod-1 was still tried after pod-0 failed
     flat = _flat(result.output)
-    assert "c-1" in flat and "NOT scheduled" in flat and "pod-0" in flat and "lium clusters rm" in flat
+    assert "c-1" in flat and "NOT scheduled" in flat and "rank 0 (pod-huid-0)" in flat and "lium clusters rm" in flat
+    assert "pod-huid-1" not in flat
 
+    FakeLium.scheduled = []
     result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--ttl", "2h", "--no-wait", "--format", "json")
 
     assert result.exit_code == 3
     payload = json.loads(result.output)
-    assert payload["ok"] is False and payload["id"] == "c-1" and payload["unscheduled"] == ["job"]
-    assert "NOT scheduled" in payload["error"]
+    assert payload["ok"] is False and payload["id"] == "c-1"
+    assert payload["unscheduled"] == [{"node_rank": 0, "huid": "pod-huid-0", "id": "pod-0"}]
+    assert "NOT scheduled" in payload["error"] and "pod-huid-0" in payload["error"]
 
 
 # --- ps / show ------------------------------------------------------------------------------------

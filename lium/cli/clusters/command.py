@@ -17,7 +17,7 @@ from lium.cli.utils import (
     ensure_config,
     handle_errors,
 )
-from lium.sdk import Cluster, ClusterOffer, Lium, LiumError, LiumNotFoundError, PodStartError
+from lium.sdk import Cluster, ClusterOffer, Lium, LiumNotFoundError, PodStartError
 
 from .display import (
     build_clusters_table,
@@ -177,19 +177,21 @@ def clusters_up_command(
         scheduled = datetime.now(timezone.utc) + ttl_delta
         # Every member is tried: a failure on one must not leave the rest unscheduled, and the
         # error names the billing cluster and the members without a TTL (as `lium up` does).
-        unscheduled: List[str] = []
+        unscheduled: List[Dict[str, Any]] = []
         last_error: Optional[Exception] = None
         for pod in cluster.pods:
             try:
                 lium.schedule_termination(pod, termination_time=scheduled.isoformat())
-            except LiumError as exc:
-                unscheduled.append(pod.name or pod.id)
+            except Exception as exc:  # noqa: BLE001 — API errors and transport errors alike; the loop must reach every member
+                # members share one name: rank + huid is what the members table shows and `lium rm` accepts
+                unscheduled.append({"node_rank": pod.cluster_node_index, "huid": pod.huid, "id": pod.id})
                 last_error = exc
         if unscheduled:
+            names = ", ".join(f"rank {m['node_rank']} ({m['huid']})" for m in unscheduled)
             warning = (
                 f"Cluster {cluster.id} is rented and billing; auto-termination was NOT scheduled on "
-                f"{', '.join(unscheduled)}: {last_error}. Remove with 'lium clusters rm {cluster.id[:8]}' "
-                f"or schedule each member with 'lium rm <pod> --in {ttl}'."
+                f"{names}: {last_error}. Remove with 'lium clusters rm {cluster.id[:8]}' "
+                f"or schedule each member with 'lium rm <huid> --in {ttl}'."
             )
             if output_format == "json":
                 data = cluster_to_dict(cluster)
