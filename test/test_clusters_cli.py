@@ -7,7 +7,7 @@ from click.testing import CliRunner
 from lium.cli import interactive
 from lium.cli.cli import cli
 from lium.cli.clusters import command as clusters_command
-from lium.sdk import Cluster, ClusterOffer, ExecutorInfo, LiumNotFoundError, PodInfo
+from lium.sdk import Cluster, ClusterOffer, ExecutorInfo, LiumError, LiumNotFoundError, PodInfo
 
 FABRIC = "hot:infiniband:0x3:0x7fff:NVIDIA H100 80GB HBM3:8"
 
@@ -44,6 +44,8 @@ class FakeLium:
     up_result = None
     wait_result = None
     wait_calls: list = []
+    schedule_fail_on = None
+    fail_one = False
 
     def __init__(self, *args, **kwargs):
         pass
@@ -72,6 +74,8 @@ class FakeLium:
         return self.up_result or self.mine[0]
 
     def schedule_termination(self, pod, *, termination_time):
+        if self.schedule_fail_on == pod.id:
+            raise LiumError(f"API error 502 on {pod.id}")
         FakeLium.scheduled.append((pod.id, termination_time))
         return {}
 
@@ -88,9 +92,9 @@ class FakeLium:
 
 def _patch(monkeypatch, tmp_path, **overrides):
     FakeLium.up_calls, FakeLium.removed, FakeLium.scheduled, FakeLium.up_result = [], [], [], None
-    FakeLium.wait_calls, FakeLium.wait_result = [], None
+    FakeLium.wait_calls, FakeLium.wait_result, FakeLium.schedule_fail_on = [], None, None
     for k, v in overrides.items():
-        setattr(FakeLium, k, v)
+        monkeypatch.setattr(FakeLium, k, v)
     monkeypatch.setattr(clusters_command, "Lium", FakeLium)
     monkeypatch.setattr(clusters_command, "ensure_config", lambda: None)
     monkeypatch.setattr(clusters_command, "_selection_file", lambda: tmp_path / "last_cluster_selection.json")
@@ -142,7 +146,6 @@ def test_clusters_list_with_no_offers(monkeypatch, tmp_path):
     result = _run("list")
 
     assert result.exit_code == 0 and "No fabric has free nodes" in result.output
-    FakeLium.offers = [_offer()]
 
 
 # --- up -------------------------------------------------------------------------------------------
@@ -246,6 +249,25 @@ def test_clusters_up_schedules_the_ttl_before_waiting(monkeypatch, tmp_path):
     assert "terminates at" in _flat(result.output)
 
 
+def test_clusters_up_ttl_failure_names_the_cluster_and_the_unscheduled_member(monkeypatch, tmp_path):
+    """Every member is tried; the error names the billing cluster and who has no TTL."""
+    _patch(monkeypatch, tmp_path, schedule_fail_on="pod-0")
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--ttl", "2h", "--no-wait")
+
+    assert result.exit_code == 3
+    assert [p for p, _ in FakeLium.scheduled] == ["pod-1"]
+    flat = _flat(result.output)
+    assert "c-1" in flat and "NOT scheduled" in flat and "pod-0" in flat and "lium clusters rm" in flat
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--ttl", "2h", "--no-wait", "--format", "json")
+
+    assert result.exit_code == 3
+    payload = json.loads(result.output)
+    assert payload["ok"] is False and payload["id"] == "c-1" and payload["unscheduled"] == ["job"]
+    assert "NOT scheduled" in payload["error"]
+
+
 # --- ps / show ------------------------------------------------------------------------------------
 
 def test_clusters_ps_lists_my_clusters(monkeypatch, tmp_path):
@@ -318,4 +340,3 @@ def test_clusters_rm_reports_a_member_that_stayed(monkeypatch, tmp_path):
     payload = json.loads(result.output)
     assert payload["ok"] is False and [r["success"] for r in payload["results"]] == [True, False]
     assert "still billing" in payload["error"]
-    FakeLium.fail_one = False

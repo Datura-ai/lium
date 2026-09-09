@@ -17,7 +17,7 @@ from lium.cli.utils import (
     ensure_config,
     handle_errors,
 )
-from lium.sdk import Cluster, ClusterOffer, Lium, LiumNotFoundError, PodStartError
+from lium.sdk import Cluster, ClusterOffer, Lium, LiumError, LiumNotFoundError, PodStartError
 
 from .display import (
     build_clusters_table,
@@ -175,8 +175,28 @@ def clusters_up_command(
     scheduled = None
     if ttl_delta is not None:
         scheduled = datetime.now(timezone.utc) + ttl_delta
+        # Every member is tried: a failure on one must not leave the rest unscheduled, and the
+        # error names the billing cluster and the members without a TTL (as `lium up` does).
+        unscheduled: List[str] = []
+        last_error: Optional[Exception] = None
         for pod in cluster.pods:
-            lium.schedule_termination(pod, termination_time=scheduled.isoformat())
+            try:
+                lium.schedule_termination(pod, termination_time=scheduled.isoformat())
+            except LiumError as exc:
+                unscheduled.append(pod.name or pod.id)
+                last_error = exc
+        if unscheduled:
+            warning = (
+                f"Cluster {cluster.id} is rented and billing; auto-termination was NOT scheduled on "
+                f"{', '.join(unscheduled)}: {last_error}. Remove with 'lium clusters rm {cluster.id[:8]}' "
+                f"or schedule each member with 'lium rm <pod> --in {ttl}'."
+            )
+            if output_format == "json":
+                data = cluster_to_dict(cluster)
+                data.update(ok=False, removal_scheduled_at=None, unscheduled=unscheduled, error=warning)
+                click.echo(json.dumps(data, indent=2, ensure_ascii=False))
+                raise SystemExit(EXIT_API_ERROR)
+            raise CliFailure("cluster_ttl_not_scheduled", warning, EXIT_API_ERROR) from last_error
 
     if wait:
         def ready() -> Cluster:
