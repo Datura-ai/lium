@@ -218,7 +218,7 @@ def up_command(
     --gpu (or on an older backend) the cheapest optimal node of 'lium ls' is rented:
     the Pareto frontier is drawn among nodes renting the same GPU count (-c, else the
     node's free GPUs; 'lium ls' stars it over all counts), then the lowest total $/h
-    wins; ties keep the 'lium ls' order.
+    wins; ties keep the API's listing order.
     \b
     Examples:
       lium up cosmic-hawk-f2                # Create pod on specific node

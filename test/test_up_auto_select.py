@@ -159,6 +159,36 @@ def test_an_unpriced_or_fully_booked_node_never_ranks_as_the_cheapest(monkeypatc
     result = _resolve(monkeypatch, gpu="RTX4090")
 
     assert result.data["executor"].huid == "solo-node-ff"
+    assert result.data["candidates"] == 1
+
+
+def test_a_booked_node_alone_in_its_count_group_is_not_picked_over_a_rentable_one(monkeypatch):
+    # The booked 8× host rents 0 GPUs, so it would be the only node in its count
+    # group and "optimal" there; the rentable node is below the download floor, so
+    # it is not. Unrentable nodes leave before the frontier: the slow node is the
+    # pick, flagged as not optimal, and it alone is counted.
+    booked = _executor("booked-node-hh", 0.10, gpu_count=8, available_gpu_count=0)
+    slow = _executor("sluggish-node-cc", 0.20, download=50.0)
+    monkeypatch.setattr(_FakeLium, "ls", lambda self, **kwargs: [booked, slow])
+
+    result = _resolve(monkeypatch, gpu="RTX4090")
+
+    assert result.ok
+    assert result.data["executor"].huid == "sluggish-node-cc"
+    assert result.data["pareto"] is False
+    assert result.data["candidates"] == 1
+    assert result.data["rent_price"] == 0.20
+
+
+def test_when_every_match_is_booked_or_unpriced_the_pick_fails_before_renting(monkeypatch):
+    booked = _executor("booked-node-hh", 0.10, gpu_count=8, available_gpu_count=0)
+    free = _executor("gratis-node-gg", 0.0)
+    monkeypatch.setattr(_FakeLium, "ls", lambda self, **kwargs: [booked, free])
+
+    result = _resolve(monkeypatch, gpu="RTX4090")
+
+    assert not result.ok
+    assert result.error == "No rentable nodes among 2 match(es): every one is fully booked or unpriced"
 
 
 def test_with_count_only_that_count_is_ranked(monkeypatch):

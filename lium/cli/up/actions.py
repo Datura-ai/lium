@@ -157,17 +157,25 @@ class ResolveExecutorAction:
                 return count if count else rented_gpu_count(e)
 
             def rent_price(e: ExecutorInfo) -> float:
-                # The SDK maps a missing price to 0 and a booked node has 0 free GPUs:
-                # neither is a rent, so neither may rank as the cheapest.
-                if not e.price_per_gpu or rent_count(e) <= 0:
-                    return float("inf")
                 return e.price_per_gpu * rent_count(e)
 
-            pareto_flags = _pareto_flags_per_rent_count(executors, rent_count)
-            pareto_executors = [e for e, is_pareto in zip(executors, pareto_flags) if is_pareto]
+            # The SDK maps a missing price to 0 and a booked node has 0 free GPUs: neither
+            # is a rent, so neither enters the frontier — alone in its count group, a
+            # booked host would be "optimal" and the pick, at $inf/h, before a rent the
+            # API refuses.
+            rentable = [e for e in executors if e.price_per_gpu and rent_count(e) > 0]
+            if not rentable:
+                return ActionResult(
+                    ok=False,
+                    data={},
+                    error=f"No rentable nodes among {len(executors)} match(es): every one is fully booked or unpriced",
+                )
+
+            pareto_flags = _pareto_flags_per_rent_count(rentable, rent_count)
+            pareto_executors = [e for e, is_pareto in zip(rentable, pareto_flags) if is_pareto]
             # Nothing is optimal only when every match is below the download floor;
             # then the cheapest match is still the best answer, and the line says so.
-            candidates = pareto_executors or executors
+            candidates = pareto_executors or rentable
             # min() keeps the first of a tie, so equal prices fall back to the listing order.
             executor = min(candidates, key=rent_price)
             return ActionResult(
