@@ -449,10 +449,11 @@ One object per node, sorted as the table is; the names are stable and pinned by 
 |---|---|
 | `index` | row number, what `lium up <index>` takes |
 | `id`, `huid` | node UUID (what the API wants) and its human id (`lium up <huid>`) |
-| `config`, `gpu_type`, `gpu_count` | `8×H100`, `H100`, `8` |
+| `config`, `gpu_type`, `gpu_count`, `machine_name` | `8×H100`, `H100`, `8`, `NVIDIA H100 80GB HBM3` |
 | `price_per_gpu_hour`, `price_per_hour` | USD per GPU-hour and for the whole node |
-| `country` | country name |
-| `vram_gb`, `ram_gb`, `disk_gb` | per-GPU VRAM, host RAM, host disk (GiB) |
+| `country`, `country_code`, `city` | country name, ISO code, city |
+| `vram_gb`, `ram_gb`, `cpu_count` | per-GPU VRAM (GiB), host RAM (GiB), CPU threads |
+| `disk_gb`, `disk_total_gb` | free and total host disk (GiB) |
 | `upload_mbps`, `download_mbps` | the backend's effective speeds |
 | `available_ports` | ports free for `--ports` |
 | `docker_in_docker` | sysbox runtime, i.e. `docker run` works inside the pod |

@@ -96,11 +96,12 @@ def test_a_summary_row_carries_every_field_the_table_and_json_render():
     # the `lium ls --format json` object, name for name as README.md documents it
     assert set(row) == {
         "index", "id", "huid", "config", "gpu_type", "gpu_count", "price_per_gpu_hour", "price_per_hour", "country",
-        "vram_gb", "ram_gb", "disk_gb", "upload_mbps", "download_mbps", "available_ports", "docker_in_docker",
-        "is_pareto", "max_cuda_version", "tier",
+        "country_code", "city", "vram_gb", "ram_gb", "cpu_count", "disk_gb", "disk_total_gb", "upload_mbps",
+        "download_mbps", "available_ports", "docker_in_docker", "is_pareto", "max_cuda_version", "tier", "machine_name",
     }
     assert None not in row.values()
-    assert (row["country"], row["vram_gb"], row["ram_gb"], row["disk_gb"], row["available_ports"]) == ("The Netherlands", 140, 1512, 6676, 30)
+    assert (row["country"], row["vram_gb"], row["ram_gb"], row["disk_gb"], row["available_ports"]) == ("The Netherlands", 140, 1512, 6199, 30)
+    assert (row["country_code"], row["city"], row["cpu_count"], row["disk_total_gb"], row["machine_name"]) == ("NL", "Amsterdam", 192, 6676, "NVIDIA H200")
 
 
 LAZY_MODULES = ("paramiko", "lium.sdk._hostkeys", "lium.cli.provider", "lium.provider.client", "jwt")
