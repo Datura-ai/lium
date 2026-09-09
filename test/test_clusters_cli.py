@@ -4,6 +4,7 @@ import json
 
 from click.testing import CliRunner
 
+from lium.cli import interactive
 from lium.cli.cli import cli
 from lium.cli.clusters import command as clusters_command
 from lium.sdk import Cluster, ClusterOffer, ExecutorInfo, LiumNotFoundError, PodInfo
@@ -93,6 +94,10 @@ def _patch(monkeypatch, tmp_path, **overrides):
     monkeypatch.setattr(clusters_command, "Lium", FakeLium)
     monkeypatch.setattr(clusters_command, "ensure_config", lambda: None)
     monkeypatch.setattr(clusters_command, "_selection_file", lambda: tmp_path / "last_cluster_selection.json")
+    # CliRunner's stdin is a pipe; the tests that answer a prompt need a terminal, or `ui.confirm` refuses to ask
+    # (`confirmation_required`, lium#124) before the "n" they feed it is read.
+    monkeypatch.delenv(interactive.NONINTERACTIVE_ENV, raising=False)
+    monkeypatch.setattr(interactive, "stdin_is_terminal", lambda: True)
     # A wide console, so Rich does not ellipsize the table cells the assertions look for.
     from lium.cli import utils
 
