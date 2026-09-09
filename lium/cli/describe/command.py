@@ -32,7 +32,7 @@ def describe_command(pod_id: str, json_output: bool, output_format: str):
     \b
     Examples:
       lium describe my-pod
-      lium describe 1 --json | jq -r .access.ssh_command
+      lium describe my-pod --json | jq -r .access.ssh_command
     """
     json_output = resolve_output_format(output_format, json_output) == "json"
 

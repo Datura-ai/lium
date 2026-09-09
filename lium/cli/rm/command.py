@@ -178,7 +178,7 @@ def rm_command(
       lium rm my-pod
       lium rm 1,2 --yes                 # no confirmation
       lium rm my-pod --in 6h            # schedule removal
-      lium rm my-pod --at "23:00"
+      lium rm my-pod --at "today 23:00"
       lium rm --all --yes               # every pod on the account
     """
     lium = Lium()
