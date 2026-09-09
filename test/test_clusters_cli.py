@@ -242,6 +242,17 @@ def test_clusters_up_timeout_says_the_members_are_billing(monkeypatch, tmp_path)
     assert result.exit_code != 0 and "rented and billing" in _flat(result.output)
 
 
+def test_clusters_up_wait_failure_does_not_say_retry(monkeypatch, tmp_path):
+    """The members are rented when --wait gives up; the hint says what to do with them, never 'Retry'."""
+    _patch(monkeypatch, tmp_path, wait_result=TimeoutError("Cluster c-1 not ready after 900s: job=PENDING"))
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y")
+
+    flat = _flat(result.output)
+    assert result.exit_code == 3 and "rented and billing" in flat
+    assert "Do not re-run 'lium clusters up'" in flat and "lium clusters rm c-1" in flat and "Retry" not in flat
+
+
 def test_clusters_up_schedules_the_ttl_before_waiting(monkeypatch, tmp_path):
     """A --wait timeout must not leave N nodes billing with nothing scheduled."""
     _patch(monkeypatch, tmp_path, wait_result=TimeoutError("Cluster c-1 not ready after 900s: job=PENDING"))
@@ -266,6 +277,8 @@ def test_clusters_up_ttl_failure_names_the_cluster_and_the_unscheduled_member(mo
     flat = _flat(result.output)
     assert "c-1" in flat and "NOT scheduled" in flat and "rank 0 (pod-huid-0)" in flat and "lium clusters rm" in flat
     assert "pod-huid-1" not in flat
+    # the nodes are rented: the hint under the error must not be the generic "Retry" (a retry rents a second cluster)
+    assert "Do not re-run 'lium clusters up'" in flat and "Retry" not in flat
 
     FakeLium.scheduled = []
     result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--ttl", "2h", "--no-wait", "--format", "json")
@@ -293,6 +306,19 @@ def test_clusters_ps_json(monkeypatch, tmp_path):
     data = json.loads(_run("ps", "--format", "json").output)
 
     assert data[0]["id"] == "c-1" and data[0]["status"] == "RUNNING" and len(data[0]["pods"]) == 2
+
+
+@pytest.mark.parametrize("args", [(), ("list",), ("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--no-wait"),
+                                  ("ps",), ("show", "c-1"), ("rm", "c-1", "-y")])
+def test_clusters_json_flag_is_an_alias_for_format_json(monkeypatch, tmp_path, args):
+    """docs/exit-codes.md: `--json` is accepted everywhere `--format json` is."""
+    _patch(monkeypatch, tmp_path)
+    by_format = _run(*args, "--format", "json")
+    _patch(monkeypatch, tmp_path)
+    by_flag = _run(*args, "--json")
+
+    assert by_flag.exit_code == by_format.exit_code == 0
+    assert json.loads(by_flag.output) == json.loads(by_format.output)
 
 
 def test_clusters_show_by_id_prefix_or_name(monkeypatch, tmp_path):

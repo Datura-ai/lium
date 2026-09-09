@@ -3,6 +3,7 @@
 import click
 
 from .command import (
+    FORMAT_OPTION,
     clusters_list_command,
     clusters_ps_command,
     clusters_rm_command,
@@ -12,12 +13,9 @@ from .command import (
 
 
 @click.group(invoke_without_command=True)
-@click.option(
-    "--format", "output_format", type=click.Choice(["table", "json"]), default="table", show_default=True,
-    help="Output format of the default listing. 'json' emits machine-readable JSON to stdout.",
-)
+@FORMAT_OPTION
 @click.pass_context
-def clusters_command(ctx, output_format: str):
+def clusters_command(ctx, output_format: str, json_output: bool):
     """Multi-node clusters on one InfiniBand/RoCE fabric.
 
     \b
@@ -30,7 +28,7 @@ def clusters_command(ctx, output_format: str):
       lium clusters rm job -y               # remove every member
     """
     if ctx.invoked_subcommand is None:
-        ctx.invoke(clusters_list_command, output_format=output_format)
+        ctx.invoke(clusters_list_command, output_format=output_format, json_output=json_output)
 
 
 clusters_command.add_command(clusters_list_command)

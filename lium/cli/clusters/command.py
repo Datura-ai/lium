@@ -16,6 +16,7 @@ from lium.cli.utils import (
     CliFailure,
     ensure_config,
     handle_errors,
+    resolve_output_format,
 )
 from lium.sdk import Cluster, ClusterOffer, Lium, LiumNotFoundError, PodStartError
 
@@ -27,11 +28,22 @@ from .display import (
     offer_to_dict,
 )
 
-FORMAT_OPTION = click.option(
-    "--format", "output_format", type=click.Choice(["table", "json"]), default="table", show_default=True,
-    help="Output format. 'json' emits machine-readable JSON to stdout.",
-)
 
+def FORMAT_OPTION(command):
+    """``--format table|json`` plus the hidden ``--json`` alias every ``--format json`` command accepts (docs/exit-codes.md)."""
+    command = click.option(
+        "--format", "output_format", type=click.Choice(["table", "json"]), default="table", show_default=True,
+        help="Output format. 'json' emits machine-readable JSON to stdout.",
+    )(command)
+    return click.option("--json", "json_output", is_flag=True, hidden=True, help="Alias for --format json")(command)
+
+
+# What to do after `clusters up` fails with the nodes already rented. The default hint for
+# EXIT_API_ERROR is "Retry" — here a retry rents a second cluster.
+RENTED_HINT = (
+    "Do not re-run 'lium clusters up': the cluster is rented and billing. "
+    "'lium clusters ps' shows it; 'lium clusters rm {cluster_id}' removes it."
+)
 
 # -- last listing, so `clusters up 1` can name a fabric by row ---------------------------------
 
@@ -65,7 +77,8 @@ def resolve_fabric(lium: Lium, fabric: str) -> ClusterOffer:
         fabrics = last.get("fabrics") or []
         index = int(fabric)
         if not fabrics:
-            raise CliFailure("no_clusters_cached", "No fabrics cached. Run 'lium clusters' first.", EXIT_GENERAL_ERROR)
+            raise CliFailure("no_clusters_cached", "No fabrics cached. Run 'lium clusters' first.", EXIT_GENERAL_ERROR,
+                             hint="Run 'lium clusters' to list fabrics, then pick one by row number, id or prefix")
         if not 1 <= index <= len(fabrics):
             raise CliFailure(
                 "invalid_arguments", f"Fabric index {index} out of range (1-{len(fabrics)}).", EXIT_CONFIGURATION_ERROR
@@ -73,7 +86,8 @@ def resolve_fabric(lium: Lium, fabric: str) -> ClusterOffer:
         fabric = fabrics[index - 1]
     offer = lium.cluster_offer(fabric)
     if offer is None:
-        raise CliFailure("fabric_not_found", f"No rentable fabric matches '{fabric}'. Run 'lium clusters'.", EXIT_POD_NOT_FOUND)
+        raise CliFailure("fabric_not_found", f"No rentable fabric matches '{fabric}'. Run 'lium clusters'.", EXIT_POD_NOT_FOUND,
+                         hint="Run 'lium clusters' to list fabrics with free nodes; a row number, fabric id or unique prefix is accepted")
     return offer
 
 
@@ -87,7 +101,8 @@ def resolve_cluster(lium: Lium, ref: str) -> Cluster:
     if len(named) == 1:
         return named[0]
     detail = f"{len(named)} clusters are named '{ref}'; use the cluster id." if named else f"No cluster '{ref}'. Run 'lium clusters ps'."
-    raise CliFailure("cluster_not_found", detail, EXIT_POD_NOT_FOUND)
+    raise CliFailure("cluster_not_found", detail, EXIT_POD_NOT_FOUND,
+                     hint="Run 'lium clusters ps' to list clusters; an id, a unique id prefix or the members' pod name is accepted")
 
 
 # -- list --------------------------------------------------------------------------------------
@@ -95,8 +110,9 @@ def resolve_cluster(lium: Lium, ref: str) -> Cluster:
 @click.command("list")
 @FORMAT_OPTION
 @handle_errors
-def clusters_list_command(output_format: str):
+def clusters_list_command(output_format: str, json_output: bool):
     """Fabrics with free nodes that can be rented as one cluster."""
+    output_format = resolve_output_format(output_format, json_output)
     ensure_config()
     lium = Lium()
     offers = ui.load("Loading clusters", lium.clusters) if output_format == "table" else lium.clusters()
@@ -131,7 +147,7 @@ def clusters_list_command(output_format: str):
 @handle_errors
 def clusters_up_command(
     fabric: str, node_count: int, name: str, template_id: Optional[str], ports: Optional[int], ttl: Optional[str],
-    wait: bool, timeout: int, yes: bool, output_format: str,
+    wait: bool, timeout: int, yes: bool, output_format: str, json_output: bool,
 ):
     """Rent N whole nodes of one fabric as a single all-or-nothing cluster.
 
@@ -139,6 +155,7 @@ def clusters_up_command(
     The cheapest free nodes are taken. Every member runs the cluster template, shares the pod
     name, and gets a private overlay address (10.42.0.<rank+1>); node 0 is the master.
     """
+    output_format = resolve_output_format(output_format, json_output)
     ensure_config()
     if node_count < 2:
         raise CliFailure("invalid_arguments", "--nodes must be at least 2.", EXIT_CONFIGURATION_ERROR)
@@ -153,7 +170,8 @@ def clusters_up_command(
     try:
         chosen = offer.cheapest(node_count)
     except ValueError as exc:
-        raise CliFailure("not_enough_nodes", str(exc), EXIT_GENERAL_ERROR) from exc
+        raise CliFailure("not_enough_nodes", str(exc), EXIT_GENERAL_ERROR,
+                         hint="Run 'lium clusters' for the free-node count per fabric, then lower --nodes or pick another fabric") from exc
 
     hourly = sum(n.price_per_hour for n in chosen)
     # money is spent only after -y or an answered prompt, in every output mode — as `lium up` does
@@ -198,7 +216,11 @@ def clusters_up_command(
                 data.update(ok=False, removal_scheduled_at=None, unscheduled=unscheduled, error=warning)
                 click.echo(json.dumps(data, indent=2, ensure_ascii=False))
                 raise SystemExit(EXIT_API_ERROR)
-            raise CliFailure("cluster_ttl_not_scheduled", warning, EXIT_API_ERROR) from last_error
+            # the money is spent: the generic EXIT_API_ERROR hint says "Retry", and a retry of
+            # `clusters up` rents a second cluster
+            raise CliFailure(
+                "cluster_ttl_not_scheduled", warning, EXIT_API_ERROR, hint=RENTED_HINT.format(cluster_id=cluster.id[:8]),
+            ) from last_error
 
     if wait:
         def ready() -> Cluster:
@@ -213,7 +235,7 @@ def clusters_up_command(
             )
             code = "cluster_member_failed" if isinstance(exc, PodStartError) else "cluster_not_ready"
             raise CliFailure(code, f"{exc}. {billing[0].upper() + billing[1:]}; see 'lium clusters ps'.",
-                             EXIT_API_ERROR) from exc
+                             EXIT_API_ERROR, hint=RENTED_HINT.format(cluster_id=cluster.id[:8])) from exc
 
     if output_format == "json":
         data = cluster_to_dict(cluster)
@@ -234,8 +256,9 @@ def clusters_up_command(
 @click.command("ps")
 @FORMAT_OPTION
 @handle_errors
-def clusters_ps_command(output_format: str):
+def clusters_ps_command(output_format: str, json_output: bool):
     """Your cluster rentals."""
+    output_format = resolve_output_format(output_format, json_output)
     ensure_config()
     lium = Lium()
     clusters = ui.load("Loading clusters", lium.my_clusters) if output_format == "table" else lium.my_clusters()
@@ -259,11 +282,12 @@ def clusters_ps_command(output_format: str):
               help="Print only the torchrun rendezvous flags for the node with this rank")
 @FORMAT_OPTION
 @handle_errors
-def clusters_show_command(cluster: str, hostfile: bool, torchrun_rank: Optional[int], output_format: str):
+def clusters_show_command(cluster: str, hostfile: bool, torchrun_rank: Optional[int], output_format: str, json_output: bool):
     """Members of a cluster: rank, overlay IP, SSH — everything a launcher needs.
 
     CLUSTER is a cluster id (or unique prefix) or the name its members share.
     """
+    output_format = resolve_output_format(output_format, json_output)
     ensure_config()
     lium = Lium()
     found = resolve_cluster(lium, cluster)
@@ -293,8 +317,9 @@ def clusters_show_command(cluster: str, hostfile: bool, torchrun_rank: Optional[
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @FORMAT_OPTION
 @handle_errors
-def clusters_rm_command(cluster: str, yes: bool, output_format: str):
+def clusters_rm_command(cluster: str, yes: bool, output_format: str, json_output: bool):
     """Remove every member pod of a cluster."""
+    output_format = resolve_output_format(output_format, json_output)
     ensure_config()
     lium = Lium()
     found = resolve_cluster(lium, cluster)

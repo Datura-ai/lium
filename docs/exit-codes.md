@@ -57,7 +57,7 @@ do not `2>/dev/null`.
 
 Machine mode is on when any of these holds:
 
-- `--format json` (list commands: `ls`, `ps`, `templates`, `balance`, `describe`);
+- `--format json` (list commands: `ls`, `ps`, `templates`, `balance`, `describe`, and every `clusters` command);
 - `--json` (accepted everywhere `--format json` is, and on `exec`, `describe`, `fund`, `signup`, `init`, `audit`, `topup`);
 - the environment variable `LIUM_OUTPUT=json` — this switches *failures* to the envelope on every command; success output is JSON only on commands that take `--format json`/`--json`, so pass the flag as well when you need to parse the result.
 
