@@ -64,7 +64,7 @@ def load(message: str, fn: Callable[[], T]) -> T:
 # User Input
 # ============================================================================
 
-def confirm(message: str, default: bool = False, *, hint: str = "re-run with --yes") -> bool:
+def confirm(message: str, default: bool = False, *, hint: str = "re-run with --yes", stderr: bool = False) -> bool:
     """Ask user for yes/no confirmation.
 
     Never blocks a caller that cannot answer. When stdin is not a terminal or
@@ -77,6 +77,7 @@ def confirm(message: str, default: bool = False, *, hint: str = "re-run with --y
         message: Question to ask
         default: Default answer if user just presses enter
         hint: What a non-interactive caller should do instead of answering
+        stderr: Ask on stderr — for a command whose stdout is a JSON document
 
     Returns:
         True if confirmed, False otherwise
@@ -93,6 +94,8 @@ def confirm(message: str, default: bool = False, *, hint: str = "re-run with --y
             EXIT_CONFIGURATION_ERROR,
         )
     try:
+        if stderr:
+            return Confirm.ask(message, default=default, console=notice_console())
         return Confirm.ask(message, default=default)
     except EOFError:
         # The terminal went away mid-prompt. No answer is not a yes.

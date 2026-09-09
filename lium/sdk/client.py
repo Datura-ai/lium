@@ -1705,14 +1705,32 @@ class Lium:
         """Poll until every member of ``cluster`` is RUNNING with SSH metadata.
 
         Raises:
+            PodStartError: a member reached a terminal status (``FAILED``, ``STOPPED``, …) or vanished from the
+                pod list — reported at once, not at the deadline, since the other members keep billing.
             TimeoutError: some member was still not ready after ``timeout`` seconds (all members keep billing).
         """
         deadline = time.time() + timeout
+        seen_members = False
         while True:
             pods = [p for p in self.ps() if p.cluster_id == cluster.id]
             fresh = Cluster(id=cluster.id, pods=pods)
             if pods and len(pods) >= cluster.size and all(p.status.upper() == "RUNNING" and p.ssh_cmd for p in pods):
                 return fresh
+            dead = [p for p in pods if (p.status or "").upper() in self.TERMINAL_POD_STATUSES]
+            if dead:
+                p = dead[0]
+                raise PodStartError(
+                    f"Cluster {cluster.id}: member {p.name or p.huid} is {p.status.upper()}; the other members keep "
+                    f"billing — remove the cluster or the member",
+                    pod_id=p.id, pod=p, status=p.status.upper(), history=[p.status.upper()],
+                )
+            if seen_members and len(pods) < cluster.size:
+                raise PodStartError(
+                    f"Cluster {cluster.id}: {cluster.size - len(pods)} member(s) vanished from the pod list; the rest "
+                    f"keep billing — remove the cluster",
+                    pod_id=cluster.id, pod=None, status=None, history=[],
+                )
+            seen_members = seen_members or len(pods) >= cluster.size
             if time.time() >= deadline:
                 pending = [f"{p.name or p.huid}={p.status}" for p in pods if p.status.upper() != "RUNNING" or not p.ssh_cmd]
                 raise TimeoutError(

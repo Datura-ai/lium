@@ -17,7 +17,7 @@ from lium.cli.utils import (
     ensure_config,
     handle_errors,
 )
-from lium.sdk import Cluster, ClusterOffer, Lium, LiumNotFoundError
+from lium.sdk import Cluster, ClusterOffer, Lium, LiumNotFoundError, PodStartError
 
 from .display import (
     build_clusters_table,
@@ -156,12 +156,13 @@ def clusters_up_command(
         raise CliFailure("not_enough_nodes", str(exc), EXIT_GENERAL_ERROR) from exc
 
     hourly = sum(n.price_per_hour for n in chosen)
-    if not yes and output_format == "table":
+    # money is spent only after -y or an answered prompt, in every output mode — as `lium up` does
+    if not yes:
         summary = (
             f"Rent {node_count}×({offer.gpus_per_node}×{offer.gpu_type}) on {offer.fabric_type} fabric "
             f"{offer.fabric_id} as cluster '{name}' for ${hourly:.2f}/h?"
         )
-        if not ui.confirm(summary):
+        if not ui.confirm(summary, stderr=output_format == "json"):
             return
 
     def rent() -> Cluster:
@@ -183,12 +184,13 @@ def clusters_up_command(
 
         try:
             cluster = ui.load(f"Waiting for {node_count} members", ready) if output_format == "table" else ready()
-        except TimeoutError as exc:
+        except (TimeoutError, PodStartError) as exc:
             billing = (
                 f"every member terminates at {scheduled.strftime('%Y-%m-%d %H:%M UTC')}" if scheduled
                 else "the members are rented and billing"
             )
-            raise CliFailure("cluster_not_ready", f"{exc}. {billing[0].upper() + billing[1:]}; see 'lium clusters ps'.",
+            code = "cluster_member_failed" if isinstance(exc, PodStartError) else "cluster_not_ready"
+            raise CliFailure(code, f"{exc}. {billing[0].upper() + billing[1:]}; see 'lium clusters ps'.",
                              EXIT_API_ERROR) from exc
 
     if output_format == "json":
@@ -274,8 +276,8 @@ def clusters_rm_command(cluster: str, yes: bool, output_format: str):
     ensure_config()
     lium = Lium()
     found = resolve_cluster(lium, cluster)
-    if not yes and output_format == "table":
-        if not ui.confirm(f"Remove cluster {found.id} ({found.size} pods, ${found.price_per_hour:.2f}/h)?"):
+    if not yes:
+        if not ui.confirm(f"Remove cluster {found.id} ({found.size} pods, ${found.price_per_hour:.2f}/h)?", stderr=output_format == "json"):
             return
     results = lium.rm_cluster(found)
     failed = [r for r in results if not r["success"]]

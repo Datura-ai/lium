@@ -165,10 +165,23 @@ def test_clusters_up_no_wait_does_not_wait(monkeypatch, tmp_path):
     assert FakeLium.wait_calls == []
 
 
+def test_clusters_up_and_rm_ask_first_in_json_mode_too(monkeypatch, tmp_path):
+    """Money is spent only after -y or an answered prompt, whatever the output format (as `lium up` does)."""
+    _patch(monkeypatch, tmp_path)
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "--format", "json", "--no-wait", input="n\n")
+    assert result.exit_code == 0 and FakeLium.up_calls == [], result.output
+    assert "[y/n]" not in result.stdout, "the prompt goes to stderr: stdout is the JSON document"
+
+    result = _run("rm", "c-1", "--format", "json", input="n\n")
+    assert result.exit_code == 0 and FakeLium.removed == [], result.output
+    assert "[y/n]" not in result.stdout
+
+
 def test_clusters_up_json_prints_the_cluster_record(monkeypatch, tmp_path):
     _patch(monkeypatch, tmp_path)
 
-    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "--format", "json", "--no-wait")
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "--format", "json", "--no-wait", "-y")
 
     data = json.loads(result.output)
     assert data["id"] == "c-1" and data["master_addr"] == "10.42.0.1" and data["size"] == 2

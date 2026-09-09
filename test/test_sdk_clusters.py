@@ -309,6 +309,35 @@ def test_wait_cluster_ready_times_out_naming_the_pending_member(monkeypatch):
         client.wait_cluster_ready(Cluster(id="c-1", pods=pending), timeout=10)
 
 
+def test_wait_cluster_ready_stops_at_once_when_a_member_dies(monkeypatch):
+    """A FAILED member is reported on the poll that sees it, not at the deadline: N nodes keep billing meanwhile."""
+    from lium.sdk import PodStartError
+
+    dead = _pods([_pod_payload(0), _pod_payload(1, status="FAILED")])
+    client = _Client(ps_sequence=[dead, dead, dead])
+    monkeypatch.setattr(time, "time", lambda: 0.0)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    with pytest.raises(PodStartError, match="job is FAILED") as raised:
+        client.wait_cluster_ready(Cluster(id="c-1", pods=dead), timeout=900)
+
+    assert raised.value.status == "FAILED" and raised.value.pod.id == "pod-1"
+
+
+def test_wait_cluster_ready_stops_when_a_member_vanishes(monkeypatch):
+    """A member that was listed and then disappears is a dead member, not a slow one."""
+    from lium.sdk import PodStartError
+
+    both = _pods([_pod_payload(0), _pod_payload(1, status="PENDING")])
+    one = _pods([_pod_payload(0)])
+    client = _Client(ps_sequence=[both, one, one])
+    monkeypatch.setattr(time, "time", lambda: 0.0)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    with pytest.raises(PodStartError, match="1 member\\(s\\) vanished"):
+        client.wait_cluster_ready(Cluster(id="c-1", pods=both), timeout=900)
+
+
 # --- my_clusters / cluster / rm_cluster -----------------------------------------------------------
 
 def test_my_clusters_groups_pods_by_cluster_id():
