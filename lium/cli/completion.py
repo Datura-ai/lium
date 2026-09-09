@@ -39,6 +39,8 @@ def ensure_completion() -> None:
 
     Only when a person is at a terminal: a script, a CI job or an agent
     piping `lium` must not have its rc files edited as a side effect.
+    Installs through :func:`install_completion`, the same path as
+    ``lium completion --install``, so the rc line is appended once.
     """
     from .interactive import is_interactive
 
@@ -54,36 +56,23 @@ def ensure_completion() -> None:
     if shell not in SHELLS:
         return
 
-    config_file, script = SHELLS[shell]
-    config_path = Path(config_file).expanduser()
-
-    # Check if already installed in shell config
     try:
-        if config_path.exists() and "_LIUM_COMPLETE" in config_path.read_text():
-            # Mark as installed to avoid future checks
-            marker_file.touch()
-            return
+        changed, rc_path = install_completion(shell)
+        # Mark as installed either way, so the rc file is not re-read on every start
+        marker_file.touch()
     except IOError:
+        return  # Silent fail
+
+    if not changed:
         return
 
-    # Install completion and notify user
-    try:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        with config_path.open("a") as f:
-            f.write(f"\n# Lium CLI completion\n{script}\n")
-        # Mark as installed
-        marker_file.touch()
-
-        # stderr, so a command invoked with --json still emits clean stdout
-        from .utils import notice_console
-        console = notice_console()
-        console.success("✓ Shell completions have been configured for tab support")
-        console.info("✓ Please restart your terminal or run:")
-        console.info(f"  source {config_file}")
-        console.print()
-
-    except IOError:
-        pass  # Silent fail
+    # stderr, so a command invoked with --json still emits clean stdout
+    from .utils import notice_console
+    console = notice_console()
+    console.success("✓ Shell completions have been configured for tab support")
+    console.info("✓ Please restart your terminal or run:")
+    console.info(f"  source {rc_path}")
+    console.print()
 
 
 @cache
