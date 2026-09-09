@@ -55,6 +55,7 @@ def config_dir(tmp_path, monkeypatch):
     """Point the listing file at a scratch directory, never at the real ~/.lium; indexes on."""
     monkeypatch.setattr(utils.config, "config_dir", tmp_path)
     monkeypatch.delenv(utils.POD_INDEX_ENV, raising=False)
+    monkeypatch.setenv("COLUMNS", "200")  # Rich wraps the CLI message at the console width
     return tmp_path
 
 
