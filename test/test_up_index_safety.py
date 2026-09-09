@@ -52,8 +52,9 @@ DEAR = _node("noble-eagle-be", 9.84)
 
 @pytest.fixture
 def config_dir(tmp_path, monkeypatch):
-    """Point the listing file at a scratch directory, never at the real ~/.lium."""
+    """Point the listing file at a scratch directory, never at the real ~/.lium; indexes on."""
     monkeypatch.setattr(utils.config, "config_dir", tmp_path)
+    monkeypatch.delenv(utils.POD_INDEX_ENV, raising=False)
     return tmp_path
 
 
@@ -116,7 +117,7 @@ def test_listing_written_before_this_change_is_refused(config_dir):
     ids, error = resolve_executor_indices(["1"], now=NOW + timedelta(seconds=5))
 
     assert ids == []
-    assert error is not None and "Run 'lium ls'" in error
+    assert "before 'lium ls'" in error and "Run 'lium ls'" in error
 
 
 def test_indexes_can_be_switched_off(config_dir, monkeypatch):

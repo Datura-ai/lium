@@ -899,7 +899,8 @@ def resolve_executor_indices(
     if not pod_indexes_allowed():
         return [], f"Node indexes are disabled ({POD_INDEX_ENV}). Name the node by its huid or id"
     last_selection = get_last_executor_selection()
-    if not last_selection:
+    # A listing without a session was written by a CLI older than this rule: not this shell's.
+    if not last_selection or 'session' not in last_selection:
         return [], f"Node index cannot be used before 'lium ls' has shown the list in this shell. {hint}"
     if last_selection.get('session') != pod_index_session():
         return [], f"Node index refers to a 'lium ls' listing from another shell. {hint}"
@@ -949,7 +950,7 @@ _PS_SNAPSHOT_SUFFIX = ".json"
 
 
 def pod_indexes_allowed() -> bool:
-    """``LIUM_NO_POD_INDEX=1`` makes every command treat numeric targets as names only."""
+    """``LIUM_NO_POD_INDEX=1`` makes every pod command treat numeric targets as names only; `up` refuses them."""
     return os.environ.get(POD_INDEX_ENV, "").strip().lower() not in ("1", "true", "yes", "on")
 
 
