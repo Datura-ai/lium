@@ -67,11 +67,13 @@ def ensure_completion() -> None:
         return
 
     # stderr, so a command invoked with --json still emits clean stdout
+    from rich.markup import escape
+
     from .utils import notice_console
     console = notice_console()
     console.success("✓ Shell completions have been configured for tab support")
     console.info("✓ Please restart your terminal or run:")
-    console.info(f"  source {rc_path}")
+    console.info(f"  source {escape(str(rc_path))}")  # a `[` in $HOME is not Rich markup
     console.print()
 
 
