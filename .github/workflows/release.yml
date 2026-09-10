@@ -30,6 +30,20 @@ jobs:
       with:
         python-version: "3.12"
 
+    # the tag is the version, so this is the only place that can say which tag a release may carry: the
+    # changelog.d fragments since the previous tag decide (### Added or no header → minor, ### Removed / a BREAKING
+    # bullet → major from 1.0, Changed / Fixed / Security / Deprecated → patch; RELEASING.md). A line
+    # `allow-version-skip: <reason>` in the release notes at publish time lets a hotfix patch ship on top of unreleased
+    # features (DAH-3328). Fails before the wheel is built, so nothing is published: delete the release and its tag,
+    # then tag the version the message names.
+    - name: Release tag must be ≥ the changelog minimum
+      if: github.event_name == 'release'
+      env:
+        RELEASE_BODY: ${{ github.event.release.body }}
+      run: |
+        printf '%s\n' "$RELEASE_BODY" > "$RUNNER_TEMP/release-notes.md"
+        python3 scripts/next_version.py --check "$RELEASE_TAG" --release-notes "$RUNNER_TEMP/release-notes.md"
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
