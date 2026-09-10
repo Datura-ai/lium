@@ -7,19 +7,22 @@ and row numbers. Now every `rm` that nobody can prompt fails with
 command to re-run, and removes or schedules nothing. On a terminal nothing
 changes; with `--yes` nothing changes.
 
-CliRunner feeds the command a pipe on stdin, so the un-patched runs below are the
-non-terminal case; the terminal cases say so by patching ``stdin_is_terminal``.
+Every run goes through the real parser (``CliRunner().invoke(cli, ["rm", …])``);
+``_run`` tells ``interactive.stdin_is_terminal`` whether a terminal is attached
+(``terminal=False`` is the default: the pipe) and fails the test if a prompt is
+ever shown.
 """
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 from click.testing import CliRunner
 
-from lium.cli import interactive, ui
+from lium.cli import interactive, ui, utils
 from lium.cli.cli import cli
 from lium.cli.rm import command as rm_module
-from lium.cli.utils import EXIT_CONFIGURATION_ERROR
+from lium.cli.utils import EXIT_CONFIGURATION_ERROR, EXIT_POD_NOT_FOUND, store_pod_selection
 from lium.sdk import PodInfo
 
 
@@ -131,6 +134,18 @@ def test_a_piped_rm_all_is_refused_and_lists_the_account(monkeypatch):
     assert "Re-run with --yes: lium rm --all --yes" in _text(result)
 
 
+def test_a_piped_rm_by_row_number_is_refused_and_names_the_pod_behind_it(monkeypatch, tmp_path):
+    """The row-number path lost its direct-call test in test_cli_noninteractive.py; this is it through the CLI."""
+    monkeypatch.setattr(utils.config, "config_dir", tmp_path)   # the `lium ps` snapshot, never the real ~/.lium
+    store_pod_selection([TRAIN, EVAL], now=datetime.now(timezone.utc))
+
+    result = _run(monkeypatch, [TRAIN, EVAL], ["1"])
+
+    _refused(result)
+    assert "Would remove 1 pod(s): eager-wolf-aa" in _text(result)
+    assert "lium rm 1 --yes" in _text(result)
+
+
 def test_a_piped_yes_is_not_approval(monkeypatch):
     """The negative control for the old rule: `echo y | lium rm my-pod` removed the pod."""
     result = _run(monkeypatch, [TRAIN], ["eager-wolf-aa"], input="y\n")
@@ -171,7 +186,7 @@ def test_a_typo_is_still_pod_not_found_not_a_refusal(monkeypatch):
     """Resolution runs first: a name that matches nothing keeps its own exit code."""
     result = _run(monkeypatch, [TRAIN], ["no-such-pod-zz"])
 
-    assert result.exit_code != EXIT_CONFIGURATION_ERROR, result.output
+    assert result.exit_code == EXIT_POD_NOT_FOUND, result.output
     assert "No pods match targets: no-such-pod-zz" in result.output
     assert _RecordingLium.removed == []
 
@@ -243,3 +258,11 @@ def test_rerun_line_carries_every_option_and_quotes_what_needs_it():
 
 def test_rerun_line_for_all_has_no_targets():
     assert rm_module.rerun_with_yes(None, True, "45m", None, False) == "lium rm --all --in 45m --yes"
+
+
+def test_rerun_line_knows_every_rm_option():
+    """A new `rm` option (lium#218 adds --format) has to be carried by rerun_with_yes too, or the
+    printed command is not the one the caller ran. This pins the option list; extend both together."""
+    assert {param.name for param in rm_module.rm_command.params} == {
+        "targets", "remove_all", "yes", "in_duration", "at_time", "name_only",
+    }
