@@ -73,6 +73,20 @@ def test_completion_install_appends_once(rc_home, monkeypatch):
     assert rc.read_text().startswith("# mine\n")
 
 
+def test_completion_install_shows_a_home_with_brackets_literally(rc_home, monkeypatch):
+    # `[work]` reads as Rich markup: unescaped, the tag is eaten and the path is not what the shell needs
+    rc = rc_home / "home [work]" / ".bashrc"
+    rc.parent.mkdir()
+    monkeypatch.setitem(completion.SHELLS, "bash", (str(rc), completion.SHELLS["bash"][1]))
+
+    first = CliRunner().invoke(cli, ["completion", "bash", "--install"])
+    second = CliRunner().invoke(cli, ["completion", "bash", "--install"])
+
+    # Rich wraps the long tmp path at the console width: compare with newlines removed
+    assert first.exit_code == 0 and "[work]/.bashrc" in first.output.replace("\n", ""), first.output
+    assert second.exit_code == 0 and "already in" in second.output and "[work]/.bashrc" in second.output.replace("\n", ""), second.output
+
+
 def test_completion_install_creates_the_fish_config_directory(rc_home):
     result = CliRunner().invoke(cli, ["completion", "fish", "--install"])
 
@@ -100,6 +114,18 @@ def test_ensure_completion_installs_for_a_person(rc_home, monkeypatch):
 
     assert "_LIUM_COMPLETE=zsh_source" in (rc_home / ".zshrc").read_text()
     assert (rc_home / ".lium_completion_installed").exists()
+
+
+def test_ensure_completion_names_a_home_with_brackets_literally(rc_home, monkeypatch, capsys):
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    monkeypatch.setattr("lium.cli.interactive.is_interactive", lambda: True)
+    rc = rc_home / "home [work]" / ".zshrc"
+    rc.parent.mkdir()
+    monkeypatch.setitem(completion.SHELLS, "zsh", (str(rc), completion.SHELLS["zsh"][1]))
+
+    completion.ensure_completion()
+
+    assert "[work]/.zshrc" in capsys.readouterr().err.replace("\n", "")
 
 
 def test_ensure_completion_appends_once_and_is_quiet_when_the_line_is_there(rc_home, monkeypatch, capsys):

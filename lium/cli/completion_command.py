@@ -1,6 +1,7 @@
 """`lium completion`: print or install shell tab completion."""
 
 import click
+from rich.markup import escape
 
 from lium.cli import ui
 from lium.cli.utils import CliFailure, EXIT_CONFIGURATION_ERROR, handle_errors
@@ -39,8 +40,9 @@ def completion_command(shell, install):
         return
 
     changed, rc_path = install_completion(shell)
+    shown = escape(str(rc_path))  # a `[` in $HOME is not Rich markup
     if changed:
-        ui.success(f"Added lium completion to {rc_path}")
-        ui.info(f"Restart the shell or run: source {rc_path}")
+        ui.success(f"Added lium completion to {shown}")
+        ui.info(f"Restart the shell or run: source {shown}")
     else:
-        ui.info(f"lium completion is already in {rc_path}")
+        ui.info(f"lium completion is already in {shown}")
