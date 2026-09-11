@@ -15,6 +15,7 @@ ever shown.
 
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -62,6 +63,8 @@ class _RecordingLium:
     pods: list[PodInfo] = []
     removed: list[str] = []
     scheduled: list[tuple[str, str]] = []
+    # a server without workspaces: `rm` reads it for its workspace line (lium#183)
+    workspaces = SimpleNamespace(current=lambda: None)
 
     def __init__(self, *args, **kwargs):
         pass
