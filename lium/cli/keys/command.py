@@ -17,7 +17,14 @@ from lium.cli.workspaces.command import require_session, section_for, target_wor
 @click.group("keys", invoke_without_command=True)
 @click.pass_context
 def keys_command(ctx):
-    """API keys, per workspace. Needs `lium workspaces login` first (keys cannot manage keys)."""
+    """API keys, per workspace. Needs `lium workspaces login` first (keys cannot manage keys).
+
+    \b
+    Examples:
+      lium keys                                   # the current workspace's keys
+      lium keys list --workspace research --json
+      lium keys create ci --workspace research --save
+    """
     if ctx.invoked_subcommand is None:
         ctx.invoke(keys_list_command)
 

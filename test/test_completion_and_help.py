@@ -6,6 +6,7 @@ explicit `lium completion --install`, the silent path only runs for a person
 at a terminal, and every command's help shows how it is used.
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -141,15 +142,25 @@ def test_ensure_completion_appends_once_and_is_quiet_when_the_line_is_there(rc_h
     assert "configured" not in capsys.readouterr().err
 
 
-def test_main_does_not_run_the_silent_install_for_the_completion_command(rc_home, monkeypatch):
-    """`lium completion bash >> ~/.bashrc` on a fresh install must write the line once, not twice."""
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["lium", "completion", "bash"],
+        ["lium", "-w", "team", "completion", "bash"],
+        ["lium", "-wteam", "completion", "bash"],
+        ["lium", "--workspace=team", "completion", "bash"],
+    ],
+)
+def test_main_does_not_run_the_silent_install_for_the_completion_command(rc_home, monkeypatch, argv):
+    """`lium completion bash >> ~/.bashrc` on a fresh install must write the line once, not twice —
+    also when the group's `-w NAME` / `--workspace=NAME` comes first."""
     from lium.cli import cli as cli_module
 
     monkeypatch.setenv("SHELL", "/bin/bash")
     monkeypatch.delenv("_LIUM_COMPLETE", raising=False)
     monkeypatch.setattr("lium.cli.interactive.is_interactive", lambda: True)
     monkeypatch.setattr(cli_module, "maybe_perform_startup_update", lambda: None)
-    monkeypatch.setattr(sys, "argv", ["lium", "completion", "bash"])
+    monkeypatch.setattr(sys, "argv", argv)
     printed = []
     monkeypatch.setattr(cli_module, "cli", lambda: printed.append(CliRunner().invoke(cli, ["completion", "bash"]).output))
 
@@ -172,14 +183,12 @@ def _leaf_commands(group, prefix=()):
 
 
 TOP_LEVEL_WITHOUT_EXAMPLES_YET = {
-    # third-party or operator tooling with its own docs; not part of the pod workflow
-    "gpu-splitting", "mine", "provider", "logs", "update", "signup", "topup", "port-forward",
-    # examples arrive with the branches that rework these commands (ls filters, ps sort/filter,
-    # rsync options, templates arch); listed here so this test does not conflict with them
-    "ls", "ps", "rsync", "templates",
-    # new groups on lium#183 (DAH-3033 workspaces CLI): drop from here once that branch adds Examples
-    "keys", "workspaces",
+    # provider-side tooling with its own docs; not part of the pod workflow
+    "gpu-splitting", "mine", "provider",
 }
+
+# An example is an "Examples:" block or, as `templates` and `workspaces` write it, an indented `lium …` line.
+_EXAMPLE_LINE = re.compile(r"^\s+lium\b", re.MULTILINE)
 
 
 def test_every_pod_workflow_command_help_has_examples():
@@ -188,7 +197,7 @@ def test_every_pod_workflow_command_help_has_examples():
         if len(path) != 1 or path[0] in TOP_LEVEL_WITHOUT_EXAMPLES_YET:
             continue
         result = CliRunner().invoke(cli, [*path, "--help"])
-        if "example" not in result.output.lower():
+        if "example" not in result.output.lower() and not _EXAMPLE_LINE.search(result.output):
             missing.append(" ".join(path))
     assert not missing, f"--help without examples: {missing}"
 

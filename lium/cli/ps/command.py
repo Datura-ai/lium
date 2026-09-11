@@ -164,6 +164,11 @@ def ps_command(
       lium ps --filter status=RUNNING --sort spent
       lium ps --filter gpu=H100 --filter name=train
       lium ps --watch 10                       # refresh every 10 s
+    \b
+    Examples:
+      lium ps                           # every pod, one row each
+      lium ps my-pod                    # one pod in detail
+      lium ps --format json | jq '.[0].huid'
     """
     output_format = resolve_output_format(output_format, json_output)
     if watch is not None and watch <= 0:
