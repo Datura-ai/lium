@@ -3,6 +3,7 @@
 import click
 import os
 import sys
+from typing import Optional
 from importlib.metadata import version, PackageNotFoundError
 from lium.__about__ import __version__ as fallback_version
 from .themed_console import ThemedConsole
@@ -133,13 +134,26 @@ cli.add_command(keys_command)
 load_plugins(cli)
 
 
+def invoked_subcommand(argv: list) -> Optional[str]:
+    """The subcommand name in argv, past the group's own `-w NAME` / `-wNAME` / `--workspace NAME` / `--workspace=NAME`."""
+    args = iter(argv[1:])
+    for arg in args:
+        if arg in ("-w", "--workspace"):
+            next(args, None)
+        elif arg.startswith(("--workspace=", "-w")):
+            continue
+        else:
+            return arg
+    return None
+
+
 def main():
     """Main entry point for the CLI."""
     if not os.environ.get("_LIUM_COMPLETE"):
         maybe_perform_startup_update()
         # `lium completion ...` manages the rc file itself: the silent install must not run first,
         # or `lium completion bash >> ~/.bashrc` on a fresh install would write the line twice.
-        if sys.argv[1:2] != ["completion"]:
+        if invoked_subcommand(sys.argv) != "completion":
             from .completion import ensure_completion
 
             ensure_completion()
