@@ -63,8 +63,9 @@ class _RecordingLium:
     pods: list[PodInfo] = []
     removed: list[str] = []
     scheduled: list[tuple[str, str]] = []
-    # a server without workspaces: `rm` reads it for its workspace line (lium#183)
+    # a server without workspaces: `rm` reads it for its workspace line (lium#183); no workspace named for the command
     workspaces = SimpleNamespace(current=lambda: None)
+    config = SimpleNamespace(workspace=None, workspace_id=None, workspace_explicit=False)
 
     def __init__(self, *args, **kwargs):
         pass
@@ -261,6 +262,21 @@ def test_rerun_line_carries_every_option_and_quotes_what_needs_it():
 
 def test_rerun_line_for_all_has_no_targets():
     assert rm_module.rerun_with_yes(None, True, "45m", None, False) == "lium rm --all --in 45m --yes"
+
+
+def test_rerun_line_names_the_workspace_the_caller_named(monkeypatch):
+    """`lium -w research rm --all </dev/null` must not suggest `lium rm --all --yes`: that line wipes the
+    default workspace (arhangel66, lium#246). With `-w` / LIUM_WORKSPACE set the rerun line carries
+    `--workspace <name>`; without one it does not."""
+    assert rm_module.rerun_with_yes(None, True, None, None, False, workspace="research") == "lium --workspace research rm --all --yes"
+    assert rm_module.rerun_with_yes("a", False, None, None, False, workspace="my team") == "lium --workspace 'my team' rm a --yes"
+
+    # the whole command, piped, with the workspace named for it: the printed line carries it
+    monkeypatch.setattr(_RecordingLium, "config", SimpleNamespace(workspace="research", workspace_explicit=True), raising=False)
+    result = _run(monkeypatch, [_pod("eager-wolf-aa")], ["--all"])
+
+    _refused(result)
+    assert "lium --workspace research rm --all --yes" in _text(result)
 
 
 def test_rerun_line_knows_every_rm_option():
