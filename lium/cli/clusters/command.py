@@ -19,7 +19,7 @@ from lium.cli.utils import (
     handle_errors,
     resolve_output_format,
 )
-from lium.sdk import Cluster, ClusterOffer, Lium, LiumNotFoundError, PodStartError
+from lium.sdk import Cluster, ClusterNotListedError, ClusterOffer, Lium, LiumNotFoundError, PodStartError
 
 from .display import (
     build_clusters_table,
@@ -44,6 +44,12 @@ def FORMAT_OPTION(command):
 RENTED_HINT = (
     "Do not re-run 'lium clusters up': the cluster is rented and billing. "
     "'lium clusters ps' shows it; 'lium clusters rm {cluster_id}' removes it."
+)
+# The same, when the rent was confirmed but the listing has not shown every member yet, so
+# there is no cluster id to name.
+RENTED_NOT_LISTED_HINT = (
+    "Do not re-run 'lium clusters up': the nodes are rented and billing. "
+    "'lium clusters ps' shows the cluster once every member is listed; 'lium clusters rm <id>' removes it."
 )
 
 # -- last listing, so `clusters up 1` can name a fabric by row ---------------------------------
@@ -187,10 +193,16 @@ def clusters_up_command(
     def rent() -> Cluster:
         return lium.up_cluster([n.id for n in chosen], name=name, template_id=template_id, ports=ports, wait=False)
 
-    cluster = ui.load(f"Renting {node_count}-node cluster", rent) if output_format == "table" else rent()
+    try:
+        cluster = ui.load(f"Renting {node_count}-node cluster", rent) if output_format == "table" else rent()
+    except ClusterNotListedError as exc:
+        # the money is spent although no cluster came back: the generic hint says "Retry"
+        raise CliFailure("cluster_rented_not_listed", str(exc), EXIT_API_ERROR, hint=RENTED_NOT_LISTED_HINT) from exc
 
     # The TTL is scheduled before any waiting: a --wait timeout must not leave N
-    # nodes billing with nothing scheduled.
+    # nodes billing with nothing scheduled. Unlike `lium up --ttl` (lium#247), a member whose
+    # schedule fails is not retried once the cluster is ready: the SDK call already retries the
+    # request itself, and a partly scheduled cluster is reported at once so the caller can act.
     scheduled = None
     if ttl_delta is not None:
         scheduled = datetime.now(timezone.utc) + ttl_delta

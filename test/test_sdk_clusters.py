@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lium.sdk import Cluster, ClusterOffer, Config, Lium, LiumError, LiumNotFoundError, Template
+from lium.sdk import Cluster, ClusterNotListedError, ClusterOffer, Config, Lium, LiumError, LiumNotFoundError, Template
 from lium.sdk.exceptions import LiumServerError
 
 FABRIC = "hot:infiniband:0x3:0x7fff:NVIDIA H100 80GB HBM3:8"
@@ -284,6 +284,49 @@ def test_up_cluster_reports_when_nothing_appeared(monkeypatch):
 
     with pytest.raises(LiumError, match="did not produce pods named 'job'"):
         client.up_cluster(["exec-0", "exec-1"], name="job", template_id="tpl-x")
+
+
+def test_up_cluster_waits_until_every_named_member_is_listed(monkeypatch):
+    """The rent route names two pods; the listing shows one of them at first. Returning then hands back a
+    one-member cluster — a --ttl would skip the second node and a wait would not wait for it (it kept billing
+    unscheduled). The lookup must keep polling until both are listed."""
+    both = _pods([_pod_payload(0), _pod_payload(1)])
+    client = _Client(
+        routes={("POST", "/executors/cluster/rent"): {"success": True, "pod_ids": ["pod-0", "pod-1"]}},
+        ps_sequence=[[], _pods([_pod_payload(0)]), both],   # before the rent; then one member listed; then both
+    )
+
+    cluster = client.up_cluster(["exec-0", "exec-1"], name="job", template_id="tpl-x")
+
+    assert [p.id for p in cluster.pods] == ["pod-0", "pod-1"]
+    assert sum(1 for c in client.calls if c[0] == "ps") == 3   # the pre-rent snapshot, the partial listing, the full one
+
+
+def test_up_cluster_confirmed_but_not_listed_is_not_a_nothing_happened_error(monkeypatch):
+    """The API confirmed the rent and named the pods, but the listing never showed the second one: the nodes are
+    rented and billing, so the error must not read like the 'nothing appeared' case a caller would answer with a
+    second rental. It names the confirmed ids and what the listing showed."""
+    client = _Client(
+        routes={("POST", "/executors/cluster/rent"): {"success": True, "pod_ids": ["pod-0", "pod-1"]}},
+        ps_sequence=[_pods([_pod_payload(0)])],
+    )
+
+    with pytest.raises(ClusterNotListedError, match="shows 1 of 2 members") as info:
+        client.up_cluster(["exec-0", "exec-1"], name="job", template_id="tpl-x")
+
+    assert info.value.pod_ids == ["pod-0", "pod-1"] and info.value.listed == ["pod-0"]
+    assert "did not produce" not in str(info.value)
+    assert sum(1 for c in client.calls if c[0] == "POST") == 1
+
+
+def test_up_cluster_refusal_is_reported_without_polling(monkeypatch):
+    """A 200 with success=false is a definite refusal: nothing was rented, so no listing is consulted."""
+    client = _Client(routes={("POST", "/executors/cluster/rent"): {"success": False, "message": "mixed fabrics"}})
+
+    with pytest.raises(LiumError, match="mixed fabrics"):
+        client.up_cluster(["exec-0", "exec-1"], name="job", template_id="tpl-x")
+
+    assert sum(1 for c in client.calls if c[0] == "ps") == 1   # only the pre-rent snapshot
 
 
 def test_up_cluster_with_wait_returns_the_ready_cluster(monkeypatch):

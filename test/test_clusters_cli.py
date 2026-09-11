@@ -9,7 +9,7 @@ from click.testing import CliRunner
 from lium.cli import interactive
 from lium.cli.cli import cli
 from lium.cli.clusters import command as clusters_command
-from lium.sdk import Cluster, ClusterOffer, ExecutorInfo, LiumNotFoundError, LiumServerError, PodInfo
+from lium.sdk import Cluster, ClusterNotListedError, ClusterOffer, ExecutorInfo, LiumNotFoundError, LiumServerError, PodInfo
 
 FABRIC = "hot:infiniband:0x3:0x7fff:NVIDIA H100 80GB HBM3:8"
 
@@ -251,6 +251,27 @@ def test_clusters_up_wait_failure_does_not_say_retry(monkeypatch, tmp_path):
     flat = _flat(result.output)
     assert result.exit_code == 3 and "rented and billing" in flat
     assert "Do not re-run 'lium clusters up'" in flat and "lium clusters rm c-1" in flat and "Retry" not in flat
+
+
+def test_clusters_up_confirmed_but_unlisted_does_not_say_retry(monkeypatch, tmp_path):
+    """The SDK confirmed the rent but could not list every member: the nodes bill, so the hint must not be the
+    generic 'Retry' (a retry rents a second cluster) and the JSON envelope must carry a code of its own."""
+    error = ClusterNotListedError("Cluster rental of 2 nodes is confirmed (pods pod-0, pod-1) but the pod listing shows 1 of 2 members",
+                                  pod_ids=["pod-0", "pod-1"], listed=["pod-0"])
+    _patch(monkeypatch, tmp_path, up_result=error)
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--ttl", "2h")
+
+    flat = _flat(result.output)
+    assert result.exit_code == 3 and "shows 1 of 2 members" in flat
+    assert "Do not re-run 'lium clusters up'" in flat and "Retry" not in flat
+    assert FakeLium.scheduled == []   # nothing to schedule on: no cluster came back
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--format", "json")
+
+    assert result.exit_code == 3
+    payload = json.loads(result.output)
+    assert payload["ok"] is False and payload["error"]["code"] == "cluster_rented_not_listed"
 
 
 def test_clusters_up_schedules_the_ttl_before_waiting(monkeypatch, tmp_path):

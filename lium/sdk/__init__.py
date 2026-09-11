@@ -4,6 +4,7 @@ from .client import AlphaQuote, Lium, pod_ssh_command
 from .config import Config
 from .decorators import machine
 from .exceptions import (
+    ClusterNotListedError,
     LiumAuthError,
     LiumError,
     LiumHostKeyError,
@@ -52,6 +53,7 @@ __all__ = [
     "BackupLog",
     "RestoreLog",
     "SSHKey",
+    "ClusterNotListedError",
     "LiumError",
     "LiumAuthError",
     "LiumRateLimitError",

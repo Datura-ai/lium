@@ -70,6 +70,23 @@ class PodStartError(LiumError):
         self.cause = cause
 
 
+class ClusterNotListedError(LiumError):
+    """The cluster rent route confirmed the order and named the member pods, but the pod
+    listing did not show every one of them within the lookup window.
+
+    The nodes are rented and billing; a second ``up_cluster`` would rent a second cluster.
+
+    Attributes:
+        pod_ids: The member pod ids the API returned.
+        listed: The subset of them that the listing showed.
+    """
+
+    def __init__(self, message: str, *, pod_ids, listed=()):
+        super().__init__(message)
+        self.pod_ids = list(pod_ids)
+        self.listed = list(listed)
+
+
 class LiumHostKeyError(LiumError):
     """A pod presented an SSH host key that differs from the pinned one."""
 

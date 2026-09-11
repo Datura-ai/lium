@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from importlib.metadata import PackageNotFoundError, version
-from typing import Any, Callable, Dict, Generator, List, Optional, Sequence, Union
+from typing import Any, Callable, Dict, Generator, List, Optional, Sequence, Tuple, Union
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -30,6 +30,7 @@ from lium.__about__ import __version__ as fallback_version
 
 from .config import Config
 from .exceptions import (
+    ClusterNotListedError,
     LiumAuthError,
     LiumError,
     LiumHostKeyError,
@@ -1607,6 +1608,8 @@ class Lium:
 
         Raises:
             ValueError: fewer than two nodes, or no SSH key.
+            ClusterNotListedError: the API confirmed the order and named the member pods, but the
+                listing did not show every one of them — the nodes are rented; do not rent again.
             LiumError: the API refused the group (mixed fabrics, split hosts, wrong image) or the
                 rental timed out and no member appeared.
         """
@@ -1639,12 +1642,23 @@ class Lium:
             response = self._request("POST", "/executors/cluster/rent", json=payload).json()
         except (requests.RequestException, LiumServerError, LiumRateLimitError):
             response = None
+        if response is not None and not response.get("success", True):
+            # a definite refusal: nothing was rented, so there is nothing to look for
+            raise LiumError(f"Cluster rental refused: {response.get('message') or response}")
         pod_ids: List[str] = [str(p) for p in (response or {}).get("pod_ids") or []]
 
-        cluster = self._find_cluster(pod_ids=pod_ids, name=name, attempts=3, interval=3, exclude=known_clusters)
+        cluster, listed = self._find_cluster(pod_ids=pod_ids, name=name, attempts=3, interval=3, exclude=known_clusters)
         if cluster is None:
-            if response is not None and not response.get("success", True):
-                raise LiumError(f"Cluster rental refused: {response.get('message') or response}")
+            if pod_ids:
+                # The API confirmed the order and named the members: the nodes are rented and
+                # billing whatever the listing shows, so this is not a "nothing happened" error
+                # and must never be answered with a second `up_cluster`.
+                raise ClusterNotListedError(
+                    f"Cluster rental of {len(ids)} nodes is confirmed (pods {', '.join(pod_ids)}) but the pod "
+                    f"listing shows {len(listed)} of {len(pod_ids)} members; the nodes are rented and billing — "
+                    "do not rent again, list the pods to find the cluster",
+                    pod_ids=pod_ids, listed=listed,
+                )
             raise LiumError(f"Cluster rental of {len(ids)} nodes did not produce pods named {name!r}")
         if wait:
             cluster = self.wait_cluster_ready(cluster, timeout=timeout)
@@ -1659,22 +1673,31 @@ class Lium:
 
     def _find_cluster(
         self, *, pod_ids: List[str], name: str, attempts: int, interval: float, exclude: frozenset = frozenset()
-    ) -> Optional[Cluster]:
-        """The cluster the rental produced: by member pod ids when the API named them, else the
-        cluster of that ``name`` that is not in ``exclude`` (the ones that existed before)."""
+    ) -> Tuple[Optional[Cluster], List[str]]:
+        """The cluster the rental produced, and the ids of the named members the last listing showed.
+
+        By member pod ids when the API named them — and then only once EVERY named id is listed,
+        so a cluster is never handed back with a member missing (a `--ttl` would skip it and a
+        `wait` would not wait for it) — else the cluster of that ``name`` that is not in
+        ``exclude`` (the ones that existed before).
+        """
+        listed: List[str] = []
         for attempt in range(attempts):
             pods = self.ps()
             if pod_ids:
                 members = [p for p in pods if p.id in pod_ids]
+                listed = [p.id for p in members]
+                if len(members) != len(pod_ids):
+                    members = []
             else:
                 members = [p for p in pods if p.name == name and p.cluster_id and p.cluster_id not in exclude]
             cluster_ids = {p.cluster_id for p in members if p.cluster_id}
             if members and len(cluster_ids) == 1:
                 cid = cluster_ids.pop()
-                return Cluster(id=cid, pods=[p for p in pods if p.cluster_id == cid])
+                return Cluster(id=cid, pods=[p for p in pods if p.cluster_id == cid]), listed
             if attempt < attempts - 1:
                 time.sleep(interval)
-        return None
+        return None, listed
 
     def my_clusters(self) -> List[Cluster]:
         """The caller's cluster rentals, one :class:`Cluster` per ``cluster_id`` found in :meth:`ps`."""
