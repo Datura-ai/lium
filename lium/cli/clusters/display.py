@@ -2,6 +2,7 @@
 
 from typing import Any, Dict, List
 
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
@@ -92,11 +93,11 @@ def build_offers_table(offers: List[ClusterOffer]) -> tuple[Table, str, str]:
         countries = sorted({(n.location or {}).get("country") or "?" for n in offer.nodes})
         table.add_row(
             str(idx),
-            ui.styled(mid_ellipsize(offer.fabric_id, 40), "id"),
-            offer.fabric_type,
-            f"{offer.gpus_per_node}×{offer.gpu_type}" if offer.nodes else "—",
+            ui.styled(escape(mid_ellipsize(offer.fabric_id, 40)), "id"),
+            escape(offer.fabric_type),
+            escape(f"{offer.gpus_per_node}×{offer.gpu_type}") if offer.nodes else "—",
             f"{offer.free_count}/{offer.node_count}",
-            offer.link_rate or "—",
+            escape(offer.link_rate) if offer.link_rate else "—",
             ui.styled("yes", "success") if offer.fabric_measured else ui.styled("no", "warning"),
             f"${offer.price_per_node_hour:.2f}" if offer.nodes else "—",
             ",".join(countries) if countries else "—",
@@ -121,12 +122,12 @@ def build_clusters_table(clusters: List[Cluster]) -> tuple[Table, str]:
         node = f"{first.executor.gpu_count}×{first.executor.gpu_type}" if first and first.executor else "—"
         table.add_row(
             str(idx),
-            ui.styled(mid_ellipsize(cluster.id, 20), "id"),
-            first.name if first else "—",
-            ui.styled(cluster.status, "success" if cluster.status == "RUNNING" else "warning"),
+            ui.styled(escape(mid_ellipsize(cluster.id, 20)), "id"),
+            escape(first.name) if first and first.name else "—",
+            ui.styled(escape(cluster.status), "success" if cluster.status == "RUNNING" else "warning"),
             str(cluster.size),
-            node,
-            cluster.master_addr or "—",
+            escape(node),
+            escape(cluster.master_addr) if cluster.master_addr else "—",
             f"${cluster.price_per_hour:.2f}",
         )
     return table, header
@@ -144,10 +145,10 @@ def build_members_table(cluster: Cluster) -> Table:
         rank = pod.cluster_node_index
         table.add_row(
             str(rank) if rank is not None else "?",
-            ui.styled(pod.huid, "id"),
-            ui.styled(pod.status, "success" if pod.status.upper() == "RUNNING" else "warning"),
-            pod.cluster_overlay_ip or "—",
-            f"{pod.executor.gpu_count}×{pod.executor.gpu_type}" if pod.executor else "—",
-            pod.ssh_cmd or ui.styled("(not ready)", "dim"),
+            ui.styled(escape(pod.huid), "id"),
+            ui.styled(escape(pod.status), "success" if pod.status.upper() == "RUNNING" else "warning"),
+            escape(pod.cluster_overlay_ip) if pod.cluster_overlay_ip else "—",
+            escape(f"{pod.executor.gpu_count}×{pod.executor.gpu_type}") if pod.executor else "—",
+            escape(pod.ssh_cmd) if pod.ssh_cmd else ui.styled("(not ready)", "dim"),
         )
     return table

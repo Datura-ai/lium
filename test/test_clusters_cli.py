@@ -375,3 +375,30 @@ def test_clusters_rm_reports_a_member_that_stayed(monkeypatch, tmp_path):
     payload = json.loads(result.output)
     assert payload["ok"] is False and [r["success"] for r in payload["results"]] == [True, False]
     assert "still billing" in payload["error"]
+
+
+def test_clusters_output_keeps_api_text_that_looks_like_rich_markup(monkeypatch, tmp_path):
+    """Text from the API or the user that Rich would read as markup reaches the terminal verbatim.
+
+    Regression: the summary lines, the table cells and the prompts were f-strings printed with markup on — an IPv6
+    overlay address `[fd00:42::1]` is a Rich tag, so `show` printed `MASTER_ADDR=` and an empty Overlay IP cell, `ps`
+    dropped the `[v2]` of a cluster named `job[v2]`, `rm` printed `failed: node unreachable` for the API's
+    `node [exec-1] unreachable`, and a `[/…]` in any of them raised MarkupError.
+    """
+    master, worker = _pod(0, name="job[v2]"), _pod(1, name="job[v2]")
+    master.cluster_overlay_ip = "[fd00:42::1]"
+    _patch(monkeypatch, tmp_path, mine=[Cluster(id="c-1", pods=[master, worker])])
+    monkeypatch.setattr(
+        FakeLium, "rm_cluster",
+        lambda self, cluster: [{"pod": "pod-0", "success": True, "error": None},
+                               {"pod": "pod-1", "success": False, "error": "node [exec-1] unreachable"}],
+    )
+
+    shown = _run("show", "c-1")
+    listed = _run("ps")
+    removed = _run("rm", "c-1", "-y")
+
+    assert shown.exit_code == 0 and "MASTER_ADDR=[fd00:42::1]" in shown.output
+    assert shown.output.count("[fd00:42::1]") == 2  # the summary line and the master's Overlay IP cell
+    assert listed.exit_code == 0 and "job[v2]" in listed.output and "[fd00:42::1]" in listed.output
+    assert removed.exit_code == 3 and "failed: node [exec-1] unreachable" in _flat(removed.output)

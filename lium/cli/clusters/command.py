@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import click
+from rich.markup import escape
 
 from lium.cli import ui
 from lium.cli.up.parsing import parse_duration
@@ -243,12 +244,13 @@ def clusters_up_command(
         click.echo(json.dumps(data, indent=2, ensure_ascii=False))
         return
 
-    ui.success(f"Cluster {cluster.id} ({cluster.size} nodes, ${cluster.price_per_hour:.2f}/h) {cluster.status}")
+    # Text from the API or the user goes through Rich with markup on: `[fd00::1]` is read as a tag and dropped, `[/x]` raises.
+    ui.success(f"Cluster {escape(cluster.id)} ({cluster.size} nodes, ${cluster.price_per_hour:.2f}/h) {escape(cluster.status)}")
     ui.print(build_members_table(cluster))
     ui.print("")
-    ui.info(f"MASTER_ADDR={cluster.master_addr}   hostfile: lium clusters show {cluster.id[:8]} --hostfile")
+    ui.info(f"MASTER_ADDR={escape(str(cluster.master_addr))}   hostfile: lium clusters show {escape(cluster.id[:8])} --hostfile")
     if scheduled:
-        ui.info(f"Every member terminates at {scheduled.strftime('%Y-%m-%d %H:%M UTC')}")
+        ui.info(f"Every member terminates at {escape(scheduled.strftime('%Y-%m-%d %H:%M UTC'))}")
 
 
 # -- ps ----------------------------------------------------------------------------------------
@@ -304,10 +306,10 @@ def clusters_show_command(cluster: str, hostfile: bool, torchrun_rank: Optional[
     if output_format == "json":
         click.echo(json.dumps(cluster_to_dict(found), indent=2, ensure_ascii=False))
         return
-    ui.info(f"Cluster {found.id}  ({found.size} nodes, {found.status}, ${found.price_per_hour:.2f}/h)")
+    ui.info(f"Cluster {escape(found.id)}  ({found.size} nodes, {escape(found.status)}, ${found.price_per_hour:.2f}/h)")
     ui.print(build_members_table(found))
     ui.print("")
-    ui.info(f"MASTER_ADDR={found.master_addr}   torchrun: lium clusters show {found.id[:8]} --torchrun <rank>")
+    ui.info(f"MASTER_ADDR={escape(str(found.master_addr))}   torchrun: lium clusters show {escape(found.id[:8])} --torchrun <rank>")
 
 
 # -- rm ----------------------------------------------------------------------------------------
@@ -339,7 +341,7 @@ def clusters_rm_command(cluster: str, yes: bool, output_format: str, json_output
         return
     for r in results:
         (ui.error if not r["success"] else ui.success)(
-            f"{r['pod'][:8]} {'removed' if r['success'] else 'failed: ' + str(r['error'])}"
+            escape(f"{r['pod'][:8]} {'removed' if r['success'] else 'failed: ' + str(r['error'])}")
         )
     if failed:
         raise CliFailure("cluster_removal_failed", warning, EXIT_API_ERROR)

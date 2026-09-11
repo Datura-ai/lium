@@ -7,6 +7,7 @@ All formatting and domain logic should live in command-specific modules.
 import os
 from typing import Callable, Optional, TypeVar, List
 from contextlib import contextmanager
+from rich.markup import escape
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
@@ -93,10 +94,12 @@ def confirm(message: str, default: bool = False, *, hint: str = "re-run with --y
             f"(no prompt shown because {noninteractive_reason()}; {hint})",
             EXIT_CONFIGURATION_ERROR,
         )
+    # The question is plain text: a pod name or an address with a `[` in it must show as typed, and `[/x]` must not
+    # raise. The CliFailure paths above and below keep the raw message — the error renderer escapes it itself.
     try:
         if stderr:
-            return Confirm.ask(message, default=default, console=notice_console())
-        return Confirm.ask(message, default=default)
+            return Confirm.ask(escape(message), default=default, console=notice_console())
+        return Confirm.ask(escape(message), default=default)
     except EOFError:
         # The terminal went away mid-prompt. No answer is not a yes.
         raise CliFailure(
