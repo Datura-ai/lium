@@ -268,6 +268,9 @@ def test_the_confirmation_names_the_same_rent_as_the_selected_line(monkeypatch):
     split = _executor("octet-node-ee", 0.25, gpu_count=8, available_gpu_count=1)
 
     class _AskingLium(_FakeLium):
+        # a server without workspaces: `up` reads it for its workspace line (DAH-3033)
+        workspaces = SimpleNamespace(current=lambda: None)
+
         def ls(self, gpu_type=None, **kwargs):
             return [split]
 
