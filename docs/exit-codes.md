@@ -58,7 +58,7 @@ do not `2>/dev/null`.
 Machine mode is on when any of these holds:
 
 - `--format json` (list commands: `ls`, `ps`, `templates`, `balance`, `describe`);
-- `--json` (accepted everywhere `--format json` is, and on `exec`, `describe`, `fund`, `signup`, `audit`, `topup`);
+- `--json` (accepted everywhere `--format json` is, and on `exec`, `describe`, `fund`, `signup`, `init`, `audit`, `topup`);
 - the environment variable `LIUM_OUTPUT=json` — this switches *failures* to the envelope on every command; success output is JSON only on commands that take `--format json`/`--json`, so pass the flag as well when you need to parse the result.
 
 Without any of these, the same information is printed as text: the error on one
@@ -70,7 +70,7 @@ Codes raised by the shared error handler (any command can produce them) when the
 
 | `code` | Exit | When | Hint |
 |--------|------|------|------|
-| `no_api_key` | 2 | No API key in `LIUM_API_KEY` or `~/.lium/config.ini`. | Set `LIUM_API_KEY`, or run `lium init` (headless: `lium init --no-browser`, then `lium init --session <ID>`); no account yet? `lium signup --email you@example.com` creates one and stores its key. |
+| `no_api_key` | 2 | No API key in `LIUM_API_KEY` or `~/.lium/config.ini`. | Set `LIUM_API_KEY`, or run `lium init` (headless: `lium init --api-key <key>` with a key from https://lium.io/api-keys, or `lium init --no-browser`, then `lium init --session <ID>`); no account yet? `lium signup --email you@example.com` creates one and stores its key. |
 | `invalid_api_key` | 3 | The API answered 401. | `lium config get api.api_key` shows which key is in use; new keys at https://lium.io/api-keys. |
 | `session_required` | 3 | A session-only command (`lium keys …`, the `lium workspaces` writes) ran without a session token, the token was refused (expired), or `lium workspaces login` was refused. | `lium workspaces login` (or set `LIUM_SESSION_TOKEN`); an API key cannot fix this. |
 | `value_error` | 2 | A value the command received was invalid (SDK `ValueError`). | Check the options. |
@@ -94,7 +94,9 @@ Codes raised by the shared error handler (any command can produce them) when the
 Commands add their own codes for the failures only they can have — for example
 `up` raises `node_selection_failed`, `template_failed`, `jupyter_install_failed`,
 `unreadable_dockerfile`; `exec` raises `unreadable_script`; `rm` raises
-`removal_failed`; `fund` raises `transfer_failed`. They follow the same envelope
+`removal_failed`; `fund` raises `transfer_failed`; `init` raises `api_unreachable` (3, the
+key passed with `--api-key` was not checked) and `empty_api_key` (2), and its `invalid_api_key` hint says
+nothing was saved. They follow the same envelope
 and use the exit code of their family from the table above. Where re-running
 the command would not be safe the hint says so: `jupyter_install_failed` from
 `up` points at `lium update <pod> --jupyter` (the pod exists and bills), and

@@ -316,7 +316,8 @@ OUTPUT_ENV = "LIUM_OUTPUT"    # LIUM_OUTPUT=json: every failure is a JSON envelo
 # (or a person) guessing; a code that has no entry here falls back to the
 # exit-code family below, so no error leaves without one.
 _HINTS_BY_CODE: Dict[str, str] = {
-    "no_api_key": "Set LIUM_API_KEY, or run 'lium init' (headless: 'lium init --no-browser'); "
+    "no_api_key": "Set LIUM_API_KEY, or run 'lium init' (headless: 'lium init --api-key <key>', "
+                  "or 'lium init --no-browser'); "
                   "no account yet? 'lium signup --email you@example.com' creates one and stores its key",
     "invalid_api_key": "Check the key: 'lium config get api.api_key' shows which one is used; "
                        "a new one comes from https://lium.io/api-keys",
@@ -1183,10 +1184,10 @@ def ensure_config():
             raise CliFailure(
                 "no_api_key",
                 "No API key configured and the browser login cannot run because "
-                f"{noninteractive_reason()}. Set LIUM_API_KEY, or run "
-                "'lium init --no-browser' and then 'lium init --session <ID>'",
+                f"{noninteractive_reason()}.",
                 EXIT_CONFIGURATION_ERROR,
-                hint="Set LIUM_API_KEY, or run 'lium init --no-browser' and then 'lium init --session <ID>'; "
+                hint="Set LIUM_API_KEY, or run 'lium init --api-key <key>' with a key from https://lium.io/api-keys "
+                     "(or 'lium init --no-browser' and then 'lium init --session <ID>'); "
                      "no account yet? 'lium signup --email you@example.com' creates one and stores its key",
             )
         # Setup API key
