@@ -408,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
     if deferred is not None and not deferred_stale:
         print(f"deferred minimum: {deferred.version}  ({DEFERRED_MINIMUM}: {deferred.reason or 'no reason given'})", file=out)
     print(f"minimum next version: {floor}  ({why}: {reason_text})", file=out)
-    out.flush()  # the report comes before any warning or verdict in a CI log
+    out.flush()  # the report comes before the fragment warnings and the verdict in a CI log (the leftover-tag warning is earlier)
     for f in entries:
         if f.unclassified:
             warn(

@@ -573,11 +573,13 @@ def test_the_script_runs_as_a_subprocess_the_way_the_workflow_calls_it(repo: Rep
     released(repo, "v0.0.41", ("DAH-1", FIXED))
     repo.fragment("DAH-2", ADDED)
     repo.tag("v0.0.42")
+    outside_actions = {k: v for k, v in os.environ.items() if k != "GITHUB_ACTIONS"}  # CI itself runs under Actions
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), "--repo", str(repo.root), "--check", "v0.0.42"],
         capture_output=True,
         text=True,
         check=False,
+        env=outside_actions,
     )
     assert proc.returncode == 1
     assert "minimum next version: 0.1.0" in proc.stdout
