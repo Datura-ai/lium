@@ -1,7 +1,7 @@
 # e2e — this checkout's CLI and SDK against a live Lium API
 
 The renter's first hour, asserted: `balance --json` → `ls --format json` (stable fields, `--gpu` filter) → `up`
-(exactly one pod; `up` itself waits for `RUNNING` with an `ssh_cmd`, 540 s budget) → `ps` agrees → `describe --json` → `exec` (exit code 7 comes back
+(exactly one pod, on the cheapest node that accepts the rent; `up` itself waits for `RUNNING` with an `ssh_cmd`, 540 s budget) → `ps` agrees → `describe --json` → `exec` (exit code 7 comes back
 as exit 7 and in the JSON; `nvidia-smi -L` lists at least the GPUs billed) → `scp` up and down, byte-exact →
 billing moves while the pod runs → `rm` → gone from `ps` → the final charge fits the wall clock at the node's
 price (per-second, no 15-minute floor). The error contract agents depend on: wrong key exit 3 with a JSON
@@ -26,6 +26,20 @@ from a healthy one. The SDK journey's first `exec` on a fresh pod also retries c
 for 30 s (`first_exec`; each attempt has the SDK's own 30 s connect timeout): `wait_ready` reports the pod RUNNING, and
 sshd's port map can land a few seconds later; a port map that never comes still fails, with the same exception, once
 the budget is spent.
+
+A node that refuses the rent gives way to the next one (DAH-3488). Both journeys keep every rentable node, cheapest
+first, and rent the first that accepts. When `lium up` exits 3 with the CLI's "could not be rented" text (the API
+answered the rent with a 400 such as `Can't rent node. Try again later.`, or the node was taken meanwhile), or the
+SDK's `up()` raises the plain `LiumError` that wraps the same answer, the journey makes sure that no pod with its name
+exists, records the refusal and calls `up` on the next candidate with a different executor id. At most `MAX_UP_TRIES`
+(3) `up` calls per journey, all inside the step's one 540 s budget (a further node is tried only with at least 60 s
+left). The SDK's `up()` resolves the node from `ls()` first and raises a `ValueError` (`Node with ID … not found`,
+`No node found with id …`) when it left the listing meanwhile; that counts as a refusal too. A timeout, a pod that did not start, an auth, permission, server or
+rate-limit error and every other exit are not retried. Each refusal is a `rent refused: <huid> (<id>) at $<price>/h: <message>` pytest warning in the
+job log (and, in the CLI journey, a note in `commands.json`), so the fleet team can see which nodes refused; when every try
+refused, the failure message lists them. On 14 Sep 2026 the single candidate answered 400 on lium#152 and lium#164
+and each red run cost a human a rerun. `commands.json` and the failure line keep the first 1,500 characters of a
+command's stdout and stderr (`OUTPUT_HEAD_CHARS`), so the API's answer is readable there.
 
 ## Run it
 
