@@ -7,11 +7,13 @@ moment the process dies.
 """
 
 import json
+import os
+import shlex
+import shutil
+import subprocess
 import time
 from contextlib import contextmanager
 from types import SimpleNamespace
-
-import shlex
 
 import pytest
 
@@ -146,9 +148,93 @@ def test_process_identity_is_the_boot_id_and_the_start_time_from_proc_stat():
         "{ cat /proc/sys/kernel/random/boot_id 2>/dev/null; "
         "sed 's/.*) //' /proc/4242/stat 2>/dev/null | cut -d' ' -f20; } | tr '\\n' ' '"
     )
+    # no .id file is a mismatch: the PID alone never decides
     assert identity_matches("4242", "/workspace/logs/j.id") == (
-        '{ [ ! -f /workspace/logs/j.id ] || [ "$(' + process_identity("4242") + ')" = "$(cat /workspace/logs/j.id)" ]; }'
+        '{ [ -f /workspace/logs/j.id ] && [ "$(' + process_identity("4242") + ')" = "$(cat /workspace/logs/j.id)" ]; }'
     )
+
+
+# --- the identity check, run in a real bash ---------------------------------------------------
+#
+# Regression (arhangel66, lium#211 round 3): `identity_matches` used to read a missing `.id`
+# file as "trust the PID", so a stale PID file from a job created before the `.id` file
+# existed made status() say running, kill() signal a stranger and the launcher refuse a start.
+
+
+def _bash(script: str, env=None) -> subprocess.CompletedProcess:
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, check=False)
+
+
+@pytest.fixture
+def live_process():
+    """A process that is alive for the whole test and is nobody's job."""
+    proc = subprocess.Popen(["sleep", "60"], start_new_session=True)  # its own group, like a job
+    try:
+        yield proc
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+
+
+def test_identity_check_fails_when_the_id_file_is_missing(tmp_path, live_process):
+    id_file = str(tmp_path / "j.id")
+
+    assert _bash(identity_matches(str(live_process.pid), id_file)).returncode != 0
+
+
+@pytest.mark.skipif(not os.path.exists("/proc/self/stat"), reason="needs /proc (Linux)")
+def test_identity_check_passes_for_the_recorded_process(tmp_path, live_process):
+    id_file = str(tmp_path / "j.id")
+    _bash(f"{process_identity(str(live_process.pid))} > {shlex.quote(id_file)}")
+
+    assert _bash(identity_matches(str(live_process.pid), id_file)).returncode == 0
+
+
+def test_status_probe_says_gone_for_a_live_pid_without_an_id_file(tmp_path, live_process):
+    probe = build_status_probe(live_process.pid, str(tmp_path / "j.exit"), str(tmp_path / "j.id"))
+
+    assert _bash(probe).stdout.strip() == "gone"
+    assert live_process.poll() is None
+
+
+def test_kill_refuses_a_live_pid_without_an_id_file(monkeypatch, tmp_path, live_process):
+    """The command Job.kill() sends, run against a real process: nothing is signalled."""
+    client = _Client()
+    sent = _ssh_answering(monkeypatch, client, [("", 1)])
+    Job(client, _pod(), name="j", pid=live_process.pid, command="x", job_dir=str(tmp_path)).kill()
+
+    result = _bash(sent[0])
+
+    assert result.returncode != 0
+    with pytest.raises(subprocess.TimeoutExpired):  # still alive: nothing was signalled
+        live_process.wait(timeout=0.2)
+
+
+def test_launcher_does_not_reclaim_a_live_pid_without_an_id_file(tmp_path, live_process):
+    """A stale .pid from before the .id file existed does not block a new start under the name."""
+    job_dir = tmp_path / "logs"
+    job_dir.mkdir()
+    (job_dir / "j.pid").write_text(f"{live_process.pid}\n")
+    env = dict(os.environ)
+    if shutil.which("setsid") is None:  # macOS has no setsid; the launcher's shape is what is under test
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        (fake_bin / "setsid").write_text('#!/bin/sh\nexec "$@"\n')
+        (fake_bin / "setsid").chmod(0o755)
+        env["PATH"] = f"{fake_bin}:{env['PATH']}"
+
+    result = _bash(build_job_launcher("true", name="j", job_dir=str(job_dir)), env=env)
+
+    assert result.returncode == 0, result.stderr
+    new_pid = int(result.stdout.strip())
+    assert new_pid != live_process.pid
+    assert (job_dir / "j.pid").read_text().strip() == str(new_pid)
+    assert live_process.poll() is None
+    deadline = time.monotonic() + 10  # the new job (`true`) ends and its wrapper writes the exit code
+    while not (job_dir / "j.exit").exists() and time.monotonic() < deadline:
+        subprocess.run(["sleep", "0.05"], check=True)  # time.sleep is a no-op in this module
+    assert (job_dir / "j.exit").read_text().strip() == "0"
 
 
 def test_launcher_changes_directory_first_when_asked():

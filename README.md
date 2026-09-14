@@ -144,7 +144,7 @@ with lium.rental(executor_id=node.id, name="eval") as pod:
 
 `lium.pod_by_name("job")` finds a pod by name, huid or id.
 
-A server or a training run should outlive the call that starts it. `run_background()` starts it detached with a PID file, an exit-code file and a log on the pod (plus the process's boot id and start time, so `status()` and `kill()` never take a PID reused after a pod restart for the job), and the returned `Job` knows how to wait for it:
+A server or a training run should outlive the call that starts it. `run_background()` starts it detached with a PID file, an exit-code file and a log on the pod (plus the process's boot id and start time in a `.id` file, so `status()` and `kill()` never take a PID reused after a pod restart for the job; a job without that file reads `gone` and is not signalled), and the returned `Job` knows how to wait for it:
 
 ```python
 job = lium.run_background(pod, "vllm serve Qwen/Qwen3-8B --port 8000", name="vllm")

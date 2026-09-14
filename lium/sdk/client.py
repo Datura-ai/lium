@@ -2249,7 +2249,8 @@ class Lium:
         The job survives this SSH session and this process: it runs under
         ``nohup setsid`` with stdin closed, logs to ``<job_dir>/<name>.log``, records
         its PID in ``<name>.pid`` (with the process's boot id and start time in
-        ``<name>.id``, so a reused PID never passes as the job) and its exit code
+        ``<name>.id``, so a reused PID never passes as the job; a job without
+        that file is never trusted either) and its exit code
         in ``<name>.exit`` when it ends.
         :meth:`job` re-attaches later by name.
 

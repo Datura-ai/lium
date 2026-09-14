@@ -16,8 +16,10 @@ Every job keeps five small files next to each other on the pod, named after the 
 so :meth:`Lium.job` can re-attach to a running job from another process or a later
 agent turn with nothing but the pod and the name. The ``.id`` file is what keeps a
 PID that survived a pod restart on ``/workspace`` from being mistaken for the job:
-``status()`` and ``kill()`` only treat the process as the job when its boot id and
-start time (``/proc/<pid>/stat`` field 22) still match.
+``status()``, ``kill()`` and the launcher only treat the process as the job when its
+boot id and start time (``/proc/<pid>/stat`` field 22) still match the file. No
+``.id`` file (a job from before this file existed) is a mismatch too, not a reason to
+trust the PID.
 """
 
 from __future__ import annotations
@@ -81,11 +83,14 @@ def process_identity(pid: str) -> str:
 def identity_matches(pid: str, id_file: str) -> str:
     """Shell condition: ``pid`` is still the process recorded in ``id_file``.
 
-    A job started before the ``.id`` file existed has none; then the PID alone decides,
-    as before.
+    A missing ``id_file`` is a mismatch, never a fall-back to the PID alone: a job
+    started before the ``.id`` file existed cannot be told from a stale PID file, so
+    ``status()`` reads it as ``gone``, ``kill()`` does not signal it and the launcher
+    does not refuse a new start under its name. Such a job has to be started again
+    with :meth:`Lium.run_background` to be tracked.
     """
     q = shlex.quote(id_file)
-    return f'{{ [ ! -f {q} ] || [ "$({process_identity(pid)})" = "$(cat {q})" ]; }}'
+    return f'{{ [ -f {q} ] && [ "$({process_identity(pid)})" = "$(cat {q})" ]; }}'
 
 
 def build_job_launcher(
@@ -103,7 +108,8 @@ def build_job_launcher(
     ``.exit`` file when it ends, so a caller can tell "still running" from
     "finished" from "vanished" without guessing. Starting a second job under a
     name whose process is still alive is refused (exit 3) rather than silently
-    running two servers.
+    running two servers; "alive" needs the recorded PID to match the ``.id`` file,
+    so a name whose files predate the ``.id`` file is free to start.
 
     Environment values are not part of this line: :meth:`Lium.run_background`
     hands them to :meth:`Lium.exec`, which exports them over the session's stdin
@@ -142,6 +148,8 @@ def build_status_probe(pid: int, exit_file: str, id_file: Optional[str] = None) 
 
     With ``id_file``, ``running`` also needs the live process to carry the recorded
     boot id and start time: after a pod restart the PID may belong to something else.
+    When that ``.id`` file is missing on the pod, the probe reads ``gone`` even
+    while the PID is alive.
     """
     q = shlex.quote
     alive = f"kill -0 {int(pid)} 2>/dev/null"
@@ -234,6 +242,7 @@ class Job:
         ``gone`` means the process is not alive and left no exit code — killed as
         a group, or the pod restarted underneath it (a PID that another process
         took after the restart does not count as alive: the ``.id`` file decides).
+        A job with no ``.id`` file (started before the file existed) is ``gone`` too.
         """
         result = self._client.exec(self.pod, command=self._status_probe(), timeout=30)
         return parse_status(result.get("stdout", ""))
@@ -353,7 +362,8 @@ class Job:
         """Send ``signal`` to the job's whole process group. Returns whether anything received it.
 
         Nothing is signalled when the PID no longer belongs to the job (the pod
-        restarted and another process took the number); the call returns ``False``.
+        restarted and another process took the number) or when the job has no
+        ``.id`` file to check it against; the call returns ``False``.
         """
         sig = signal.upper().removeprefix("SIG")
         if not re.fullmatch(r"[A-Z0-9]+", sig):
