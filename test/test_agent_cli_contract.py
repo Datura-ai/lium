@@ -723,6 +723,8 @@ def test_missing_api_key_in_a_pipe_points_a_new_user_at_signup(monkeypatch):
     envelope = json.loads(result.output)
     assert envelope["error"]["code"] == "no_api_key"
     assert "lium signup --email" in envelope["error"]["hint"]
+    assert "lium init --api-key <key>" in envelope["error"]["hint"]   # DAH-3242: the headless path is a hint, not only message text
+    assert "--api-key" not in envelope["error"]["message"]           # the message is the diagnosis; the hint is the fix, once
 
 
 def test_ps_empty_account_is_not_a_failure(monkeypatch):

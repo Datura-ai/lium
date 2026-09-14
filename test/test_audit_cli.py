@@ -166,6 +166,24 @@ def test_auth_failure_points_at_an_old_backend(monkeypatch):
     assert "this backend does not yet open" in result.output
 
 
+def test_auth_failure_keeps_the_servers_hint_and_request_id(monkeypatch):
+    # the server's hint and request_id (DAH-3057) are printed under audit's own line, like on any API error
+    error = LiumAuthError("Invalid API key", code="invalid_api_key",
+                          hint="Create a key at https://lium.io/settings.", request_id="req-401-0001")
+    result = _run(monkeypatch, error=error)
+
+    assert result.exit_code == EXIT_API_ERROR
+    assert "this backend does not yet open" in result.output
+    assert "Create a key at https://lium.io/settings." in result.output
+    assert "request_id: req-401-0001" in result.output
+
+    result = _run(monkeypatch, "--json", error=error)
+    envelope = json.loads(result.stderr)
+    assert envelope["error"]["code"] == "invalid_api_key"
+    assert envelope["error"]["hint"] == "Create a key at https://lium.io/settings."
+    assert envelope["data"] == {"request_id": "req-401-0001"}
+
+
 @pytest.mark.parametrize("value", ["0", "1001", "-5", "many"])
 def test_limit_outside_1_to_1000_is_refused_before_any_request(monkeypatch, value):
     result = _run(monkeypatch, "--limit", value)

@@ -602,6 +602,30 @@ def test_an_expired_session_says_to_log_in_again_on_reads_too(home, monkeypatch)
 
 
 @responses.activate
+def test_a_refused_session_keeps_the_servers_request_id_but_not_its_key_code_or_hint(home, monkeypatch):
+    # the rewrap into LiumSessionError renames the 401 (DAH-3057): the server's request_id survives it, so the
+    # refusal can be quoted to support; its API-key code and hint do not — the CLI keeps `session_required` and
+    # the login hint, which must never point at an API key
+    monkeypatch.setenv("LIUM_SESSION_TOKEN", "eyJ.expired")
+    me()
+    responses.add(responses.GET, f"{API}/workspaces", status=401, json={"error": {
+        "code": "invalid_api_key", "message": "Invalid or expired token",
+        "hint": "Create a key at https://lium.io/settings.", "request_id": "req-401-0007"}})
+
+    result = run("workspaces")
+    text = " ".join(result.output.split())
+
+    assert result.exit_code == EXIT_API_ERROR
+    assert "run `lium workspaces login` again" in text and "request_id: req-401-0007" in text
+    assert "lium.io/settings" not in text
+
+    result = run("workspaces", "list", "--json")
+    error = json.loads(result.stderr)["error"]
+    assert (error["code"], json.loads(result.stderr)["data"]) == ("session_required", {"request_id": "req-401-0007"})
+    assert "lium workspaces login" in error["hint"] and "lium.io/settings" not in error["hint"]
+
+
+@responses.activate
 def test_a_named_workspace_on_a_server_without_them_says_so_without_reading_workspaces(home, monkeypatch):
     monkeypatch.setenv("LIUM_SESSION_TOKEN", "eyJ.fixture.session")
     me("users_me_off")

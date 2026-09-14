@@ -321,7 +321,7 @@ def _response_error_code(response: requests.Response) -> Optional[str]:
 
 
 def permission_error(
-    detail: str, code: Optional[str] = None, key: Optional[str] = None
+    detail: str, code: Optional[str] = None, key: Optional[str] = None, **context: Optional[str]
 ) -> LiumPermissionError:
     """The exception for a 403: :class:`LiumInsufficientBalanceError` when the server
     refused for lack of funds (with ``required``/``available`` when it said them),
@@ -331,7 +331,8 @@ def permission_error(
     one (:func:`_response_error_code`); it decides. Without it the message text
     decides, which is what every server before lium-platform#210 sends. ``key``
     (the API key's fingerprint and source) is appended so the message says which
-    key the server refused.
+    key the server refused. ``code`` and ``context`` (:func:`_error_context`'s
+    hint/request_id) are carried on the exception.
     """
     message = f"Permission denied: {detail}" + (f" ({key})" if key else "")
     if code is not None:
@@ -339,7 +340,7 @@ def permission_error(
     else:
         insufficient = "insufficient balance" in (detail or "").lower()
     if not insufficient:
-        return LiumPermissionError(message)
+        return LiumPermissionError(message, code=code, **context)
 
     def usd(match: Optional[re.Match]) -> Optional[float]:
         return float(match.group(1).replace(",", "")) if match else None
@@ -348,6 +349,8 @@ def permission_error(
         message,
         required=usd(_REQUIRED_RE.search(detail)),
         available=usd(_AVAILABLE_RE.search(detail)),
+        code=code,
+        **context,
     )
 
 
@@ -404,6 +407,28 @@ def _int_or_none(row: Dict[str, Any], key: str) -> Optional[int]:
 def _pod_gpu_count(row: Dict[str, Any]) -> Optional[int]:
     """The pod's own billed GPU count from a ``/pods`` row (a string in the payload), or None."""
     return _int_or_none(row, "gpu_count")
+
+
+def _error_context(response: requests.Response) -> dict:
+    """code/hint/request_id from the API's error envelope (``error: {...}``) and the
+    ``X-Request-Id`` header, for the exception's attributes. Empty when absent (older servers)."""
+    try:
+        error = response.json().get("error")
+    except Exception:
+        error = None
+    error = error if isinstance(error, dict) else {}
+    headers = getattr(response, "headers", None) or {}
+
+    def text(value: Any) -> Optional[str]:
+        # only non-empty strings: the fields are printed and compared as text, and a server
+        # (or a proxy) sending a number or an object here must not break the error path
+        return value if isinstance(value, str) and value else None
+
+    return {
+        "code": _response_error_code(response),  # the same field; #219 reads it through this helper too
+        "hint": text(error.get("hint")),
+        "request_id": text(error.get("request_id")) or text(headers.get("X-Request-Id")),
+    }
 
 
 def _get_client_version() -> str:
@@ -537,20 +562,21 @@ class Lium:
         """
         if resp.ok:
             return
+        context = _error_context(resp)
         # Auth failures name the key that was sent: two commands can resolve
         # different keys (environment versus config file), and "invalid API key"
         # alone does not say which one to fix.
         if resp.status_code == 401:
-            raise LiumAuthError(f"Invalid API key ({key})" if key else "Invalid API key")
+            raise LiumAuthError(f"Invalid API key ({key})" if key else "Invalid API key", **context)
         if resp.status_code == 403:
-            raise permission_error(_response_error_message(resp), _response_error_code(resp), key=key)
+            raise permission_error(_response_error_message(resp), key=key, **context)
         if resp.status_code == 404:
-            raise LiumNotFoundError(f"Resource not found: {_response_error_message(resp)}")
+            raise LiumNotFoundError(f"Resource not found: {_response_error_message(resp)}", **context)
         if resp.status_code == 429:
-            raise LiumRateLimitError("Rate limit exceeded")
+            raise LiumRateLimitError("Rate limit exceeded", **context)
         if 500 <= resp.status_code < 600:
-            raise LiumServerError(f"Server error: {resp.status_code}")
-        raise LiumError(f"API error {resp.status_code}: {_response_error_message(resp)}")
+            raise LiumServerError(f"Server error: {resp.status_code}", **context)
+        raise LiumError(f"API error {resp.status_code}: {_response_error_message(resp)}", **context)
 
     def _dict_to_backup_config(self, config_dict: Dict) -> BackupConfig:
         """Convert backup config dict to BackupConfig object."""
@@ -788,6 +814,7 @@ class Lium:
         executor_id: str,
         name: str = "Your Pod",
         template_id: Optional[str] = None,
+        image: Optional[str] = None,
         dockerfile_content: Optional[str] = None,
         volume_id: Optional[str] = None,
         ports: Optional[int] = None,
@@ -805,7 +832,15 @@ class Lium:
             executor_id: Target node ID string.
             name: Human-friendly pod name (defaults to ``"Your Pod"``).
             template_id: Template ID. Defaults to the node's default template.
-                Mutually exclusive with ``dockerfile_content``.
+                Mutually exclusive with ``image`` and ``dockerfile_content``.
+            image: Docker image to run, passed to the backend whole
+                (``"repo/name:tag"``, ``"registry:5000/team/img"``,
+                ``"repo/name@sha256:<hex>"``; the backend splits name, tag and
+                digest and defaults the tag to ``latest``), the same as
+                ``lium up --image``: a private one-time template is created for it
+                with port 22 exposed and the image's own entrypoint/command, and
+                deleted with the pod. Mutually exclusive with ``template_id`` and
+                ``dockerfile_content``.
             dockerfile_content: Raw Dockerfile text to build the pod image from on
                 the node (custom build). Mutually exclusive with ``template_id`` —
                 pass exactly one. The image is built remotely with no network
@@ -837,6 +872,7 @@ class Lium:
             executor_id=executor_id,
             name=name,
             template_id=template_id,
+            image=image,
             dockerfile_content=dockerfile_content,
             volume_id=volume_id,
             ports=ports,
@@ -864,6 +900,7 @@ class Lium:
         executor_id: str,
         name: str,
         template_id: Optional[str],
+        image: Optional[str],
         dockerfile_content: Optional[str],
         volume_id: Optional[str],
         ports: Optional[int],
@@ -874,9 +911,9 @@ class Lium:
         restore_path: Optional[str],
     ) -> Dict[str, Any]:
         """The rent call itself; :meth:`up` adds the optional wait on top."""
-        if template_id is not None and dockerfile_content is not None:
+        if sum(x is not None for x in (template_id, image, dockerfile_content)) > 1:
             raise ValueError(
-                "Provide either template_id or dockerfile_content, not both"
+                "Provide only one of template_id, image or dockerfile_content"
             )
         if bool(backup_id) != bool(restore_path):
             raise ValueError("backup_id and restore_path must be provided together")
@@ -884,6 +921,16 @@ class Lium:
         executor_info = self.get_executor(executor_id)
         if not executor_info:
             raise ValueError(f"Node with ID '{executor_id}' not found")
+
+        if image is not None:
+            template_id = self.create_template(
+                name=f"ephemeral-{hashlib.md5(image.encode()).hexdigest()[:8]}",
+                docker_image=image,
+                docker_image_tag="",  # backend splits name/tag/digest
+                ports=[22],
+                is_private=True,
+                one_time_template=True,
+            ).id
 
         if template_id is None and dockerfile_content is None:
             selected_template = self.default_docker_template(executor_info.id)
@@ -1454,8 +1501,10 @@ class Lium:
                 stream=True,
                 timeout=None if follow else 30,
             )
-        except LiumNotFoundError:
-            raise LiumNotFoundError(f"Pod not found: {pod_id}") from None
+        except LiumNotFoundError as e:
+            raise LiumNotFoundError(
+                f"Pod not found: {pod_id}", code=e.code, hint=e.hint, request_id=e.request_id
+            ) from None
 
         with response:
             for line in response.iter_lines():

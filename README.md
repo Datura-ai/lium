@@ -46,7 +46,8 @@ versioned binary under `~/.lium/versions/<version>/lium`.
 ```bash
 # First-time setup: create an account (mints and stores an API key) …
 lium signup --email you@example.com
-# … or link an existing account
+# … or link an existing account (opens a browser). Headless (agents, CI, containers): pass the key
+# instead — lium init --api-key sk_...   (keys: https://lium.io/api-keys), or export LIUM_API_KEY and skip init.
 lium init
 lium balance
 
@@ -183,7 +184,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 ### Core Commands
 
 - `lium signup` - Create an account from the terminal and store its API key
-- `lium init` - Initialize configuration for an existing account (API key, SSH keys)
+- `lium init` - Initialize configuration for an existing account (API key, SSH keys); `--api-key <key>` for machines without a browser
 - `lium balance` - Show the account balance (add `--format json` for machine-readable output)
 - `lium whoami` - Show which API key is in use, where it came from, and the account it belongs to
 - `lium ls [--gpu TYPE] [--count N] [--country CODE] [--min-vram GB] [--max-price USD] [--tier spot|secure] [--format json]` - List available nodes
@@ -478,6 +479,21 @@ token = …
 
 Key resolution: an explicit `--workspace` / `LIUM_WORKSPACE` uses the key saved for it and nothing else (exit 2 when none is saved). Otherwise, first match wins: `LIUM_API_API_KEY` / `LIUM_API_KEY` (the env key, in the CLI's order), the key saved for `[workspaces] active`, `[api] api_key`. The `[workspace.<name>]` section is written when a key is saved (`lium keys create --save`, or `lium workspaces use` run with a key that acts there); `lium workspaces delete` drops it. Sections are keyed by the lower-cased name, so a save into a section that already holds another workspace's id (two workspaces with one name) is refused (exit 2) rather than overwriting the first one's key — drop that section or rename one of the workspaces first.
 
+For a machine with no browser — an agent's sandbox, CI, a container — `lium init --api-key <key>` checks the
+key against `/users/me`, saves it to the file with mode 600 and sets up the SSH key, without opening anything or
+asking anything; `--json` prints `{"ok", "api_key_source", "saved_from", "env_key", "active_workspace",
+"config_path", "ssh_key_path"}` — `api_key_source` is the same value `lium whoami --json` prints: where the next
+command reads the key by the *Key resolution* order above (`env:LIUM_API_KEY`, `config:<path> [api] api_key`, or a
+`[workspace.<name>]` key when `lium workspaces use` selected one — then `active_workspace` names it and the text
+output warns that it wins over the key just saved), `saved_from` how this run got it (`flag`, `env`, `config`,
+`session`, `browser`). `--json` needs `--api-key` or an exported key; the browser flows print for a person. A
+refused key exits 3 (`invalid_api_key`), an API that cannot be reached exits 3 (`api_unreachable`), an empty value
+exits 2 (`empty_api_key`); none of them saves anything, and the hint says so. With `LIUM_WORKSPACE` / `-w` set,
+`lium init` exits 2: commands then run with the key saved for that workspace, which `init` does not write — use
+`lium keys create <name> --workspace <ws> --save`. With `LIUM_API_KEY` (or `LIUM_API_API_KEY`) already exported,
+`lium init` skips the browser, sets up the SSH key and says the key is coming from the environment — the SSH path
+is written to the file, the key is not; `--api-key` warns when a key is also exported (`env_key` in the JSON).
+
 SSH host keys of pods are pinned on first use under `~/.lium/known_hosts/<pod-id>`
 (`lium ssh`, `lium up`, and the SDK's `exec`, `stream_exec`, `rsync`). `reboot`, `edit`,
 `switch_template` and `rm` drop the pin themselves (the container, and its key, are replaced).
@@ -498,6 +514,7 @@ the flag to pass:
 
 ```bash
 export LIUM_API_KEY=...            # no browser login is attempted without a terminal
+lium init --api-key $KEY           # or save the key once, without a browser
 lium up --gpu H100 -y --no-ssh     # -y: rent without the confirmation prompt
 lium rm my-pod -y                  # -y on every destructive command
 lium fund -w default -a 1.5 -y     # values that would be prompted for must be passed as options

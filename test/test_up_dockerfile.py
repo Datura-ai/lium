@@ -190,7 +190,7 @@ def test_up_rejects_both_template_and_dockerfile(monkeypatch):
     _stub_up(monkeypatch, client, captured)
 
     # Act / Assert — XOR guard fires before any network call
-    with pytest.raises(ValueError, match="not both"):
+    with pytest.raises(ValueError, match="only one of"):
         client.up(
             executor_id="exec-1",
             template_id="tmpl-xyz",
@@ -445,3 +445,72 @@ def test_up_command_reports_non_utf8_dockerfile(monkeypatch, tmp_path):
 
     assert result.exit_code == 2
     assert "Could not read Dockerfile" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# SDK: Lium.up(image=...) — docker image only, defaults for the rest (DAH-2103)
+# --------------------------------------------------------------------------- #
+
+
+def test_up_with_image_creates_a_one_time_template_and_rents_it(monkeypatch):
+    # Arrange
+    client = Lium(Config(api_key="test"))
+    captured: dict = {}
+    _stub_up(monkeypatch, client, captured)
+    created: dict = {}
+
+    def fake_create_template(**kwargs):
+        created.update(kwargs)
+        return SimpleNamespace(id="tmpl-ephemeral")
+
+    monkeypatch.setattr(client, "create_template", fake_create_template)
+
+    # Act
+    client.up(executor_id="exec-1", image="pytorch/pytorch:2.9.1-cuda13.0-cudnn9-runtime", ssh_keys=["ssh-ed25519 AAA"])
+
+    # Assert — the same template `lium up --image` creates, then the normal rent.
+    # The reference goes to the backend whole; it splits name, tag and digest
+    # (parse_image_reference_parts, DAH-2739) — no client-side rsplit(":").
+    assert created["docker_image"] == "pytorch/pytorch:2.9.1-cuda13.0-cudnn9-runtime"
+    assert created["docker_image_tag"] == ""
+    assert created["ports"] == [22]
+    assert created["is_private"] is True and created["one_time_template"] is True
+    assert captured["payload"]["template_id"] == "tmpl-ephemeral"
+    assert captured["payload"]["dockerfile_content"] is None
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "ubuntu",  # no tag: the backend defaults it to latest
+        "registry.example.com:5000/team/img",  # a colon before the last '/' is a registry port
+        "repo/name@sha256:" + "a" * 64,  # a digest reference
+    ],
+)
+def test_up_with_image_hands_the_reference_over_whole(monkeypatch, image):
+    client = Lium(Config(api_key="test"))
+    captured: dict = {}
+    _stub_up(monkeypatch, client, captured)
+    created: dict = {}
+    monkeypatch.setattr(
+        client, "create_template", lambda **kwargs: created.update(kwargs) or SimpleNamespace(id="t")
+    )
+
+    client.up(executor_id="exec-1", image=image, ssh_keys=["ssh-ed25519 AAA"])
+
+    assert (created["docker_image"], created["docker_image_tag"]) == (image, "")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"image": "ubuntu", "template_id": "tmpl-xyz"},
+        {"image": "ubuntu", "dockerfile_content": "FROM busybox"},
+    ],
+)
+def test_up_rejects_image_combined_with_another_source(monkeypatch, kwargs):
+    client = Lium(Config(api_key="test"))
+    _stub_up(monkeypatch, client, {})
+
+    with pytest.raises(ValueError, match="only one of"):
+        client.up(executor_id="exec-1", ssh_keys=["ssh-ed25519 AAA"], **kwargs)

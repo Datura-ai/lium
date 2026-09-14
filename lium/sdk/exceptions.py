@@ -1,7 +1,19 @@
 """Exception hierarchy for the Lium SDK."""
 
 class LiumError(Exception):
-    """Base exception for Lium SDK."""
+    """Base exception for Lium SDK.
+
+    ``code``, ``hint`` and ``request_id`` come from the API's error envelope
+    (``error: {code, message, hint, request_id}``) and the ``X-Request-Id``
+    header; all three are ``None`` when the server did not send them.
+    """
+
+    def __init__(self, message: str = "", *, code: str | None = None, hint: str | None = None,
+                 request_id: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.hint = hint
+        self.request_id = request_id
 
 
 class LiumAuthError(LiumError):
@@ -101,8 +113,11 @@ class LiumInsufficientBalanceError(LiumPermissionError):
         *,
         required: float | None = None,
         available: float | None = None,
+        code: str | None = None,
+        hint: str | None = None,
+        request_id: str | None = None,
     ) -> None:
-        super().__init__(message)
+        super().__init__(message, code=code, hint=hint, request_id=request_id)
         self.required = required
         self.available = available
 

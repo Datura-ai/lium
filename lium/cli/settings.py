@@ -43,7 +43,9 @@ class ConfigManager:
     def _ensure_config_dir(self) -> Path:
         """Ensure ~/.lium directory exists."""
         config_dir = Path.home() / ".lium"
-        config_dir.mkdir(exist_ok=True)
+        # parents=True: in a fresh container HOME may name a directory nothing has created yet,
+        # and without it every command died at import with FileNotFoundError
+        config_dir.mkdir(parents=True, exist_ok=True)
         return config_dir
     
     def _load_config(self) -> ConfigParser:
