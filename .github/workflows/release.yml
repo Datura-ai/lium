@@ -30,12 +30,13 @@ jobs:
       with:
         python-version: "3.12"
 
-    # the tag is the version, so this is the only place that can say which tag a release may carry: the
-    # changelog.d fragments since the previous tag decide (### Added or no header → minor, ### Removed / a BREAKING
-    # bullet → major from 1.0, Changed / Fixed / Security / Deprecated → patch; RELEASING.md). A line
-    # `allow-version-skip: <reason>` in the release notes at publish time lets a hotfix patch ship on top of unreleased
-    # features (DAH-3328). Fails before the wheel is built, so nothing is published: delete the release and its tag,
-    # then tag the version the message names.
+    # the tag is the version, so this is the only place that can say which tag a release may carry: the changelog.d
+    # fragments and the CHANGELOG.md sections added since the previous tag decide (### Added or no header → minor,
+    # ### Removed / a BREAKING bullet → major from 1.0, Changed / Fixed / Security / Deprecated → patch; RELEASING.md).
+    # Also refused: a tag not above the previous release, and code under lium/ with no changelog entry. A line
+    # `allow-version-skip: <reason>` in the release notes at publish time, with the skipped minimum committed in
+    # changelog.d/.deferred_minimum, lets a hotfix patch ship on top of unreleased features (DAH-3328). Fails before
+    # the wheel is built, so nothing is published: delete the release and its tag, then tag the version the message names.
     - name: Release tag must be ≥ the changelog minimum
       if: github.event_name == 'release'
       env:
