@@ -225,31 +225,31 @@ jobs:
         fetch-depth: 0
 
     - name: Download Python artifact
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: python-dist
         path: release-assets/python-dist
 
     - name: Download Linux artifact
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: lium-linux-amd64
         path: release-assets/linux-amd64
 
     - name: Download Linux ARM64 artifact
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: lium-linux-arm64
         path: release-assets/linux-arm64
 
     - name: Download macOS ARM64 artifact
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: lium-darwin-arm64
         path: release-assets/darwin-arm64
 
     - name: Download macOS AMD64 artifact
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: lium-darwin-amd64
         path: release-assets/darwin-amd64
@@ -299,7 +299,7 @@ jobs:
 
     steps:
     - name: Download artifact
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: python-dist
         path: dist/
