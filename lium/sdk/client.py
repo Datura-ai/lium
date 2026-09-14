@@ -1819,33 +1819,47 @@ class Lium:
             time.sleep(poll_interval)
 
     def rm_cluster(self, cluster: Cluster) -> List[Dict[str, Any]]:
-        """Remove every member pod of a cluster. Returns one ``{"pod", "success", "error"}`` per member.
+        """Remove every member pod of a cluster with one ``DELETE /clusters/{cluster_id}``.
 
-        The API has no single "terminate cluster" order; each member is deleted in turn and a
-        failure on one does not stop the others, so nothing is left billing by accident. The
-        members are the pods of ``cluster`` plus every pod a fresh listing shows under its id, and
-        the listing is read once more after the deletes: a member that appeared after the caller's
-        snapshot is removed too, instead of billing on. When the listing fails, the members the
-        caller gave are still removed.
+        Returns one ``{"pod", "huid", "name", "node_rank", "success", "message", "error"}`` per
+        member, in the order the server reports them (``huid`` is the short name ``lium rm`` accepts). The server (lium-platform#411) finds the members by the
+        cluster id, checks ownership and API-key scope on every one of them before the first
+        delete, then tears them down one by one; a member that failed is reported with ``success``
+        false and its error text while the others are still removed, so nothing is left billing by
+        accident. Call again to retry the members that failed. The pinned ssh host key of every
+        member the server accepted is dropped, as :meth:`rm` does for a single pod.
+
+        There is no per-pod fallback: a 404 from the route removes nothing and is raised.
+
+        Raises:
+            LiumNotFoundError: no pod carries the id (the cluster is already gone), or the server
+                has no ``DELETE /clusters/{id}`` route yet. Nothing was removed.
+            LiumPermissionError: a member belongs to another user, or the API key lacks the
+                ``manage`` scope for a pod it did not create. Nothing was removed.
+            LiumError: 409 — a member is still being created and the platform is set not to cancel
+                in-flight creates; nothing was removed, call again later. Also a 200 without the
+                per-member rows, so an unexpected answer is never read as "removed".
         """
+        data = self._request("DELETE", f"/clusters/{quote(str(cluster.id), safe='')}").json()
+        rows = data.get("pods") if isinstance(data, dict) else None
+        if not isinstance(rows, list) or not rows:
+            raise LiumError(f"Cluster {cluster.id}: the API answered without per-member results ({data!r})")
         results: List[Dict[str, Any]] = []
-        handled: set = set()
-        for pass_no in range(2):
-            members: Dict[str, PodInfo] = {p.id: p for p in cluster.pods} if pass_no == 0 else {}
-            try:
-                members.update({p.id: p for p in self.ps() if p.cluster_id == cluster.id})
-            except (requests.RequestException, LiumError):
-                pass  # the members already known are removed regardless
-            todo = [p for pid, p in members.items() if pid not in handled]
-            if not todo:
-                break
-            for pod in todo:
-                handled.add(pod.id)
-                try:
-                    self.rm(pod)
-                    results.append({"pod": pod.id, "success": True, "error": None})
-                except Exception as exc:  # keep going: the other members must still be released
-                    results.append({"pod": pod.id, "success": False, "error": str(exc)})
+        for row in rows:
+            ok = bool(row.get("success"))
+            message = row.get("message")
+            pod_id = str(row.get("pod_id") or "")
+            results.append({
+                "pod": pod_id,
+                "huid": generate_huid(pod_id) if pod_id else None,
+                "name": row.get("pod_name"),
+                "node_rank": row.get("cluster_node_index"),
+                "success": ok,
+                "message": message,
+                "error": None if ok else (message or "Pod deletion failed"),
+            })
+            if ok and results[-1]["pod"]:
+                forget_host_key(results[-1]["pod"])
         return results
 
     def get_default_images(self, gpu_model: Optional[str], driver_version: Optional[str]) -> list[dict]:

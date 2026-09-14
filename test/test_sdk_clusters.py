@@ -11,7 +11,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from lium.sdk import Cluster, ClusterNotListedError, ClusterOffer, Config, Lium, LiumError, LiumNotFoundError, Template
+from lium.sdk import (
+    Cluster, ClusterNotListedError, ClusterOffer, Config, Lium, LiumError, LiumNotFoundError, LiumPermissionError, Template,
+)
 from lium.sdk.exceptions import LiumServerError
 
 FABRIC = "hot:infiniband:0x3:0x7fff:NVIDIA H100 80GB HBM3:8"
@@ -60,7 +62,6 @@ class _Client(Lium):
         self.routes = routes or {}
         self.calls: list = []
         self._ps_sequence = list(ps_sequence or [])
-        self.removed: list = []
 
     def _request(self, method, endpoint, **kwargs):
         self.calls.append((method, endpoint, kwargs.get("json")))
@@ -83,12 +84,6 @@ class _Client(Lium):
 
     def _ensure_ssh_keys_registered(self, public_keys, name=None):
         self.calls.append(("ssh-keys", tuple(public_keys)))
-
-    def rm(self, pod):
-        self.removed.append(pod.id)
-        if pod.id in getattr(self, "rm_fails", ()):
-            raise LiumError("boom")
-        return {"ok": True}
 
 
 def _pods(payloads):
@@ -523,39 +518,124 @@ def test_cluster_by_id_or_unique_prefix():
         client.cluster("zzz")
 
 
-def test_rm_cluster_removes_every_member_and_keeps_going_after_a_failure():
-    pods = _pods([_pod_payload(0), _pod_payload(1), _pod_payload(2)])
-    client = _Client()
-    client.rm_fails = {"pod-1"}
+# `rm_cluster` is one HTTP call, so these run the real `_request` against a scripted `requests.request`
+# (as test_sdk_error_context does): the status mapping in `_raise_for_status` is part of what is tested.
+
+class _HttpResponse:
+    text = ""
+
+    def __init__(self, status_code, body):
+        self.status_code = status_code
+        self.ok = 200 <= status_code < 300
+        self.headers = {}
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
+def _member_row(i: int, success: bool = True, message: str = "Pod deletion started") -> dict:
+    return {"pod_id": f"pod-{i}", "pod_name": "job", "cluster_node_index": i, "success": success, "message": message}
+
+
+def _error_body(status: int, message: str) -> dict:
+    """The platform's error envelope (DAH-3056): `message` is the route's detail."""
+    return {"success": False, "error": {"code": "x", "message": message, "hint": None, "request_id": "r-1"},
+            "message": message, "status_code": status}
+
+
+def _http_client(monkeypatch, tmp_path, response):
+    """A client whose one HTTP call answers `response`; `calls` records (method, url). HOME is `tmp_path`, so the
+    pinned host keys the call may drop live there."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    calls: list = []
+
+    def fake_request(method, url, **kwargs):
+        calls.append((method, url))
+        return response
+
+    monkeypatch.setattr("lium.sdk.client.requests.request", fake_request)
+    client = Lium(_Config(api_key="test"))
+    client.calls = calls
+    return client
+
+
+def test_rm_cluster_is_one_delete_by_cluster_id_and_reports_every_member(monkeypatch, tmp_path):
+    """Regression: the old code deleted each member with `DELETE /pods/{id}` in a loop after two `GET /pods`; a
+    member the listing had not shown yet kept billing. The server now owns the group (lium-platform#411)."""
+    pods = _pods([_pod_payload(0), _pod_payload(1)])
+    body = {"cluster_id": "c-1", "success": True, "message": "Cluster deletion started for every member",
+            "pods": [_member_row(0), _member_row(1, message="Pod deletion is in progress")]}
+    client = _http_client(monkeypatch, tmp_path, _HttpResponse(200, body))
+    for pod in pods:  # a pinned host key per member, as an ssh session leaves behind
+        path = tmp_path / ".lium" / "known_hosts" / pod.id
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("key")
 
     results = client.rm_cluster(Cluster(id="c-1", pods=pods))
 
-    assert client.removed == ["pod-0", "pod-1", "pod-2"]
-    assert [(r["pod"], r["success"]) for r in results] == [("pod-0", True), ("pod-1", False), ("pod-2", True)]
-    assert results[1]["error"] == "boom"
+    assert client.calls == [("DELETE", f"{client.config.base_url}/clusters/c-1")]
+    assert results == [
+        {"pod": "pod-0", "huid": pods[0].huid, "name": "job", "node_rank": 0, "success": True, "message": "Pod deletion started", "error": None},
+        {"pod": "pod-1", "huid": pods[1].huid, "name": "job", "node_rank": 1, "success": True, "message": "Pod deletion is in progress", "error": None},
+    ]
+    assert not list((tmp_path / ".lium" / "known_hosts").iterdir())  # both host keys dropped, as rm() does
 
 
-def test_rm_cluster_removes_a_member_that_appeared_after_the_snapshot():
-    """The caller's Cluster was read before the third member was listed. The old code removed only the snapshot,
-    so that member billed on. The members come from a fresh listing by cluster id, read again after the deletes;
-    a member that is already gone is not deleted twice."""
-    snapshot = _pods([_pod_payload(0), _pod_payload(1)])
-    late = _pods([_pod_payload(0), _pod_payload(1), _pod_payload(2)])
-    # after the deletes: two members still listed as stopping, and a fourth that appeared meanwhile
-    after = _pods([_pod_payload(1, status="STOPPED"), _pod_payload(2, status="STOPPED"), _pod_payload(3)])
-    client = _Client(ps_sequence=[late, after])
+def test_rm_cluster_reports_the_member_that_failed_and_keeps_the_rest(monkeypatch, tmp_path):
+    """The server removes the other members when one fails and says so per row; the failed row's message is the
+    error the caller shows, and only the accepted member's host key is dropped."""
+    pods = _pods([_pod_payload(0), _pod_payload(1)])
+    body = {"cluster_id": "c-1", "success": False,
+            "message": "Cluster deletion failed for 1 of 2 member(s); the others are being removed",
+            "pods": [_member_row(0), _member_row(1, success=False, message="Pod deletion failed; call again to retry this member, or delete the pod on its own")]}
+    client = _http_client(monkeypatch, tmp_path, _HttpResponse(200, body))
+    hosts = tmp_path / ".lium" / "known_hosts"
+    hosts.mkdir(parents=True)
+    (hosts / "pod-0").write_text("key")
+    (hosts / "pod-1").write_text("key")
 
-    results = client.rm_cluster(Cluster(id="c-1", pods=snapshot))
+    results = client.rm_cluster(Cluster(id="c-1", pods=pods))
 
-    assert client.removed == ["pod-0", "pod-1", "pod-2", "pod-3"]
-    assert [(r["pod"], r["success"]) for r in results] == [("pod-0", True), ("pod-1", True), ("pod-2", True), ("pod-3", True)]
-    assert sum(1 for c in client.calls if c[0] == "ps") == 2
+    assert [(r["pod"], r["success"]) for r in results] == [("pod-0", True), ("pod-1", False)]
+    assert results[1]["error"].startswith("Pod deletion failed; call again")
+    assert sorted(p.name for p in hosts.iterdir()) == ["pod-1"]
 
 
-def test_rm_cluster_still_removes_the_known_members_when_the_listing_fails():
-    snapshot = _pods([_pod_payload(0), _pod_payload(1)])
-    client = _Client(ps_sequence=[LiumServerError("Server error: 503")])
+def test_rm_cluster_404_is_raised_and_nothing_falls_back_to_per_pod_deletes(monkeypatch, tmp_path):
+    """A 404 from the route (the cluster is gone, or the server has no `DELETE /clusters/{id}`) is
+    `LiumNotFoundError` with the server's text. Exactly one request goes out: no `GET /pods`, no `DELETE /pods/{id}`."""
+    pods = _pods([_pod_payload(0), _pod_payload(1)])
+    client = _http_client(monkeypatch, tmp_path, _HttpResponse(404, _error_body(404, "Cluster not found")))
 
-    results = client.rm_cluster(Cluster(id="c-1", pods=snapshot))
+    with pytest.raises(LiumNotFoundError, match="Cluster not found"):
+        client.rm_cluster(Cluster(id="c-1", pods=pods))
 
-    assert client.removed == ["pod-0", "pod-1"] and all(r["success"] for r in results)
+    assert client.calls == [("DELETE", f"{client.config.base_url}/clusters/c-1")]
+
+
+def test_rm_cluster_409_and_an_answer_without_rows_are_errors_not_removals(monkeypatch, tmp_path):
+    """409: a member is still being created and the platform does not cancel in-flight creates; the server removed
+    nothing. A 200 without `pods` rows (not a shape #411 sends) must not come back as an empty, all-good result either:
+    `clusters rm` would exit 0 on a cluster that is still billing."""
+    pods = _pods([_pod_payload(0), _pod_payload(1)])
+    detail = {"message": "A member of this cluster is still being created; try again later.", "cluster_id": "c-1", "pending_pods": ["pod-1"]}
+    conflict = _http_client(monkeypatch, tmp_path, _HttpResponse(409, {**_error_body(409, "conflict"), "message": detail}))
+    with pytest.raises(LiumError, match="API error 409") as raised:
+        conflict.rm_cluster(Cluster(id="c-1", pods=pods))
+    assert "still being created" in str(raised.value) and not isinstance(raised.value, (LiumNotFoundError, LiumPermissionError))
+
+    empty = _http_client(monkeypatch, tmp_path, _HttpResponse(200, {"cluster_id": "c-1", "success": True, "message": "ok", "pods": []}))
+    with pytest.raises(LiumError, match="without per-member results"):
+        empty.rm_cluster(Cluster(id="c-1", pods=pods))
+
+
+def test_rm_cluster_403_is_a_permission_error(monkeypatch, tmp_path):
+    """A member of another user, or a key without the manage scope: the server refuses before the first delete."""
+    pods = _pods([_pod_payload(0)])
+    client = _http_client(monkeypatch, tmp_path, _HttpResponse(403, _error_body(403, "You do not have permission to access this pod")))
+
+    with pytest.raises(LiumPermissionError, match="Permission denied: You do not have permission"):
+        client.rm_cluster(Cluster(id="c-1", pods=pods))
+
+    assert len(client.calls) == 1

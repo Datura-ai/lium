@@ -131,10 +131,10 @@ print(cluster.master_addr)                                   # 10.42.0.1 — MAS
 for pod in cluster.pods:
     lium.exec(pod, command=f"torchrun {cluster.torchrun_args(pod)} --nproc_per_node 8 train.py")
 open("hostfile", "w").write(cluster.hostfile())              # mpirun / DeepSpeed
-lium.rm_cluster(cluster)                                     # every member the pod list shows under the cluster id
+lium.rm_cluster(cluster)                                     # one DELETE /clusters/{id}; one result per member
 ```
 
-`up_cluster()` raises `ClusterNotListedError` when the nodes are, or may be, rented but the pod list did not show a whole cluster (`.confirmed` says whether the API confirmed the order, `.pod_ids` and `.listed` what it named and what was listed): do not rent again, list the pods to find the cluster. `wait_cluster_ready()` raises `PodStartError` at once when a member fails or is missing from the pod list.
+`up_cluster()` raises `ClusterNotListedError` when the nodes are, or may be, rented but the pod list did not show a whole cluster (`.confirmed` says whether the API confirmed the order, `.pod_ids` and `.listed` what it named and what was listed): do not rent again, list the pods to find the cluster. `wait_cluster_ready()` raises `PodStartError` at once when a member fails or is missing from the pod list. `rm_cluster()` sends one `DELETE /clusters/{cluster_id}`: the API removes every member and answers one row per member (`pod`, `huid`, `name`, `node_rank`, `success`, `message`, `error`); a member that failed is reported and the rest are still removed, so call again to retry it. A 404 (the cluster is gone, or the API has no such route) raises `LiumNotFoundError` and nothing is removed; there is no per-pod fallback.
 
 Full API reference: https://docs.lium.io/developers/sdk/reference
 
@@ -202,7 +202,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium clusters up <FABRIC> --nodes N -n <NAME>` - Rent N whole nodes of one fabric as a single all-or-nothing cluster
 - `lium clusters ps` - Your clusters
 - `lium clusters show <CLUSTER> [--hostfile | --torchrun RANK]` - Members with rank, overlay IP and SSH; launcher material
-- `lium clusters rm <CLUSTER>` - Remove every member
+- `lium clusters rm <CLUSTER>` - Remove every member in one API call (exit 5 when the cluster is gone)
 
 ### Backup Commands
 

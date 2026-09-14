@@ -342,7 +342,12 @@ def clusters_show_command(cluster: str, hostfile: bool, torchrun_rank: Optional[
 @FORMAT_OPTION
 @handle_errors
 def clusters_rm_command(cluster: str, yes: bool, output_format: str, json_output: bool):
-    """Remove every member pod of a cluster."""
+    """Remove every member pod of a cluster in one API call.
+
+    CLUSTER is a cluster id (or unique prefix) or the name its members share. The API removes
+    the members itself and answers one line per member; a member that failed is printed with
+    its error and the rest are still removed. Run the command again to retry the ones that failed.
+    """
     output_format = resolve_output_format(output_format, json_output)
     ensure_config()
     lium = Lium()
@@ -350,11 +355,23 @@ def clusters_rm_command(cluster: str, yes: bool, output_format: str, json_output
     if not yes:
         if not ui.confirm(f"Remove cluster {found.id} ({found.size} pods, ${found.price_per_hour:.2f}/h)?", stderr=output_format == "json"):
             return
-    results = lium.rm_cluster(found)
+    try:
+        results = lium.rm_cluster(found)
+    except LiumNotFoundError as exc:
+        # The route answered 404 after the listing showed the cluster: it was removed meanwhile, or this
+        # server has no DELETE /clusters/{id} yet. Nothing falls back to per-pod deletes; nothing was removed.
+        # A 403 (another user's member, or a key without the manage scope) is exit 6 through handle_errors.
+        raise CliFailure(
+            "cluster_not_found",
+            f"Cluster {found.id} was not removed: the API answered 404 ({exc}). Nothing was deleted.",
+            EXIT_POD_NOT_FOUND,
+            hint="Run 'lium clusters ps'; a member still listed is billing, 'lium rm <huid>' removes it. "
+                 "An API without DELETE /clusters/{id} answers 404 too.",
+        ) from exc
     failed = [r for r in results if not r["success"]]
     warning = (
         f"{len(failed)} of {len(results)} members were not removed; they are still billing — "
-        "retry or remove them with 'lium rm'."
+        f"run 'lium clusters rm {found.id[:8]}' again to retry them, or remove one with 'lium rm <huid>'."
     ) if failed else None
     if output_format == "json":
         click.echo(json.dumps({"ok": not failed, "cluster": found.id, "results": results, "error": warning}, indent=2))
@@ -362,8 +379,9 @@ def clusters_rm_command(cluster: str, yes: bool, output_format: str, json_output
             raise SystemExit(EXIT_API_ERROR)
         return
     for r in results:
-        (ui.error if not r["success"] else ui.success)(
-            escape(f"{r['pod'][:8]} {'removed' if r['success'] else 'failed: ' + str(r['error'])}")
-        )
+        # rank + huid, as the members table and `lium rm <huid>` use (an id prefix is not a name `lium rm` accepts)
+        rank = f"rank {r['node_rank']} " if r.get("node_rank") is not None else ""
+        outcome = "removed" if r["success"] else f"failed: {r['error']}"
+        (ui.success if r["success"] else ui.error)(escape(f"{rank}{r.get('huid') or r['pod']} {outcome}"))
     if failed:
         raise CliFailure("cluster_removal_failed", warning, EXIT_API_ERROR)

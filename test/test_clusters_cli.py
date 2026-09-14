@@ -9,7 +9,9 @@ from click.testing import CliRunner
 from lium.cli import interactive
 from lium.cli.cli import cli
 from lium.cli.clusters import command as clusters_command
-from lium.sdk import Cluster, ClusterNotListedError, ClusterOffer, ExecutorInfo, LiumNotFoundError, LiumServerError, PodInfo
+from lium.sdk import (
+    Cluster, ClusterNotListedError, ClusterOffer, ExecutorInfo, LiumNotFoundError, LiumPermissionError, LiumServerError, PodInfo,
+)
 
 FABRIC = "hot:infiniband:0x3:0x7fff:NVIDIA H100 80GB HBM3:8"
 
@@ -89,13 +91,22 @@ class FakeLium:
         return self.wait_result or cluster
 
     def rm_cluster(self, cluster):
+        """The SDK's per-member rows from `DELETE /clusters/{id}`; `rm_error` (an SDK exception) is raised instead."""
         FakeLium.removed.append(cluster.id)
-        return [{"pod": p.id, "success": p.id != "pod-1" or not getattr(self, "fail_one", False), "error": None} for p in cluster.pods]
+        if self.rm_error is not None:
+            raise self.rm_error
+        rows = []
+        for p in cluster.pods:
+            failed = p.id == "pod-1" and getattr(self, "fail_one", False)
+            message = "Pod deletion failed; call again to retry this member, or delete the pod on its own" if failed else "Pod deletion started"
+            rows.append({"pod": p.id, "huid": p.huid, "name": p.name, "node_rank": p.cluster_node_index, "success": not failed,
+                         "message": message, "error": message if failed else None})
+        return rows
 
 
 def _patch(monkeypatch, tmp_path, **overrides):
     FakeLium.up_calls, FakeLium.removed, FakeLium.scheduled, FakeLium.up_result = [], [], [], None
-    FakeLium.wait_calls, FakeLium.wait_result, FakeLium.schedule_fail_on = [], None, None
+    FakeLium.wait_calls, FakeLium.wait_result, FakeLium.schedule_fail_on, FakeLium.rm_error = [], None, None, None
     FakeLium.schedule_error = LiumServerError("Server error: 502")
     for k, v in overrides.items():
         monkeypatch.setattr(FakeLium, k, v)
@@ -409,7 +420,7 @@ def test_clusters_rm_removes_every_member(monkeypatch, tmp_path):
     result = _run("rm", "job", "-y")
 
     assert result.exit_code == 0, result.output
-    assert FakeLium.removed == ["c-1"] and "pod-0" in result.output and "removed" in result.output
+    assert FakeLium.removed == ["c-1"] and "pod-huid-0" in result.output and "removed" in result.output
 
 
 def test_clusters_rm_asks_first(monkeypatch, tmp_path):
@@ -428,7 +439,49 @@ def test_clusters_rm_reports_a_member_that_stayed(monkeypatch, tmp_path):
     assert result.exit_code == 3
     payload = json.loads(result.output)
     assert payload["ok"] is False and [r["success"] for r in payload["results"]] == [True, False]
-    assert "still billing" in payload["error"]
+    assert payload["results"][1]["error"].startswith("Pod deletion failed")
+    assert "still billing" in payload["error"] and "lium clusters rm c-1" in payload["error"]
+
+
+def test_clusters_rm_prints_one_line_per_member_with_rank_and_huid(monkeypatch, tmp_path):
+    """Regression: the old line was an 8-char id prefix, which `lium rm` does not accept although the warning says
+    `lium rm <huid>`. The line names the member as the members table does: rank and huid."""
+    _patch(monkeypatch, tmp_path, fail_one=True)
+
+    result = _run("rm", "c-1", "-y")
+
+    assert result.exit_code == 3
+    flat = _flat(result.output)
+    assert "rank 0 pod-huid-0 removed" in flat and "rank 1 pod-huid-1 failed: Pod deletion failed" in flat
+    assert "pod-0 " not in flat
+
+
+def test_clusters_rm_404_from_the_route_is_exit_5_and_removes_nothing_per_pod(monkeypatch, tmp_path):
+    """The listing showed the cluster, then `DELETE /clusters/{id}` answered 404: it was removed meanwhile, or the
+    server has no such route. Regression: the old client fell through to per-pod deletes. Now: exit 5
+    (`cluster_not_found`), the hint names `lium clusters ps` and `lium rm`, and no per-pod call is made."""
+    _patch(monkeypatch, tmp_path, rm_error=LiumNotFoundError("Resource not found: Cluster not found"))
+
+    result = _run("rm", "c-1", "-y", "--format", "json")
+
+    assert result.exit_code == 5, result.output
+    error = json.loads(result.stderr)["error"]
+    assert error["code"] == "cluster_not_found" and "Cluster not found" in error["message"]
+    assert "Nothing was deleted" in error["message"] and "lium rm <huid>" in error["hint"]
+    assert FakeLium.removed == ["c-1"]  # the one cluster call; FakeLium has no per-pod rm to fall back to
+
+
+def test_clusters_rm_403_is_permission_denied_exit_6(monkeypatch, tmp_path):
+    """A member of another user, or an API key without the manage scope: the server refuses the whole cluster.
+    Regression guarded: the command's `except LiumNotFoundError` must not widen to `LiumError`, or a 403 would come
+    out as exit 5 `cluster_not_found` saying the cluster is gone while it is billing."""
+    _patch(monkeypatch, tmp_path, rm_error=LiumPermissionError("Permission denied: You do not have permission to access this pod"))
+
+    result = _run("rm", "c-1", "-y", "--format", "json")
+
+    assert result.exit_code == 6, result.output
+    error = json.loads(result.stderr)["error"]
+    assert error["code"] == "permission_denied" and "You do not have permission" in error["message"]
 
 
 def test_clusters_output_keeps_api_text_that_looks_like_rich_markup(monkeypatch, tmp_path):
