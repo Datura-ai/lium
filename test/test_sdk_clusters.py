@@ -5,6 +5,7 @@ The API has had cluster endpoints since DAH-2620/DAH-2664 (`GET /executors/infin
 pod); the SDK could not reach any of it, so a multi-node job could only be started from the web UI.
 """
 
+import itertools
 import time
 from types import SimpleNamespace
 
@@ -71,12 +72,14 @@ class _Client(Lium):
         return SimpleNamespace(json=lambda: answer)
 
     def ps(self):
+        """One listing per call from the sequence (the last one repeats); an Exception in the sequence is raised."""
         self.calls.append(("ps",))
         if not self._ps_sequence:
             return []
-        if len(self._ps_sequence) > 1:
-            return self._ps_sequence.pop(0)
-        return self._ps_sequence[0]
+        answer = self._ps_sequence.pop(0) if len(self._ps_sequence) > 1 else self._ps_sequence[0]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
     def _ensure_ssh_keys_registered(self, public_keys, name=None):
         self.calls.append(("ssh-keys", tuple(public_keys)))
@@ -319,6 +322,83 @@ def test_up_cluster_confirmed_but_not_listed_is_not_a_nothing_happened_error(mon
     assert sum(1 for c in client.calls if c[0] == "POST") == 1
 
 
+def test_up_cluster_confirmed_but_listing_fails_is_not_a_retry_error(monkeypatch):
+    """The API confirmed the rent and named the pods, then every listing failed. The old code let the listing's
+    exception out as a plain server error, whose CLI hint is 'Retry': a retry rents a second cluster. The nodes
+    are rented, so this is the confirmed-but-not-listed case."""
+    client = _Client(
+        routes={("POST", "/executors/cluster/rent"): {"success": True, "pod_ids": ["pod-0", "pod-1"]}},
+        ps_sequence=[[], LiumServerError("Server error: 503")],   # the pre-rent snapshot works; every listing after fails
+    )
+
+    with pytest.raises(ClusterNotListedError, match="listing failed \\(Server error: 503\\)") as info:
+        client.up_cluster(["exec-0", "exec-1"], name="job", template_id="tpl-x")
+
+    assert info.value.confirmed is True and info.value.pod_ids == ["pod-0", "pod-1"] and info.value.listed == []
+    assert "rented and billing" in str(info.value)
+    assert sum(1 for c in client.calls if c[0] == "POST") == 1
+    assert sum(1 for c in client.calls if c[0] == "ps") == 4   # the snapshot, then three failed attempts
+
+
+def test_up_cluster_aborts_before_the_order_when_the_baseline_listing_fails(monkeypatch):
+    """The pre-rent snapshot is what keeps the by-name recovery from handing back an older cluster of the same
+    name. The old code treated a failed snapshot as 'no clusters', so a timeout after it could return the older
+    cluster. Nothing is rented before the order, so the listing error is let out and the order is not sent."""
+    client = _Client(
+        routes={("POST", "/executors/cluster/rent"): {"success": True, "pod_ids": ["pod-0", "pod-1"]}},
+        ps_sequence=[LiumServerError("Server error: 503")],
+    )
+
+    with pytest.raises(LiumServerError, match="503"):
+        client.up_cluster(["exec-0", "exec-1"], name="job", template_id="tpl-x")
+
+    assert not any(c[0] == "POST" for c in client.calls)
+
+
+def test_up_cluster_by_name_short_of_the_requested_count_is_an_uncertain_rent(monkeypatch):
+    """The order got no answer and the by-name lookup finds a new cluster of that name with one of the two
+    members. The old code returned it: a --ttl skipped the second node and a wait did not wait for it. The
+    rent may well have gone through in full, so the error says the nodes may be rented and never 'Retry'."""
+    client = _Client(
+        routes={("POST", "/executors/cluster/rent"): LiumServerError("Server error: 504")},
+        ps_sequence=[[], _pods([_pod_payload(0)])],
+    )
+
+    with pytest.raises(ClusterNotListedError, match="shows 1 new pod\\(s\\) named 'job' where 2 members were requested") as info:
+        client.up_cluster(["exec-0", "exec-1"], name="job", template_id="tpl-x")
+
+    assert info.value.confirmed is False and info.value.pod_ids == [] and info.value.listed == ["pod-0"]
+    assert "may be rented" in str(info.value) and "did not produce" not in str(info.value)
+    assert sum(1 for c in client.calls if c[0] == "POST") == 1
+
+
+def test_up_cluster_by_name_waits_for_the_full_count(monkeypatch):
+    """Same start, but the second member is listed on a later attempt: the whole cluster comes back."""
+    client = _Client(
+        routes={("POST", "/executors/cluster/rent"): LiumServerError("Server error: 504")},
+        ps_sequence=[[], _pods([_pod_payload(0)]), _pods([_pod_payload(0), _pod_payload(1)])],
+    )
+
+    cluster = client.up_cluster(["exec-0", "exec-1"], name="job", template_id="tpl-x")
+
+    assert [p.id for p in cluster.pods] == ["pod-0", "pod-1"]
+
+
+def test_up_cluster_no_answer_and_no_listing_is_an_uncertain_rent(monkeypatch):
+    """The order got no answer and no listing answered either: nothing says whether the nodes are rented, so the
+    error must not read like 'nothing appeared' (which a caller answers with a second rental)."""
+    client = _Client(
+        routes={("POST", "/executors/cluster/rent"): LiumServerError("Server error: 504")},
+        ps_sequence=[[], LiumServerError("Server error: 503")],
+    )
+
+    with pytest.raises(ClusterNotListedError, match="listing failed") as info:
+        client.up_cluster(["exec-0", "exec-1"], name="job", template_id="tpl-x")
+
+    assert info.value.confirmed is False and info.value.listed == []
+    assert "may be rented" in str(info.value)
+
+
 def test_up_cluster_refusal_is_reported_without_polling(monkeypatch):
     """A 200 with success=false is a definite refusal: nothing was rented, so no listing is consulted."""
     client = _Client(routes={("POST", "/executors/cluster/rent"): {"success": False, "message": "mixed fabrics"}})
@@ -381,6 +461,45 @@ def test_wait_cluster_ready_stops_when_a_member_vanishes(monkeypatch):
         client.wait_cluster_ready(Cluster(id="c-1", pods=both), timeout=900)
 
 
+def test_wait_cluster_ready_stops_when_a_member_is_missing_on_the_first_poll(monkeypatch):
+    """The members waited for are the ones the caller gave. The old code only counted members after a poll had
+    shown the full set, so a member gone on the first poll was waited for until the deadline (15 minutes by
+    default) while the rest billed. It is reported on that first poll, by id."""
+    from lium.sdk import PodStartError
+
+    both = _pods([_pod_payload(0), _pod_payload(1, status="PENDING")])
+    one = _pods([_pod_payload(0)])
+    client = _Client(ps_sequence=[one])
+    clock = itertools.count(0.0, 500.0)   # advances, so the old code fails with TimeoutError instead of hanging
+    monkeypatch.setattr(time, "time", lambda: next(clock))
+
+    with pytest.raises(PodStartError, match="1 member\\(s\\) vanished from the pod list \\(pod-1\\)"):
+        client.wait_cluster_ready(Cluster(id="c-1", pods=both), timeout=900)
+
+    assert sum(1 for c in client.calls if c[0] == "ps") == 1
+
+
+def test_wait_cluster_ready_outlives_a_failing_listing_until_the_deadline(monkeypatch):
+    """A listing that fails is not a member that failed. The old code let the listing's error out of the wait,
+    and the CLI's generic hint for it is 'Retry' while the cluster bills. The poll goes on; if the listing never
+    answers, the deadline reports it as a timeout that names the listing failure."""
+    pending = _pods([_pod_payload(0), _pod_payload(1, status="PENDING")])
+    ready = _pods([_pod_payload(0), _pod_payload(1)])
+    client = _Client(ps_sequence=[LiumServerError("Server error: 503"), ready])
+    monkeypatch.setattr(time, "time", lambda: 0.0)
+
+    cluster = client.wait_cluster_ready(Cluster(id="c-1", pods=pending), timeout=900)
+
+    assert cluster.status == "RUNNING" and sum(1 for c in client.calls if c[0] == "ps") == 2
+
+    client = _Client(ps_sequence=[LiumServerError("Server error: 503")])
+    clock = iter([0.0, 0.0, 1000.0])
+    monkeypatch.setattr(time, "time", lambda: next(clock))
+
+    with pytest.raises(TimeoutError, match="the pod listing failed \\(Server error: 503\\)"):
+        client.wait_cluster_ready(Cluster(id="c-1", pods=pending), timeout=10)
+
+
 # --- my_clusters / cluster / rm_cluster -----------------------------------------------------------
 
 def test_my_clusters_groups_pods_by_cluster_id():
@@ -414,3 +533,29 @@ def test_rm_cluster_removes_every_member_and_keeps_going_after_a_failure():
     assert client.removed == ["pod-0", "pod-1", "pod-2"]
     assert [(r["pod"], r["success"]) for r in results] == [("pod-0", True), ("pod-1", False), ("pod-2", True)]
     assert results[1]["error"] == "boom"
+
+
+def test_rm_cluster_removes_a_member_that_appeared_after_the_snapshot():
+    """The caller's Cluster was read before the third member was listed. The old code removed only the snapshot,
+    so that member billed on. The members come from a fresh listing by cluster id, read again after the deletes;
+    a member that is already gone is not deleted twice."""
+    snapshot = _pods([_pod_payload(0), _pod_payload(1)])
+    late = _pods([_pod_payload(0), _pod_payload(1), _pod_payload(2)])
+    # after the deletes: two members still listed as stopping, and a fourth that appeared meanwhile
+    after = _pods([_pod_payload(1, status="STOPPED"), _pod_payload(2, status="STOPPED"), _pod_payload(3)])
+    client = _Client(ps_sequence=[late, after])
+
+    results = client.rm_cluster(Cluster(id="c-1", pods=snapshot))
+
+    assert client.removed == ["pod-0", "pod-1", "pod-2", "pod-3"]
+    assert [(r["pod"], r["success"]) for r in results] == [("pod-0", True), ("pod-1", True), ("pod-2", True), ("pod-3", True)]
+    assert sum(1 for c in client.calls if c[0] == "ps") == 2
+
+
+def test_rm_cluster_still_removes_the_known_members_when_the_listing_fails():
+    snapshot = _pods([_pod_payload(0), _pod_payload(1)])
+    client = _Client(ps_sequence=[LiumServerError("Server error: 503")])
+
+    results = client.rm_cluster(Cluster(id="c-1", pods=snapshot))
+
+    assert client.removed == ["pod-0", "pod-1"] and all(r["success"] for r in results)

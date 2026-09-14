@@ -131,8 +131,10 @@ print(cluster.master_addr)                                   # 10.42.0.1 — MAS
 for pod in cluster.pods:
     lium.exec(pod, command=f"torchrun {cluster.torchrun_args(pod)} --nproc_per_node 8 train.py")
 open("hostfile", "w").write(cluster.hostfile())              # mpirun / DeepSpeed
-lium.rm_cluster(cluster)                                     # every member
+lium.rm_cluster(cluster)                                     # every member the pod list shows under the cluster id
 ```
+
+`up_cluster()` raises `ClusterNotListedError` when the nodes are, or may be, rented but the pod list did not show a whole cluster (`.confirmed` says whether the API confirmed the order, `.pod_ids` and `.listed` what it named and what was listed): do not rent again, list the pods to find the cluster. `wait_cluster_ready()` raises `PodStartError` at once when a member fails or is missing from the pod list.
 
 Full API reference: https://docs.lium.io/developers/sdk/reference
 

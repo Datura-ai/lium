@@ -19,7 +19,7 @@ from lium.cli.utils import (
     handle_errors,
     resolve_output_format,
 )
-from lium.sdk import Cluster, ClusterNotListedError, ClusterOffer, Lium, LiumNotFoundError, PodStartError
+from lium.sdk import Cluster, ClusterNotListedError, ClusterOffer, Lium, LiumError, LiumNotFoundError, PodStartError
 
 from .display import (
     build_clusters_table,
@@ -50,6 +50,12 @@ RENTED_HINT = (
 RENTED_NOT_LISTED_HINT = (
     "Do not re-run 'lium clusters up': the nodes are rented and billing. "
     "'lium clusters ps' shows the cluster once every member is listed; 'lium clusters rm <id>' removes it."
+)
+# The same, when the rent order got no answer and the listing could not settle whether it went
+# through (too few members named like this, or no listing at all): a re-run may rent a second cluster.
+RENT_UNCERTAIN_HINT = (
+    "Do not re-run 'lium clusters up' yet: the nodes may be rented and billing. "
+    "'lium clusters ps' shows whether the cluster exists; 'lium clusters rm <id>' removes it."
 )
 
 # -- last listing, so `clusters up 1` can name a fabric by row ---------------------------------
@@ -196,8 +202,10 @@ def clusters_up_command(
     try:
         cluster = ui.load(f"Renting {node_count}-node cluster", rent) if output_format == "table" else rent()
     except ClusterNotListedError as exc:
-        # the money is spent although no cluster came back: the generic hint says "Retry"
-        raise CliFailure("cluster_rented_not_listed", str(exc), EXIT_API_ERROR, hint=RENTED_NOT_LISTED_HINT) from exc
+        # the money is, or may be, spent although no cluster came back: the generic hint says "Retry"
+        if exc.confirmed:
+            raise CliFailure("cluster_rented_not_listed", str(exc), EXIT_API_ERROR, hint=RENTED_NOT_LISTED_HINT) from exc
+        raise CliFailure("cluster_rent_uncertain", str(exc), EXIT_API_ERROR, hint=RENT_UNCERTAIN_HINT) from exc
 
     # The TTL is scheduled before any waiting: a --wait timeout must not leave N
     # nodes billing with nothing scheduled. Unlike `lium up --ttl` (lium#247), a member whose
@@ -241,7 +249,9 @@ def clusters_up_command(
 
         try:
             cluster = ui.load(f"Waiting for {node_count} members", ready) if output_format == "table" else ready()
-        except (TimeoutError, PodStartError) as exc:
+        except (TimeoutError, PodStartError, LiumError) as exc:
+            # LiumError too: the cluster is rented whatever the wait ran into, and the generic
+            # hint for an API error says "Retry"
             billing = (
                 f"every member terminates at {scheduled.strftime('%Y-%m-%d %H:%M UTC')}" if scheduled
                 else "the members are rented and billing"

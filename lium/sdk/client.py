@@ -1608,10 +1608,13 @@ class Lium:
 
         Raises:
             ValueError: fewer than two nodes, or no SSH key.
-            ClusterNotListedError: the API confirmed the order and named the member pods, but the
-                listing did not show every one of them — the nodes are rented; do not rent again.
-            LiumError: the API refused the group (mixed fabrics, split hosts, wrong image) or the
-                rental timed out and no member appeared.
+            ClusterNotListedError: the nodes are, or may be, rented, but the listing did not show a
+                whole cluster: the API confirmed the order and named the member pods but the listing
+                did not show every one of them (or failed); or the order got no answer and the
+                by-name lookup found fewer members than requested (or could not list). Do not rent again.
+            LiumError: the API refused the group (mixed fabrics, split hosts, wrong image); the pod
+                listing before the order failed (nothing was rented); or the order got no answer and
+                no member appeared.
         """
         ids = [str(i) for i in executor_ids]
         if len(ids) < 2:
@@ -1636,7 +1639,10 @@ class Lium:
         # Not idempotent and not retried: a timeout may have rented the group anyway, so look
         # for it by name before reporting failure rather than sending the order twice. The
         # by-name lookup only accepts a cluster that did not exist before this call: an older
-        # cluster reusing the pod name must not be handed back (and then, say, --ttl'd).
+        # cluster reusing the pod name must not be handed back (and then, say, --ttl'd). That is
+        # why the snapshot is taken before the order and a failure to take it aborts the order:
+        # nothing is rented yet, so failing here costs nothing, while an empty snapshot would let
+        # the lookup hand back the older cluster.
         known_clusters = self._cluster_ids_now()
         try:
             response = self._request("POST", "/executors/cluster/rent", json=payload).json()
@@ -1647,17 +1653,40 @@ class Lium:
             raise LiumError(f"Cluster rental refused: {response.get('message') or response}")
         pod_ids: List[str] = [str(p) for p in (response or {}).get("pod_ids") or []]
 
-        cluster, listed = self._find_cluster(pod_ids=pod_ids, name=name, attempts=3, interval=3, exclude=known_clusters)
+        cluster, listed, listing_error = self._find_cluster(
+            pod_ids=pod_ids, name=name, size=len(ids), attempts=3, interval=3, exclude=known_clusters,
+        )
         if cluster is None:
             if pod_ids:
                 # The API confirmed the order and named the members: the nodes are rented and
-                # billing whatever the listing shows, so this is not a "nothing happened" error
-                # and must never be answered with a second `up_cluster`.
+                # billing whatever the listing shows (or whether it fails), so this is not a
+                # "nothing happened" error and must never be answered with a second `up_cluster`.
+                shown = (
+                    f"failed ({listing_error})" if listing_error is not None
+                    else f"shows {len(listed)} of {len(pod_ids)} members"
+                )
                 raise ClusterNotListedError(
                     f"Cluster rental of {len(ids)} nodes is confirmed (pods {', '.join(pod_ids)}) but the pod "
-                    f"listing shows {len(listed)} of {len(pod_ids)} members; the nodes are rented and billing — "
-                    "do not rent again, list the pods to find the cluster",
-                    pod_ids=pod_ids, listed=listed,
+                    f"listing {shown}; the nodes are rented and billing: do not rent again, list the pods to "
+                    "find the cluster",
+                    pod_ids=pod_ids, listed=listed, confirmed=True,
+                )
+            if listing_error is not None:
+                # No answer to the order and no listing either: the rent may have gone through.
+                raise ClusterNotListedError(
+                    f"Cluster rental of {len(ids)} nodes got no answer and the pod listing failed ({listing_error}); "
+                    "the nodes may be rented: do not rent again before the pod list shows whether they are",
+                    listed=[], confirmed=False,
+                )
+            if listed:
+                # No answer to the order, and a new cluster of that name is listed short of the
+                # requested count: the rent may have gone through in full, with members still to
+                # appear, so this is not a "nothing happened" error either.
+                raise ClusterNotListedError(
+                    f"Cluster rental of {len(ids)} nodes got no answer and the pod listing shows {len(listed)} new "
+                    f"pod(s) named {name!r} where {len(ids)} members were requested; the nodes may be rented: do not "
+                    "rent again, list the pods to find the cluster",
+                    listed=listed, confirmed=False,
                 )
             raise LiumError(f"Cluster rental of {len(ids)} nodes did not produce pods named {name!r}")
         if wait:
@@ -1665,39 +1694,54 @@ class Lium:
         return cluster
 
     def _cluster_ids_now(self) -> frozenset:
-        """Cluster ids present in ``ps`` right now; empty when the listing fails (best effort)."""
-        try:
-            return frozenset(p.cluster_id for p in self.ps() if p.cluster_id)
-        except Exception:  # noqa: BLE001 - a listing failure must not fail the rental
-            return frozenset()
+        """Cluster ids present in ``ps`` right now.
+
+        A listing failure propagates: the caller takes this snapshot before an order and must not
+        place the order without it (see :meth:`up_cluster`).
+        """
+        return frozenset(p.cluster_id for p in self.ps() if p.cluster_id)
 
     def _find_cluster(
-        self, *, pod_ids: List[str], name: str, attempts: int, interval: float, exclude: frozenset = frozenset()
-    ) -> Tuple[Optional[Cluster], List[str]]:
-        """The cluster the rental produced, and the ids of the named members the last listing showed.
+        self, *, pod_ids: List[str], name: str, size: int, attempts: int, interval: float,
+        exclude: frozenset = frozenset(),
+    ) -> Tuple[Optional[Cluster], List[str], Optional[Exception]]:
+        """The cluster the rental produced, the ids of its members the last listing showed, and the
+        error of the last listing when it failed.
 
-        By member pod ids when the API named them — and then only once EVERY named id is listed,
+        By member pod ids when the API named them, and then only once EVERY named id is listed,
         so a cluster is never handed back with a member missing (a `--ttl` would skip it and a
-        `wait` would not wait for it) — else the cluster of that ``name`` that is not in
-        ``exclude`` (the ones that existed before).
+        `wait` would not wait for it). Else the cluster of that ``name`` that is not in ``exclude``
+        (the ones that existed before), and then only once it has ``size`` members, for the same
+        reason. A listing that fails counts as an attempt; the error of the last one is returned,
+        so the caller can tell "the listing showed too few" from "the listing did not answer".
         """
         listed: List[str] = []
+        listing_error: Optional[Exception] = None
         for attempt in range(attempts):
-            pods = self.ps()
-            if pod_ids:
-                members = [p for p in pods if p.id in pod_ids]
-                listed = [p.id for p in members]
-                if len(members) != len(pod_ids):
-                    members = []
-            else:
-                members = [p for p in pods if p.name == name and p.cluster_id and p.cluster_id not in exclude]
-            cluster_ids = {p.cluster_id for p in members if p.cluster_id}
-            if members and len(cluster_ids) == 1:
-                cid = cluster_ids.pop()
-                return Cluster(id=cid, pods=[p for p in pods if p.cluster_id == cid]), listed
+            try:
+                pods = self.ps()
+            except (requests.RequestException, LiumError) as exc:
+                listing_error = exc
+                pods = None
+            if pods is not None:
+                listing_error = None
+                if pod_ids:
+                    members = [p for p in pods if p.id in pod_ids]
+                    listed = [p.id for p in members]
+                    if len(members) != len(pod_ids):
+                        members = []
+                else:
+                    members = [p for p in pods if p.name == name and p.cluster_id and p.cluster_id not in exclude]
+                    listed = [p.id for p in members]
+                cluster_ids = {p.cluster_id for p in members if p.cluster_id}
+                if members and len(cluster_ids) == 1:
+                    cid = cluster_ids.pop()
+                    found = Cluster(id=cid, pods=[p for p in pods if p.cluster_id == cid])
+                    if pod_ids or found.size >= size:
+                        return found, listed, None
             if attempt < attempts - 1:
                 time.sleep(interval)
-        return None, listed
+        return None, listed, listing_error
 
     def my_clusters(self) -> List[Cluster]:
         """The caller's cluster rentals, one :class:`Cluster` per ``cluster_id`` found in :meth:`ps`."""
@@ -1727,33 +1771,46 @@ class Lium:
     def wait_cluster_ready(self, cluster: Cluster, *, timeout: int = 900, poll_interval: int = 10) -> Cluster:
         """Poll until every member of ``cluster`` is RUNNING with SSH metadata.
 
+        The members waited for are the pods of ``cluster`` as given: one of them missing from any
+        poll, the first included, is a member that vanished, not one that is slow.
+
         Raises:
-            PodStartError: a member reached a terminal status (``FAILED``, ``STOPPED``, …) or vanished from the
-                pod list — reported at once, not at the deadline, since the other members keep billing.
+            PodStartError: a member reached a terminal status (``FAILED``, ``STOPPED``, …) or is missing from
+                the pod list. Reported at once, not at the deadline, since the other members keep billing.
             TimeoutError: some member was still not ready after ``timeout`` seconds (all members keep billing).
         """
         deadline = time.time() + timeout
-        seen_members = False
+        expected = {p.id for p in cluster.pods}
         while True:
-            pods = [p for p in self.ps() if p.cluster_id == cluster.id]
+            try:
+                pods = [p for p in self.ps() if p.cluster_id == cluster.id]
+            except (requests.RequestException, LiumServerError, LiumRateLimitError) as exc:
+                # A listing that fails is not a member that failed: keep polling until the
+                # deadline, then say so (the members keep billing either way).
+                if time.time() >= deadline:
+                    raise TimeoutError(
+                        f"Cluster {cluster.id} not ready after {timeout}s: the pod listing failed ({exc})"
+                    ) from exc
+                time.sleep(poll_interval)
+                continue
             fresh = Cluster(id=cluster.id, pods=pods)
-            if pods and len(pods) >= cluster.size and all(p.status.upper() == "RUNNING" and p.ssh_cmd for p in pods):
+            missing = expected - {p.id for p in pods}
+            if pods and not missing and all(p.status.upper() == "RUNNING" and p.ssh_cmd for p in pods):
                 return fresh
             dead = [p for p in pods if (p.status or "").upper() in self.TERMINAL_POD_STATUSES]
             if dead:
                 p = dead[0]
                 raise PodStartError(
                     f"Cluster {cluster.id}: member {p.name or p.huid} is {p.status.upper()}; the other members keep "
-                    f"billing — remove the cluster or the member",
+                    f"billing: remove the cluster or the member",
                     pod_id=p.id, pod=p, status=p.status.upper(), history=[p.status.upper()],
                 )
-            if seen_members and len(pods) < cluster.size:
+            if missing:
                 raise PodStartError(
-                    f"Cluster {cluster.id}: {cluster.size - len(pods)} member(s) vanished from the pod list; the rest "
-                    f"keep billing — remove the cluster",
+                    f"Cluster {cluster.id}: {len(missing)} member(s) vanished from the pod list "
+                    f"({', '.join(sorted(missing))}); the rest keep billing: remove the cluster",
                     pod_id=cluster.id, pod=None, status=None, history=[],
                 )
-            seen_members = seen_members or len(pods) >= cluster.size
             if time.time() >= deadline:
                 pending = [f"{p.name or p.huid}={p.status}" for p in pods if p.status.upper() != "RUNNING" or not p.ssh_cmd]
                 raise TimeoutError(
@@ -1765,15 +1822,30 @@ class Lium:
         """Remove every member pod of a cluster. Returns one ``{"pod", "success", "error"}`` per member.
 
         The API has no single "terminate cluster" order; each member is deleted in turn and a
-        failure on one does not stop the others, so nothing is left billing by accident.
+        failure on one does not stop the others, so nothing is left billing by accident. The
+        members are the pods of ``cluster`` plus every pod a fresh listing shows under its id, and
+        the listing is read once more after the deletes: a member that appeared after the caller's
+        snapshot is removed too, instead of billing on. When the listing fails, the members the
+        caller gave are still removed.
         """
         results: List[Dict[str, Any]] = []
-        for pod in cluster.pods:
+        handled: set = set()
+        for pass_no in range(2):
+            members: Dict[str, PodInfo] = {p.id: p for p in cluster.pods} if pass_no == 0 else {}
             try:
-                self.rm(pod)
-                results.append({"pod": pod.id, "success": True, "error": None})
-            except Exception as exc:  # keep going: the other members must still be released
-                results.append({"pod": pod.id, "success": False, "error": str(exc)})
+                members.update({p.id: p for p in self.ps() if p.cluster_id == cluster.id})
+            except (requests.RequestException, LiumError):
+                pass  # the members already known are removed regardless
+            todo = [p for pid, p in members.items() if pid not in handled]
+            if not todo:
+                break
+            for pod in todo:
+                handled.add(pod.id)
+                try:
+                    self.rm(pod)
+                    results.append({"pod": pod.id, "success": True, "error": None})
+                except Exception as exc:  # keep going: the other members must still be released
+                    results.append({"pod": pod.id, "success": False, "error": str(exc)})
         return results
 
     def get_default_images(self, gpu_model: Optional[str], driver_version: Optional[str]) -> list[dict]:

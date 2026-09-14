@@ -274,6 +274,39 @@ def test_clusters_up_confirmed_but_unlisted_does_not_say_retry(monkeypatch, tmp_
     assert payload["ok"] is False and payload["error"]["code"] == "cluster_rented_not_listed"
 
 
+def test_clusters_up_uncertain_rent_does_not_say_retry(monkeypatch, tmp_path):
+    """The order got no answer and the listing could not settle whether it went through (one of two members named
+    like this). Before, the SDK handed the short cluster back; now it raises with confirmed=False, and the CLI must
+    say the nodes MAY be rented, with its own code, and never 'Retry'."""
+    error = ClusterNotListedError("Cluster rental of 2 nodes got no answer and the pod listing shows 1 new pod(s) named 'job' "
+                                  "where 2 members were requested", listed=["pod-0"], confirmed=False)
+    _patch(monkeypatch, tmp_path, up_result=error)
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y")
+
+    flat = _flat(result.output)
+    assert result.exit_code == 3 and "shows 1 new pod(s) named 'job'" in flat
+    assert "may be rented" in flat and "Do not re-run 'lium clusters up'" in flat and "Retry" not in flat
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--format", "json")
+
+    assert result.exit_code == 3
+    assert json.loads(result.output)["error"]["code"] == "cluster_rent_uncertain"
+
+
+def test_clusters_up_wait_listing_failure_does_not_say_retry(monkeypatch, tmp_path):
+    """The cluster is rented when the wait runs into an API error (a listing that kept failing past the deadline
+    comes out as TimeoutError; any other LiumError is caught the same way). The old code let a LiumError through
+    to the generic handler, whose hint is 'Retry'."""
+    _patch(monkeypatch, tmp_path, wait_result=LiumServerError("Server error: 503"))
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y")
+
+    flat = _flat(result.output)
+    assert result.exit_code == 3 and "503" in flat and "rented and billing" in flat
+    assert "Do not re-run 'lium clusters up'" in flat and "lium clusters rm c-1" in flat and "Retry" not in flat
+
+
 def test_clusters_up_schedules_the_ttl_before_waiting(monkeypatch, tmp_path):
     """A --wait timeout must not leave N nodes billing with nothing scheduled."""
     _patch(monkeypatch, tmp_path, wait_result=TimeoutError("Cluster c-1 not ready after 900s: job=PENDING"))
