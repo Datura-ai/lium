@@ -20,6 +20,9 @@ from lium.cli.utils import (
 from . import validation, parsing, display
 from .actions import RemovePodsAction, ScheduleRemovalAction
 
+# The positional spelling of --all: `lium rm all`.
+ALL_TARGETS = "all"
+
 
 @dataclass(frozen=True)
 class RemovalPlan:
@@ -162,11 +165,12 @@ def rm_command(
 
     \b
     TARGETS: comma-separated pod huids, names or ids (eager-wolf-aa,my-pod).
-    A row number from your last 'lium ps' in this shell (1, 2) stands for the
-    pod that listing showed there; it is accepted only while that pod is still
-    listed and for 10 minutes after the listing. The pod list is account-wide
-    and changes as pods come and go. Use --name-only or LIUM_NO_POD_INDEX=1 to
-    refuse numbers altogether.
+    The word 'all' means every pod, the same as --all. A row number from your
+    last 'lium ps' in this shell (1, 2) stands for the pod that listing showed
+    there; it is accepted only while that pod is still listed and for 10
+    minutes after the listing. The pod list is account-wide and changes as
+    pods come and go. Use --name-only or LIUM_NO_POD_INDEX=1 to refuse numbers
+    altogether.
 
     \b
     Removal is irreversible. Exits non-zero when nothing matched TARGETS, so a
@@ -178,6 +182,11 @@ def rm_command(
     lium = Lium()
     # --format json: stdout is one JSON document, so the workspace context line goes to stderr
     show_workspace(lium, acting=True, on_stderr=output_format == "json")
+    if targets is not None and targets.strip().lower() == ALL_TARGETS:
+        # `lium rm all` names every pod exactly as `--all` does, so it takes the
+        # same path: the whole-account prompt, or `confirmation_required` when
+        # nobody can answer it. Resolving the word as a target skipped both.
+        remove_all, targets = True, None
     plan = build_removal_plan(
         lium, targets, remove_all, in_duration, at_time,
         allow_index=False if name_only else None, quiet=output_format == "json",
