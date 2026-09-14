@@ -86,6 +86,24 @@ def test_no_match_on_the_spec_path_is_a_selection_failure_not_an_api_error():
     assert "no_executor_matches_spec" in result.error
 
 
+def test_the_servers_hint_and_request_id_ride_along_with_a_spec_refusal():
+    """A 409 with an error envelope: the hint and the id reach ``data`` (DAH-3057), so the
+    node_selection_failed failure prints them like every other API refusal."""
+    lium = _SpecLium()
+
+    def no_match(**kwargs):
+        raise LiumError("API error 409: no_executor_matches_spec: gpu_count=8", code="no_executor_matches_spec",
+                        hint="Lower gpu_count or drop the country filter.", request_id="req-409-0001")
+
+    lium.rent = no_match
+
+    result = ResolveExecutorAction().execute({"lium": lium, "gpu": "RTX4090", "count": 8})
+
+    assert not result.ok
+    assert result.data == {"hint": "Lower gpu_count or drop the country filter.",
+                           "request_id": "req-409-0001"}
+
+
 def test_other_api_errors_on_the_spec_path_keep_their_own_code():
     lium = _SpecLium()
 
@@ -175,6 +193,23 @@ def test_up_names_the_servers_pick_then_rents_by_spec(monkeypatch):
     assert "Selected thrifty-node-bb (1×RTX4090, Germany) at $0.30/h — cheapest of 4 matching node(s)" in output
     assert "was taken meanwhile" not in output
     assert output.index("Selected") < output.index("ready")
+
+
+def test_up_prints_the_servers_hint_under_a_spec_refusal(monkeypatch):
+    """The 409's hint and request_id reach the terminal (DAH-3057) even though the failure is
+    node_selection_failed, not lium_error."""
+    class _Refusing(_SpecLium):
+        def rent(self, **kwargs):
+            raise LiumError("API error 409: no_executor_matches_spec: gpu_count=1", code="no_executor_matches_spec",
+                            hint="Drop the country filter.", request_id="req-409-0001")
+
+    result = _run_up(monkeypatch, _Refusing)
+
+    assert result.exit_code == 1, result.output
+    output = " ".join(result.output.split())
+    assert "no_executor_matches_spec" in output
+    assert "Drop the country filter." in output
+    assert "request_id: req-409-0001" in output
 
 
 def test_up_says_when_the_confirmed_node_was_taken_and_another_rented(monkeypatch):

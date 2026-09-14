@@ -9,6 +9,7 @@ from lium.sdk import ExecutorInfo, Template, PodInfo, Lium, LiumError
 from lium.sdk.client import RENT_BY_SPEC
 from lium.cli.utils import (
     MIN_DOWNLOAD_MBPS,
+    _api_error_data,
     calculate_pareto_frontier,
     resolve_executor_indices,
     get_pytorch_template_id,
@@ -69,8 +70,11 @@ class ResolveExecutorAction:
                 if type(exc) is not LiumError:
                     raise  # auth, permission, not-found, rate-limit and server errors keep their own codes
                 # "No node matches …" (client-side) or the server's 409: the same outcome as the
-                # Pareto path's empty list below — node_selection_failed, not an API error.
-                return ActionResult(ok=False, data={}, error=str(exc))
+                # Pareto path's empty list below — node_selection_failed, not an API error. The
+                # server's hint and request_id ride along in data (DAH-3057); the command lifts
+                # the hint out into the failure's own.
+                data = {**(_api_error_data(exc) or {}), **({"hint": exc.hint} if exc.hint else {})}
+                return ActionResult(ok=False, data=data, error=str(exc))
             return ActionResult(
                 ok=True,
                 data={

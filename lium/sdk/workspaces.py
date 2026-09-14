@@ -90,8 +90,10 @@ class WorkspacesClient:
                 "POST", "/users/login", headers=self._plain_headers(), json={"email": email, "password": password}
             )
         except LiumAuthError as e:
-            # _request maps every 401 to "Invalid API key"; here no key was sent
-            raise LiumSessionError("Login refused: check the e-mail and password") from e
+            # _request maps every 401 to "Invalid API key"; here no key was sent. The server's request_id survives
+            # the rename (DAH-3057) so the refusal can be quoted to support; its code and hint describe an API key
+            # and stay behind — the CLI's `session_required` code and login hint are the right ones here
+            raise LiumSessionError("Login refused: check the e-mail and password", request_id=e.request_id) from e
         token = response.json().get("token")
         if not token:
             raise LiumSessionError("Login did not return a session token")
@@ -117,7 +119,10 @@ class WorkspacesClient:
         except LiumAuthError as e:
             if str(e) == NEEDS_SESSION:
                 raise
-            raise LiumSessionError("The session token was refused (expired?); run `lium workspaces login` again") from e
+            # the server's request_id survives the rename (DAH-3057); its API-key code and hint do not (see login)
+            raise LiumSessionError(
+                "The session token was refused (expired?); run `lium workspaces login` again", request_id=e.request_id
+            ) from e
 
     def _read(self, endpoint: str) -> requests.Response:
         # a session lists every workspace of the account; a key lists the one it acts in

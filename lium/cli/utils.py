@@ -415,11 +415,14 @@ def _emit_json_error(code: str, message: str, exit_code: int = EXIT_GENERAL_ERRO
     raise SystemExit(exit_code)
 
 
-def _render_human_error(message: str, hint: str) -> None:
-    """The text rendering: the error, then the next step underneath it."""
+def _render_human_error(message: str, hint: str, request_id: str | None = None) -> None:
+    """The text rendering: the error, then the next step underneath it, then the id to
+    quote to support when the API sent one (DAH-3057)."""
     console.error(escape(message))
     if hint and hint.lower() not in message.lower():
         console.dim(escape(hint))
+    if request_id:
+        console.dim(escape(f"request_id: {request_id}"))
 
 
 def resolve_output_format(output_format: Optional[str], json_output: bool) -> str:
@@ -486,9 +489,18 @@ def sdk_error_failure(error: LiumError, data: dict | None = None) -> CliFailure:
 
     For a command that caught the error to finish its report first (``whoami``) and must still fail
     with the same code, exit status and hint as every other command — plus the report as ``data``.
+    Like ``handle_errors``, it prefers the API's own code, hint and request_id when the
+    server sent them (DAH-3057).
     """
     code, exit_code = _classify_sdk_error(error)
-    return CliFailure(code, str(error), exit_code, data=data)
+    merged = {**(_api_error_data(error) or {}), **(data or {})} or None
+    return CliFailure(error.code or code, str(error), exit_code, data=merged, hint=error.hint)
+
+
+def _api_error_data(e: LiumError) -> dict | None:
+    """The server's request_id, for the JSON envelope's ``data`` (the hint has its own
+    field in the envelope; see :func:`error_envelope`)."""
+    return {"request_id": e.request_id} if e.request_id else None
 
 
 def handle_errors(func):
@@ -513,7 +525,7 @@ def handle_errors(func):
         json_output = _wants_json(kwargs)
 
         def fail(code: str, message: str, exit_code: int, data: dict | None = None,
-                 hint: str | None = None, prefix: str = "") -> None:
+                 hint: str | None = None, request_id: str | None = None, prefix: str = "") -> None:
             # ``prefix`` ("Error: ") is for the human line only; the JSON
             # message stays the bare text a program can match on.
             if debug_enabled():
@@ -522,7 +534,7 @@ def handle_errors(func):
                 traceback.print_exc(file=sys.stderr)
             if json_output:
                 _emit_json_error(code, message, exit_code, data, hint)
-            _render_human_error(prefix + message, hint or default_hint(code, exit_code))
+            _render_human_error(prefix + message, hint or default_hint(code, exit_code), request_id)
             raise SystemExit(exit_code)
 
         try:
@@ -530,14 +542,19 @@ def handle_errors(func):
         except (click.ClickException, click.Abort):
             raise
         except CliFailure as e:
-            fail(e.code, e.message, e.exit_code, e.data, e.hint)
+            # a command that wrapped an API refusal (lium up → rent_rejected) hands the server's
+            # request_id over in ``data`` and its hint as the failure's own (DAH-3057)
+            fail(e.code, e.message, e.exit_code, e.data, e.hint, request_id=(e.data or {}).get("request_id"))
         except ValueError as e:
             if "No API key found" in str(e):
                 fail("no_api_key", str(e), EXIT_CONFIGURATION_ERROR)
             fail("value_error", str(e), EXIT_CONFIGURATION_ERROR, prefix="Error: ")
         except LiumError as e:
             code, exit_code = _classify_sdk_error(e)
-            fail(code, str(e), exit_code, prefix="Error: ")
+            # the API's own code, hint and request_id when it sent them (DAH-3057); the
+            # class-derived code and the default hint otherwise
+            fail(e.code or code, str(e), exit_code, _api_error_data(e), e.hint,
+                 request_id=e.request_id, prefix="Error: ")
         except Exception as e:
             # a bug, not a usage or API error: the only branch crash reporting sees (DAH-2057)
             reported = telemetry.report(e)

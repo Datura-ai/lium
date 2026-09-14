@@ -305,6 +305,23 @@ def test_a_403_mentions_the_read_scope(monkeypatch):
     assert "`read` scope" in result.output
 
 
+def test_a_403_keeps_the_servers_code_hint_and_request_id(monkeypatch):
+    # the server's code, hint and request_id (DAH-3057) ride along under audit's own line, like on the 401
+    error = LiumPermissionError("Permission denied: API key 'renter' does not have the 'read' scope",
+                                code="missing_scope", hint="Create a key with the read scope.", request_id="req-403-0001")
+    result = _run(monkeypatch, error=error)
+
+    assert result.exit_code == EXIT_PERMISSION_DENIED
+    assert "`read` scope" in result.output
+    assert "Create a key with the read scope." in result.output and "request_id: req-403-0001" in result.output
+
+    result = _run(monkeypatch, "--json", error=error)
+    envelope = json.loads(result.stderr)
+    assert envelope["error"]["code"] == "missing_scope"
+    assert envelope["error"]["hint"] == "Create a key with the read scope."
+    assert envelope["data"] == {"request_id": "req-403-0001"}
+
+
 # --------------------------------------------------------------------------------------------------
 # the SDK method
 # --------------------------------------------------------------------------------------------------
