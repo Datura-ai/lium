@@ -7,17 +7,74 @@ from __future__ import annotations
 
 import os
 import time
+import warnings
 from types import SimpleNamespace
 
 import paramiko
 import pytest
 
-from conftest import API_KEY, API_URL, MAX_PRICE, MIN_RELIABILITY, keep_pod, reliability_scores, rentable
+from conftest import API_KEY, API_URL, MAX_PRICE, MAX_UP_TRIES, MIN_RELIABILITY, keep_pod, refusal_note, reliability_scores, rentable
+from lium.sdk.exceptions import (
+    LiumAuthError,
+    LiumError,
+    LiumHostKeyError,
+    LiumPermissionError,
+    LiumRateLimitError,
+    LiumServerError,
+)
 
 pytestmark = pytest.mark.timeout(900)
 
 FIRST_SSH_BUDGET_S = 30.0   # how long the first connect to a fresh pod may keep failing before the journey does
 FIRST_SSH_PAUSE_S = 5.0
+
+# `Lium.up()` errors that moving to another node cannot fix: a bad key, no balance/permission (LiumInsufficientBalanceError
+# is a LiumPermissionError), the API down or throttling, a host-key mismatch. Every other LiumError is the API answering
+# the rent with a no (400 "Can't rent node") and is a refusal of that node. So are the two ValueErrors `up()` raises before
+# the POST when the node left the listing between `ls` and `up` (`Lium.get_executor`, `Lium.default_docker_template`).
+NOT_A_REFUSAL = (LiumAuthError, LiumPermissionError, LiumServerError, LiumRateLimitError, LiumHostKeyError)
+NODE_GONE = ("not found", "No node found")   # `Lium.up()`'s two ValueErrors for a node no longer listed (`get_executor`,
+                                              # `default_docker_template`); its other ValueErrors (no SSH key, template) are ours
+
+
+def up_first_accepting(lium, nodes: list, name: str, state: dict, max_tries: int = MAX_UP_TRIES) -> dict:
+    """`lium.up()` on the cheapest node; a node that refuses the rent (a `LiumError` outside NOT_A_REFUSAL, or the
+    `ValueError` for a node gone from the listing) gives way to the next one, a different executor id each time, at most
+    `max_tries` `up()` calls. Returns the dict `up()` returned for the node that took it. Every refusal is a
+    `rent refused: …` warning and a line of `state["refused"]`. When a refusal left a pod named `name` behind, that pod
+    is recorded in `state["pod"]` (the fixture removes it) and the step fails; when every try refused, the last refusal
+    is re-raised as a `LiumError` with every refused node in its message. No clock of its own: an `up()` is the SDK's
+    30 s POST plus its `ls` lookups and the `ps` after a refusal, so three tries stay under ~3 min of the module's 900 s
+    pytest-timeout next to `wait_ready(600)`; the CLI journey needs the shared budget because each `lium up` waits for
+    the pod to be ready."""
+    tried: set[str] = set()
+    last: Exception | None = None
+    state.setdefault("refused", [])
+    for node in sorted(nodes, key=lambda n: float(n.price_per_hour)):
+        if str(node.id) in tried:
+            continue
+        if len(tried) >= max_tries:
+            break
+        tried.add(str(node.id))
+        try:
+            return lium.up(executor_id=node.id, name=name)
+        except NOT_A_REFUSAL:
+            raise
+        except (LiumError, ValueError) as exc:
+            if isinstance(exc, ValueError) and not any(t in str(exc) for t in NODE_GONE):
+                raise   # "No SSH keys found", a bad backup argument: ours, and no other node fixes it
+            last = exc
+            note = refusal_note(str(node.huid), str(node.id), node.price_per_hour, str(exc))
+            state["refused"].append(note)
+            warnings.warn(note, stacklevel=2)
+            left_behind = [p for p in lium.ps() if p.name == name]
+            if left_behind:
+                state["pod"] = {"id": left_behind[0].id}
+                raise AssertionError(f"{node.huid} refused the rent but a pod named {name} exists (id {left_behind[0].id}) "
+                                     "— not renting elsewhere; the fixture removes it") from exc
+    left = len({str(n.id) for n in nodes} - tried)
+    raise LiumError(f"{len(tried)} node(s) refused the rent, none accepted (max_tries={max_tries}"
+                    + (f", {left} rentable candidate(s) left untried" if left else "") + "): " + "; ".join(state["refused"])) from last
 
 
 def first_exec(lium, pod, command: str, budget_s: float = FIRST_SSH_BUDGET_S, pause_s: float = FIRST_SSH_PAUSE_S,
@@ -97,9 +154,9 @@ def test_sdk_up_wait_exec_upload_download_rm(lium, sdk_pod, tmp_path):
     nodes = [n for n in lium.ls() if rentable(n.gpu_count, n.price_per_hour, _country(n), n.id, n.huid, scores.get(str(n.id)))]
     if not nodes:
         pytest.skip(f"no rentable node with ≥1 GPU at ≤ ${MAX_PRICE}/h and reliability ≥ {MIN_RELIABILITY:g} listed right now (E2E_EXCLUDE_* applied)")
-    node = min(nodes, key=lambda n: float(n.price_per_hour))
     t0 = time.monotonic()
-    created = lium.up(executor_id=node.id, name=sdk_pod["name"])
+    # the cheapest node that accepts: a refusal (400 "Can't rent node") moves to the next one, ≤ MAX_UP_TRIES (DAH-3488)
+    created = up_first_accepting(lium, nodes, sdk_pod["name"], sdk_pod)
     assert created.get("id") and created.get("status"), created  # {'executor_id','huid','id','name','ssh_cmd','status'}
     # Recorded before anything can fail, and capped: if wait_ready returns None or raises, an assertion trips, or
     # pytest-timeout kills the process (timeout_method = thread runs no finalizer), the pod still goes — by the
