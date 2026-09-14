@@ -1152,7 +1152,7 @@ class Lium:
             ...     lium.exec(pod, command="nvidia-smi")
         """
         rent_args = dict(
-            name="Your Pod", template_id=None, dockerfile_content=None, volume_id=None,
+            name="Your Pod", template_id=None, image=None, dockerfile_content=None, volume_id=None,
             ports=None, ssh_keys=None, ssh_name=None, enable_volume_encryption=True,
             backup_id=None, restore_path=None,
         )

@@ -5,6 +5,7 @@ A script that rents a pod has to write the same twenty lines every time: poll
 `nohup setsid ... < /dev/null &`, parse `nvidia-smi`. These belong in the SDK.
 """
 
+import inspect
 import json
 import re
 import time
@@ -43,6 +44,9 @@ class _Client(Lium):
         self._ps_sequence = list(ps_sequence or [])
 
     def _rent(self, **kwargs):
+        # a fake that took any keyword set hid a rental() that no longer matched the real
+        # _rent() (main's `image`, lium#161): every call is bound against the real signature
+        inspect.signature(Lium._rent).bind(self, **kwargs)
         self.calls.append(("rent", kwargs))
         return {"id": "pod-1", "name": kwargs.get("name")}
 
@@ -106,6 +110,17 @@ def test_rental_removes_the_pod_after_the_block():
         assert pod.status == "RUNNING"
 
     assert ("DELETE", "/pods/pod-1") in client.calls
+
+
+def test_rental_passes_image_through_to_the_rent():
+    """`rental()` takes every `up()` keyword; `image` (lium#161) must reach `_rent`, not the unknown-kwarg guard."""
+    client = _Client(ps_sequence=[[_pod("RUNNING")]])
+
+    with client.rental(executor_id="exec-1", name="job", image="repo/img:tag") as pod:
+        assert pod.id == "pod-1"
+
+    rent = next(call for call in client.calls if call[0] == "rent")
+    assert rent[1]["image"] == "repo/img:tag"
 
 
 def test_rental_removes_the_pod_when_the_block_raises():
