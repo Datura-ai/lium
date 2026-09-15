@@ -30,6 +30,9 @@ def _listed(node_id: str) -> SimpleNamespace:
 def _client(monkeypatch, listing: list) -> Lium:
     client = Lium(Config(api_key="test"))
     monkeypatch.setattr(client, "ls", lambda **kwargs: listing)
+    # a server without workspaces: `up` reads it for its workspace line before resolving the node
+    # (DAH-3033 on main); without the stub the CLI tests below would call the live API with key "test"
+    monkeypatch.setattr(client, "workspaces", SimpleNamespace(current=lambda: None))
     return client
 
 
