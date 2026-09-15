@@ -217,9 +217,11 @@ def _rm_two_pods(monkeypatch):
     """Two pods on the account; returns (answers the prompt got, pods handed to removal)."""
     from lium.cli.rm import command as rm_module
 
+    # created_at / executor / status: `rm` reports each removed pod's uptime and spend since lium#218
+    # (display.pod_spend); None means "unknown", which it prints as such
     pods = [
-        SimpleNamespace(huid="eager-wolf-aa", name="train", id="id-a"),
-        SimpleNamespace(huid="calm-lake-bb", name="eval", id="id-b"),
+        SimpleNamespace(huid="eager-wolf-aa", name="train", id="id-a", created_at=None, executor=None, status="RUNNING"),
+        SimpleNamespace(huid="calm-lake-bb", name="eval", id="id-b", created_at=None, executor=None, status="RUNNING"),
     ]
     asked, removed = [], []
     config = SimpleNamespace(workspace=None, workspace_id=None, workspace_explicit=False)
