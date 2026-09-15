@@ -1,3 +1,4 @@
+import json
 import time
 from datetime import datetime, timezone
 from typing import Optional, Tuple
@@ -25,7 +26,10 @@ from lium.cli.utils import (
     _api_error_data,
     ensure_config,
     handle_errors,
+    narrate_on_stderr_under_json,
+    sdk_error_failure,
 )
+from lium.cli.ps.display import compact_pod
 from lium.cli.completion import get_gpu_completions
 from . import validation, parsing
 from .budget import MIN_BUDGET_MINUTES, budget_deadline, budget_hours, rental_price_per_hour
@@ -101,6 +105,32 @@ def _in_hours(termination_time: datetime) -> str:
     return f" (in {hours:.1f}h)" if hours > 0 else ""
 
 
+def _post_rent_failure(exc: Exception, billing_pod: dict, doing: str, note: str = "") -> CliFailure:
+    """The failure for an API call that broke after the rent: the pod exists and bills, so the
+    envelope names it in ``data`` whatever the error was.
+
+    A ``LiumError`` keeps its own code (``server_error``, ``rate_limited``, …). A
+    ``requests.RequestException`` is the API not answering: ``Lium.ps()`` and ``schedule_termination``
+    re-raise it once the SDK's retries run out, ``install_jupyter`` (a POST, sent once) on the first
+    lost connection, and it used to fall through to ``unexpected_error`` with no ``data``. It gets
+    ``api_timeout``, the code the rent itself uses when the API does not answer, and a message that
+    names the pod. ``doing`` is the step that was running, in the pod's voice ("waiting for it to
+    become ready"); ``note`` is what that step left undone and how to do it by hand.
+    """
+    if isinstance(exc, LiumError):
+        return sdk_error_failure(exc, data=billing_pod, note=note)
+    pod_name, pod_id = billing_pod["pod_name"], billing_pod["pod_id"]
+    return CliFailure(
+        "api_timeout",
+        f"Pod {pod_name} (id: {pod_id}) is rented and billing, but the API stopped answering while "
+        f"{doing} ({exc.__class__.__name__}).{note}",
+        EXIT_API_ERROR,
+        data=billing_pod,
+        # The generic exit-3 hint says "Retry"; a second `lium up` would rent a second pod.
+        hint=f"Do not run 'lium up' again: the pod exists. Check it with 'lium ps'; 'lium rm {pod_name}' removes it.",
+    )
+
+
 @click.command("up")
 @click.argument("executor_id", required=False, metavar="NODE_ID")
 @click.option("--name", "-n", help="Custom pod name")
@@ -171,7 +201,13 @@ def _in_hours(termination_time: datetime) -> str:
     default=True,
     help="Encrypt the local volume when supported (enabled by default)",
 )
+@click.option(
+    "--json", "json_output", is_flag=True,
+    help="Print the ready pod as machine-readable JSON on stdout (implies --no-ssh); progress goes to stderr, "
+         "a failure is the JSON error envelope on stderr",
+)
 @handle_errors
+@narrate_on_stderr_under_json
 def up_command(
     executor_id: Optional[str],
     name: Optional[str],
@@ -202,6 +238,7 @@ def up_command(
     cmd: Optional[str],
     ssh_name: Optional[str],
     volume_encryption: bool,
+    json_output: bool,
 ):
     """\b
     Create a new GPU pod on a node.
@@ -239,6 +276,7 @@ def up_command(
       lium up --gpu H200 -c 8 --verify-gpus # Fail if the pod exposes fewer GPUs than billed
       lium up --gpu H200 -c 8 --verify-gpus --strict-gpus  # ...and remove the pod on mismatch
       lium up 1 --restore-backup BACKUP_ID --restore-to /root/restored
+      lium up --gpu H100 -y --json          # Rent, wait, print the pod as JSON (no SSH session)
       LIUM_DEBUG=1 lium up 1 --jupyter      # Show debug information
     \b
     Docker-run style (streams logs instead of SSH):
@@ -523,6 +561,14 @@ def up_command(
         # the --timeout budget, or a slow answer would kill the command before it rents.
         deadline += time.monotonic() - asked_at
 
+    # A volume `--volume new:` creates here exists before the rent and is kept by every failure
+    # below (nothing removes it). Those failures name it in the message and carry it in the
+    # envelope's ``data``: ``volume_id`` (the API id, what the SDK takes) and ``volume_huid``
+    # (what `--volume id:<HUID>` and `lium volumes` show), so a program can rent again with the
+    # same volume or remove it without parsing the message. Empty when no volume was created:
+    # the envelope then has no ``data``.
+    created_volume: dict = {}
+    kept = ""
     if volume_create_params:
         action = CreateVolumeAction()
         result = ui.load(
@@ -534,18 +580,20 @@ def up_command(
         )
 
         volume_id = result.data["volume_id"]
+        created_volume = {"volume_id": volume_id, "volume_huid": result.data["volume"].huid}
+        kept = f" The volume {volume_create_params['name']} was created and is kept."
 
     # --timeout is the whole command's budget. Everything before this line (finding the node and
     # the template, creating the volume — not the answer at the prompt) counts against it; a budget
     # that is already spent must not reach the rent, or the pod would be created and then
     # reported as timed out one second later. The rent is the first thing that bills.
     if time.monotonic() >= deadline:
-        kept = f" The volume {volume_create_params['name']} was created and is kept." if volume_create_params else ""
         raise CliFailure(
             "timeout_before_rent",
             f"The --timeout budget of {timeout}s ran out before renting {executor.huid}; no pod was created.{kept} "
             "Run again with a larger --timeout.",
             EXIT_GENERAL_ERROR,
+            data=created_volume,
         )
 
     ui.dim(f"renting {executor.huid}…")
@@ -575,11 +623,16 @@ def up_command(
         raise CliFailure(
             "api_timeout",
             f"The rent request for {executor.huid} got no answer from the API ({exc.__class__.__name__}). "
-            f"Run 'lium ps' before retrying: a pod named {name or executor.huid} may exist and be billing.",
+            f"Run 'lium ps' before retrying: a pod named {name or executor.huid} may exist and be billing.{kept}",
             EXIT_API_ERROR,
+            data=created_volume,
         )
-    except (LiumAuthError, LiumPermissionError, LiumServerError, LiumRateLimitError):
-        raise  # handle_errors already names these (bad key, no permission, server down, throttled)
+    except (LiumAuthError, LiumPermissionError, LiumServerError, LiumRateLimitError) as exc:
+        # handle_errors already names these (bad key, no permission, server down, throttled);
+        # only a volume created above has to ride along, with the same code, exit and hint.
+        if created_volume:
+            raise sdk_error_failure(exc, data=created_volume, note=kept)
+        raise
     except LiumError as exc:
         # The API answered and said no: the node is no longer rentable (taken, offline, pending
         # rental) or the request was refused. Usually no pod exists — but Lium.up() sends the
@@ -592,9 +645,10 @@ def up_command(
         raise CliFailure(
             exc.code or "rent_rejected",
             f"Node {executor.huid} could not be rented: {exc}. Run 'lium ps' to check whether a pod was created. "
-            "Run 'lium ls --format json' for the nodes rentable now.",
+            f"Run 'lium ls --format json' for the nodes rentable now.{kept}",
             EXIT_API_ERROR,
-            data=_api_error_data(exc),
+            # the server's request_id (DAH-3057) next to the volume the rent leaves behind
+            data={**(_api_error_data(exc) or {}), **created_volume} or None,
             hint=exc.hint,
         )
 
@@ -618,6 +672,9 @@ def up_command(
 
     # The pod is rented and already billing from here on. Every failure below
     # names it before propagating, or the caller cannot clean up what it pays for.
+    # In the JSON envelope the name lives in ``data`` too, so a program does not
+    # have to parse it out of the message.
+    billing_pod = {"pod_id": pod_id, "pod_name": pod_name}
     #
     # --ttl/--until are scheduled now, with the id the rent returned, not once the pod is ready:
     # a pod that never gets there (a wait that runs out, a stuck pull) bills all the same, and
@@ -654,9 +711,14 @@ def up_command(
             f"{_termination_note(termination_time, termination_scheduled, label)} "
             f"Check 'lium ps' and remove it with 'lium rm {label}' if it is still listed.",
             EXIT_API_ERROR,
+            data=billing_pod,
         )
-    except Exception:
+    except Exception as exc:
         ui.error(f"Pod {pod_name} (id: {pod_id}) was created but did not become ready")
+        if isinstance(exc, (LiumError, requests.RequestException)):
+            # The API failed mid-wait (5xx, 429, a revoked key) or stopped answering (`Lium.ps()`
+            # re-raises the transport error after its retries); the pod may well be up and bills.
+            raise _post_rent_failure(exc, billing_pod, "waiting for it to become ready")
         raise
 
     if not result.ok:
@@ -680,6 +742,7 @@ def up_command(
             f"{_termination_note(termination_time, termination_scheduled, pod_name)}{budget_not_scheduled} "
             f"Wait with 'lium ps', or remove it with 'lium rm {pod_name}'.",
             EXIT_GENERAL_ERROR,
+            data=billing_pod,
         )
 
     pod = result.data["pod"]
@@ -725,8 +788,13 @@ def up_command(
                     "termination_time": termination_time
                 })
             )
-        except Exception:
+        except Exception as exc:
             ui.info(f"{pod_label} is running but auto-termination was NOT scheduled")
+            if isinstance(exc, (LiumError, requests.RequestException)):
+                raise _post_rent_failure(
+                    exc, billing_pod, "scheduling its auto-termination",
+                    note=f" Auto-termination is NOT scheduled; set it with 'lium rm {pod.huid} --in <duration>' or remove the pod.",
+                )
             raise
         ui.dim(f"removal of pod {escape(pod_name)} scheduled for {termination_time:%Y-%m-%d %H:%M UTC}{_in_hours(termination_time)}")
 
@@ -751,20 +819,33 @@ def up_command(
     if not result.ok:
         ui.error(result.error)
         if strict_gpus and result.data.get("mismatch"):
-            ui.load("Removing pod", lambda: lium.rm(pod))
+            try:
+                ui.load("Removing pod", lambda: lium.rm(pod))
+            except (LiumError, requests.RequestException) as exc:
+                # The pod is still there and bills (or, after a lost connection on the DELETE, may
+                # be): say so under the same code, with pod_removed false, and let 'lium ps' settle it.
+                # the server's request_id and hint ride along when the DELETE was refused (DAH-3057)
+                api = exc if isinstance(exc, LiumError) else None
+                raise CliFailure(
+                    "gpu_count_mismatch",
+                    f"{result.error}; removing the pod failed: {exc}",
+                    EXIT_GENERAL_ERROR,
+                    data={**result.data, **billing_pod, "pod_removed": False, **((api and _api_error_data(api)) or {})},
+                    hint=api.hint if api else None,
+                )
             ui.info(f"{pod_label} removed (--strict-gpus)")
             raise CliFailure(
                 "gpu_count_mismatch",
                 f"{result.error}; pod removed",
                 EXIT_GENERAL_ERROR,
-                data=result.data,
+                data={**result.data, **billing_pod, "pod_removed": True},
             )
         ui.info(f"{pod_label} is running with the GPU count above; remove it with 'lium rm {pod.huid}'")
         raise CliFailure(
             "gpu_count_mismatch" if result.data.get("mismatch") else "gpu_verification_failed",
             result.error,
             EXIT_GENERAL_ERROR,
-            data=result.data,
+            data={**result.data, **billing_pod},
         )
 
     if jupyter:
@@ -778,8 +859,13 @@ def up_command(
                     "ui": ui
                 })
             )
-        except Exception:
+        except Exception as exc:
             ui.info(f"{pod_label} is running but Jupyter was NOT installed")
+            if isinstance(exc, (LiumError, requests.RequestException)):
+                raise _post_rent_failure(
+                    exc, billing_pod, "installing Jupyter",
+                    note=f" Jupyter is NOT installed; add it with 'lium update {pod.huid} --jupyter <port>'.",
+                )
             raise
 
         if not result.ok:
@@ -788,10 +874,13 @@ def up_command(
                 "jupyter_install_failed",
                 f"Pod is running but Jupyter was NOT installed: {result.error}",
                 EXIT_GENERAL_ERROR,
+                data=billing_pod,
                 # The pod exists and bills; running `up` again would rent a second one.
                 hint=f"The pod is up: add Jupyter with 'lium update {pod.huid} --jupyter <port>' "
                      "instead of running 'lium up' again",
             )
+        # ``pod`` was fetched before the install; the JSON below must show the URL it produced.
+        pod.jupyter_url = result.data.get("jupyter_url") or pod.jupyter_url
 
     # Always state what was created: a caller that only gets an SSH banner or a
     # log stream has no way to name the pod it is now paying for.
@@ -801,6 +890,19 @@ def up_command(
         ui.warning(
             f"Restore is continuing in {restore_path}. Do not modify that directory until the restore completes."
         )
+
+    if json_output:
+        # The same pod view as `lium ps --format json`, so one parser serves both, printed the
+        # way `ps`, `describe` and `rm --format json` print theirs: the bare payload, indented,
+        # no `ok` wrapper (success is exit 0; a failure is the envelope on stderr). The SSH
+        # session and the log stream are for a person, so --json ends here.
+        payload = {"pod": compact_pod(pod)}
+        if termination_time:
+            # `--ttl`, `--until` or the `--budget` cap: the time the backend was given. Present only
+            # when one was set, as `rm --format json` carries `termination_time` only for a schedule.
+            payload["termination_time"] = termination_time.isoformat()
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
 
     if no_ssh:
         return
