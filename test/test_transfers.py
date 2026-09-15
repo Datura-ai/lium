@@ -8,6 +8,7 @@ to another, granting and revoking a one-off key around the copy.
 
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import warnings
@@ -48,10 +49,12 @@ class _RecordingLium(Lium):
     def __init__(self, answers=None):
         super().__init__(Config(api_key="test", ssh_key_path="/home/u/.ssh/id_ed25519"))
         self.sent: list[tuple[str, str]] = []
+        self.envs: list = []  # the ``env`` of each exec, parallel to ``sent``
         self.answers = answers or {}
 
     def exec(self, pod, *, command, env=None):
         self.sent.append((pod.huid, command))
+        self.envs.append(env)
         for needle, answer in self.answers.items():
             if needle in command:
                 return dict(answer)
@@ -165,8 +168,9 @@ def test_rsync_cli_passes_the_new_flags_through(monkeypatch, tmp_path):
 
 # --- Lium.cp -------------------------------------------------------------------------------
 
-KEYGEN = "ssh-keygen -q -t ed25519"
-PUBKEY = "ssh-ed25519 AAAAC3Nza... root@dev"
+PLACE_KEY = "umask 077 && printf '%s' \"$LIUM_CP_PRIVATE_KEY\" > /tmp/lium-cp-"
+# What a hostile source pod prints where ssh-keygen output used to be read (bounty report 6, DAH-3511)
+ATTACKER_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEVJTE5FVklMRVZJTEVWSUxFVklMRVZJTEVWSUxFVklM attacker@evil"
 
 
 DST_PIN = "[5.6.7.8]:31000 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDstPodKey"
@@ -185,7 +189,10 @@ def dst_pinned(monkeypatch, tmp_path):
 
 def _cp_client(rsync_answer=None, **extra):
     answers = {
-        KEYGEN: {"success": True, "exit_code": 0, "stdout": PUBKEY + "\n", "stderr": ""},
+        # the source pod answers the key step with an attacker key: none of it may reach the destination
+        # (``ssh-keygen`` is the step the old flow ran there; it must never be sent again)
+        PLACE_KEY: {"success": True, "exit_code": 0, "stdout": ATTACKER_KEY + "\n", "stderr": ""},
+        "ssh-keygen": {"success": True, "exit_code": 0, "stdout": ATTACKER_KEY + "\n", "stderr": ""},
         "rsync -az": rsync_answer or {"success": True, "exit_code": 0, "stdout": "", "stderr": ""},
     }
     answers.update(extra)
@@ -199,18 +206,25 @@ def test_cp_grants_a_one_off_key_copies_and_revokes_it(dst_pinned):
 
     pods, commands = zip(*client.sent)
     assert pods == ("swift-fox-c8", "brave-lion-11", "swift-fox-c8", "swift-fox-c8", "brave-lion-11", "swift-fox-c8")
-    keygen, grant, pin_copy, copy, revoke, remove_key = commands
-    assert keygen.startswith(KEYGEN) and "/tmp/lium-cp-" in keygen
-    assert PUBKEY in grant and ">> ~/.ssh/authorized_keys" in grant
+    place_key, grant, pin_copy, copy, revoke, remove_key = commands
+    assert place_key.startswith(PLACE_KEY)
+    # the private half goes to the source over stdin (exec's env), the command line names only the variable
+    private_key = client.envs[0][Lium.TRANSFER_KEY_ENV]
+    assert private_key.startswith("-----BEGIN OPENSSH PRIVATE KEY-----") and private_key not in place_key
+    public_key = _public_key_of(private_key)
+    assert f"echo '{public_key} lium-cp-" in _under_lock(grant) and ">> ~/.ssh/authorized_keys" in grant
     # the source verifies the destination with the key this client pinned, never with accept-anything
-    key_path = re.search(r"/tmp/lium-cp-[0-9a-f]{12}", keygen).group(0)
+    key_path = re.search(r"/tmp/lium-cp-[0-9a-f]{12}", place_key).group(0)
     assert DST_PIN in pin_copy and f"> {key_path}.known_hosts" in pin_copy
     assert f"-o StrictHostKeyChecking=yes -o UserKnownHostsFile={key_path}.known_hosts" in copy
     assert "StrictHostKeyChecking=no" not in copy
     assert "rsync -az --partial --bwlimit=3000 '--exclude=*.tmp'" in copy
     assert "-p 31000" in copy and "root@5.6.7.8:/workspace/ckpt/" in copy and "/workspace/ckpt/ " in copy
     assert f"{key_path}.known_hosts" in remove_key
-    assert "grep -vF" in revoke and "authorized_keys" in revoke
+    # the revoke matches the key the client installed, not only the comment after it: a line that lost its
+    # marker (a destination shell whose echo expanded an escape) still goes
+    assert f"grep -vF '{public_key}' ~/.ssh/authorized_keys" in _under_lock(revoke)
+    assert "grep -vF 'lium-cp-" not in _under_lock(revoke)
     marker = re.search(r"lium-cp-[0-9a-f]{12}", grant).group(0)
     assert f"authorized_keys.{marker}" in revoke, "the scratch file carries this run's marker"
     assert f"cat ~/.ssh/authorized_keys.{marker} > ~/.ssh/authorized_keys" in revoke
@@ -220,6 +234,48 @@ def test_cp_grants_a_one_off_key_copies_and_revokes_it(dst_pinned):
     lock = f"flock -w 30 {Lium.TRANSFER_KEY_LOCK} -c "
     assert lock in grant and lock in revoke
     assert remove_key.startswith("rm -f /tmp/lium-cp-")
+
+
+def _under_lock(command: str) -> str:
+    """The line ``flock ... -c`` runs on the pod (the grant and revoke wrap theirs in it)."""
+    return shlex.split(command.split(" -c ", 1)[1])[0]
+
+
+def _public_key_of(private_key: str) -> str:
+    """The ``ssh-ed25519 <base64>`` line that belongs to an OpenSSH private key."""
+    from cryptography.hazmat.primitives import serialization
+
+    key = serialization.load_ssh_private_key(private_key.encode(), password=None)
+    return key.public_key().public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH).decode()
+
+
+def test_cp_authorises_only_the_key_this_client_made_whatever_the_source_prints(dst_pinned):
+    """Bounty report 6 (DAH-3511): the destination used to trust the last line the SOURCE pod printed.
+
+    Fails on the old flow: the attacker line the source returns lands in the grant. Now the grant
+    carries the public half of the key the client generated, and nothing the source pod printed.
+    """
+    client = _cp_client()
+
+    client.cp(SRC, "/a", DST, "/b")
+
+    grant = next(c for pod, c in client.sent if pod == DST.huid and ">> ~/.ssh/authorized_keys" in c)
+    assert ATTACKER_KEY not in grant and "attacker" not in grant
+    assert "ssh-keygen" not in " ".join(c for _, c in client.sent), "no key is made on the source pod"
+    public_key = _public_key_of(client.envs[0][Lium.TRANSFER_KEY_ENV])
+    marker = re.search(r"lium-cp-[0-9a-f]{12}", grant).group(0)
+    assert f"echo '{public_key} {marker}' >> ~/.ssh/authorized_keys" in _under_lock(grant)
+    assert " " not in public_key.split(" ", 1)[1] and "\\" not in public_key, "one key, no shell escapes"
+
+
+def test_transfer_keypair_is_fresh_and_matches():
+    private_a, public_a = Lium.transfer_keypair()
+    private_b, public_b = Lium.transfer_keypair()
+
+    assert public_a != public_b and private_a != private_b
+    assert _public_key_of(private_a) == public_a
+    assert re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/]+=*", public_a), public_a
+    assert private_a.endswith("-----END OPENSSH PRIVATE KEY-----\n")
 
 
 def test_cp_refuses_to_copy_when_the_destination_has_no_pinned_key(monkeypatch, tmp_path):
@@ -262,10 +318,10 @@ def test_cp_revokes_the_key_even_when_the_copy_fails(dst_pinned):
     assert any(c.startswith("rm -f /tmp/lium-cp-") for c in commands)
 
 
-def test_cp_stops_before_touching_the_destination_when_keygen_fails():
-    client = _RecordingLium({KEYGEN: {"success": False, "exit_code": 1, "stdout": "", "stderr": "no ssh-keygen"}})
+def test_cp_stops_before_touching_the_destination_when_the_key_cannot_be_placed():
+    client = _RecordingLium({PLACE_KEY: {"success": False, "exit_code": 1, "stdout": "", "stderr": "read-only file system"}})
 
-    with pytest.raises(LiumError, match="transfer key"):
+    with pytest.raises(LiumError, match="place the transfer key"):
         client.cp(SRC, "/a", DST, "/b")
 
     assert all(pod == "swift-fox-c8" for pod, _ in client.sent)
@@ -316,10 +372,11 @@ def test_revoke_command_keeps_the_other_keys_and_the_mode(tmp_path):
     ssh_dir = tmp_path / ".ssh"
     ssh_dir.mkdir()
     keys = ssh_dir / "authorized_keys"
-    keys.write_text("ssh-ed25519 AAA renter@laptop\nssh-ed25519 BBB lium-cp-abc123\n")
+    # the second entry lost its marker on the way in; the key material is what the revoke matches
+    keys.write_text("ssh-ed25519 AAA renter@laptop\nssh-ed25519 BBB lium-cp-abc123\nssh-ed25519 BBB\n")
     keys.chmod(0o600)
 
-    done = sp.run(["/bin/sh", "-c", Lium.revoke_transfer_key_command("lium-cp-abc123")],
+    done = sp.run(["/bin/sh", "-c", Lium.revoke_transfer_key_command("ssh-ed25519 BBB", "lium-cp-abc123")],
                   env={"HOME": str(tmp_path), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}, capture_output=True, text=True)
 
     assert done.returncode == 0, done.stderr
@@ -334,7 +391,7 @@ def test_revoke_command_fails_loudly_when_it_cannot_read_the_file(tmp_path):
     import subprocess as sp
 
     (tmp_path / ".ssh").mkdir()
-    done = sp.run(["/bin/sh", "-c", Lium.revoke_transfer_key_command("lium-cp-abc123")],
+    done = sp.run(["/bin/sh", "-c", Lium.revoke_transfer_key_command("ssh-ed25519 BBB", "lium-cp-abc123")],
                   env={"HOME": str(tmp_path), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}, capture_output=True, text=True)
 
     assert done.returncode != 0
