@@ -38,12 +38,21 @@ RUN set -eu; \
 RUN pip install --no-cache-dir uv
 
 WORKDIR /app
-COPY . .
+
+# Dependencies first, from the lockfile alone: this layer is reused by every build whose pyproject.toml
+# and uv.lock did not change (CI builds the bundle on every PR push; the deps are the slow part).
+# --no-install-project leaves lium itself out, so neither the source nor the version is needed yet —
+# the version ARG below must stay below this RUN: it changes with every commit and would bust the layer.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project --extra dev --extra provider
 
 # hatch-vcs derives the version from git, which this image does not have (bullseye's archive cannot
 # install git next to the image's perl-base); the runner computes it and hands it in (release.yml, ci.yml).
 ARG LIUM_VERSION
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=$LIUM_VERSION
 
+COPY . .
+# the same resolution as above plus the project itself: an editable install of the project (`.`, package lium/), built with hatchling + hatch-vcs
+# in uv's isolated build env (a few small wheels from the index; the dependency set above is untouched)
 RUN uv sync --frozen --extra dev --extra provider
 RUN uv run pyinstaller lium.spec --clean
