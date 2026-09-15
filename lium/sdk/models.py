@@ -30,6 +30,31 @@ class ExecutorInfo:
     # no count takes and is billed for exactly these.
     available_gpu_count: Optional[int] = None
 
+    # How the GPUs are wired to each other, as the validator's `nvidia-smi topo` run saw them:
+    # {"gpu_count", "gpu_pairs", "nvlink", "nvlink_links", "nvlink_pairs", "nvlink_active_links",
+    #  "pcie_class", "p2p", "p2p_pairs", "p2p_ok_pairs", "matrix"}. None = not reported for this node.
+    interconnect: Optional[Dict] = None
+    # Every GPU pair on NVLink (an HGX board). False = PCIe and/or no peer-to-peer; None = unknown.
+    nvlink: Optional[bool] = None
+
+    @property
+    def link(self) -> Optional[str]:
+        """One-word interconnect label: ``NV18`` (NVLink, 18 links), ``PCIe/SYS`` (worst PCIe class), or None when unknown."""
+        if self.nvlink is None:
+            return None
+        interconnect = self.interconnect or {}
+        if self.nvlink:
+            links = interconnect.get("nvlink_links")
+            return f"NV{links}" if links else "NVLink"
+        pcie_class = interconnect.get("pcie_class")
+        return f"PCIe/{pcie_class}" if pcie_class else "PCIe"
+
+    @property
+    def p2p(self) -> Optional[bool]:
+        """Every GPU pair can read each other's memory (NCCL works without NCCL_P2P_DISABLE=1); None when unknown."""
+        value = (self.interconnect or {}).get("p2p")
+        return value if isinstance(value, bool) else None
+
     @property
     def driver_version(self) -> str:
         """Extract GPU driver version from specs."""

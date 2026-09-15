@@ -290,6 +290,11 @@ lium ls --gpu H100 --count 8 --country US,NL --max-price 2.50
 lium ls --min-vram 80 --min-cuda 12.8 --tier secure
 lium ls --format json          # machine-readable
 
+# Multi-GPU jobs: only nodes whose GPUs are all on NVLink (Link column NV#), and a floor on
+# the Download (Mbps) column — tensor parallelism and 700 GB checkpoints behave very
+# differently on a PCIe box or a slow link that the price does not reveal
+lium ls --gpu H200 --nvlink --min-download 2000
+
 # Create pod with node index
 lium up 1 --name my-pod --yes
 
