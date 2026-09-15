@@ -1,8 +1,6 @@
 """Lium SDK - Clean, Unix-style SDK for GPU pod management."""
 
-import base64
 import getpass
-import hashlib
 import ipaddress
 import os
 import re
@@ -17,12 +15,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Callable, Dict, Generator, List, Optional, Sequence, Tuple, Union
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-import paramiko
 import requests
 from dotenv import load_dotenv
 
@@ -96,12 +94,6 @@ def known_hosts_path(pod: Union[PodInfo, str]) -> Path:
     pod_id = pod if isinstance(pod, str) else pod.id
     safe_id = _POD_ID_SAFE.sub("_", pod_id or "unknown")
     return Path.home() / ".lium" / "known_hosts" / safe_id
-
-
-def host_key_fingerprint(key: paramiko.PKey) -> str:
-    """``SHA256:<base64>`` as ``ssh-keygen -lf`` prints it, so a user can compare the two."""
-    digest = hashlib.sha256(key.asbytes()).digest()
-    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
 
 
 def forget_host_key(pod: Union[PodInfo, str]) -> None:
@@ -211,42 +203,31 @@ def pod_ssh_command(pod: PodInfo) -> Optional[str]:
     return shlex.join(["ssh", "-p", str(port), *options, f"{user}@{host}"])
 
 
-class _PinOnFirstUsePolicy(paramiko.MissingHostKeyPolicy):
-    """Trust-on-first-use: record the key of a pod we have never talked to.
+class _LazyModule:
+    """A module imported on first attribute access, so `paramiko.X` anywhere in this file stays lazy.
 
-    Later connections to the same pod are checked against the recorded key by
-    paramiko itself (``BadHostKeyException`` on mismatch); ``ssh_connection``
-    turns that into :class:`LiumHostKeyError`.
+    Reading an attribute imports the module and reads it there; setting or deleting one does it on
+    the module, so `monkeypatch.setattr(client.paramiko, "SSHClient", Fake)` patches paramiko itself.
     """
 
-    def missing_host_key(self, client, hostname, key):  # noqa: D401 - paramiko interface
-        client._host_keys.add(hostname, key.get_name(), key)
-        if client._host_keys_filename is not None:
-            client.save_host_keys(client._host_keys_filename)
-        fp = host_key_fingerprint(key)
-        warnings.warn(
-            f"Pinning {key.get_name()} host key {fp} for {hostname} "
-            f"(first connection to this pod; {_SSH_INSECURE_ENV}=1 disables pinning)",
-            stacklevel=2,
-        )
+    def __init__(self, name: str) -> None:
+        object.__setattr__(self, "_name", name)
+
+    def __getattr__(self, attr: str) -> Any:
+        return getattr(import_module(self._name), attr)
+
+    def __setattr__(self, attr: str, value: Any) -> None:
+        setattr(import_module(self._name), attr, value)
+
+    def __delattr__(self, attr: str) -> None:
+        delattr(import_module(self._name), attr)
 
 
-class _InsecureAcceptPolicy(paramiko.MissingHostKeyPolicy):
-    """Accept whatever key the host presents. Installed only under ``LIUM_SSH_INSECURE=1``.
-
-    This is the pre-pinning behaviour (paramiko's ``AutoAddPolicy``) spelled out:
-    the key is kept for the life of this client so the connection proceeds, nothing
-    is written to disk, and every acceptance is reported so the opt-out is never
-    silent. The default path uses :class:`_PinOnFirstUsePolicy`.
-    """
-
-    def missing_host_key(self, client, hostname, key):  # noqa: D401 - paramiko interface
-        client.get_host_keys().add(hostname, key.get_name(), key)
-        warnings.warn(
-            f"Accepting unverified {key.get_name()} host key {host_key_fingerprint(key)} for "
-            f"{hostname}: {_SSH_INSECURE_ENV}=1 disabled host key verification",
-            stacklevel=2,
-        )
+# paramiko is a quarter of the CLI's import time (about 100 ms on a pod, 450 ms on a fresh box) and only
+# ssh_connection() uses it (DAH-3053). The host-key policies that subclass it live in _hostkeys, imported
+# by ssh_connection(); these three names still resolve on this module for callers and tests (DAH-2904).
+paramiko = _LazyModule("paramiko")
+_HOSTKEY_NAMES = ("host_key_fingerprint", "_PinOnFirstUsePolicy", "_InsecureAcceptPolicy")
 
 
 def _satisfies_spec(executor: ExecutorInfo, spec: Dict[str, Any]) -> bool:
@@ -343,6 +324,14 @@ def permission_error(
         code=code,
         **context,
     )
+
+
+def __getattr__(name: str) -> Any:
+    if name in _HOSTKEY_NAMES:
+        from . import _hostkeys
+
+        return getattr(_hostkeys, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _response_error_message(response: requests.Response) -> str:
@@ -1385,6 +1374,7 @@ class Lium:
         max_distance_miles: Optional[int] = None,
         min_cuda_version: Optional[float] = None,
         min_cpus: Optional[int] = None,
+        view: str = "summary",
     ) -> List[ExecutorInfo]:
         """List available nodes.
 
@@ -1399,11 +1389,17 @@ class Lium:
                 backward compatible, so a node with a higher driver CUDA version satisfies the requirement.
             min_cpus: Optional minimum CPU thread count (``specs.cpu.count``). Nodes that report fewer
                 CPUs, or none, are excluded.
+            view: ``"summary"`` (default) asks the API for the fields a listing reads — price, GPU/CPU/RAM/disk
+                headline specs, location, tier, network; an API that does not know the parameter returns the
+                full row. ``"full"`` asks for the whole validator scrape in :attr:`ExecutorInfo.specs` (docker
+                info, verified ports, per-GPU telemetry, checksums).
 
         Returns:
             A list of :class:`ExecutorInfo` objects that satisfy the filters.
         """
-        params: Dict[str, Any] = {"size": 1000}
+        # no `size`: the API applies it only together with `page`, and a bare `size` made the
+        # request miss the server's listing cache (DAH-3052)
+        params: Dict[str, Any] = {"view": view}
         if gpu_type:
             # Try to map short GPU name to full machine name
             machine_name = self._resolve_machine_name(gpu_type)
@@ -2123,6 +2119,8 @@ class Lium:
 
         if not self.config.ssh_key_path:
             raise ValueError("No SSH key configured")
+
+        from ._hostkeys import _InsecureAcceptPolicy, _PinOnFirstUsePolicy, host_key_fingerprint
 
         # Parse SSH command
         parts = shlex.split(pod.ssh_cmd)
