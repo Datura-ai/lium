@@ -1,12 +1,38 @@
 """Datamodels used across the Lium SDK."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
+
+
+class _Serializable:
+    """``to_dict()`` for the models below (not ``RentResult`` or the workspace models), so a caller can ``json.dumps`` what the SDK returns.
+
+    Nested dataclasses (a pod's executor) are converted too. Subclasses that
+    derive useful values from their fields add them in ``_derived``.
+    """
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = {f.name: _to_plain(getattr(self, f.name)) for f in fields(self)}
+        data.update(self._derived())
+        return data
+
+    def _derived(self) -> Dict[str, Any]:
+        return {}
+
+
+def _to_plain(value: Any) -> Any:
+    if isinstance(value, _Serializable):
+        return value.to_dict()
+    if isinstance(value, dict):
+        return {k: _to_plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_plain(v) for v in value]
+    return value
 
 
 @dataclass
-class ExecutorInfo:
+class ExecutorInfo(_Serializable):
     id: str
     huid: str
     machine_name: str
@@ -61,6 +87,9 @@ class ExecutorInfo:
         """Effective upload speed in Mbps (backend-authoritative; 0.0 if unknown)."""
         return self.effective_upload_speed_mbps or 0.0
 
+    def _derived(self) -> Dict[str, Any]:
+        return {"gpu_model": self.gpu_model, "driver_version": self.driver_version}
+
 
 @dataclass
 class RentResult:
@@ -88,7 +117,7 @@ class RentResult:
 
 
 @dataclass
-class PodInfo:
+class PodInfo(_Serializable):
     id: str
     name: str
     status: str
@@ -177,6 +206,9 @@ class PodInfo:
     def default_restore_path(self) -> str:
         """Return a safe restore destination below the local volume mount."""
         return f"{self.volume_path.rstrip('/')}/restored"
+
+    def _derived(self) -> Dict[str, Any]:
+        return {"host": self.host, "username": self.username, "ssh_port": self.ssh_port}
 
 
 @dataclass
@@ -286,7 +318,7 @@ class Cluster:
 
 
 @dataclass
-class Template:
+class Template(_Serializable):
     """Template information."""
 
     id: str
@@ -299,7 +331,7 @@ class Template:
 
 
 @dataclass
-class BackupConfig:
+class BackupConfig(_Serializable):
     """Backup configuration information."""
 
     id: str
@@ -314,7 +346,7 @@ class BackupConfig:
 
 
 @dataclass
-class BackupLog:
+class BackupLog(_Serializable):
     """Backup log information."""
 
     id: str
@@ -341,7 +373,7 @@ class BackupLog:
 
 
 @dataclass
-class RestoreLog:
+class RestoreLog(_Serializable):
     """Restore log information."""
 
     id: str
@@ -370,7 +402,7 @@ class RestoreLog:
 
 
 @dataclass
-class SSHKey:
+class SSHKey(_Serializable):
     """Public SSH key registered for the current user."""
 
     id: str
@@ -380,7 +412,7 @@ class SSHKey:
 
 
 @dataclass
-class VolumeInfo:
+class VolumeInfo(_Serializable):
     """Volume information."""
 
     id: str
@@ -394,6 +426,28 @@ class VolumeInfo:
     current_size_gb: float = 0.0
     current_size_mb: float = 0.0
     last_metrics_update: Optional[str] = None
+
+
+@dataclass
+class GpuStats(_Serializable):
+    """One GPU's utilisation as reported by ``nvidia-smi`` on the pod."""
+
+    index: int
+    name: str
+    utilization_pct: Optional[float]
+    memory_used_mib: Optional[float]
+    memory_total_mib: Optional[float]
+    temperature_c: Optional[float]
+    power_draw_w: Optional[float]
+
+    @property
+    def memory_pct(self) -> Optional[float]:
+        if not self.memory_total_mib or self.memory_used_mib is None:
+            return None
+        return round(100.0 * self.memory_used_mib / self.memory_total_mib, 1)
+
+    def _derived(self) -> Dict[str, Any]:
+        return {"memory_pct": self.memory_pct}
 
 
 @dataclass
@@ -433,6 +487,7 @@ __all__ = [
     "RestoreLog",
     "VolumeInfo",
     "SSHKey",
+    "GpuStats",
     "WorkspaceInfo",
     "WorkspaceMember",
 ]
