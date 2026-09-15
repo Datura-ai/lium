@@ -1,0 +1,57 @@
+# Code owners — GitHub requests a review from the people on the LAST matching line when a PR touches the path.
+# Two owners per path so one absence does not block; one approval satisfies the branch rule.
+# Proposal from 180-day commit/line evidence per path and 90-day merged-PR review data (DAH-3022);
+# lines marked "TODO owner: confirm" are the ones where the evidence is thin or disagrees with the reviewer map.
+# How reviews work here: .github/REVIEWING.md
+
+# arhangel66 7 approvals / 6 merges; pixel29913 4 merges and the only author active in the last 30 d
+# TODO owner: confirm — fortunelucky777 has the most CLI commits (25) but 0 in the last 30 d — still on the team?
+*                                           @arhangel66 @pixel29913
+
+# 11 (3 active) / 7 (1 active) commits; 7 approvals / 4 merges
+# TODO owner: confirm — as above
+/lium/cli/                                  @arhangel66 @pixel29913
+
+# 8 commits (only active author), 4 SDK PRs authored and merged; arhangel66 5 approvals
+/lium/sdk/                                  @pixel29913 @arhangel66
+
+# 1 / 1 commits; fortunelucky777 4 (May); the provider CLI talks to the portal (pixel29913)
+# TODO owner: confirm — low activity — confirm
+/lium/provider/                             @pixel29913 @taiberium
+
+# same reviewers as lium/cli
+/test/                                      @arhangel66 @pixel29913
+
+# docs per the 5 Sep map; pixel29913 3 commits (1 active)
+/docs/                                      @arhangel66 @pixel29913
+
+# as docs
+/README.md                                  @arhangel66 @pixel29913
+
+# as docs
+/CHANGELOG.md                               @arhangel66 @pixel29913
+
+# 8 / 4 approvals on packaging PRs
+/pyproject.toml                             @arhangel66 @taiberium
+
+# as above
+/uv.lock                                    @arhangel66 @taiberium
+
+# as above
+/pdm.lock                                   @arhangel66 @taiberium
+
+# taiberium 5 commits + 2 CI PRs (Aug); pyon777 11 (Apr, inactive)
+# TODO owner: confirm — the 5 Sep map routes CI to jam6099 / pixel29913; nobody active here in 30 d
+/.github/                                   @taiberium @pixel29913
+
+# binary build image (release CI)
+# TODO owner: confirm — as above
+/Dockerfile.build                           @taiberium @pixel29913
+
+# PyInstaller spec (release CI)
+# TODO owner: confirm — as above
+/lium.spec                                  @taiberium @pixel29913
+
+# release helper scripts
+# TODO owner: confirm — as above
+/scripts/                                   @taiberium @pixel29913
