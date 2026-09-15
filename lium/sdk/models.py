@@ -12,6 +12,8 @@ class ExecutorInfo:
     machine_name: str
     gpu_type: str
     gpu_count: int
+    # USD per hour for the whole node (price_per_gpu * gpu_count). A pod is
+    # billed per second at this rate, with no minimum.
     price_per_hour: float
     price_per_gpu: float
     location: Dict

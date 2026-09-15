@@ -206,6 +206,9 @@ def up_command(
     """\b
     Create a new GPU pod on a node.
     \b
+    The node's $/h price is charged per second, from deploy until the pod is
+    removed, with no minimum.
+    \b
     NODE_ID: Node UUID, HUID, or index from last 'lium ls'.
     If not provided, the filters pick the node and the pick is printed before renting.
     With --gpu the backend chooses: the cheapest $/GPU·h node matching the filters

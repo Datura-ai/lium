@@ -3638,6 +3638,9 @@ class Lium:
     def balance(self) -> float:
         """Get current account balance.
 
+        Pods are billed per second at their hourly price; the balance is
+        debited every 5 minutes.
+
         Returns:
             Floating-point balance value reported by ``/users/me``.
         """

@@ -21,6 +21,9 @@ from lium.cli.utils import handle_errors, resolve_output_format
 def balance_command(output_format: str, json_output: bool):
     """Show the current Lium account balance.
 
+    Running pods draw on it per second at their $/h price; the platform
+    debits the balance every 5 minutes.
+
     \b
     Examples:
       lium balance
