@@ -14,17 +14,7 @@ from .lifecycle import bk_cancel_command, bk_delete_command, bk_restore_cancel_c
 
 @click.group()
 def bk_command():
-    """Manage pod backup configurations.
-
-    \b
-    Examples:
-      lium bk set my-pod --path /root --every 6h --keep 7d   # configure periodic backups
-      lium bk show my-pod
-      lium bk now my-pod                                     # back up right now
-      lium bk logs my-pod
-      lium bk restore my-pod --id <BACKUP_ID>                # restore a backup into the pod
-      lium bk rm my-pod                                      # stop backing the pod up
-    """
+    """Manage pod backup configurations."""
     pass
 
 

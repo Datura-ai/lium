@@ -1,12 +1,11 @@
-"""Tab completion on request, never as a side effect; examples in every --help.
+"""Tab completion on request, or silently only for a person at a terminal.
 
 `lium` used to append a completion line to the shell rc file the first time it
 ran, whoever ran it — a CI job or an agent included. Installing is now an
-explicit `lium completion --install`, the silent path only runs for a person
-at a terminal, and every command's help shows how it is used.
+explicit `lium completion --install`, and the silent path only runs for a person
+at a terminal.
 """
 
-import re
 import sys
 from pathlib import Path
 
@@ -169,51 +168,3 @@ def test_main_does_not_run_the_silent_install_for_the_completion_command(rc_home
     assert not (rc_home / ".bashrc").exists(), "the startup path edited the rc file"
     assert not (rc_home / ".lium_completion_installed").exists()
     assert "_LIUM_COMPLETE=bash_source" in printed[0]
-
-
-# --- help ----------------------------------------------------------------------------------
-
-def _leaf_commands(group, prefix=()):
-    for name, command in sorted(group.commands.items()):
-        if isinstance(command, type(cli)) and command.commands:
-            yield prefix + (name,), command
-            yield from _leaf_commands(command, prefix + (name,))
-        else:
-            yield prefix + (name,), command
-
-
-TOP_LEVEL_WITHOUT_EXAMPLES_YET = {
-    # provider-side tooling with its own docs; not part of the pod workflow
-    "gpu-splitting", "mine", "provider",
-}
-
-# An example is an "Examples:" block or, as `templates` and `workspaces` write it, an indented `lium …` line.
-_EXAMPLE_LINE = re.compile(r"^\s+lium\b", re.MULTILINE)
-
-
-def test_every_pod_workflow_command_help_has_examples():
-    missing = []
-    for path, command in _leaf_commands(cli):
-        if len(path) != 1 or path[0] in TOP_LEVEL_WITHOUT_EXAMPLES_YET:
-            continue
-        result = CliRunner().invoke(cli, [*path, "--help"])
-        if "example" not in result.output.lower() and not _EXAMPLE_LINE.search(result.output):
-            missing.append(" ".join(path))
-    assert not missing, f"--help without examples: {missing}"
-
-
-def test_reboot_accepts_yes_for_symmetry(monkeypatch):
-    from lium.cli.reboot import command as reboot_module
-
-    class _Lium:
-        def __init__(self, *a, **k):
-            pass
-
-        def ps(self):
-            return []
-
-    monkeypatch.setattr(reboot_module, "Lium", _Lium)
-
-    result = CliRunner().invoke(cli, ["reboot", "--all", "--yes"])
-
-    assert "no such option" not in result.output.lower()

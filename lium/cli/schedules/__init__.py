@@ -8,14 +8,7 @@ from .rm.command import schedules_rm_command
 @click.group(invoke_without_command=True)
 @click.pass_context
 def schedules_command(ctx):
-    """Manage scheduled pod terminations.
-
-    \b
-    Examples:
-      lium schedules                 # same as 'lium schedules list'
-      lium schedules rm 1            # cancel by index from the list
-      lium rm my-pod --in 6h         # create one
-    """
+    """Manage scheduled pod terminations."""
     # If no subcommand is provided, default to list
     if ctx.invoked_subcommand is None:
         ctx.invoke(schedules_list_command)
