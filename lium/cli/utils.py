@@ -715,12 +715,20 @@ def calculate_pareto_frontier(executors: List[ExecutorInfo]) -> List[bool]:
     return is_pareto
 
 
-def store_executor_selection(executors: List[ExecutorInfo]) -> None:
-    """Store the last executor selection for index-based selection."""
+def store_executor_selection(executors: List[ExecutorInfo], now: Optional[datetime] = None) -> None:
+    """Remember which node `lium ls` showed on which row, so `lium up <index>` can be checked later.
+
+    The listing is stamped with the shell that produced it (``session``, the parent
+    process) and a UTC time: ``resolve_executor_indices`` refuses a row number from
+    another shell or older than ``POD_INDEX_TTL_SECONDS`` — the rule lium#138 set for
+    pod indexes. Every ``lium ls`` in the home directory rewrites this one file.
+    """
     from lium.cli.settings import config
-    
+
+    now = now or datetime.now(timezone.utc)
     selection_data = {
-        'timestamp': datetime.now().isoformat(),
+        'timestamp': now.isoformat(),
+        'session': pod_index_session(),
         'executors': []
     }
     
@@ -876,15 +884,32 @@ def parse_volume_spec(volume_spec: str) -> Tuple[Optional[str], Optional[Dict[st
     return None, None, f"Invalid volume format: '{spec}'. Use 'id:<HUID>' or 'new:name=<NAME>[,desc=<DESC>]'"
 
 
-def resolve_executor_indices(indices: List[str]) -> Tuple[List[str], Optional[str]]:
+def resolve_executor_indices(
+    indices: List[str], now: Optional[datetime] = None
+) -> Tuple[List[str], Optional[str]]:
+    """Translate `lium ls` row numbers to node ids.
+
+    Returns (resolved_executor_ids, error_message). A number is trusted only while the
+    listing it points at is this shell's and younger than ``POD_INDEX_TTL_SECONDS``:
+    the file is rewritten by every ``lium ls`` in the home directory, another agent's
+    included, so without the check ``lium up 3`` could rent a node the caller never saw.
+    Refusing is the safe answer; the message says what to run instead.
     """
-    Resolve executor indices from the last selection.
-    Returns (resolved_executor_ids, error_message)
-    """
+    hint = "Run 'lium ls' and retry, or name the node by its huid (the Id column of 'lium ls')"
+    if not pod_indexes_allowed():
+        return [], f"Node indexes are disabled ({POD_INDEX_ENV}). Name the node by its huid or id"
     last_selection = get_last_executor_selection()
-    if not last_selection:
-        return [], None
-    
+    # A listing without a session was written by a CLI older than this rule: not this shell's.
+    if not isinstance(last_selection, dict) or 'session' not in last_selection:
+        return [], f"Node index cannot be used before 'lium ls' has shown the list in this shell. {hint}"
+    if last_selection.get('session') != pod_index_session():
+        return [], f"Node index refers to a 'lium ls' listing from another shell. {hint}"
+    age = _snapshot_age_seconds(last_selection, now or datetime.now(timezone.utc))
+    if age is None or age < 0 or age > POD_INDEX_TTL_SECONDS:
+        return [], (
+            f"Node index refers to a 'lium ls' listing older than {POD_INDEX_TTL_SECONDS // 60} minutes. {hint}"
+        )
+
     executors = last_selection.get('executors', [])
     if not executors:
         return [], "No nodes in last selection."
@@ -925,7 +950,7 @@ _PS_SNAPSHOT_SUFFIX = ".json"
 
 
 def pod_indexes_allowed() -> bool:
-    """``LIUM_NO_POD_INDEX=1`` makes every command treat numeric targets as names only."""
+    """``LIUM_NO_POD_INDEX=1`` makes every pod command treat numeric targets as names only; `up` refuses them."""
     return os.environ.get(POD_INDEX_ENV, "").strip().lower() not in ("1", "true", "yes", "on")
 
 
