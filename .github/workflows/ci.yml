@@ -297,9 +297,10 @@ jobs:
   # billing → rm → gone → final charge, plus the error contract (wrong key 3, no key 2, unknown pod 5), then the
   # SDK's pod-lifecycle example. Rents the cheapest ≥1-GPU node under $0.50/h for a few minutes ($0.03 on 7 Sep 2026:
   # two RTX 4090 rentals of 6 and 0.5 min). Needs the secret LIUM_E2E_API_KEY (the dedicated test account's key);
-  # without it the job skips every test and stays green, so fork PRs are unaffected. One run at a time repo-wide:
-  # two suites on one account would sweep each other's pods. e2e/run.sh puts a timeout on every step and always leaves e2e/artifacts (timings,
-  # summary.md, junit, commands.json); summarised in one sticky PR comment. Reproduce: E2E_API_KEY=… e2e/run.sh
+  # without it the job skips every test and stays green, so fork PRs are unaffected. One run at a time repo-wide
+  # (the job's `concurrency:` group, explained at the job). e2e/run.sh puts a timeout on every step and always
+  # leaves e2e/artifacts (timings, summary.md, junit, commands.json); summarised in one sticky PR comment.
+  # Reproduce: E2E_API_KEY=… e2e/run.sh
   e2e-live:
     name: e2e-live
     needs: e2e-inputs
@@ -309,9 +310,19 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+    # One live suite at a time repo-wide: two suites on one account would sweep each other's pods (the cleanup step
+    # below removes every e2e-… pod it sees), so this group must stay repo-wide, never per PR. `queue: max` makes the
+    # group a queue: up to 100 jobs wait as `pending`, served first-in-first-out by the time each started waiting
+    # (GitHub: the order is not guaranteed, since when a job starts waiting varies); only a job past the cap of 100
+    # is cancelled. Without it (the default, `queue: single`) the group held ONE pending job and cancelled it when a
+    # third PR pushed, so any push on any PR turned another PR's e2e-live red as "cancelled" for a job that never
+    # ran (three PRs in one night, 9 Sep 2026). `cancel-in-progress` is left at its default (false): `true` cannot be
+    # combined with `queue: max`, and superseding pushes on the SAME PR are already cancelled — run and all, this job
+    # included — by the workflow-level group at the top, keyed per PR. A waiting job is `pending` (yellow, not red)
+    # and holds no runner, so timeout-minutes covers the suite alone.
     concurrency:
       group: e2e-live-staging
-      cancel-in-progress: false
+      queue: max
     steps:
     - uses: actions/checkout@v4
       with:

@@ -48,9 +48,15 @@ always reports; a README- or `test/`-only PR does not rent anything), on `workfl
 listing must not block every merge; the sticky comment is its verdict. Needs the repository secret **`LIUM_E2E_API_KEY`** (the key of a funded account on the target API) and the
 variable `LIUM_E2E_API_URL` (staging when unset). Today the variable is `https://lium.io/api` and the key belongs to
 a dedicated test account funded with $200, which covers about 6,000 runs at $0.03. Fork PRs have no secrets →
-the job skips and stays green. One run at a time repo-wide (`concurrency: e2e-live-staging`; the job's own group
-queues, it does not cancel): two suites on one account would sweep each other's `e2e-…` pods, and staging has a
-single node. The workflow-level group does cancel a run a newer push supersedes; the `e2e-…` pods of a run whose suite did not
+the job skips and stays green. One run at a time repo-wide: two suites on one account would sweep each other's
+`e2e-…` pods, and staging has a single node. The lock is the job-level `concurrency:` group `e2e-live-staging` with
+`queue: max`: up to 100 jobs wait as `pending` and are served first-in-first-out by the time each started waiting
+(any branch, the cron and dispatches included); that group cancels only a job past the cap, a queued job is yellow
+until its turn. Before that the group ran with the default, `queue: single`, which holds ONE pending job repo-wide
+and cancels it when a third PR pushes, so a push on any PR made another PR's `e2e-live` red as "cancelled" (9 Sep
+2026: three PRs in one night). The group stays repo-wide on purpose — keyed per PR it would let two suites onto the
+one account. The workflow-level group (per PR, `cancel-in-progress: true`) does cancel a run a newer push on the same
+PR supersedes; the `e2e-…` pods of a run whose suite did not
 finish its own cleanup — cancelled by the runner, killed by `run.sh`'s `timeout`, or failed under pytest-timeout — are
 removed one by one by the job's cleanup step (it runs when the suite step failed or was cancelled; pytest's
 finalizers do not run under those kills), the 30-min TTL being the last resort. The job and step time limits (65 / 60 min) sit above `run.sh`'s own budget (5 + 25 + 25 min), so a
