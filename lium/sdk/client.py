@@ -2845,11 +2845,15 @@ class Lium:
     ) -> Dict[str, Any]:
         """Copy files from one pod to another over SSH, without passing through this machine.
 
-        Pod-to-pod links are far faster than relaying through the caller. The
-        source pod gets a one-off ed25519 key, its public half is added to the
-        destination pod's ``authorized_keys`` for the duration of the copy, the
-        source runs ``rsync`` straight to the destination, and both halves are
-        removed again whatever happened. The source verifies the destination with
+        Pod-to-pod links are far faster than relaying through the caller. This
+        client makes a one-off ed25519 key, places the private half on the
+        source pod (sent over the exec session's stdin, never on a command line)
+        and adds the public half to the destination pod's ``authorized_keys``
+        for the duration of the copy; the source runs ``rsync`` straight to the
+        destination, and both halves are removed again whatever happened. The
+        source pod's output never decides what the destination trusts: the key
+        the destination authorises is the one this client generated, and the
+        revoke removes exactly that key. The source verifies the destination with
         the host key this client pinned for it (``~/.lium/known_hosts/<pod id>``,
         written by the grant connection), copied next to the transfer key; no pin
         means no copy (``LIUM_SSH_INSECURE=1`` accepts any key, as everywhere).
@@ -2882,17 +2886,20 @@ class Lium:
         if not dst_pod.ssh_cmd or not dst_pod.host:
             raise ValueError(f"No SSH for destination pod {dst_pod.name or dst_pod.huid}")
 
+        # The key pair is made here, not on the source pod: whatever the source prints is never
+        # what the destination authorises (bounty report 6, DAH-3511).
+        private_key, public_key = self.transfer_keypair()
         key_path = f"/tmp/lium-cp-{uuid.uuid4().hex[:12]}"
-        keygen = self.exec(
+        placed = self.exec(
             src_pod,
-            command=f"ssh-keygen -q -t ed25519 -N '' -f {key_path} && cat {key_path}.pub",
+            command=f"umask 077 && printf '%s' \"${self.TRANSFER_KEY_ENV}\" > {key_path}",
+            env={self.TRANSFER_KEY_ENV: private_key},
         )
-        if not keygen["success"]:
+        if not placed["success"]:
             raise LiumError(
-                f"Could not create a transfer key on pod {src_pod.name or src_pod.huid}: "
-                f"{keygen['stderr'].strip() or keygen['stdout'].strip()}"
+                f"Could not place the transfer key on pod {src_pod.name or src_pod.huid}: "
+                f"{placed['stderr'].strip() or placed['stdout'].strip()}"
             )
-        public_key = keygen["stdout"].strip().splitlines()[-1]
         marker = f"lium-cp-{uuid.uuid4().hex[:12]}"
         authorized_line = f"{public_key} {marker}"
 
@@ -2945,7 +2952,7 @@ class Lium:
             return result
         finally:
             if authorized:
-                revoke = self.revoke_transfer_key_command(marker)
+                revoke = self.revoke_transfer_key_command(public_key, marker)
                 self._exec_quietly(
                     dst_pod,
                     revoke,
@@ -2955,7 +2962,32 @@ class Lium:
                         f"lium exec {dst_pod.huid} {shlex.quote(revoke)}"
                     ),
                 )
-            self._exec_quietly(src_pod, f"rm -f {key_path} {key_path}.pub {key_path}.known_hosts")
+            self._exec_quietly(src_pod, f"rm -f {key_path} {key_path}.known_hosts")
+
+    # The private half of the transfer key travels to the source pod in this variable, over the
+    # exec session's stdin (see ``exec(env=...)``): ``ps`` on the pod never shows it.
+    TRANSFER_KEY_ENV = "LIUM_CP_PRIVATE_KEY"
+
+    @staticmethod
+    def transfer_keypair() -> Tuple[str, str]:
+        """A fresh ed25519 key pair for one copy, as OpenSSH text.
+
+        Returns:
+            ``(private_key, public_key)``: the private key in OpenSSH PEM form
+            (what ``ssh -i`` reads) and the public key as one ``ssh-ed25519
+            <base64>`` line with no comment.
+        """
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        key = Ed25519PrivateKey.generate()
+        private_key = key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.OpenSSH, serialization.NoEncryption()
+        ).decode("ascii")
+        public_key = key.public_key().public_bytes(
+            serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH
+        ).decode("ascii")
+        return private_key, public_key
 
     @staticmethod
     def _pinned_host_key_lines(pod: PodInfo) -> str:
@@ -2991,10 +3023,12 @@ class Lium:
         )
 
     @classmethod
-    def revoke_transfer_key_command(cls, marker: str) -> str:
-        """The remote line that drops the authorized_keys entry tagged ``marker``.
+    def revoke_transfer_key_command(cls, public_key: str, marker: str) -> str:
+        """The remote line that drops every authorized_keys entry carrying ``public_key``.
 
-        The scratch file carries the marker, so two ``cp`` runs into the same
+        The match is the key itself (``ssh-ed25519 <base64>``, unique to one
+        ``cp`` run), not the comment: a line that lost its marker still goes.
+        The scratch file carries the ``marker``, so two ``cp`` runs into the same
         pod never share one, and the result is written back with ``cat >``
         (the way lium-io removes keys) rather than ``mv``: the file keeps its
         mode and a second run's half-written scratch file can never replace it.
@@ -3004,7 +3038,7 @@ class Lium:
         """
         scratch = f"~/.ssh/authorized_keys.{marker}"
         return cls._under_transfer_key_lock(
-            f"( grep -vF {shlex.quote(marker)} ~/.ssh/authorized_keys > {scratch} || [ $? -eq 1 ] ) "
+            f"( grep -vF {shlex.quote(public_key)} ~/.ssh/authorized_keys > {scratch} || [ $? -eq 1 ] ) "
             f"&& cat {scratch} > ~/.ssh/authorized_keys; rc=$?; rm -f {scratch}; exit $rc"
         )
 
