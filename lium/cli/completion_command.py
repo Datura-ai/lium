@@ -1,5 +1,7 @@
 """`lium completion`: print or install shell tab completion."""
 
+import os
+
 import click
 from rich.markup import escape
 
@@ -25,8 +27,6 @@ def completion_command(shell, install):
       lium completion --install               # install for the current shell
       lium completion bash >> ~/.bashrc       # same thing, by hand
     """
-    import os
-
     shell = shell or os.path.basename(os.environ.get("SHELL", ""))
     if shell not in SHELLS:
         raise CliFailure(
