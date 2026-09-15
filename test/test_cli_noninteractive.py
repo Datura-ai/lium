@@ -213,6 +213,75 @@ def test_rm_all_and_rm_by_index_fail_closed_when_piped(monkeypatch):
     assert rm_module.human_approved_index_targets([match], yes=True) is True
 
 
+def _rm_two_pods(monkeypatch):
+    """Two pods on the account; returns (answers the prompt got, pods handed to removal)."""
+    from lium.cli.rm import command as rm_module
+
+    # created_at / executor / status: `rm` reports each removed pod's uptime and spend since lium#218
+    # (display.pod_spend); None means "unknown", which it prints as such
+    pods = [
+        SimpleNamespace(huid="eager-wolf-aa", name="train", id="id-a", created_at=None, executor=None, status="RUNNING"),
+        SimpleNamespace(huid="calm-lake-bb", name="eval", id="id-b", created_at=None, executor=None, status="RUNNING"),
+    ]
+    asked, removed = [], []
+    config = SimpleNamespace(workspace=None, workspace_id=None, workspace_explicit=False)
+    monkeypatch.setattr(rm_module, "Lium", lambda *a, **k: SimpleNamespace(ps=lambda: pods, config=config))
+    monkeypatch.setattr(rm_module, "show_workspace", lambda *a, **k: None)
+    monkeypatch.setattr(ui.Confirm, "ask", lambda message, *a, **k: asked.append(message) or False)
+    monkeypatch.setattr(
+        rm_module.RemovePodsAction, "execute",
+        lambda self, ctx: removed.extend(ctx["pods"]) or SimpleNamespace(data={"failed_huids": []}),
+    )
+    return asked, removed
+
+
+@pytest.mark.parametrize("spelling", ["--all", "all", "ALL", " all "])
+def test_rm_all_asks_on_a_terminal_in_both_spellings(monkeypatch, spelling):
+    """Regression: `lium rm all` resolved the word as a target and removed every pod with no
+    question, while `lium rm --all` asked. Both spellings (the word in any case, spaces around
+    it ignored) must reach the whole-account prompt, and a 'no' removes nothing."""
+    _terminal(monkeypatch, attached=True)
+    asked, removed = _rm_two_pods(monkeypatch)
+
+    result = CliRunner().invoke(cli, ["rm", spelling])
+
+    assert result.exit_code == 0, result.output
+    assert asked == ["Remove all 2 pods (eager-wolf-aa, calm-lake-bb)?"]
+    assert removed == []
+
+
+@pytest.mark.parametrize("spelling", ["--all", "all"])
+@pytest.mark.parametrize("how", ["piped", "env"])
+def test_rm_all_fails_closed_when_nobody_can_answer_in_both_spellings(monkeypatch, spelling, how):
+    """Regression: piped `lium rm all` wiped the account with no prompt and exit 0. Without a
+    terminal, or with LIUM_NONINTERACTIVE=1, both spellings fail with confirmation_required,
+    name --yes, and remove nothing."""
+    _terminal(monkeypatch, attached=(how == "env"))
+    if how == "env":
+        monkeypatch.setenv(interactive.NONINTERACTIVE_ENV, "1")
+    asked, removed = _rm_two_pods(monkeypatch)
+
+    result = CliRunner().invoke(cli, ["rm", spelling])
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
+    assert "--yes" in result.output
+    assert asked == [] and removed == []
+
+
+@pytest.mark.parametrize("spelling", ["--all", "all"])
+def test_rm_all_with_yes_removes_without_a_prompt_in_both_spellings(monkeypatch, spelling):
+    """A script names its intent with -y: no prompt is shown and every pod is removed, whichever
+    spelling it used (the fix must not make `rm all -y` start asking)."""
+    _terminal(monkeypatch, attached=False)
+    asked, removed = _rm_two_pods(monkeypatch)
+
+    result = CliRunner().invoke(cli, ["rm", spelling, "-y"])
+
+    assert result.exit_code == 0, result.output
+    assert asked == []
+    assert [pod.huid for pod in removed] == ["eager-wolf-aa", "calm-lake-bb"]
+
+
 def test_volumes_rm_without_yes_fails_fast_when_piped(monkeypatch):
     from lium.cli.volumes.rm import command as volumes_rm_module
 
