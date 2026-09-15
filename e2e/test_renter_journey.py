@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from conftest import API_URL, MAX_PRICE, Rental, Session, keep_pod, ps, rentable
+from conftest import API_URL, MAX_PRICE, MIN_RELIABILITY, Rental, Session, keep_pod, ps, reliability_scores, rentable
 
 pytestmark = pytest.mark.timeout(600)
 
@@ -46,9 +46,10 @@ def test_ls_json_lists_nodes_with_stable_fields(session: Session, rental: Rental
     # a second call keeps the same key set — the contract agents and the docs rely on
     again = session.lium("ls", "--format", "json", check=True).json()
     assert set(again[0]) == set(nodes[0]), "ls --format json key set changed between two calls"
-    candidates = [n for n in nodes if rentable(n.get("gpu_count"), n.get("price_per_hour"), n.get("country"), n.get("id"), n.get("huid"))]
+    scores = reliability_scores()   # `ls --format json` has no reliability_score; the public listing does
+    candidates = [n for n in nodes if rentable(n.get("gpu_count"), n.get("price_per_hour"), n.get("country"), n.get("id"), n.get("huid"), scores.get(str(n.get("id"))))]
     if not candidates:
-        pytest.skip(f"no rentable node with ≥1 GPU at ≤ ${MAX_PRICE}/h listed right now (E2E_EXCLUDE_* applied) — nothing to rent")
+        pytest.skip(f"no rentable node with ≥1 GPU at ≤ ${MAX_PRICE}/h and reliability ≥ {MIN_RELIABILITY:g} listed right now (E2E_EXCLUDE_* applied) — nothing to rent")
     cheapest = min(candidates, key=lambda n: float(n["price_per_hour"]))
     rental.executor_id, rental.price_per_hour, rental.gpu_type = cheapest["id"], float(cheapest["price_per_hour"]), str(cheapest.get("gpu_type"))
 

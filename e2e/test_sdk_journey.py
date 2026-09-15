@@ -9,11 +9,36 @@ import os
 import time
 from types import SimpleNamespace
 
+import paramiko
 import pytest
 
-from conftest import API_KEY, API_URL, MAX_PRICE, keep_pod, rentable
+from conftest import API_KEY, API_URL, MAX_PRICE, MIN_RELIABILITY, keep_pod, reliability_scores, rentable
 
 pytestmark = pytest.mark.timeout(900)
+
+FIRST_SSH_BUDGET_S = 30.0   # how long the first connect to a fresh pod may keep failing before the journey does
+FIRST_SSH_PAUSE_S = 5.0
+
+
+def first_exec(lium, pod, command: str, budget_s: float = FIRST_SSH_BUDGET_S, pause_s: float = FIRST_SSH_PAUSE_S,
+               sleep=time.sleep, clock=time.monotonic) -> dict:
+    """`lium.exec` for the FIRST command on a pod, retried while the connection itself fails: new attempts start for
+    `budget_s` (each carries the SDK's own 30 s connect timeout, so a port that drops packets can take ~60 s to fail).
+
+    `wait_ready` returns when the platform reports the pod RUNNING with an ssh_cmd — the container's state, not sshd's:
+    the port map can be a few seconds behind. Only connection-level errors are retried (paramiko's
+    `NoValidConnectionsError`, a refused/reset connection, a timeout, a banner/transport/auth `SSHException` while the
+    key lands); a host-key mismatch (`LiumHostKeyError`), a missing key file and any failure inside the command come
+    straight back. The last error is re-raised once the budget is spent, so a dead port map still fails — later, and
+    with the same exception."""
+    deadline = clock() + budget_s
+    while True:
+        try:
+            return lium.exec(pod, command=command)
+        except (paramiko.ssh_exception.NoValidConnectionsError, ConnectionError, TimeoutError, paramiko.SSHException):
+            if clock() >= deadline:
+                raise
+            sleep(pause_s)
 
 
 @pytest.fixture(scope="module")
@@ -68,9 +93,10 @@ def test_sdk_up_wait_exec_upload_download_rm(lium, sdk_pod, tmp_path):
         pytest.skip("the e2e account has no balance")
     # the same country rule as the CLI journey: `ls --format json` falls back to the ISO code when a listing has no
     # country name (lium/cli/ls/display.py), which is why RU/BY are in the default exclusion
-    nodes = [n for n in lium.ls() if rentable(n.gpu_count, n.price_per_hour, _country(n), n.id, n.huid)]
+    scores = reliability_scores()   # ExecutorInfo has no reliability_score; the public listing does
+    nodes = [n for n in lium.ls() if rentable(n.gpu_count, n.price_per_hour, _country(n), n.id, n.huid, scores.get(str(n.id)))]
     if not nodes:
-        pytest.skip(f"no rentable node with ≥1 GPU at ≤ ${MAX_PRICE}/h listed right now (E2E_EXCLUDE_* applied)")
+        pytest.skip(f"no rentable node with ≥1 GPU at ≤ ${MAX_PRICE}/h and reliability ≥ {MIN_RELIABILITY:g} listed right now (E2E_EXCLUDE_* applied)")
     node = min(nodes, key=lambda n: float(n.price_per_hour))
     t0 = time.monotonic()
     created = lium.up(executor_id=node.id, name=sdk_pod["name"])
@@ -90,7 +116,8 @@ def test_sdk_up_wait_exec_upload_download_rm(lium, sdk_pod, tmp_path):
     assert ready.status == "RUNNING" and ready.ssh_cmd, ready
     t_ready = time.monotonic() - t0
 
-    ok = lium.exec(ready, command="echo sdk-e2e && (command -v nvidia-smi >/dev/null && nvidia-smi -L || echo NO-NVIDIA-SMI)")
+    # the first connect: RUNNING is the pod's state, sshd's port map may land a few seconds later (DAH-3383)
+    ok = first_exec(lium, ready, "echo sdk-e2e && (command -v nvidia-smi >/dev/null && nvidia-smi -L || echo NO-NVIDIA-SMI)")
     assert ok["success"] is True and ok["exit_code"] == 0 and "sdk-e2e" in ok["stdout"], ok
     if "NO-NVIDIA-SMI" not in ok["stdout"] or "localhost" not in API_URL:
         assert "GPU 0" in ok["stdout"], ok
