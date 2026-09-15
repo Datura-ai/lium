@@ -86,6 +86,7 @@ def machine_request_command() -> None:
 @with_provider_overrides
 @click.pass_context
 def list_machine_requests(ctx: click.Context) -> None:
+    """Pending tenant requests, or their aggregate when the hotkey has no validator-verified node."""
     require_hotkey(ctx, group="machine-request")
     client = build_client(ctx)
     try:
@@ -93,9 +94,19 @@ def list_machine_requests(ctx: click.Context) -> None:
     except ProviderError as e:
         ctx.exit(handle_provider_error(ctx, e))
         return
+    render(ctx, body, summary=_machine_request_summary_line(body))
+
+
+def _machine_request_summary_line(body: object) -> str:
+    """The one-line summary above the table: the aggregate tier states why it carries no rows."""
+    if isinstance(body, dict) and body.get("tier") == "aggregate":
+        return (
+            f"machine requests: {body.get('open_requests') or 0} open "
+            "(aggregate — per-request detail needs a portal login and a validator-verified node)"
+        )
     rows = body.get("data") if isinstance(body, dict) else body
     count = len(rows) if isinstance(rows, list) else 0
-    render(ctx, body, summary=f"machine requests: {count}")
+    return f"machine requests: {count}"
 
 
 @machine_request_command.command("get", short_help="Single tenant machine request.")

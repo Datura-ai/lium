@@ -267,7 +267,7 @@ Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, 
 - `lium provider config show|opt-in|opt-out|set-email|set-subscriptions` - Portal-account configuration (incl. lium.io central miner server toggle)
 - `lium provider sync from-miner-server|to-miner-server` - Batch node-state sync between portal and the central miner server
 - `lium provider billing list [--all | --miner-hotkey HK] [--page N] [--limit N]` - Paginated billing history (active hotkey by default; `--all` for every provider's)
-- `lium provider machine-request list|get` - Pending tenant machine requests
+- `lium provider machine-request list|get` - Pending tenant machine requests (the portal shows per-request detail once one of your nodes is verified by a validator — lium-platform#248, not deployed; until then `list` returns counts per GPU class and hourly budget band, and `get` exits 2 with `PORTAL_FORBIDDEN`)
 - `lium provider machine list|estimate` - Machine catalogue + reward estimates
 
 Full reference with every flag and runnable examples: <https://docs.lium.io/developers/cli/reference/provider>.

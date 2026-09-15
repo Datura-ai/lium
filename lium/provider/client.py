@@ -642,11 +642,20 @@ class ProviderClient:
         return self._http.get(BILLING, params=params or None)
 
     def list_machine_requests(self) -> dict[str, Any]:
-        """``GET /machine-requests`` -- pending tenant capacity asks."""
+        """``GET /machine-requests`` -- pending tenant capacity asks.
+
+        Two shapes. With at least one validator-verified node the portal returns a JSON array, which
+        ``PortalHTTP`` wraps: ``{"data": [<request>, ...]}``. Without one it returns an object, passed through as
+        ``{"tier": "aggregate", "open_requests": N, "by_gpu_class": [...], "by_hourly_budget_band": [...]}`` --
+        counts only, no request id and no requester. Discriminate on ``body.get("tier")``.
+        """
         return self._http.get(MACHINE_REQUESTS)
 
     def get_machine_request(self, request_id: str) -> dict[str, Any]:
-        """``GET /machine-requests/{request_id}``."""
+        """``GET /machine-requests/{request_id}``.
+
+        403 (``PORTAL_FORBIDDEN``) until one of the hotkey's nodes is verified by a validator.
+        """
         return self._http.get(
             MACHINE_REQUEST_BY_ID.format(
                 request_id=_safe_id(request_id, label="request_id")
