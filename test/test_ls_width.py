@@ -124,13 +124,36 @@ def test_fit_columns_keeps_the_core_set_and_fits_the_width(width):
 
 
 def test_fit_columns_drops_in_priority_order():
-    """A wider terminal never loses a column a narrower one had."""
+    """A wider terminal never loses a column a narrower one had, and the optional columns
+    present are always the first N of the priority list (Tier, Download, VRAM, Max CUDA,
+    Upload, RAM, CPUs, Disk free, Ports) — a swap of two priorities fails here."""
+    by_priority = [h for h, *_ in sorted((c for c in display._COLUMNS if c[2] is not None), key=lambda c: c[2])]
+    assert by_priority == ["Tier", "Download (Mbps)", "VRAM (Gb)", "Max CUDA", "Upload (Mbps)", "RAM (Gb)", "CPUs", "Disk free (Gb)", "Ports"]
     previous: set = set()
     for width in range(60, 220):
-        shown = set(display.fit_columns(width)[0])
-        assert previous <= shown
-        previous = shown
+        shown, hidden = display.fit_columns(width)
+        assert previous <= set(shown)
+        previous = set(shown)
+        optional = [h for h in shown if h not in CORE]
+        assert sorted(optional, key=by_priority.index) == by_priority[: len(optional)], width
+        assert sorted(hidden, key=by_priority.index) == by_priority[len(optional):], width
     assert display.fit_columns(None) == (ALL, [])
+
+
+def test_no_row_folds_at_any_width_above_the_core_minimum():
+    """arhangel66's thread on 18a265d: the nominal widths and Rich's ratios disagreed, so at widths where
+    fit_columns admitted a column with no slack Rich squeezed Location and `United States` folded onto a
+    second line. Rendered through Rich at every width from the 69-column core minimum to 220, two rows
+    stay two lines."""
+    from rich.console import Console
+
+    executors = [_executor("cosmic-hawk-2e", 0.40), _executor("golden-matrix-ff", 12.50)]
+    for width in range(69, 221):
+        table, *_ = display.build_executors_table(executors, show_pareto=False, width=width)
+        console = Console(width=width, record=True, force_terminal=False)
+        console.print(table)
+        lines = [line for line in console.export_text().splitlines() if line.strip()]
+        assert len(lines) == 1 + len(executors), f"width {width}: {lines}"
 
 
 def test_build_executors_table_without_width_keeps_every_column():
