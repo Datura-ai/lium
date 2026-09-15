@@ -29,6 +29,17 @@ from ..utils import (
 # the lium process exit table.
 UNKNOWN_REMOTE_FAILURE = 1
 
+# pip on an Ubuntu 24.04 image refuses to touch the system Python (PEP 668) and
+# prints Debian's apt/pipx advice, none of which applies to a GPU pod. Only the
+# marker is visible here, not the image: a `--image`/`--dockerfile` pod may ship
+# no torch at all, so the hint promises nothing about what the system Python holds.
+PEP668_MARKER = "externally-managed-environment"
+PEP668_HINT = (
+    "Hint: pip on this image is PEP 668-managed; --system-site-packages keeps any torch the image ships. Either:",
+    "  pip install --break-system-packages <pkg>",
+    "  python3 -m venv --system-site-packages /workspace/venv && /workspace/venv/bin/pip install <pkg>",
+)
+
 
 @dataclass(frozen=True)
 class PodExecution:
@@ -79,6 +90,9 @@ def print_execution_for_a_human(execution: PodExecution, show_pod_header: bool) 
             console.error(f"Error: {execution.error}")
         else:
             console.error(f"Command failed (exit code: {execution.exit_code})")
+        if PEP668_MARKER in execution.stderr or PEP668_MARKER in execution.stdout:
+            for line in PEP668_HINT:
+                console.dim(line, soft_wrap=True)  # one copy-pasteable command per line
 
 
 def resolve_command_to_run(command: Optional[str], script: Optional[str]) -> str:

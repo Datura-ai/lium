@@ -123,6 +123,45 @@ def test_exec_exits_zero_when_the_remote_command_succeeds(monkeypatch):
     assert "ok" in result.output
 
 
+_PEP668_STDERR = (
+    "error: externally-managed-environment\n\n"
+    "× This environment is externally managed\n"
+    "╰─> To install Python packages system-wide, try apt install python3-xyz\n"
+    "hint: See PEP 668 for the detailed specification.\n"
+)
+
+
+def test_exec_names_the_pip_fix_when_pep_668_blocks_the_install(monkeypatch):
+    """DAH-3049: the pod's own text recommends apt, pipx and a torch-less venv;
+    the line that works on a GPU pod comes from the CLI."""
+    result = _run_exec(
+        monkeypatch,
+        {"success": False, "exit_code": 1, "stdout": "", "stderr": _PEP668_STDERR},
+    )
+
+    assert result.exit_code == 1
+    assert "Command failed (exit code: 1)" in result.output
+    assert "\n  pip install --break-system-packages <pkg>\n" in result.output
+    assert "\n  python3 -m venv --system-site-packages /workspace/venv && /workspace/venv/bin/pip install <pkg>\n" in result.output
+
+
+def test_exec_hint_needs_the_pep_668_marker_and_stays_out_of_json(monkeypatch):
+    plain_failure = _run_exec(
+        monkeypatch,
+        {"success": False, "exit_code": 1, "stdout": "", "stderr": "No module named requests\n"},
+    )
+    assert "break-system-packages" not in plain_failure.output
+
+    as_json = _run_exec(
+        monkeypatch,
+        {"success": False, "exit_code": 1, "stdout": "", "stderr": _PEP668_STDERR},
+        ["--json"],
+    )
+    payload = json.loads(as_json.output)
+    assert payload["results"][0]["stderr"] == _PEP668_STDERR
+    assert "break-system-packages" not in as_json.output
+
+
 def test_exec_json_carries_stdout_stderr_and_exit_code(monkeypatch):
     result = _run_exec(
         monkeypatch,
