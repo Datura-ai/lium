@@ -4,8 +4,9 @@ import hashlib
 import random
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from functools import wraps
-from typing import Callable, TypeVar
+from typing import Callable, Optional, TypeVar
 
 import requests
 
@@ -16,6 +17,35 @@ F = TypeVar("F", bound=Callable[..., object])
 # Human-friendly ID parts
 ADJECTIVES = ["swift", "brave", "calm", "eager", "gentle", "cosmic", "golden", "lunar", "zesty", "noble"]
 NOUNS = ["hawk", "lion", "eagle", "fox", "wolf", "shark", "raven", "matrix", "comet", "orbit"]
+
+
+def parse_api_timestamp(value: Optional[str]) -> Optional[datetime]:
+    """An API timestamp as an aware UTC datetime; None when missing or unparseable."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def spend_cap_deadline(started_at: datetime, price_per_hour: float, budget_usd: float) -> datetime:
+    """When a rental billed at ``price_per_hour`` from ``started_at`` has spent ``budget_usd``.
+
+    Billing is per hour of wall time from creation, so a budget is a deadline:
+    ``started_at + budget / price``. There is no server-side spend cap yet; the
+    deadline is enforced by scheduling the pod's removal for that time.
+
+    Raises:
+        ValueError: A non-positive budget, or an unknown/zero price (the deadline
+            would be "never", which is not a cap).
+    """
+    if budget_usd <= 0:
+        raise ValueError(f"Budget must be positive, got {budget_usd}")
+    if not price_per_hour or price_per_hour <= 0:
+        raise ValueError("Cannot cap spend without a positive hourly price")
+    return started_at + timedelta(hours=budget_usd / price_per_hour)
 
 
 def generate_huid(id_str: str) -> str:

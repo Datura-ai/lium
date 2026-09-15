@@ -35,7 +35,7 @@ from lium.sdk import LiumPermissionError, LiumServerError
 
 
 def _pod(huid: str = "eager-wolf-aa", name: str = "my-pod") -> SimpleNamespace:
-    return SimpleNamespace(id="pod-uuid-1", huid=huid, name=name)
+    return SimpleNamespace(id="pod-uuid-1", huid=huid, name=name, executor=None, created_at="")
 
 
 def _executor(huid: str, price_per_hour: float, download: int) -> SimpleNamespace:

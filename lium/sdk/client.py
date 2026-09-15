@@ -15,7 +15,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Callable, Dict, Generator, List, Optional, Sequence, Tuple, Union
@@ -55,7 +55,14 @@ from .models import (
     VolumeInfo,
 )
 from .ssh_key_cache import fingerprint, load_cache, save_cache
-from .utils import extract_gpu_type, generate_huid, gpu_short_matches, with_retry
+from .utils import (
+    extract_gpu_type,
+    generate_huid,
+    gpu_short_matches,
+    parse_api_timestamp,
+    spend_cap_deadline,
+    with_retry,
+)
 from .workspaces import WorkspacesClient
 
 # The backend feature `Lium.rent` looks for on GET /version before using POST /executors/rent-by-spec.
@@ -3761,6 +3768,47 @@ class Lium:
         # Idempotent payload: the same removal time twice is one schedule, so a 5xx or a lost response
         # is retried — one blip after `lium up --ttl` must not leave the pod without its auto-stop.
         return self._request("POST", f"/pods/{quote(str(pod_id), safe='')}/schedule-removal", json=payload, retry=True).json()
+
+    def cap_spend(self, pod: PodInfo, *, budget_usd: float) -> datetime:
+        """Schedule the pod's removal for the moment it will have spent ``budget_usd``.
+
+        The API caps a rental by time only. This computes the time at which the
+        pod, billed at its hourly price since ``created_at``, reaches the budget
+        (:func:`lium.sdk.utils.spend_cap_deadline`) and schedules removal then —
+        unless a removal is already scheduled earlier (a ``--ttl``), which stays,
+        as ``lium up --budget --ttl`` keeps the earlier of the two. Client-side:
+        the pod keeps running if the schedule is cancelled or the price changes.
+
+        Args:
+            pod: A running pod with ``created_at`` and an executor price.
+            budget_usd: Total spend allowed for the pod's lifetime.
+
+        Returns:
+            The scheduled removal time (UTC): the budget deadline, or the earlier
+            removal that was already scheduled.
+
+        Raises:
+            ValueError: Budget not positive, price or creation time unknown,
+                the budget is already spent (the deadline is in the past), or the
+                pod's scheduled removal has already passed.
+        """
+        started_at = parse_api_timestamp(pod.created_at)
+        if started_at is None:
+            raise ValueError(f"Pod {pod.huid} has no usable created_at; cannot cap spend")
+        price = pod.executor.price_per_hour if pod.executor else None
+        deadline = spend_cap_deadline(started_at, price or 0.0, budget_usd)
+        now = datetime.now(timezone.utc)
+        if deadline <= now:
+            raise ValueError(
+                f"Pod {pod.huid} has already spent ${budget_usd:.2f} at ${price:.2f}/h since {pod.created_at}"
+            )
+        existing = parse_api_timestamp(pod.removal_scheduled_at)
+        if existing is not None:
+            if existing <= now:
+                raise ValueError(f"Pod {pod.huid} is already scheduled for removal at {pod.removal_scheduled_at}")
+            deadline = min(deadline, existing.astimezone(timezone.utc))
+        self.schedule_termination(pod, termination_time=deadline.isoformat().replace("+00:00", "Z"))
+        return deadline
 
     def cancel_scheduled_termination(self, pod: PodInfo) -> Dict[str, Any]:
         """Cancel a scheduled termination for a pod.

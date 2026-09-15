@@ -30,17 +30,17 @@ def _format_uptime(created_at: str) -> str:
     if not dt_created:
         return "—"
 
-    duration = datetime.now(timezone.utc) - dt_created
-    hours = duration.total_seconds() / 3600
+    return format_duration((datetime.now(timezone.utc) - dt_created).total_seconds())
 
+
+def format_duration(seconds: float) -> str:
+    """``32m`` / ``1.5h`` / ``1.2d`` — the uptime spelling every command shares (ps, describe, rm)."""
+    hours = seconds / 3600
     if hours < 1:
-        mins = duration.total_seconds() / 60
-        return f"{mins:.0f}m"
-    elif hours < 24:
+        return f"{seconds / 60:.0f}m"
+    if hours < 24:
         return f"{hours:.1f}h"
-    else:
-        days = hours / 24
-        return f"{days:.1f}d"
+    return f"{hours / 24:.1f}d"
 
 
 def _format_cost(created_at: str, price_per_hour: Optional[float]) -> str:
@@ -56,6 +56,24 @@ def _format_cost(created_at: str, price_per_hour: Optional[float]) -> str:
     hours = duration.total_seconds() / 3600
     cost = hours * price_per_hour
     return f"${cost:.2f}"
+
+
+def _spend_cap_usd(created_at: str, removal_scheduled_at: Optional[str], price_per_hour: Optional[float]) -> Optional[float]:
+    """What the pod will have cost when its scheduled removal fires; None without a schedule."""
+    if not created_at or not removal_scheduled_at or price_per_hour is None:
+        return None
+    dt_created = _parse_timestamp(created_at)
+    dt_removal = _parse_timestamp(removal_scheduled_at)
+    if not dt_created or not dt_removal or dt_removal <= dt_created:
+        return None
+    return round((dt_removal - dt_created).total_seconds() / 3600 * price_per_hour, 2)
+
+
+def _format_spent(created_at: str, removal_scheduled_at: Optional[str], price_per_hour: Optional[float]) -> str:
+    """'$3.20' — or '$3.20/$12.50' when a removal is scheduled, spent against the cap."""
+    spent = _format_cost(created_at, price_per_hour)
+    cap = _spend_cap_usd(created_at, removal_scheduled_at, price_per_hour)
+    return f"{spent}/${cap:.2f}" if cap is not None and spent != "—" else spent
 
 
 def _format_template_name(template: dict) -> str:
@@ -92,7 +110,8 @@ def compact_pod(pod: PodInfo, index: Optional[int] = None) -> dict:
     """Slim, table-equivalent JSON view of a pod.
 
     ``index`` is the 1-based row number in this listing — the number `lium rm 1`
-    refers to — and is only meaningful for the full, unfiltered list.
+    refers to, sorted or filtered as shown; None for a single-pod lookup
+    (`ps <pod>`), which defines no rows.
     """
     executor = pod.executor
     view = {
@@ -107,6 +126,9 @@ def compact_pod(pod: PodInfo, index: Optional[int] = None) -> dict:
         "template": _format_template_name(pod.template) if pod.template else None,
         "price_per_hour": executor.price_per_hour if executor else None,
         "spent_usd": _spent_usd(pod.created_at, executor.price_per_hour if executor else None),
+        "spend_cap_usd": _spend_cap_usd(
+            pod.created_at, pod.removal_scheduled_at, executor.price_per_hour if executor else None
+        ),
         "uptime": _format_uptime(pod.created_at),
         "created_at": pod.created_at,
         "ip": executor.ip if executor else None,
@@ -143,7 +165,8 @@ def build_pods_table(pods: List[PodInfo], short: bool = False, show_index: bool 
     """Build pods table, returns (table, header).
 
     ``show_index`` adds the ``#`` column: the row number other commands accept
-    as a pod index. It is off for filtered listings, where row 1 is not pod 1.
+    as a pod index. It is off for a single-pod lookup (`ps <pod>`), which
+    defines no rows.
     """
 
     if not pods:
@@ -158,6 +181,15 @@ def build_pods_table(pods: List[PodInfo], short: bool = False, show_index: bool 
         padding=(0, 1),
     )
 
+    # the Spent cell is "$3.20" or, for a pod with a scheduled removal, "$200.00/$480.00" (15 chars) — spent against
+    # the cap (DAH-2565). The column grows only when a listed pod has a cap, so a narrow terminal keeps its Ports.
+    any_cap = any(
+        pod.executor is not None
+        and _spend_cap_usd(pod.created_at, pod.removal_scheduled_at, pod.executor.price_per_hour) is not None
+        for pod in pods
+    )
+    spent_width = 15 if any_cap else 8
+
     # Add columns
     if show_index:
         table.add_column("#", justify="right", width=3, no_wrap=True)
@@ -166,7 +198,7 @@ def build_pods_table(pods: List[PodInfo], short: bool = False, show_index: bool 
     table.add_column("Config", justify="left", width=12, no_wrap=True)
     table.add_column("Template", justify="left", ratio=2, min_width=12, overflow="ellipsis")
     table.add_column("$/h", justify="right", width=6, no_wrap=True)
-    table.add_column("Spent", justify="right", width=8, no_wrap=True)
+    table.add_column("Spent", justify="right", width=spent_width, no_wrap=True)
     table.add_column("Uptime", justify="right", width=7, no_wrap=True)
     if not short:
         table.add_column("Ports", justify="left", ratio=3, min_width=15, overflow="fold")
@@ -199,7 +231,7 @@ def build_pods_table(pods: List[PodInfo], short: bool = False, show_index: bool 
             config,
             console.get_styled(template_name, 'info'),
             price_str,
-            _format_cost(pod.created_at, price_per_hour),
+            _format_spent(pod.created_at, pod.removal_scheduled_at, price_per_hour),
             _format_uptime(pod.created_at),
         ]
 
