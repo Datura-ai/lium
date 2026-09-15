@@ -7,6 +7,7 @@ person reads agree.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -41,6 +42,8 @@ NODES = [US_CHEAP, US_BIG, NL, DE_SMALL]
 @pytest.fixture
 def fake_ls(monkeypatch):
     class _Lium:
+        workspaces = SimpleNamespace(current=lambda: None)   # a server without workspaces: no context line
+
         def __init__(self, *a, **k):
             pass
 

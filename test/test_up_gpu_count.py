@@ -81,6 +81,8 @@ class _FakeLium:
     exec_error: Exception | None = None
     removed: list[str] = []
     exec_commands: list[str] = []
+    # a server without workspaces: `up` reads it for its workspace line
+    workspaces = SimpleNamespace(current=lambda: None)
 
     def __init__(self, *args, **kwargs):
         pass

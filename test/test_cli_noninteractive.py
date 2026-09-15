@@ -135,6 +135,8 @@ class _UpLium:
     """Rent must never be reached without an answer; ``rented`` records if it was."""
 
     rented: list = []
+    # a server without workspaces: `up` reads it for its workspace line (DAH-3033)
+    workspaces = SimpleNamespace(current=lambda: None)
 
     def __init__(self, *args, **kwargs):
         pass

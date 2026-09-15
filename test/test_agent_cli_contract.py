@@ -35,7 +35,7 @@ from lium.sdk import LiumPermissionError, LiumServerError
 
 
 def _pod(huid: str = "eager-wolf-aa", name: str = "my-pod") -> SimpleNamespace:
-    return SimpleNamespace(id="pod-uuid-1", huid=huid, name=name)
+    return SimpleNamespace(id="pod-uuid-1", huid=huid, name=name, executor=None, created_at="")
 
 
 def _executor(huid: str, price_per_hour: float, download: int) -> SimpleNamespace:
@@ -60,10 +60,15 @@ def _executor(huid: str, price_per_hour: float, download: int) -> SimpleNamespac
     )
 
 
+# `Lium.workspaces` on a server without workspaces: `ps`, `ls`, `up` and `rm` read it for their workspace line
+_NO_WORKSPACES = SimpleNamespace(current=lambda: None)
+
+
 class _FakeLium:
     """Stands in for the SDK: one pod, and an exec result the test dictates."""
 
     result: dict[str, object] = {}
+    workspaces = _NO_WORKSPACES
 
     def __init__(self, *args, **kwargs):
         pass
@@ -122,6 +127,45 @@ def test_exec_exits_zero_when_the_remote_command_succeeds(monkeypatch):
     assert "ok" in result.output
 
 
+_PEP668_STDERR = (
+    "error: externally-managed-environment\n\n"
+    "× This environment is externally managed\n"
+    "╰─> To install Python packages system-wide, try apt install python3-xyz\n"
+    "hint: See PEP 668 for the detailed specification.\n"
+)
+
+
+def test_exec_names_the_pip_fix_when_pep_668_blocks_the_install(monkeypatch):
+    """DAH-3049: the pod's own text recommends apt, pipx and a torch-less venv;
+    the line that works on a GPU pod comes from the CLI."""
+    result = _run_exec(
+        monkeypatch,
+        {"success": False, "exit_code": 1, "stdout": "", "stderr": _PEP668_STDERR},
+    )
+
+    assert result.exit_code == 1
+    assert "Command failed (exit code: 1)" in result.output
+    assert "\n  pip install --break-system-packages <pkg>\n" in result.output
+    assert "\n  python3 -m venv --system-site-packages /workspace/venv && /workspace/venv/bin/pip install <pkg>\n" in result.output
+
+
+def test_exec_hint_needs_the_pep_668_marker_and_stays_out_of_json(monkeypatch):
+    plain_failure = _run_exec(
+        monkeypatch,
+        {"success": False, "exit_code": 1, "stdout": "", "stderr": "No module named requests\n"},
+    )
+    assert "break-system-packages" not in plain_failure.output
+
+    as_json = _run_exec(
+        monkeypatch,
+        {"success": False, "exit_code": 1, "stdout": "", "stderr": _PEP668_STDERR},
+        ["--json"],
+    )
+    payload = json.loads(as_json.output)
+    assert payload["results"][0]["stderr"] == _PEP668_STDERR
+    assert "break-system-packages" not in as_json.output
+
+
 def test_exec_json_carries_stdout_stderr_and_exit_code(monkeypatch):
     result = _run_exec(
         monkeypatch,
@@ -150,6 +194,7 @@ def test_exec_fails_loudly_when_no_pod_matches(monkeypatch):
 
 class _FakeRmLium:
     removed: list[str] = []
+    workspaces = _NO_WORKSPACES
 
     def __init__(self, *args, **kwargs):
         pass
@@ -272,6 +317,8 @@ def test_rm_named_pod_on_an_empty_account_fails(monkeypatch):
     """A typo must fail even when the account happens to hold no pods."""
 
     class _EmptyLium:
+        workspaces = _NO_WORKSPACES
+
         def __init__(self, *args, **kwargs):
             pass
 
@@ -289,6 +336,8 @@ def test_rm_all_on_an_empty_account_is_a_no_op(monkeypatch):
     """Removing everything when there is nothing is success, not failure."""
 
     class _EmptyLium:
+        workspaces = _NO_WORKSPACES
+
         def __init__(self, *args, **kwargs):
             pass
 
@@ -447,6 +496,8 @@ def _run_up_past_the_rent(monkeypatch, extra_args, break_on):
     from lium.cli.up import command as up_module
 
     class _RentingLium:
+        workspaces = _NO_WORKSPACES
+
         def __init__(self, *args, **kwargs):
             pass
 
@@ -502,6 +553,8 @@ def test_up_reports_an_api_failure_while_resolving_a_node(monkeypatch):
     from lium.cli.up import command as up_module
 
     class _BrokenUpLium:
+        workspaces = _NO_WORKSPACES
+
         def __init__(self, *args, **kwargs):
             pass
 
@@ -713,6 +766,8 @@ def test_missing_api_key_in_a_pipe_points_a_new_user_at_signup(monkeypatch):
     envelope = json.loads(result.output)
     assert envelope["error"]["code"] == "no_api_key"
     assert "lium signup --email" in envelope["error"]["hint"]
+    assert "lium init --api-key <key>" in envelope["error"]["hint"]   # DAH-3242: the headless path is a hint, not only message text
+    assert "--api-key" not in envelope["error"]["message"]           # the message is the diagnosis; the hint is the fix, once
 
 
 def test_ps_empty_account_is_not_a_failure(monkeypatch):

@@ -105,14 +105,14 @@ def test_up_rents_exactly_one_pod(session: Session, rental: Rental):
     if (rental.balance_before or 0) <= 0.01:
         pytest.skip("the e2e account has no balance — fund it before the rent tests can run")
     rental.up_called_at = time.monotonic()
-    # `lium up` itself blocks until the pod is RUNNING with an ssh_cmd (wait_ready_no_timeout, no deadline of its
-    # own) and schedules --ttl only then, so this call's timeout is the suite's RUNNING budget: 540 s, under the
-    # module's 600 s pytest-timeout (timeout_method = thread exits the process with no finalizer). A killed `up`
-    # leaves a pod without a TTL; the rental fixture removes it by name.
+    # `lium up` schedules --ttl right after the rent (DAH-3331) and then blocks until the pod is RUNNING with an
+    # ssh_cmd, so this call's timeout is the suite's RUNNING budget: 540 s, under the module's 600 s
+    # pytest-timeout (timeout_method = thread exits the process with no finalizer). A killed `up` may still leave
+    # a pod without a TTL (killed between the two calls); the rental fixture removes it by name.
     try:
         r = session.lium("up", rental.executor_id, "--name", rental.name, "--ttl", "30m", "-y", "--no-ssh", timeout=540)
     except subprocess.TimeoutExpired:
-        pytest.fail(f"lium up {rental.name} did not return within 540 s (a rented pod has no TTL yet; the fixture removes it by name)")
+        pytest.fail(f"lium up {rental.name} did not return within 540 s (the fixture removes the rented pod by name)")
     assert r.rc == 0, r
     mine = [p for p in ps(session) if p.get("name") == rental.name]
     assert len(mine) == 1, f"pods named {rental.name}: {len(mine)} (a retried POST must never rent twice)"

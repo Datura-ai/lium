@@ -14,7 +14,7 @@ mirrors it and a unit test keeps the two in step.
 | 2 | `EXIT_CONFIGURATION_ERROR` | Bad arguments, a missing or unreadable configuration value, no API key, a confirmation or input that could not be asked for because no terminal is attached. |
 | 3 | `EXIT_API_ERROR` | The API refused or failed the call (5xx, 404 on a resource, rate limit, any other non-2xx). |
 | 4 | `EXIT_SSH_ERROR` | ssh could not connect, the pod has no SSH endpoint yet, or no ssh client is installed. |
-| 5 | `EXIT_POD_NOT_FOUND` | The pod named on the command line does not exist. |
+| 5 | `EXIT_POD_NOT_FOUND` | The pod, cluster or fabric named on the command line does not exist (`lium clusters rm`: also a cluster the API answered 404 for). |
 | 6 | `EXIT_PERMISSION_DENIED` | The account is not allowed to do this: unverified account, insufficient balance (403). |
 
 `lium exec` exits with the remote command's own exit status, so `lium exec pod
@@ -22,7 +22,12 @@ mirrors it and a unit test keeps the two in step.
 by the argument parser (an unknown option, a missing argument) exit 2 with
 click's plain-text usage message; they are raised before the command runs and
 are not rendered as JSON. `lium provider …` keeps its own exit-code map,
-documented in `lium/cli/provider/_render.py`.
+documented in `lium/cli/provider/_render.py`. `lium mine --register` exits 0
+when the node is listed, 1 on a failed step or a fix the portal names, and 2
+when the node is registered but not listed — within `--wait` minutes, or not
+yet in the node list right after the add — the same
+code as a usage error; the timeout message (`Still … after N min`) is on
+stdout, a usage error on stderr.
 
 ## The error envelope
 
@@ -41,10 +46,10 @@ When a command is run for a machine reader, every failure is one JSON object:
 ```
 
 - `ok` is always `false`; a success payload never has `"ok": false`.
-- `code` is a stable `snake_case` identifier to branch on; `message` is for people and may change wording.
-- `hint` is always present: the next command or option to try.
+- `code` is a stable `snake_case` identifier to branch on; `message` is for people and may change wording. When the API refused with its own `error.code` (`insufficient_balance`, `pod_not_found`, …) that code is the one you get; the CLI's code for the failure class (table below) otherwise. `exit_code` is always the CLI's, by class.
+- `hint` is always present: the next command or option to try. When the API sent a hint with its refusal, that is the one you get; the CLI's own hint for the code otherwise.
 - `exit_code` repeats the process exit status for readers that only see the streams.
-- `data` (optional) carries anything the caller must not lose along with the failure — `lium signup --json`, for one, returns the credentials it generated.
+- `data` (optional) carries anything the caller must not lose along with the failure — `lium signup --json`, for one, returns the credentials it generated; an API refusal puts the server's `request_id` here (also printed as `request_id: …` in the text rendering) to quote to support.
 
 The envelope goes to **stderr**, stdout is left empty, and the process exits
 with `exit_code`. On success stdout carries the result JSON. Read both streams;
@@ -52,8 +57,8 @@ do not `2>/dev/null`.
 
 Machine mode is on when any of these holds:
 
-- `--format json` (list commands: `ls`, `ps`, `templates`, `balance`, `describe`);
-- `--json` (accepted everywhere `--format json` is, and on `exec`, `describe`, `fund`, `signup`, `audit`, `topup`);
+- `--format json` (list commands: `ls`, `ps`, `templates`, `balance`, `describe`, and every `clusters` command);
+- `--json` (accepted everywhere `--format json` is, and on `exec`, `describe`, `fund`, `signup`, `init`, `audit`, `topup`);
 - the environment variable `LIUM_OUTPUT=json` — this switches *failures* to the envelope on every command; success output is JSON only on commands that take `--format json`/`--json`, so pass the flag as well when you need to parse the result.
 
 Without any of these, the same information is printed as text: the error on one
@@ -61,12 +66,13 @@ line, the hint dimmed underneath.
 
 ## Error codes
 
-Codes raised by the shared error handler (any command can produce them):
+Codes raised by the shared error handler (any command can produce them) when the API sent no code of its own; the exit code holds either way:
 
 | `code` | Exit | When | Hint |
 |--------|------|------|------|
-| `no_api_key` | 2 | No API key in `LIUM_API_KEY` or `~/.lium/config.ini`. | Set `LIUM_API_KEY`, or run `lium init` (headless: `lium init --no-browser`, then `lium init --session <ID>`); no account yet? `lium signup --email you@example.com` creates one and stores its key. |
+| `no_api_key` | 2 | No API key in `LIUM_API_KEY` or `~/.lium/config.ini`. | Set `LIUM_API_KEY`, or run `lium init` (headless: `lium init --api-key <key>` with a key from https://lium.io/api-keys, or `lium init --no-browser`, then `lium init --session <ID>`); no account yet? `lium signup --email you@example.com` creates one and stores its key. |
 | `invalid_api_key` | 3 | The API answered 401. | `lium config get api.api_key` shows which key is in use; new keys at https://lium.io/api-keys. |
+| `session_required` | 3 | A session-only command (`lium keys …`, the `lium workspaces` writes) ran without a session token, the token was refused (expired), or `lium workspaces login` was refused. | `lium workspaces login` (or set `LIUM_SESSION_TOKEN`); an API key cannot fix this. |
 | `value_error` | 2 | A value the command received was invalid (SDK `ValueError`). | Check the options. |
 | `invalid_arguments` | 2 | Options that contradict each other or a malformed value. | `lium <command> --help`. |
 | `confirmation_required` | 2 | A yes/no question could not be asked: no terminal can answer, or the terminal went away mid-prompt (`ui.confirm`, DAH-2883). | Re-run with `--yes`. |
@@ -80,13 +86,17 @@ Codes raised by the shared error handler (any command can produce them):
 | `lium_error` | 3 | Any other API failure. | Retry; `LIUM_DEBUG=1` prints the traceback on stderr. |
 | `ssh_unavailable` | 4 | The pod has no SSH endpoint yet. | Wait for `lium ps` to show it RUNNING with an SSH command. |
 | `ssh_connection_failed` | 4 | ssh could not connect to a RUNNING pod. | Check `lium config get ssh.key_path` and `lium ssh-keys`. |
+| `copy_failed` | 1 | `lium cp`: the copy failed on a pod — rsync missing on either side, the one-off transfer key could not be authorised, or rsync exited non-zero; the message carries the pod's stderr. | Both pods need rsync (`apt-get install -y rsync`) and the destination needs `flock` (util-linux); fix what the message names and re-run. |
+| `ssh_host_key_unknown` | 4 | `lium cp`: the destination pod's host key was never pinned under `~/.lium/known_hosts/`, so the source pod cannot verify it; nothing was copied. | Connect to the destination once with `lium ssh <huid>` (pins its key), or set `LIUM_SSH_INSECURE=1` to skip host key checks. |
 | `ssh_host_key_changed` | 4 | The pod presented an ssh host key that differs from the one pinned under `~/.lium/known_hosts/` (`lium exec` on one pod; SDK callers of `Lium.exec`, `scp`, `download`). | Not a retry: if the pod was rebooted or re-templated and the new key is trusted, delete the file the message names and reconnect. |
 | `unexpected_error` | 1 | Anything not classified above. | `LIUM_DEBUG=1` prints the traceback on stderr; report the issue. |
 
 Commands add their own codes for the failures only they can have — for example
 `up` raises `node_selection_failed`, `template_failed`, `jupyter_install_failed`,
 `unreadable_dockerfile`; `exec` raises `unreadable_script`; `rm` raises
-`removal_failed`; `fund` raises `transfer_failed`. They follow the same envelope
+`removal_failed`; `fund` raises `transfer_failed`; `init` raises `api_unreachable` (3, the
+key passed with `--api-key` was not checked) and `empty_api_key` (2), and its `invalid_api_key` hint says
+nothing was saved. They follow the same envelope
 and use the exit code of their family from the table above. Where re-running
 the command would not be safe the hint says so: `jupyter_install_failed` from
 `up` points at `lium update <pod> --jupyter` (the pod exists and bills), and

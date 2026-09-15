@@ -375,3 +375,72 @@ def test_path_segment_validators_reject_unsafe_inputs(
     assert exc_info.value.code == "ARG_INVALID"
     assert portal.gets == [] and portal.posts == [] and portal.deletes == []
 
+
+
+# --- node listing scope ------------------------------------------------------
+
+
+def test_list_nodes_defaults_to_own_hotkey(client, fake_signer) -> None:
+    """``GET /executors`` is a global listing on the portal; default the
+    ``miner_hotkey`` filter to this provider so the result is its own fleet."""
+    portal = _Portal(get_body={"data": [], "total": 0})
+    c = client(portal)
+    c.list_nodes(page=2, limit=10)
+    path, params, _ = portal.gets[0]
+    assert path == "/executors"
+    assert params == {"miner_hotkey": fake_signer.ss58_address, "page": 2, "limit": 10}
+
+
+def test_list_nodes_without_a_resolvable_hotkey_refuses_instead_of_listing_everyone(tmp_token_store) -> None:
+    """No wallet for --hotkey on this machine: refuse, never fall back to the global view."""
+    portal = _Portal(get_body={"data": [], "total": 1538})
+
+    class _NoWallet:
+        @property
+        def ss58_address(self):
+            raise FileNotFoundError("no wallet")
+
+    c = ProviderClient(signer=_NoWallet(), token_store=tmp_token_store, http=portal)  # type: ignore[arg-type]
+    with pytest.raises(ProviderError) as exc_info:
+        c.list_nodes()
+    assert exc_info.value.code == "ARG_INVALID"
+    assert "--all" in exc_info.value.hint
+    assert portal.gets == []
+
+
+def test_list_nodes_all_miners_sends_no_hotkey_filter(client) -> None:
+    portal = _Portal(get_body={"data": [], "total": 0})
+    c = client(portal)
+    c.list_nodes(all_miners=True)
+    path, params, _ = portal.gets[0]
+    assert path == "/executors"
+    assert params is None
+
+
+def test_list_nodes_explicit_hotkey_wins(client) -> None:
+    portal = _Portal(get_body={"data": [], "total": 0})
+    c = client(portal)
+    other = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+    c.list_nodes(miner_hotkey=other)
+    _, params, _ = portal.gets[0]
+    assert params == {"miner_hotkey": other}
+
+
+def test_billing_history_defaults_to_own_hotkey(client, fake_signer) -> None:
+    portal = _Portal(get_body={"data": []})
+    c = client(portal)
+    c.billing_history(page=1, limit=10)
+    assert portal.gets[0][0] == "/billing"
+    assert portal.gets[0][1] == {
+        "miner_hotkey": fake_signer.ss58_address,
+        "page": 1,
+        "limit": 10,
+    }
+
+
+def test_billing_history_all_miners_is_unfiltered(client) -> None:
+    portal = _Portal(get_body={"data": []})
+    c = client(portal)
+    c.billing_history(all_miners=True)
+    assert portal.gets[0][0] == "/billing"
+    assert portal.gets[0][1] is None

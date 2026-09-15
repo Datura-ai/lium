@@ -9,6 +9,7 @@ line and timeout message use that.
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -85,6 +86,8 @@ def test_progress_line_is_unchanged_when_the_backend_sends_no_estimate():
 
 def test_timeout_error_says_what_the_backend_still_expects():
     class _Lium:
+        workspaces = SimpleNamespace(current=lambda: None)  # a server without workspaces: `up` reads it for its workspace line
+
         def wait_ready(self, pod_id, *, timeout, poll_interval=None, on_poll=None):
             on_poll(_pending(40, phase="pulling image", basis="cold_pull_estimate"), "PENDING", timeout)
             return None
@@ -100,6 +103,8 @@ def test_timeout_error_says_what_the_backend_still_expects():
 
 def test_timeout_error_is_the_plain_one_without_an_estimate():
     class _Lium:
+        workspaces = SimpleNamespace(current=lambda: None)  # a server without workspaces: `up` reads it for its workspace line
+
         def wait_ready(self, pod_id, *, timeout, poll_interval=None, on_poll=None):
             on_poll(_pod("PENDING", None), "PENDING", timeout)
             return None
@@ -116,6 +121,8 @@ def test_lium_up_timeout_message_carries_the_backends_estimate(monkeypatch):
     """The whole path: wait_ready's last poll → WaitReadyAction → the `lium up` error the caller reads."""
 
     class _Lium:
+        workspaces = SimpleNamespace(current=lambda: None)  # a server without workspaces: `up` reads it for its workspace line
+
         def wait_ready(self, pod_id, *, timeout, poll_interval=None, on_poll=None):
             on_poll(_pending(40, phase="pulling image", basis="cold_pull_estimate"), "PENDING", timeout)
             return None

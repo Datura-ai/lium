@@ -39,6 +39,7 @@ EXECUTOR_NOTICE_PERIOD = "/executors/{id}/notice-period"
 EXECUTOR_MACHINE_ADDED = "/executors/{id}/machine-added"
 EXECUTOR_MACHINE_REQUESTS = "/executors/{id}/machine-requests"
 EXECUTOR_MIN_GPU_FOR_RENTAL = "/executors/{id}/min-gpu-count-for-rental"
+EXECUTOR_VERIFICATION = "/executors/{id}/verification"
 
 # Billing
 BILLING = "/billing"
@@ -64,6 +65,7 @@ __all__ = [
     "EXECUTOR_MIN_GPU_FOR_RENTAL",
     "EXECUTOR_NOTICE_PERIOD",
     "EXECUTOR_PODS",
+    "EXECUTOR_VERIFICATION",
     "EXECUTORS",
     "LOGIN_FLEXIBLE",
     "LOGOUT",

@@ -20,9 +20,34 @@ from .actions import RsyncPodsAction
 @click.argument("targets")
 @click.argument("local_path", type=click.Path(exists=True, readable=True))
 @click.argument("remote_path", required=False)
+@click.option("--bwlimit", type=click.IntRange(min=1), metavar="KIB_PER_S", help="Cap the transfer rate (rsync --bwlimit)")
+@click.option("--exclude", multiple=True, metavar="PATTERN", help="Skip matching paths; repeatable (rsync --exclude)")
+@click.option("--delete", is_flag=True, help="Remove files on the pod that are not in the local source")
+@click.option("--progress", is_flag=True, help="Show overall transfer progress")
 @handle_errors
-def rsync_command(targets: str, local_path: str, remote_path: Optional[str]):
-    """Sync directories to GPU pods using rsync."""
+def rsync_command(
+    targets: str,
+    local_path: str,
+    remote_path: Optional[str],
+    bwlimit: Optional[int],
+    exclude: tuple,
+    delete: bool,
+    progress: bool,
+):
+    """Sync directories to GPU pods using rsync.
+
+    Transfers resume where they stopped (rsync --partial), so an interrupted
+    copy can simply be re-run.
+
+    \b
+    Examples:
+      lium rsync my-pod ./data                        # -> /root/data on the pod
+      lium rsync my-pod ./data /workspace/data
+      lium rsync all ./src /workspace/src --exclude .git --exclude '*.pt'
+      lium rsync my-pod ./ckpt /workspace/ckpt --bwlimit 20000 --progress
+    \b
+    Pod to pod: lium cp SRC_POD:/path DST_POD:/path
+    """
 
     # Validate
     valid, error = validation.validate(local_path)
@@ -50,7 +75,13 @@ def rsync_command(targets: str, local_path: str, remote_path: Optional[str]):
         "pods": selected_pods,
         "lium": lium,
         "local_dir": local_dir,
-        "remote_path": resolved_remote_path
+        "remote_path": resolved_remote_path,
+        "rsync_kwargs": {
+            "bwlimit": bwlimit,
+            "exclude": list(exclude),
+            "delete": delete,
+            "progress": progress,
+        },
     }
 
     action = RsyncPodsAction()

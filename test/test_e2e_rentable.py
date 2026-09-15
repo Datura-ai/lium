@@ -143,8 +143,8 @@ def test_a_pod_the_up_step_never_recorded_is_still_removed(monkeypatch):
 
 
 def test_under_keep_pod_a_pod_whose_up_never_returned_gets_a_scheduled_removal(monkeypatch):
-    """`lium up` sets --ttl only once the pod is RUNNING; an `up` killed by its timeout leaves a rented pod without
-    one. Kept for a look under E2E_KEEP_POD=1, it still gets the 30 minutes: `lium rm <name> --in 30m -y`."""
+    """An `up` killed by its timeout may leave a rented pod without its --ttl (killed between the rent and the
+    schedule call). Kept for a look under E2E_KEEP_POD=1, it gets the 30 minutes: `lium rm <name> --in 30m -y`."""
     session = _run_rental_fixture(_load(monkeypatch, E2E_KEEP_POD="1"), fail_before_teardown=True, recorded=False)
     rm_calls = [c for c in session.calls if c[0] == "rm"]
     assert len(rm_calls) == 1 and rm_calls[0][2:] == ("--in", "30m", "-y"), session.calls

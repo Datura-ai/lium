@@ -250,7 +250,7 @@ def test_rsync_uses_pinned_known_hosts_unless_insecure(monkeypatch, tmp_path):
     pod = _pod()
 
     client.rsync(pod, local="./out", remote="/workspace/out")
-    ssh_opt = calls[0][3]
+    ssh_opt = calls[0][calls[0].index("-e") + 1]  # the rsync options (DAH-2888) come before -e
     hosts_file = tmp_path / ".lium" / "known_hosts" / "pod-123"
     assert "-o StrictHostKeyChecking=accept-new" in ssh_opt
     assert f"-o 'UserKnownHostsFile=\"{hosts_file}\"'" in ssh_opt
@@ -259,7 +259,7 @@ def test_rsync_uses_pinned_known_hosts_unless_insecure(monkeypatch, tmp_path):
 
     monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
     client.rsync(pod, local="./out", remote="/workspace/out")
-    assert "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" in calls[1][3]
+    assert "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" in calls[1][calls[1].index("-e") + 1]
 
 
 def test_rsync_refuses_an_ssh_cmd_of_another_shape(monkeypatch, tmp_path):

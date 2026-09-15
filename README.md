@@ -46,7 +46,8 @@ versioned binary under `~/.lium/versions/<version>/lium`.
 ```bash
 # First-time setup: create an account (mints and stores an API key) …
 lium signup --email you@example.com
-# … or link an existing account
+# … or link an existing account (opens a browser). Headless (agents, CI, containers): pass the key
+# instead — lium init --api-key sk_...   (keys: https://lium.io/api-keys), or export LIUM_API_KEY and skip init.
 lium init
 lium balance
 
@@ -61,6 +62,8 @@ lium up --gpu A100  # Auto-select best A100 node
 
 # List your pods
 lium ps
+lium ps --filter status=RUNNING --sort spent   # running pods, most expensive so far first
+lium spend                                     # burn per hour, spend per pod, runway
 
 # Copy files to pod
 lium scp 1 ./my_script.py
@@ -121,6 +124,20 @@ lium.down(ready)
 
 `wait_ready()` raises `PodStartError` — with `.pod`, `.status`, `.history` and `.cause` (what the backend recorded, e.g. `Container creation failed due to ... (failure_step: ssh_connect)`) — when the pod reaches `FAILED`/`CREATION_FAILED`/`STOPPED`/`BROKEN` or disappears from the pod list, so a dead pod is not mistaken for a slow one. Pass `on_poll=lambda pod, status, elapsed: ...` to be told about every poll. `lium up` is bounded by `--timeout SECONDS` (default 900) for the whole rent, prints `waiting for <pod>… <STATUS> (<n> s)` while it waits, and exits 1 naming the pod when the budget runs out; `--ready-timeout` caps only the wait.
 
+Multi-node clusters — N whole nodes on one InfiniBand/RoCE fabric, rented as one order, each with a private overlay address:
+
+```python
+offer = lium.clusters()[0]                                   # fabrics with free nodes
+cluster = lium.up_cluster([n.id for n in offer.cheapest(2)], name="train", wait=True)
+print(cluster.master_addr)                                   # 10.42.0.1 — MASTER_ADDR for torchrun
+for pod in cluster.pods:
+    lium.exec(pod, command=f"torchrun {cluster.torchrun_args(pod)} --nproc_per_node 8 train.py")
+open("hostfile", "w").write(cluster.hostfile())              # mpirun / DeepSpeed
+lium.rm_cluster(cluster)                                     # one DELETE /clusters/{id}; one result per member
+```
+
+`up_cluster()` raises `ClusterNotListedError` when the nodes are, or may be, rented but the pod list did not show a whole cluster (`.confirmed` says whether the API confirmed the order, `.pod_ids` and `.listed` what it named and what was listed): do not rent again, list the pods to find the cluster. `wait_cluster_ready()` raises `PodStartError` at once when a member fails or is missing from the pod list. `rm_cluster()` sends one `DELETE /clusters/{cluster_id}`: the API removes every member and answers one row per member (`pod`, `huid`, `name`, `node_rank`, `success`, `message`, `error`); a member that failed is reported and the rest are still removed, so call again to retry it. A 404 (the cluster is gone, or the API has no such route) raises `LiumNotFoundError` and nothing is removed; there is no per-pod fallback.
+
 Full API reference: https://docs.lium.io/developers/sdk/reference
 
 `lium.ssh(pod)` returns the pod's ssh command with `-i <key>` and the pinned host-key options
@@ -149,24 +166,27 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 ### Core Commands
 
 - `lium signup` - Create an account from the terminal and store its API key
-- `lium init` - Initialize configuration for an existing account (API key, SSH keys)
+- `lium init` - Initialize configuration for an existing account (API key, SSH keys); `--api-key <key>` for machines without a browser
 - `lium balance` - Show the account balance (add `--format json` for machine-readable output)
 - `lium whoami` - Show which API key is in use, where it came from, and the account it belongs to
 - `lium ls [--gpu TYPE] [--count N] [--country CODE] [--min-vram GB] [--max-price USD] [--tier spot|secure] [--format json]` - List available nodes
-- `lium up [NODE_ID]` - Create a pod (use node ID or filters like `--gpu`, `--count`, `--country`)
-- `lium ps` - List active pods; the `#` column is the row number `rm`/`ssh`/`exec`/`scp` accept in the same shell, for 10 minutes, and only while the pod shown on that row is still listed. Use the huid in scripts.
+- `lium up [NODE_ID]` - Create a pod (use node ID or filters like `--gpu`, `--count`, `--country`; cap it with `--ttl 6h` or `--budget 12.50`)
+- `lium ps [--sort KEY] [--filter KEY=VALUE] [--watch N] [--wide] [--format json]` - List active pods; the `#` column is the row number `rm`/`ssh`/`exec`/`scp` accept in the same shell, for 10 minutes, and only while the pod shown on that row is still listed — the rows of the last listing, in the order shown (sorted or filtered). Use the huid in scripts.
+- `lium spend [--format json]` - Hourly burn, estimated spend per pod, balance and runway
 - `lium describe <POD>` - Full manifest of one pod: ports, GPU, template, billing, last lifecycle event (why it is REBOOT_FAILED/BROKEN) and the node's disk health (add `--json` for machine-readable output). A deleted pod can still be described by its id: you get the events the backend kept for it and the reason it went away.
 - `lium ssh <POD>` - SSH into a pod
 - `lium exec <POD> <COMMAND>` - Execute command on pod (`--json` for stdout/stderr/exit_code)
 - `lium logs <POD>` - Stream a pod's container logs
 - `lium port-forward <POD> <PORT>` - Forward a local port to a pod port
 - `lium scp <POD> <LOCAL_FILE> [REMOTE_PATH]` - Copy files to pods (add `-d` to download from pods)
-- `lium rsync <POD> <LOCAL_DIR> [REMOTE_PATH]` - Sync directories to pods
+- `lium rsync <POD> <LOCAL_DIR> [REMOTE_PATH]` - Sync directories to pods (`--bwlimit`, `--exclude`, `--delete`, `--progress`; resumes on re-run)
+- `lium cp <SRC_POD>:<PATH> <DST_POD>:<PATH>` - Copy files from one pod to another over SSH
 - `lium rm <POD>` - Remove/stop a pod (`--name-only` to refuse `lium ps` row numbers in scripts)
 - `lium reboot <POD>` - Reboot a pod
 - `lium audit [--pod POD] [--since 24h] [--key ID]` - Who did what to the account's pods, and when: every rent, reboot, edit and delete with the session or API key that requested it (add `--json` for machine-readable output)
+- `lium audit --account [--action pod.] [--source cli] [--since 7d] [--cursor <next_cursor>]` - The account audit log: every request that changed something (pods, keys, logins, balance, settings, team members) with the client and IP it came from; your own IPs only, 90 days (`--json` prints the page with `next_cursor`)
 - `lium update <POD>` - Install Jupyter on a pod
-- `lium templates [SEARCH]` - List available Docker templates (add `--format json` for ids and image details)
+- `lium templates [SEARCH] [--arch hopper|blackwell] [--format json]` - List Docker templates with the CUDA build and the GPU generations it runs on
 - `lium fund` - Fund account with TAO from Bittensor wallet
 - `lium topup create -a <USD> -c <COIN> -n <NETWORK>` - Top up with a stablecoin (`lium topup currencies` lists them)
 - `lium ssh-keys list|sync` - SSH public keys registered on the account
@@ -178,6 +198,14 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium volumes list` - List all volumes
 - `lium volumes new <NAME>` - Create a new volume
 - `lium volumes rm <VOLUME>` - Remove a volume
+
+### Cluster Commands
+
+- `lium clusters` - Fabrics (InfiniBand/RoCE) with free nodes that can be rented as one multi-node cluster
+- `lium clusters up <FABRIC> --nodes N -n <NAME>` - Rent N whole nodes of one fabric as a single all-or-nothing cluster
+- `lium clusters ps` - Your clusters
+- `lium clusters show <CLUSTER> [--hostfile | --torchrun RANK]` - Members with rank, overlay IP and SSH; launcher material
+- `lium clusters rm <CLUSTER>` - Remove every member in one API call (exit 5 when the cluster is gone)
 
 ### Backup Commands
 
@@ -195,6 +223,22 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 
 - `lium schedules list` - List scheduled terminations
 - `lium schedules rm <POD>` - Cancel scheduled termination
+
+### Workspace Commands
+
+Teams share a workspace whose billing owner pays (lium-platform DAH-1992). An API key is bound to one workspace, so `--workspace NAME` on any command means "use the key saved for NAME" and nothing else. On a server without workspaces these commands say so (exit 3) and every other command behaves as today.
+
+- `lium workspaces [list]` - The workspace this key acts in (the role shown is the account's the key runs as — the billing owner's for a team key); every workspace you belong to, with your own role, after `lium workspaces login`
+- `lium workspaces members [WORKSPACE]` - Members, roles and who pays
+- `lium workspaces use <WORKSPACE>` - Default workspace for every command (`~/.lium/config.ini`); run it as `LIUM_API_KEY=<a key bound to it> lium workspaces use <WORKSPACE>` to save that key for `--workspace`
+- `lium workspaces login` - Sign in once (e-mail + password) for the session-only subcommands below
+- `lium workspaces create <NAME> [--use]` - Create a workspace; you are its owner and billing owner
+- `lium workspaces invite <EMAIL> [WORKSPACE] [--role member|admin|owner]` - E-mail an invitation (no account needed yet)
+- `lium workspaces remove <USER_ID_OR_EMAIL> [WORKSPACE] [--yes]` - Remove a member, asks first (owners and the billing owner cannot be; the server says so)
+- `lium workspaces transfer-billing <USER_ID_OR_EMAIL> [WORKSPACE] [--yes]` - Hand the bill to another member (asks first)
+- `lium workspaces delete [WORKSPACE] [--yes]` - Delete a workspace, asks first (owners; refused while pods run or volumes exist); drops its config section
+- `lium keys list [--workspace W]` / `lium keys create <NAME> [--workspace W] [--save]` - API keys per workspace; `--save` keeps the key for `--workspace`
+- `lium --workspace NAME <command>` / `LIUM_WORKSPACE=NAME` - Run one command with the key saved for NAME (refused, exit 2, when none is saved); `ps`, `ls`, `up`, `rm` print the workspace they act in, and when that key turns out to act elsewhere `up` / `rm` refuse (exit 2) while `ps` / `ls` warn. `lium workspaces …` and `lium keys …` themselves run with `LIUM_API_KEY`, else NAME's saved key, else the stored default's saved key, else `[api] api_key`, so they can mint or save the missing key
 
 ### Configuration Commands
 
@@ -214,7 +258,7 @@ Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, 
 
 - `lium provider portal {login,logout,whoami}` - Manage the cached portal JWT
 - `lium provider status [--netuid 51]` - Aggregated provider snapshot (registration, portal session, nodes, validator weights)
-- `lium provider node list|get|add|rm|update-price|update-gpu` - Node lifecycle on the portal
+- `lium provider node list|get|add|rm|update-price|update-gpu` - Node lifecycle on the portal; `node list [--all | --miner-hotkey HK]` shows the active hotkey's nodes by default, `--all` every provider's
 - `lium provider node min-gpu set|unset <NODE_ID> [COUNT]` - Min GPU count for rental matchmaking
 - `lium provider node pods <NODE_ID>` - Pods currently rented on a node
 - `lium provider node machine-requests <NODE_ID>` - Pending tenant requests on a node
@@ -222,7 +266,7 @@ Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, 
 - `lium provider node notify-added <NODE_ID> --request-id <REQ>` - Mark a tenant machine request fulfilled
 - `lium provider config show|opt-in|opt-out|set-email|set-subscriptions` - Portal-account configuration (incl. lium.io central miner server toggle)
 - `lium provider sync from-miner-server|to-miner-server` - Batch node-state sync between portal and the central miner server
-- `lium provider billing list [--miner-hotkey HK] [--page N] [--limit N]` - Paginated billing history
+- `lium provider billing list [--all | --miner-hotkey HK] [--page N] [--limit N]` - Paginated billing history (active hotkey by default; `--all` for every provider's)
 - `lium provider machine-request list|get` - Pending tenant machine requests
 - `lium provider machine list|estimate` - Machine catalogue + reward estimates
 
@@ -232,6 +276,7 @@ Full reference with every flag and runnable examples: <https://docs.lium.io/deve
 
 - `lium theme [THEME]` - Get or set UI theme (light/dark/auto)
 - `lium mine` - Set up a compute subnet node/miner
+- `lium mine --register <TOKEN>` - Same, then add the node to your portal account from what the host reports and wait until it is listed (token from the portal's Add Node page; the account, and what the node reports under, come from the token — no `-k`)
 - `sudo lium gpu-splitting setup [--device /dev/...] [--yes]` - Prepare Docker storage for LIUM GPU splitting
 - `lium gpu-splitting check [--device /dev/...]` - Inspect the host and print the GPU-splitting plan
 - `lium gpu-splitting verify` - Verify Docker storage matches LIUM GPU-splitting requirements
@@ -263,6 +308,11 @@ lium up 1 --template_id <TEMPLATE_ID> --yes
 # Set up node bootstrap flow
 lium mine --auto --hotkey <HOTKEY>
 
+# One command from a bare host to a listed node: the portal's Add Node page prints this line with a
+# one-hour token; GPU model/count, port and address are read from the host, the price is the portal base price for the model
+curl -fsSL https://lium.io/mine.sh | bash -s -- --register <TOKEN>
+lium mine --register <TOKEN> --wait 0          # add the node, do not wait for the validator
+
 # Provider-portal automation (same surface as the portal frontend)
 lium config set provider.coldkey miner-prod        # one-time: persist wallet identity
 lium config set provider.hotkey  miner-1
@@ -287,6 +337,7 @@ lium up 1 --volume new:name=mydata,desc="My dataset"
 
 # Create pod with auto-termination
 lium up 1 --ttl 6h                    # Terminate after 6 hours
+lium up 1 --budget 12.50              # Terminate once $12.50 has been spent
 lium up 1 --until "today 23:00"       # Terminate at 11 PM today
 
 # Create pod with Jupyter
@@ -318,6 +369,12 @@ lium rsync my-pod ./project                    # Sync to /root/project
 lium rsync 1 ./data /root/datasets/           # Sync to specific directory
 lium rsync all ./models                       # Sync to all pods
 lium rsync 1,2,3 ./code /root/workspace/      # Sync to multiple pods
+lium rsync my-pod ./ckpt /workspace/ckpt --bwlimit 20000 --exclude '*.tmp' --progress
+                                              # Throttled, filtered, with progress; re-run to resume
+
+# Copy between pods directly (data never passes through your machine)
+lium cp dev-pod:/workspace/src train-pod:/workspace/
+lium cp 1:/workspace/ckpt/ 2:/workspace/ckpt/ --exclude '*.tmp'
 
 # Remove multiple pods
 lium rm my-pod-1 my-pod-2
@@ -330,6 +387,13 @@ lium update my-pod
 lium volumes list
 lium volumes new mydata -d "My dataset"
 lium volumes rm <VOLUME_HUID>
+
+# Multi-node clusters
+lium clusters                                  # fabrics with free nodes
+lium clusters up 1 --nodes 2 -n train --ttl 6h # 2 whole nodes of fabric #1, one order
+lium clusters show train --hostfile            # 10.42.0.1 slots=8 / 10.42.0.2 slots=8
+lium clusters show train --torchrun 1          # --nnodes 2 --node_rank 1 --master_addr 10.42.0.1 --master_port 29500
+lium clusters rm train -y
 
 # Manage backups
 lium bk show my-pod
@@ -397,6 +461,38 @@ export LIUM_API_KEY=your-api-key-here
 
 `LIUM_API_KEY` takes precedence over the config file. To see which key a shell is using, run `lium whoami` (or `lium balance` / `lium config get api.api_key`): they print the key's fingerprint and source (`env:LIUM_API_KEY` or `config:~/.lium/config.ini [api] api_key`), and authentication errors name the same key.
 
+With workspaces, `lium workspaces use` (when the key it runs with acts there) and `lium keys create --save` add:
+
+```ini
+[workspaces]
+active = research
+
+[workspace.research]
+id = 9d8c7b6a-…
+api_key = the-key-bound-to-that-workspace
+
+# from `lium workspaces login`; LIUM_SESSION_TOKEN overrides it
+[session]
+token = …
+```
+
+Key resolution: an explicit `--workspace` / `LIUM_WORKSPACE` uses the key saved for it and nothing else (exit 2 when none is saved). Otherwise, first match wins: `LIUM_API_API_KEY` / `LIUM_API_KEY` (the env key, in the CLI's order), the key saved for `[workspaces] active`, `[api] api_key`. The `[workspace.<name>]` section is written when a key is saved (`lium keys create --save`, or `lium workspaces use` run with a key that acts there); `lium workspaces delete` drops it. Sections are keyed by the lower-cased name, so a save into a section that already holds another workspace's id (two workspaces with one name) is refused (exit 2) rather than overwriting the first one's key — drop that section or rename one of the workspaces first.
+
+For a machine with no browser — an agent's sandbox, CI, a container — `lium init --api-key <key>` checks the
+key against `/users/me`, saves it to the file with mode 600 and sets up the SSH key, without opening anything or
+asking anything; `--json` prints `{"ok", "api_key_source", "saved_from", "env_key", "active_workspace",
+"config_path", "ssh_key_path"}` — `api_key_source` is the same value `lium whoami --json` prints: where the next
+command reads the key by the *Key resolution* order above (`env:LIUM_API_KEY`, `config:<path> [api] api_key`, or a
+`[workspace.<name>]` key when `lium workspaces use` selected one — then `active_workspace` names it and the text
+output warns that it wins over the key just saved), `saved_from` how this run got it (`flag`, `env`, `config`,
+`session`, `browser`). `--json` needs `--api-key` or an exported key; the browser flows print for a person. A
+refused key exits 3 (`invalid_api_key`), an API that cannot be reached exits 3 (`api_unreachable`), an empty value
+exits 2 (`empty_api_key`); none of them saves anything, and the hint says so. With `LIUM_WORKSPACE` / `-w` set,
+`lium init` exits 2: commands then run with the key saved for that workspace, which `init` does not write — use
+`lium keys create <name> --workspace <ws> --save`. With `LIUM_API_KEY` (or `LIUM_API_API_KEY`) already exported,
+`lium init` skips the browser, sets up the SSH key and says the key is coming from the environment — the SSH path
+is written to the file, the key is not; `--api-key` warns when a key is also exported (`env_key` in the JSON).
+
 SSH host keys of pods are pinned on first use under `~/.lium/known_hosts/<pod-id>`
 (`lium ssh`, `lium up`, and the SDK's `exec`, `stream_exec`, `rsync`). `reboot`, `edit`,
 `switch_template` and `rm` drop the pin themselves (the container, and its key, are replaced).
@@ -417,10 +513,30 @@ the flag to pass:
 
 ```bash
 export LIUM_API_KEY=...            # no browser login is attempted without a terminal
+lium init --api-key $KEY           # or save the key once, without a browser
 lium up --gpu H100 -y --no-ssh     # -y: rent without the confirmation prompt
 lium rm my-pod -y                  # -y on every destructive command
 lium fund -w default -a 1.5 -y     # values that would be prompted for must be passed as options
 ```
+
+### Crash reporting (opt-in, off by default)
+
+The CLI never sends telemetry unless you turn it on:
+
+```bash
+lium config set telemetry.enabled true    # or: export LIUM_TELEMETRY=1
+lium config set telemetry.enabled false   # off again
+```
+
+When on, an *unexpected* error (a bug, shown as `Unexpected error: …`) is reported once with the
+exception, its stack trace, the command name (`lium up`), the CLI version, the Python version,
+the OS and the API host the CLI is configured for (`lium.io`, or your `LIUM_BASE_URL`). API errors,
+usage errors, arguments, option values and local variables are never sent; the exception message is
+sent with the values you passed on the command line (a pod name, a path), home-directory paths
+(macOS, Linux and Windows), e-mails and API keys cut out of it. Reports go to Lium's Sentry project;
+`LIUM_SENTRY_DSN` points them somewhere else (a self-hosted GlitchTip, for example) and
+`LIUM_SENTRY_DSN=` (empty) keeps them off even when enabled. A value that is not a DSN prints one
+warning on stderr and keeps reporting off; the command itself still runs.
 
 ## Requirements
 

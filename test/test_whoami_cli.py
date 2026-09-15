@@ -85,6 +85,23 @@ def test_collect_identity_follows_lium_base_url(monkeypatch, local_setup, fake_l
     assert identity.ssh_key_path == str(local_setup)
 
 
+def test_collect_identity_names_the_workspace_key_the_commands_run_with(monkeypatch, tmp_path, local_setup, fake_lium):
+    """With a stored default (`lium workspaces use`), every command runs with `[workspace.<name>] api_key`;
+    whoami must name that key, not `[api] api_key`, or its row contradicts `lium balance` and the auth errors."""
+    monkeypatch.delenv("LIUM_API_KEY")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".lium").mkdir()
+    (tmp_path / ".lium" / "config.ini").write_text(
+        "[api]\napi_key = sk_default_key_0000\n[workspaces]\nactive = research\n"
+        "[workspace.research]\nid = ws-1\napi_key = sk_research_key_9999\n"
+    )
+
+    identity = collect_identity()
+
+    assert identity.api_key_fingerprint == "sk_res…9999"
+    assert identity.api_key_source.endswith("[workspace.research] api_key")
+
+
 def test_collect_identity_without_a_key_stops_before_the_network(monkeypatch, local_setup, fake_lium):
     monkeypatch.delenv("LIUM_API_KEY")
     monkeypatch.setattr(identity_module, "resolve_api_key", lambda: (None, None))

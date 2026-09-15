@@ -35,6 +35,8 @@ dependencies = [
     "requests>=2.31.0",
     "loguru>=0.7.0",
     "python-dotenv>=1.1.1",
+    # opt-in crash reporting (lium/cli/telemetry.py); imported only after the user turns it on
+    "sentry-sdk>=2.0",
     # Provider subcommand dependencies (`lium provider ...` and ProviderClient SDK)
     "asyncssh>=2.14",
     "PyJWT~=2.8",

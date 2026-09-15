@@ -4,6 +4,7 @@ from .client import AlphaQuote, Lium, pod_ssh_command
 from .config import Config
 from .decorators import machine
 from .exceptions import (
+    ClusterNotListedError,
     LiumAuthError,
     LiumError,
     LiumHostKeyError,
@@ -12,12 +13,15 @@ from .exceptions import (
     LiumPermissionError,
     LiumRateLimitError,
     LiumServerError,
+    LiumSessionError,
     PodStartError,
     RemoteExecutionError,
 )
 from .models import (
     BackupConfig,
     BackupLog,
+    Cluster,
+    ClusterOffer,
     ExecutorInfo,
     PodInfo,
     RentResult,
@@ -25,22 +29,31 @@ from .models import (
     SSHKey,
     Template,
     VolumeInfo,
+    WorkspaceInfo,
+    WorkspaceMember,
 )
+from .workspaces import WorkspacesClient
 from .result_codec import ResultEncodingError
 
 __all__ = [
     "Lium",
+    "WorkspacesClient",
+    "WorkspaceInfo",
+    "WorkspaceMember",
     "AlphaQuote",
     "Config",
     "ExecutorInfo",
     "PodInfo",
     "RentResult",
+    "Cluster",
+    "ClusterOffer",
     "Template",
     "VolumeInfo",
     "BackupConfig",
     "BackupLog",
     "RestoreLog",
     "SSHKey",
+    "ClusterNotListedError",
     "LiumError",
     "LiumAuthError",
     "LiumRateLimitError",
@@ -50,6 +63,7 @@ __all__ = [
     "PodStartError",
     "LiumHostKeyError",
     "LiumInsufficientBalanceError",
+    "LiumSessionError",
     "RemoteExecutionError",
     "ResultEncodingError",
     "machine",

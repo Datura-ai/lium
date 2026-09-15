@@ -7,6 +7,7 @@ key was used, so the caller had nothing to compare.
 """
 
 
+from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 
@@ -230,6 +231,7 @@ def test_config_manager_source_follows_get_precedence(monkeypatch, tmp_path):
 
 class _FakePsLium:
     pods = []
+    workspaces = SimpleNamespace(current=lambda: None)  # a server without workspaces: `ps` reads it for its workspace line
 
     def __init__(self, *args, **kwargs):
         self.config = Config(api_key=ENV_KEY, api_key_source="env:LIUM_API_KEY")

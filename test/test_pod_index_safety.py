@@ -12,6 +12,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -264,6 +265,8 @@ def test_unreadable_snapshot_counts_as_no_snapshot(config_dir):
 
 class _FakeLium:
     pods: list = []
+    # a server without workspaces: `rm` reads it for its workspace line
+    workspaces = SimpleNamespace(current=lambda: None)
 
     def __init__(self, *args, **kwargs):
         pass
@@ -307,7 +310,7 @@ def test_ps_table_leads_with_the_row_number():
     assert table.columns[1].header == "Pod"
 
 
-def test_ps_table_for_a_filtered_listing_has_no_row_number():
+def test_ps_table_for_a_single_pod_lookup_has_no_row_number():
     table, _ = ps_display.build_pods_table([MINE], show_index=False)
 
     assert table.columns[0].header == "Pod"

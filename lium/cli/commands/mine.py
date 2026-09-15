@@ -5,7 +5,7 @@ import re
 import shutil
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import click
 from rich import box
@@ -14,6 +14,11 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from ..utils import console, handle_errors, timed_step_status
+
+_SS58_HOTKEY = r"[1-9A-HJ-NP-Za-km-z]{40,60}"  # the shape `lium mine -k` validates and `mine status` refuses
+
+if TYPE_CHECKING:
+    from . import mine_register
 
 
 # --------------------------
@@ -45,7 +50,8 @@ def _get_public_ip() -> str:
     ]
 
     for service in services:
-        out, _ = _run(f"curl -4 -s {service}")
+        # check=False: a service that is down (curl exit 6/7/28) is skipped, the next one is asked
+        out, _ = _run(f"curl -4 -s {service}", check=False)
         ip = out.strip()
         # Validate IPv4 format (strict check for valid octets)
         if re.match(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$", ip):
@@ -105,7 +111,7 @@ def _exists(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
-def _show_setup_summary():
+def _show_setup_summary(register: bool = False):
     table = Table(title="Node Setup Plan", show_header=False, box=box.SIMPLE_HEAVY)
     table.add_column("Step", style="cyan", no_wrap=True)
     table.add_column("What happens")
@@ -115,6 +121,9 @@ def _show_setup_summary():
     table.add_row("4", "Configure node .env (ports, hotkey)")
     table.add_row("5", "Start node with docker compose")
     table.add_row("6", "Validate node configuration")
+    if register:
+        table.add_row("7", "Register the node in the portal (--register)")
+        table.add_row("8", "Wait until the portal lists it")
     console.print(table)
     console.print()
 
@@ -184,7 +193,7 @@ def _setup_executor_env(
     def _valid_port(p: int) -> bool:
         return isinstance(p, int) and 1 <= p <= 65535
 
-    if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{40,60}", hotkey or ""):
+    if not re.fullmatch(_SS58_HOTKEY, hotkey or ""):
         raise Exception(f"Invalid hotkey format: {hotkey}")
 
     for p, name in [(internal_port, "INTERNAL_PORT"),
@@ -599,18 +608,112 @@ def _preflight_verdict(stdout: str) -> Optional[dict]:
     return None
 
 
+_MINE_STATUS_PROG = "lium mine status"
+
+
+def _mine_status(args: list[str], hotkey: Optional[str] = None) -> int:
+    """Run `lium provider node status <args>`; `--json` may come after the node id here.
+
+    ``hotkey`` is what `--hotkey`/`-k` was set to on the `lium mine` line: click gives it to `mine` wherever
+    it is typed, so for `status` it is passed on as the provider group's `--hotkey` (the wallet hotkey name
+    the portal is signed in with) — the flag the ARG_INVALID message asks for then means what it says.
+
+    Help and usage errors are rendered under the name the user typed: click would otherwise compose
+    ``lium mine status node status`` from the provider group's path.
+    """
+    from lium.cli.provider.command import provider_command
+    from lium.cli.provider.node import status_node
+
+    own_ctx = click.Context(status_node, info_name=_MINE_STATUS_PROG)
+    if "--help" in args:
+        # the leaf's help, plus the one option `mine` takes on its behalf (the changelog and the ARG_INVALID
+        # message both name it, so `--help` has to as well)
+        click.echo(status_node.get_help(own_ctx))
+        click.echo(f"  {'--hotkey, -k NAME':<24}  Provider wallet hotkey the portal is signed in with (else")
+        click.echo(f"  {'':<24}  LIUM_PROVIDER_HOTKEY / ~/.lium/config.ini).")
+        return 0
+    group_args = ["--json"] if "--json" in args else []
+    if hotkey and re.fullmatch(_SS58_HOTKEY, hotkey):
+        # `lium mine -k` takes the miner's ss58; here the same flag is the wallet hotkey NAME the portal is
+        # signed in with. An ss58 would find no local wallet and end in PORTAL_AUTH_INVALID with no word
+        # about the flag — say so before any request goes out.
+        from lium.cli.provider._render import emit_error
+        from lium.provider.errors import ARG_INVALID, ProviderError
+
+        own_ctx.obj = {"provider_opts": {"json": bool(group_args)}}
+        return emit_error(own_ctx, ProviderError(
+            "--hotkey for 'lium mine status' is the wallet hotkey name the portal is signed in with "
+            "(as for 'lium provider -k'), not the SS58 address 'lium mine' takes",
+            code=ARG_INVALID,
+            hint="Re-run with the wallet hotkey name, or set LIUM_PROVIDER_HOTKEY.",
+        ))
+    if hotkey:
+        group_args += ["--hotkey", hotkey]
+    sub_args = [a for a in args if a != "--json"]
+    try:
+        code = provider_command.main(
+            args=[*group_args, "node", "status", *sub_args],
+            prog_name=_MINE_STATUS_PROG,
+            standalone_mode=False,
+        )
+    except click.UsageError as e:   # a missing node id, an unknown option: usage under our own name
+        click.echo(f"{own_ctx.get_usage()}\nTry '{_MINE_STATUS_PROG} --help' for help.\n\nError: {e.format_message()}", err=True)
+        return e.exit_code
+    except click.ClickException as e:
+        e.show()
+        return e.exit_code
+    return int(code or 0)
+
+
 # --------------------------
 # CLI
 # --------------------------
-@click.command("mine", context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
-@click.option("--hotkey", "-k", help="Miner hotkey SS58 address")
+@click.command("mine", context_settings=dict(ignore_unknown_options=True, allow_extra_args=True), add_help_option=False)
+@click.option("--hotkey", "-k", help="Miner hotkey SS58 address (for `mine status`: the wallet hotkey name)")
 @click.option("--dir", "-d", "dir_", default="compute-subnet", help="Target directory")
 @click.option("--branch", "-b", default="main")
 @click.option("--auto", "-a", is_flag=True)
 @click.option("--verbose", "-v", is_flag=True, help="Show the plan banner")
+# not click's eager --help: `lium mine status --help` must reach the status command below, not this one's help
+@click.option("--help", "help_", is_flag=True, help="Show this message and exit.")
+@click.option(
+    "--register",
+    "register_token",
+    metavar="TOKEN",
+    help="Register token from the portal's Add Node page: after the node is up, add it to your account and "
+    "wait until it is listed. Implies --auto; the account comes from the token, so -k is not needed.",
+)
+@click.option(
+    "--portal-url",
+    envvar="LIUM_PORTAL_URL",
+    default=None,
+    help="Provider portal API (default: the production portal). Only with --register.",
+)
+@click.option(
+    "--price",
+    type=float,
+    default=None,
+    help="USD per GPU per hour for the registered node (default: the model's base price from lium.io's public "
+    "shared-config; LIUM_SHARED_CONFIG_URL overrides the source). Only with --register.",
+)
+@click.option(
+    "--gpu-type",
+    default=None,
+    help="Register under this portal GPU name instead of the one nvidia-smi reports (for when the portal "
+    "does not know the reported name). Only with --register.",
+)
+@click.option(
+    "--wait",
+    "wait_minutes",
+    type=click.IntRange(0, 24 * 60),
+    default=45,
+    show_default=True,
+    help="Minutes to wait for the node to be listed after registering; 0 returns right after the add. "
+    "Only with --register.",
+)
 @click.pass_context
 @handle_errors
-def mine_command(ctx, hotkey, dir_, branch, auto, verbose):
+def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token, portal_url, price, gpu_type, wait_minutes):
     """Set up this host as a Lium provider node: clone, configure, start and validate the executor.
 
     Before `docker compose up`, the service and SSH ports are checked on this host: a port
@@ -618,14 +721,70 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose):
     timeout. On a host whose executor service is already running the check is skipped (the
     ports are ours). The preflight image is pulled while the node starts; its checks are shown
     as they run. Exit 1 on any failed step, with the step and the reason.
+
+    With --register TOKEN (the command the portal's Add Node page shows) the account and the value the
+    node reports under come from the token (an account created with e-mail or Google has no key of its own;
+    the portal's is written to the executor's .env) and two steps follow: the node
+    is added to your account with the GPU model and count nvidia-smi reports, this host's public
+    IPv4 and the executor's port, at the model's base price from lium.io's public shared-config; then the node's
+    status is polled every 15 s until it is listed (exit 0), the portal names something to fix
+    (OFFLINE or VALIDATION_FAILED, exit 1), or --wait minutes pass (exit 2). The node page URL is
+    printed in every case.
     """
+    if ctx.args and ctx.args[0] == "status":
+        # `lium mine` is the provider's first command; `lium mine status <node>` is where they look
+        # next, so it is the same command as `lium provider node status` (auth from `--hotkey`/`-k`
+        # anywhere on the line, else LIUM_PROVIDER_HOTKEY / ~/.lium/config.ini). Extra args are
+        # otherwise the validator's.
+        raise SystemExit(_mine_status(ctx.args[1:] + (["--help"] if help_ else []), hotkey=hotkey))
+    if help_:
+        click.echo(ctx.get_help())
+        raise SystemExit(0)   # not ctx.exit(): handle_errors would report click's Exit as an unexpected error
+    from . import mine_register as reg
+
     if verbose:
-        _show_setup_summary()   # keep the banner only when asked
+        _show_setup_summary(register=bool(register_token))   # keep the banner only when asked
+
+    token: Optional[reg.RegisterToken] = None
+    if not register_token:
+        # typed on the command line only: LIUM_PORTAL_URL in the environment (the `lium provider` group's
+        # variable) must not turn a plain `lium mine` into a usage error
+        from click.core import ParameterSource
+
+        given = [flag for flag, param in (("--portal-url", "portal_url"), ("--price", "price"),
+                                          ("--gpu-type", "gpu_type"), ("--wait", "wait_minutes"))
+                 if ctx.get_parameter_source(param) == ParameterSource.COMMANDLINE]
+        if given:
+            raise click.UsageError(f"{', '.join(given)}: only with --register TOKEN.")
+    if register_token:
+        # fail on a bad or expired token before the ten-minute install, not after it
+        try:
+            token = reg.parse_register_token(register_token)
+        except reg.RegisterError as e:
+            from rich.markup import escape
+
+            console.error(f"❌ {escape(str(e))}")
+            raise SystemExit(1)
+        if hotkey and hotkey != token.node_hotkey:
+            console.error(
+                "❌ --hotkey differs from what the register token says this node reports under; drop -k, the token decides."
+            )
+            raise SystemExit(1)
+        # what the executor reports under: the account's own key, or the portal's for an account without one
+        # (lium-platform#294) — the SS58 check in _setup_executor_env applies to this value, not to the account id
+        hotkey = token.node_hotkey
+        auto = True
+        left = token.seconds_left()
+        if left is not None and left < 15 * 60:
+            console.warning(
+                f"The register token expires in {left // 60} min; the install alone takes 5–10 min. "
+                "If registration fails with an expired token, copy a fresh command from the portal."
+            )
 
     answers = _gather_inputs(hotkey, auto)
     target_dir = Path(dir_).absolute()
 
-    TOTAL_STEPS = 6
+    TOTAL_STEPS = 8 if token else 6
 
     try:
         with timed_step_status(1, TOTAL_STEPS, "Ensuring repository"):
@@ -691,6 +850,17 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose):
         console.error(f"❌ {escape(str(e))}")
         raise SystemExit(1)   # a failed step is a failed command: mine.sh and scripts read the exit code
 
+    if token:
+        raise SystemExit(_register_and_wait(
+            token,
+            executor_dir=executor_dir,
+            portal_url=portal_url,
+            price=price,
+            gpu_type_override=gpu_type,
+            wait_minutes=wait_minutes,
+            total_steps=TOTAL_STEPS,
+        ))
+
     # Get executor details for summary
     gpu_info = _get_gpu_info()
     public_ip = _get_public_ip()
@@ -732,6 +902,90 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose):
     console.print("[bold cyan]…or from this terminal:[/bold cyan]")
     console.print(f"[yellow]{_provider_add_command(gpu_info, public_ip, external_port)}[/yellow]")
     console.dim(_registration_note())
+
+
+def _register_and_wait(
+    token: "mine_register.RegisterToken",
+    *,
+    executor_dir: Path,
+    portal_url: Optional[str],
+    price: Optional[float],
+    gpu_type_override: Optional[str],
+    wait_minutes: int,
+    total_steps: int,
+) -> int:
+    """Steps 7–8 of `lium mine --register`: add the node to the account, then watch its status. Returns the exit code."""
+    from rich.markup import escape
+
+    from . import mine_register as reg
+
+    http = reg.build_http(portal_url, token.token)
+    node_url = f"{reg.portal_web_url(portal_url)}/nodes"
+    try:
+        with timed_step_status(7, total_steps, "Registering node in the portal"):
+            inventory = reg.read_gpu_inventory(_run)
+            gpu_type = gpu_type_override or inventory.gpu_type
+            port = reg.executor_port(executor_dir)
+            ip = reg.public_ipv4_or_fail(_get_public_ip())
+            price_per_gpu = reg.resolve_price(gpu_type, price)
+            record = reg.register_node(
+                http,
+                miner_hotkey=token.miner_hotkey,
+                gpu_type=gpu_type,
+                gpu_count=inventory.gpu_count,
+                ip_address=ip,
+                port=port,
+                price_per_gpu=price_per_gpu,
+            )
+    except Exception as e:   # RegisterError, a portal error, nvidia-smi exiting non-zero, an unreadable .env: same shape as steps 1–6
+        console.error(f"❌ {escape(str(e))}")
+        return 1
+
+    if record.node_id is None:
+        # the add went through; the list did not show it within ~30 s — nothing to poll, nothing failed, but the node
+        # is registered and not listed, which docs/exit-codes.md says is exit 2
+        console.success(escape(
+            f"\n✨ Node added: {inventory.gpu_count}×{gpu_type} ({inventory.vram_gb} GB) at {ip}:{port}, "
+            f"${price_per_gpu:g}/GPU/h — it is not in the node list yet; the page shows it when it is: {node_url}"
+        ))
+        return 2
+
+    node_url = f"{node_url}/{record.node_id}"
+    if record.already_registered:
+        # the portal's record, not this run's values, is what stands: name only the address
+        console.success(escape(f"\n✨ Node already in the portal at {ip}:{port}"))
+    else:
+        console.success(escape(
+            f"\n✨ Node added: {inventory.gpu_count}×{gpu_type} ({inventory.vram_gb} GB) at {ip}:{port}, "
+            f"${price_per_gpu:g}/GPU/h"
+        ))
+    console.print(f"[yellow]{escape(node_url)}[/yellow]")
+    fix = reg.opt_in_fix(token, portal_url)
+    if fix:
+        console.warning(escape(fix))
+    if wait_minutes == 0:
+        return 0
+
+    console.print(escape(f"\n● [8/{total_steps}] Waiting for the validator (up to {wait_minutes} min; Ctrl-C leaves the node registered)"))
+    started = time.monotonic()
+    try:
+        final = reg.wait_until_listed(
+            http,
+            record.node_id,
+            timeout_s=wait_minutes * 60,
+            on_change=lambda s, t: console.print(escape(reg.status_line(s, t))),
+        )
+    except KeyboardInterrupt:
+        console.print(escape(f"\nStopped watching; the node stays registered: {node_url}"))
+        return 2
+    message, code = reg.result_summary(final, node_url=node_url, waited_s=time.monotonic() - started)
+    if code == 0:
+        console.success(message)
+    elif code == 1:
+        console.error(escape(message))
+    else:
+        console.warning(escape(message))
+    return code
 
 
 def _provider_add_command(gpu_info: dict, public_ip: str, external_port: str | int) -> str:

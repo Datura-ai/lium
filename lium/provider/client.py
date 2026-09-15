@@ -33,6 +33,7 @@ from lium.provider._routes import (
     EXECUTOR_MIN_GPU_FOR_RENTAL,
     EXECUTOR_NOTICE_PERIOD,
     EXECUTOR_PODS,
+    EXECUTOR_VERIFICATION,
     EXECUTORS,
     LOGIN_FLEXIBLE,
     MACHINE_REQUEST_BY_ID,
@@ -264,13 +265,24 @@ class ProviderClient:
             warnings.append(f"whoami: {e.code}")
         out.provider_id = provider_id
 
-        # Node list (skip silently if portal not authed).
-        if out.portal_session_active:
+        # Node list (skip silently if portal not authed). Scoped to this
+        # hotkey: the portal's ``GET /executors`` is a global listing and
+        # would otherwise report other providers' nodes as ours.
+        if out.portal_session_active and not out.hotkey:
+            # Without the ss58 the only listing available is the portal's global one, which
+            # would count every provider's nodes as ours (the same refusal `node list` and
+            # `billing list` make with ARG_INVALID).
+            warnings.append(
+                f"nodes: the ss58 address of hotkey {self.hotkey!r} is not resolvable (no local wallet), "
+                "so the node count is skipped; `lium provider node list --miner-hotkey <ss58>` lists them"
+            )
+        elif out.portal_session_active:
             try:
                 from lium.provider._routes import EXECUTORS
                 from lium.provider.models import ExecutorInfo
 
-                body = self._http.get(EXECUTORS)
+                params = {"miner_hotkey": out.hotkey}
+                body = self._http.get(EXECUTORS, params=params)
                 rows = body.get("data") if isinstance(body, dict) else body
                 if not isinstance(rows, list):
                     rows = []
@@ -309,6 +321,20 @@ class ProviderClient:
             return self.signer.ss58_address
         except Exception:  # pragma: no cover - defensive
             return None
+
+    def _own_hotkey_or_fail(self) -> str:
+        """The scope for a default listing. When the signer cannot be materialised
+        (no local wallet for ``--hotkey``), refuse instead of silently falling back
+        to the portal's global view — that fallback is the very confusion DAH-2935
+        removes (a zero-node account reading 1,538 rows as its own)."""
+        hotkey = self._safe_hotkey()
+        if hotkey is None:
+            raise ProviderError(
+                f"cannot resolve the ss58 address of hotkey {self.hotkey!r} (no local wallet)",
+                code=ARG_INVALID,
+                hint="Pass --miner-hotkey <ss58> for one provider, or --all for the portal's global listing.",
+            )
+        return hotkey
 
     # ------------------------------------------------------------------
     # Profile / configuration
@@ -405,13 +431,22 @@ class ProviderClient:
         miner_hotkey: str | None = None,
         page: int | None = None,
         limit: int | None = None,
+        all_miners: bool = False,
     ) -> dict[str, Any]:
         """``GET /executors`` -- paginated node list.
+
+        The portal endpoint is a global listing (its frontend exposes an
+        "All miners" mode), so without a ``miner_hotkey`` filter it returns
+        every provider's nodes. Default to the caller's own hotkey so the
+        result describes *this* provider's fleet; pass ``all_miners=True``
+        for the unfiltered view, or ``miner_hotkey`` for another provider.
 
         Returns the raw envelope (``{data: [...], total, page, limit}``) so
         list callers can read pagination metadata.
         """
         params: dict[str, Any] = {}
+        if miner_hotkey is None and not all_miners:
+            miner_hotkey = self._own_hotkey_or_fail()
         if miner_hotkey is not None:
             params["miner_hotkey"] = _safe_hotkey_segment(miner_hotkey)
         if page is not None:
@@ -424,6 +459,14 @@ class ProviderClient:
         """``GET /executors/{id}`` -- fetch one node's full record."""
         return self._http.get(
             EXECUTOR_BY_ID.format(id=_safe_id(node_id, label="node_id"))
+        )
+
+    def get_node_verification(self, node_id: str) -> dict[str, Any]:
+        """``GET /executors/{id}/verification`` -- which validator step the
+        node is on, elapsed and estimated time left while a check runs; the
+        last run's per-step timeline otherwise (portal DAH-3019)."""
+        return self._http.get(
+            EXECUTOR_VERIFICATION.format(id=_safe_id(node_id, label="node_id"))
         )
 
     def add_node(
@@ -574,13 +617,22 @@ class ProviderClient:
         miner_hotkey: str | None = None,
         page: int | None = None,
         limit: int | None = None,
+        all_miners: bool = False,
     ) -> dict[str, Any]:
-        """``GET /billing`` (paginated) or ``/billing/{miner_hotkey}``."""
+        """``GET /billing`` (paginated) or ``/billing/{miner_hotkey}``.
+
+        Like ``list_nodes``, the paginated portal endpoint is global; the
+        default scopes it to this provider's hotkey. ``all_miners=True``
+        returns every provider's history, ``miner_hotkey`` one provider's
+        (unpaginated ``/billing/{hotkey}`` when no page/limit is given).
+        """
         if miner_hotkey is not None and page is None and limit is None:
             return self._http.get(
                 BILLING_BY_MINER.format(miner_hotkey=_safe_hotkey_segment(miner_hotkey))
             )
         params: dict[str, Any] = {}
+        if miner_hotkey is None and not all_miners:
+            miner_hotkey = self._own_hotkey_or_fail()
         if miner_hotkey is not None:
             params["miner_hotkey"] = _safe_hotkey_segment(miner_hotkey)
         if page is not None:

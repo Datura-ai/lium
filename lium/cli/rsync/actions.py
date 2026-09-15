@@ -15,6 +15,7 @@ class RsyncPodsAction:
         lium: Lium = ctx["lium"]
         local_dir: Path = ctx["local_dir"]
         remote_path: str = ctx["remote_path"]
+        rsync_kwargs: dict = ctx.get("rsync_kwargs", {})
 
         failed_huids = []
 
@@ -37,7 +38,7 @@ class RsyncPodsAction:
                 local_formatted = str(local_dir) + ('/' if local_dir.is_dir() else '')
 
                 # Rsync
-                lium.rsync(pod, local=local_formatted, remote=remote_path)
+                lium.rsync(pod, local=local_formatted, remote=remote_path, **rsync_kwargs)
 
             except Exception as e:
                 ui.debug(f"Failed to rsync to {pod.huid}: {e}")

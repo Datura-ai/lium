@@ -106,6 +106,23 @@ def _select_executor(executors: List[ExecutorInfo], spec: str) -> ExecutorInfo:
     return min(matches, key=_rent_price)
 
 
+def _rent_node(sdk: Lium, spec: str, pod_name: str, template_id: Optional[str]):
+    """The cheapest node matching ``spec``, rented: ``(executor, $/h billed, pod dict)``.
+
+    A backend that advertises ``rent_by_spec`` picks and rents in one call (and falls through
+    to the next candidate if the pick is taken meanwhile); an older one gets today's path —
+    list the fleet here, choose, rent by id — which costs three fleet listings per cold call.
+    """
+    count, gpu = _parse_machine(spec)
+    # `Lium.rent`/`Lium.supports` land with #184 (DAH-3047); an SDK without them keeps the listing path
+    if hasattr(sdk, "rent") and sdk.supports("rent_by_spec"):
+        rented = sdk.rent(gpu_type=gpu, gpu_count=count, name=pod_name, template_id=template_id)
+        return rented.executor, rented.price_per_hour, rented.pod
+    executor = _select_executor(sdk.ls(), spec)
+    pod_dict = sdk.up(executor_id=executor.id, name=pod_name, template_id=template_id)
+    return executor, _rent_price(executor), pod_dict
+
+
 def _say(quiet: bool, func_name: str, msg: str) -> None:
     if not quiet:
         print(f"[lium] {func_name}: {msg}", file=sys.stderr, flush=True)
@@ -497,8 +514,10 @@ def machine(
             takes it (``H100``, ``RTX4090``, ``rtx pro 6000``, a bare ``4090``) and has
             to match the node's type whole — ``"A100"`` never rents an RTX A1000. The
             cheapest node with exactly that many GPUs of that type free to rent is rented
-            (a split host with 2 of 8 free is a ``2xA100``) and billed for those; when none
-            matches, the error names the types the listing has.
+            (a split host with 2 of 8 free is a ``2xA100``) and billed for those — by the
+            backend in one call (:meth:`Lium.rent`) when it offers ``rent_by_spec``, else
+            picked here from a listing; when none matches, the error names the types the
+            listing has.
         template_id: Docker template ID (optional, uses the node's default if not specified)
         cleanup: Whether to delete the pod after execution (default: True)
         requirements: Optional iterable of pip-installable packages to install on the pod.
@@ -557,22 +576,14 @@ def machine(
                     sdk, pod_info, executor, hourly = warm.sdk, warm.pod, warm.executor, warm.hourly
                     _schedule_removal(sdk, pod_info, ttl, say)  # re-arm: this call may run up to `timeout`
                 else:
-                    # Step 1: Pick the cheapest node renting "<count>x<gpu>" (its free GPUs, not the whole host)
-                    executor = _select_executor(sdk.ls(), machine)
-                    hourly = _rent_price(executor)
-
-                    # Step 2: Create pod (a fixed name lets the next run of the script find it)
+                    # Steps 1-2: rent the cheapest node renting "<count>x<gpu>" (its free GPUs, not the
+                    # whole host; a fixed pod name lets the next run of the script find it)
                     pod_name = f"lium-fn-{key}" if keep else f"remote-{func.__name__}-{int(time.time())}"
+                    executor, hourly, pod_dict = _rent_node(sdk, machine, pod_name, template_id)
                     say(
-                        f"renting {_rentable(executor)}x{executor.gpu_type} ${hourly:.2f}/h "
+                        f"rented {_parse_machine(machine)[0]}x{executor.gpu_type} ${hourly:.2f}/h "
                         f"({executor.huid}, {(executor.location or {}).get('country', '?')}), "
                         f"removal in {ttl.total_seconds() / 3600:.1f}h"
-                    )
-
-                    pod_dict = sdk.up(
-                        executor_id=executor.id,
-                        name=pod_name,
-                        template_id=template_id,
                     )
                     pod_info = pod_dict  # enough for cleanup (dict with id) until wait_ready returns
                     _schedule_removal(sdk, pod_dict, ttl, say)

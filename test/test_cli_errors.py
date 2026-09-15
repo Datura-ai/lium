@@ -37,6 +37,7 @@ from lium.sdk import (
     LiumPermissionError,
     LiumRateLimitError,
     LiumServerError,
+    LiumSessionError,
 )
 
 DOC = Path(__file__).resolve().parent.parent / "docs" / "exit-codes.md"
@@ -137,6 +138,8 @@ def test_output_env_with_another_value_keeps_text(monkeypatch):
 
 @pytest.mark.parametrize("error, code, exit_code", [
     (LiumAuthError("Invalid API key"), "invalid_api_key", EXIT_API_ERROR),
+    # a LiumAuthError too, but the hint must name the login, not an API key (DAH-3033)
+    (LiumSessionError("This needs a browser session, not an API key"), "session_required", EXIT_API_ERROR),
     (LiumPermissionError("User is not verified"), "permission_denied", EXIT_PERMISSION_DENIED),
     (LiumInsufficientBalanceError("Insufficient balance", required=4.0, available=1.0),
      "insufficient_balance", EXIT_PERMISSION_DENIED),

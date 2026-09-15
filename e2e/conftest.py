@@ -13,8 +13,8 @@ Target (env):
   E2E_KEEP_POD  =1 leaves the pod up on failure for a human to look at (never in CI): once a step has failed, no
                 removal this run would do runs — the `rental`/`sdk_pod` finalizers, the renter journey's `rm` step
                 (skipped) and the stale-pod sweep at the start; the pod's own 30-min TTL still applies — or, when
-                `up` itself never returned (it sets the TTL only once the pod is RUNNING), the fixture schedules a
-                30-min removal instead. With no failure the journey removes its pod as usual.
+                `up` itself never returned (killed between the rent and its --ttl call, or before DAH-3331 any time
+                before RUNNING), the fixture schedules a 30-min removal instead. With no failure the journey removes its pod as usual.
 
 Every command runs with HOME set to a temp dir, so `up` mints its SSH key there and the first-run shell-completion
 hook edits a shell rc nobody uses (L-65: never the runner's ~/.lium). The key travels only as LIUM_API_KEY.
@@ -189,14 +189,15 @@ def rental(session: Session) -> Rental:
         if r.pod:
             session.log.append({"note": f"E2E_KEEP_POD=1: {r.name} kept after a failed step (its 30-min TTL still applies)"})
         elif any(p.get("name") == r.name for p in ps(session)):
-            # `up` never returned (killed by its timeout, or exited non-zero after renting): `lium up` schedules
-            # --ttl only once the pod is RUNNING, so this pod has none — give it the same 30 minutes
+            # `up` never returned (killed by its timeout, or exited non-zero after renting). Since DAH-3331 `up`
+            # schedules --ttl right after the rent, so the pod usually has one already; a kill between the two
+            # calls leaves none, and setting the same 30 minutes again is harmless — do it either way
             session.lium("rm", r.name, "--in", "30m", "-y", timeout=120)
-            session.log.append({"note": f"E2E_KEEP_POD=1: {r.name} kept after `up` did not return; no TTL was set, removal scheduled in 30m"})
+            session.log.append({"note": f"E2E_KEEP_POD=1: {r.name} kept after `up` did not return; removal scheduled in 30m"})
         return
     # keyed on the name, not on `r.pod`: an `up` killed by its 300 s timeout, or one that exited non-zero after
-    # renting (a GPU-count mismatch since #120), leaves a pod the test never recorded — and, killed before RUNNING,
-    # one without its --ttl
+    # renting (a GPU-count mismatch since #120), leaves a pod the test never recorded — and, killed between the
+    # rent and the --ttl call, one without its --ttl
     for _ in range(3):
         if not any(p.get("name") == r.name for p in ps(session)):
             break

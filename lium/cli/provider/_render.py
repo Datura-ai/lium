@@ -24,7 +24,9 @@ from typing import Any, Callable, Iterable, Mapping
 
 import click
 from rich.box import SIMPLE_HEAVY
+from rich.markup import escape
 from rich.table import Table
+from rich.text import Text
 
 from lium.cli.utils import console
 from lium.provider.errors import (
@@ -295,6 +297,54 @@ def _short_timestamp(value: Any) -> str:
     return console.get_styled(text, "dim")
 
 
+# Portal ``computed_status.status`` values that mean the node is not earning.
+_NODE_STATUS_BAD = frozenset({"OFFLINE", "VALIDATION_FAILED", "NOT_DETECTED", "RECLAIMING"})
+_NODE_STATUS_GOOD = frozenset({"AVAILABLE", "RENTED"})
+
+
+def _node_status_label(status: Any) -> str:
+    if not status:
+        return console.get_styled("—", "dim")
+    text = escape(str(status))   # portal text is rendered as Rich markup: a `[…]` in it must stay text
+    if text in _NODE_STATUS_GOOD:
+        return console.get_styled(text, "success")
+    if text in _NODE_STATUS_BAD:
+        return console.get_styled(text, "error")
+    return console.get_styled(text, "warning")
+
+
+def _node_status(row: Mapping[str, Any]) -> str:
+    computed = row.get("computed_status")
+    if not isinstance(computed, Mapping):
+        return console.get_styled("—", "dim")
+    return _node_status_label(computed.get("status"))
+
+
+def _computed_status_rows(value: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """Portal ``computed_status`` -> ``Status`` (and ``Last Error``) record rows.
+
+    The portal computes the badge, its one-line reason and the validator's
+    last verdict server-side; the generic renderer collapses that dict to
+    ``{4 fields}`` and hides all three.
+    """
+    text = _node_status_label(value.get("status"))
+    message = value.get("message")
+    if message:
+        text = f"{text} — {escape(str(message))}"
+    rows = [("Status", text)]
+    err = value.get("last_error")
+    if isinstance(err, Mapping):
+        # the validator's free text (`see [/var/log/x]`) goes through Rich markup: escaped, or a bracketed
+        # sequence is parsed as a style tag and `node get` dies with MarkupError
+        lines = [escape(str(err.get("title") or err.get("message") or ""))]
+        if err.get("impact"):
+            lines.append(f"Impact: {escape(str(err['impact']))}")
+        if err.get("remediation"):
+            lines.append(f"Fix: {escape(str(err['remediation']))}")
+        rows.append(("Last Error", "\n".join(line for line in lines if line)))
+    return rows
+
+
 def _gpu_config(row: Mapping[str, Any]) -> str:
     gpu_count = row.get("gpu_count")
     gpu_type = row.get("gpu_type") or row.get("executor_machine_name") or "—"
@@ -341,6 +391,9 @@ def _value_or_dash(v: Any) -> str:
 
 _RowFn = Callable[[Mapping[str, Any]], str]
 # (header, extractor, justify, ratio, min_width, no_wrap)
+# ratio 0 = a content-sized column: as wide as its longest cell (at least min_width), not truncated while the
+#           terminal holds the fixed columns (the node table: from 67 columns; below that every column shares by ratio again);
+# ratio > 0 = a flexible column that shares what is left in proportion and is cut to an ellipsis when short
 _TablePreset = list[tuple[str, _RowFn, str, int, int, bool]]
 
 
@@ -366,13 +419,18 @@ def _trim_money(value: Any, decimals: int = 4) -> str:
 
 
 def _node_preset() -> _TablePreset:
+    # Status and the three figures on the right are content-sized (ratio 0): a provider tells
+    # VALIDATION_FAILED from VALIDATION_PENDING at 80 columns, and a price is never `$1.…`. ID, GPUs and
+    # Endpoint flex and are the ones cut short on a narrow terminal (`lium provider node get <id>` prints
+    # them whole).
     return [
+        ("Status",    _node_status,                                                  "left",  0,  6, True),
         ("ID",        lambda r: _truncate_id(r.get("id"), 14),                      "left",  3, 12, True),
         ("GPUs",      _gpu_config,                                                   "left",  4, 14, True),
         ("Endpoint",  _ip_port,                                                      "left",  3, 15, True),
-        ("$/GPU·h",   lambda r: _trim_money(r.get("price_per_gpu")),                 "right", 2,  8, True),
-        ("Rented",    _rented_fraction,                                              "right", 2,  6, True),
-        ("Rev/h",     lambda r: _trim_money(r.get("revenue_per_hour"), decimals=2),  "right", 2,  6, True),
+        ("$/GPU·h",   lambda r: _trim_money(r.get("price_per_gpu")),                 "right", 0,  7, True),
+        ("Rented",    _rented_fraction,                                              "right", 0,  6, True),
+        ("Rev/h",     lambda r: _trim_money(r.get("revenue_per_hour"), decimals=2),  "right", 0,  5, True),
     ]
 
 
@@ -474,30 +532,57 @@ def _render_rows(rows: Iterable[Any], *, meta: Mapping[str, Any] | None = None) 
             _print_meta_line(meta)
         return
 
-    table = _new_table()
-    table.add_column("#", justify="right", style="dim", no_wrap=True, width=3)
-    for header, _extract, justify, ratio, min_width, no_wrap in preset:
-        table.add_column(
-            header,
-            justify=justify,
-            no_wrap=no_wrap,
-            overflow="ellipsis",
-            ratio=ratio,
-            min_width=min_width,
-        )
-
-    for idx, row in enumerate(items, 1):
-        cells = [str(idx)]
+    rows_cells: list[list[str]] = []
+    for row in items:
+        cells = []
         for _header, extract, *_meta in preset:
             try:
                 cells.append(extract(row))
             except Exception:
                 cells.append(console.get_styled("?", "warning"))
-        table.add_row(*cells)
+        rows_cells.append(cells)
+
+    # content-sized (ratio 0) columns are exactly as wide as their longest cell, at least the header and
+    # `min_width`, so a status word or a money figure is not cut to an ellipsis — `VALIDATION_PENDING` and
+    # `VALIDATION_FAILED` both rendered `VALIDATI…` at 80 columns under a ratio. The ratio columns absorb the
+    # squeeze instead. Below the width where the fixed columns plus three characters per flexible one no longer
+    # fit (the node table: 67), Rich would run the table past the right edge, so every column goes back to the
+    # ratio layout there and degrades with ellipses as before.
+    fixed_widths = {
+        col: max(len(header), min_width, *(_cell_len(cells[col]) for cells in rows_cells))
+        for col, (header, _extract, _justify, ratio, min_width, _no_wrap) in enumerate(preset) if ratio == 0
+    }
+    flexible = len(preset) - len(fixed_widths)
+    needed = 3 + sum(fixed_widths.values()) + 3 * flexible + 2 * (len(preset) + 1) + 2   # `#`, cells, padding, edges
+    if console.width < needed:
+        fixed_widths = {}
+
+    table = _new_table()
+    table.add_column("#", justify="right", style="dim", no_wrap=True, width=3)
+    for col, (header, _extract, justify, ratio, min_width, no_wrap) in enumerate(preset):
+        if col in fixed_widths:
+            table.add_column(header, justify=justify, no_wrap=no_wrap, overflow="ellipsis", width=fixed_widths[col])
+        else:
+            table.add_column(
+                header,
+                justify=justify,
+                no_wrap=no_wrap,
+                overflow="ellipsis",
+                ratio=ratio or 2,   # a content-sized column on a terminal too narrow for it shares by ratio
+                min_width=min_width,
+            )
+
+    for idx, cells in enumerate(rows_cells, 1):
+        table.add_row(str(idx), *cells)
 
     console.print(table)
     if meta:
         _print_meta_line(meta)
+
+
+def _cell_len(cell: str) -> int:
+    """Printable width of a cell that may carry Rich markup (``console.get_styled`` output)."""
+    return Text.from_markup(cell).cell_len
 
 
 def _render_generic_rows(items: list[Mapping[str, Any]]) -> None:
@@ -511,10 +596,13 @@ def _render_generic_rows(items: list[Mapping[str, Any]]) -> None:
         if k not in keys:
             keys.append(k)
     # Push complex (dict/list) keys to the back so they get pruned by the cap.
+    # Snapshot the original order first: ``list.sort`` empties the list while
+    # it runs, so ``keys.index(k)`` inside the key function raises ValueError.
+    order = {k: i for i, k in enumerate(keys)}
     keys.sort(
         key=lambda k: (
             isinstance(items[0].get(k), (dict, list, tuple)),
-            keys.index(k),
+            order[k],
         )
     )
     keys = keys[:6]
@@ -582,6 +670,10 @@ def _render_record(body: Mapping[str, Any]) -> None:
     extra_incentive_note_rendered = False
     for key, value in body.items():
         if key == "extra_incentive_eligible" and extra_incentives_disabled:
+            continue
+        if key == "computed_status" and isinstance(value, Mapping):
+            for label, text in _computed_status_rows(value):
+                table.add_row(label, text)
             continue
         table.add_row(_human_label(key), _format_record_value(key, value))
         if key == "discord_connected" and extra_incentives_disabled:

@@ -1,0 +1,11 @@
+{
+  "id": "e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b",
+  "workspace_id": "9d8c7b6a-5f4e-4d3c-8b2a-190807060504",
+  "email": "dana@example.com",
+  "role": "member",
+  "invited_by_user_id": "2f1c8a3e-6d4b-4a1f-9c2e-0b7d5e6f8a91",
+  "status": "pending",
+  "expires_at": "2026-09-13T20:00:00",
+  "created_at": "2026-09-06T20:00:00",
+  "email_sent": true
+}

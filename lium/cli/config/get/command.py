@@ -9,8 +9,8 @@ from .actions import GetConfigAction
 
 
 def mask_value(value: str, key: str) -> str:
-    """Mask sensitive values."""
-    if key.endswith('api_key') and value:
+    """Mask sensitive values (API keys, the `[session] token` from `lium workspaces login`)."""
+    if (key.endswith('api_key') or key == 'session.token') and value:
         return value[:8] + '...' + value[-4:] if len(value) > 12 else '***'
     return value
 

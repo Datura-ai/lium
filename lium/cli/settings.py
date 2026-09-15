@@ -43,12 +43,14 @@ class ConfigManager:
     def _ensure_config_dir(self) -> Path:
         """Ensure ~/.lium directory exists."""
         config_dir = Path.home() / ".lium"
-        config_dir.mkdir(exist_ok=True)
+        # parents=True: in a fresh container HOME may name a directory nothing has created yet,
+        # and without it every command died at import with FileNotFoundError
+        config_dir.mkdir(parents=True, exist_ok=True)
         return config_dir
     
     def _load_config(self) -> ConfigParser:
-        """Load configuration from file."""
-        config = ConfigParser()
+        """Load configuration from file (no %-interpolation: values such as workspace names are opaque)."""
+        config = ConfigParser(interpolation=None)
         if self.config_file.exists():
             config.read(self.config_file)
         return config
@@ -132,6 +134,28 @@ class ConfigManager:
         self._config.set(section, option, value)
         self._save_config()
     
+    def get_in_section(self, section: str, option: str) -> Optional[str]:
+        """Read an option from a section whose name itself contains a dot (``[workspace.<name>]``)."""
+        return self._config.get(section, option, fallback=None)
+
+    def set_in_section(self, section: str, option: str, value: str) -> None:
+        """Set an option in a section whose name itself contains a dot (``[workspace.<name>]``)."""
+        if not self._config.has_section(section):
+            self._config.add_section(section)
+        self._config.set(section, option, value)
+        self._save_config()
+
+    def sections(self, prefix: str) -> list:
+        """The section names starting with ``prefix`` (``"workspace."`` for the saved workspaces)."""
+        return [name for name in self._config.sections() if name.startswith(prefix)]
+
+    def remove_section(self, section: str) -> bool:
+        """Drop a whole section (``[workspace.<name>]`` after `lium workspaces delete`); False when absent."""
+        removed = self._config.remove_section(section)
+        if removed:
+            self._save_config()
+        return removed
+
     def unset(self, key: str) -> bool:
         """Remove configuration value."""
         section, option = self._parse_key(key)

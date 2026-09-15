@@ -11,6 +11,7 @@ from lium.cli.actions import ActionResult
 from lium.cli.cli import cli
 from lium.cli.init.actions import SetupSshKeyAction
 from lium.cli.signup import actions as signup_actions
+from lium.cli.signup import command as signup_command
 
 
 class FakeResponse:
@@ -240,6 +241,27 @@ def test_signup_announces_the_credit_only_when_it_was_granted(monkeypatch, store
 
 
 def test_signup_says_no_credit_was_granted_when_the_flag_is_false(monkeypatch, stored_config, ssh_setup_ok):
+    """The password is fixed here: without --password, signup prints the one it generated, and a random
+    password can contain "$5" (it did on one CI run), which is not the credit sentence this test is about."""
+    monkeypatch.setattr(
+        signup_actions.requests, "post",
+        lambda url, **kwargs: FakeResponse(200, {"api_key": "sk_inline", "signup_credit_granted": False}),
+    )
+
+    result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com", "--password", "s3cret-pw"])
+
+    assert result.exit_code == 0
+    assert "No signup credit was granted" in result.output
+    assert "$5 signup credit was granted" not in result.output
+
+
+def test_a_generated_password_containing_dollar_five_is_not_mistaken_for_the_credit(
+    monkeypatch, stored_config, ssh_setup_ok
+):
+    """The negative control for the test above: the password lium#129's CI run generated (`…O5$5cayT#Y`) is printed
+    and contains "$5", while the credit sentence is still absent — the two must be told apart."""
+    monkeypatch.delenv("LIUM_SIGNUP_PASSWORD", raising=False)  # the env var would replace the generated password
+    monkeypatch.setattr(signup_command, "generate_password", lambda: "EyH@j&dQO5$5cayT#Y")
     monkeypatch.setattr(
         signup_actions.requests, "post",
         lambda url, **kwargs: FakeResponse(200, {"api_key": "sk_inline", "signup_credit_granted": False}),
@@ -248,8 +270,9 @@ def test_signup_says_no_credit_was_granted_when_the_flag_is_false(monkeypatch, s
     result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com"])
 
     assert result.exit_code == 0
+    assert "EyH@j&dQO5$5cayT#Y" in result.output  # the generated password is shown to the user
     assert "No signup credit was granted" in result.output
-    assert "$5" not in result.output
+    assert "$5 signup credit was granted" not in result.output
 
 
 def test_signup_asserts_nothing_about_the_credit_on_an_older_backend(monkeypatch, stored_config, ssh_setup_ok):

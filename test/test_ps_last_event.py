@@ -2,6 +2,7 @@
 listed points at `lium describe <id>` for its events."""
 
 import json
+from types import SimpleNamespace
 
 from click.testing import CliRunner
 
@@ -48,6 +49,8 @@ class _FakeLium:
     pods: list = []
     detail: dict = {}
     detail_calls = 0
+    # `Lium.workspaces` on a server without workspaces: `ps` reads it for its workspace line (DAH-3033)
+    workspaces = SimpleNamespace(current=lambda: None)
 
     def __init__(self, *args, **kwargs):
         pass

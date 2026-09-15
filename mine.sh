@@ -1,6 +1,7 @@
 #!/bin/bash
 # Lium Mine Installer & Runner
 # curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-cli/main/mine.sh | bash -s -- -k <HOTKEY>
+#   or, from the portal's Add Node page: ... | bash -s -- --register <TOKEN>   (adds the node to your account and waits until it is listed)
 
 # If running from pipe, save to temp file and re-execute
 # (Preserves interactive capabilities if needed)
@@ -143,6 +144,21 @@ main() {
     if [[ -z "$LIUM_BIN" ]]; then
         log_err "Binary path is empty."
         exit 1
+    fi
+
+    # --register needs a lium that knows the flag: an older one would treat the token as a stray argument
+    # (`lium mine` passes unknown options on to the preflight image). Upgrade an installed lium once, then refuse.
+    if [[ " ${LIUM_ARGS[*]} " == *" --register "* || " ${LIUM_ARGS[*]} " == *" --register="* ]] && ! "$LIUM_BIN" mine --help 2>/dev/null | grep -q -- '--register'; then
+        if command_exists uv; then
+            # soft: a pip/pipx-installed lium is not uv's to upgrade; the refusal below is then what the provider reads
+            uv tool upgrade lium.io >/dev/null 2>&1 || true
+            hash -r
+            LIUM_BIN=$(find_lium) || LIUM_BIN="$LIUM_BIN"
+        fi
+        if ! "$LIUM_BIN" mine --help 2>/dev/null | grep -q -- '--register'; then
+            log_err "This lium ($("$LIUM_BIN" --version 2>/dev/null)) has no 'mine --register'. Upgrade it (uv tool upgrade lium.io) and re-run."
+            exit 1
+        fi
     fi
 
     # Execute lium mine

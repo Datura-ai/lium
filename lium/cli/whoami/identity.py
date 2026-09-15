@@ -115,6 +115,10 @@ def collect_identity(lium_factory=None) -> Identity:
         identity.api_error = str(exc)
         identity.api_reachable = False
         return identity
+    # The key the commands actually run with: under a stored workspace default or LIUM_WORKSPACE
+    # that is the `[workspace.<name>]` key, not `[api] api_key` — the same one auth errors name.
+    identity.api_key_fingerprint = api_key_fingerprint(config.api_key)
+    identity.api_key_source = config.api_key_source
     identity.api_base_url = lium.config.base_url
 
     started = time.monotonic()

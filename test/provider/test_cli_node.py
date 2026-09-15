@@ -81,7 +81,6 @@ def patched_build_client(
     return _factory
 
 
-@pytest.mark.xfail(strict=False, reason="_render_generic_rows reads keys.index() inside list.sort(); fixed by #158 (DAH-2936)")
 def test_node_list_renders_summary(patched_build_client) -> None:
     portal = _Portal(get_body={"data": [{"id": "e-1"}, {"id": "e-2"}], "total": 2})
     patched_build_client(portal)
@@ -92,6 +91,141 @@ def test_node_list_renders_summary(patched_build_client) -> None:
     )
     assert result.exit_code == 0, result.output
     assert portal.gets[0][0] == "/executors"
+
+
+def _node_row(node_id: str, ip: str, status: str | None) -> dict:
+    # a price with four decimals and a two-figure revenue: values a ratio column cuts to `$1.2…` / `$23.…` at 80
+    row = {
+        "id": node_id,
+        "executor_ip_address": ip,
+        "executor_ip_port": "8080",
+        "price_per_gpu": 1.2345,
+        "gpu_count": 8,
+        "rented_gpu_count": 3,
+        "revenue_per_hour": 23.75,
+        "gpu_type": "RTX 4090",
+    }
+    if status:
+        row["computed_status"] = {"status": status, "message": "…"}
+    return row
+
+
+def test_node_list_shows_computed_status_column(patched_build_client) -> None:
+    # The portal returns computed_status on every row; the human table must show it whole, or a
+    # VALIDATION_FAILED node looks identical to an AVAILABLE one — and, at the 80 columns a provider's
+    # terminal has by default, to a VALIDATION_PENDING one (e4e3a85 rendered both as `VALIDATI…`).
+    rows = [
+        _node_row("e-1", "203.0.113.4", "AVAILABLE"),
+        _node_row("e-2", "203.0.113.5", "VALIDATION_PENDING"),
+        _node_row("e-3", "203.0.113.6", "VALIDATION_FAILED"),
+        _node_row("e-4", "203.0.113.7", None),
+    ]
+    portal = _Portal(get_body={"data": rows, "total": 4})
+    patched_build_client(portal)
+    runner = CliRunner()
+    # Rich sizes the table from COLUMNS (ignored under TERM=dumb): 80 is the width that used to cut the words
+    result = runner.invoke(
+        provider_command,
+        ["--hotkey", "hk1", "node", "list"],
+        env={"COLUMNS": "80", "TERM": "xterm-256color"},
+    )
+    assert result.exit_code == 0, result.output
+    assert "Status" in result.output
+    lines = result.output.splitlines()
+    assert any("AVAILABLE" in line and "e-1" in line for line in lines), result.output
+    assert any("VALIDATION_PENDING" in line and "e-2" in line for line in lines), result.output
+    assert any("VALIDATION_FAILED" in line and "e-3" in line for line in lines), result.output
+    assert "VALIDATI…" not in result.output
+    # the figures on the right are content-sized too: on e4e3a85 the ratio layout rendered `$23.…` at 80
+    for line in lines:
+        if line.strip().startswith(("1 ", "2 ", "3 ", "4 ")) and "e-" in line:
+            assert "$1.2345" in line and "$23.75" in line and "3/8" in line, line
+    assert "$1.2…" not in result.output and "$23.…" not in result.output
+    # A row without computed_status renders a dash, not a crash.
+    assert any("e-4" in line and "—" in line for line in lines), result.output
+
+
+@pytest.mark.parametrize("columns", ["40", "60", "66"])
+def test_node_list_still_fits_a_terminal_too_narrow_for_the_fixed_columns(patched_build_client, columns) -> None:
+    """Below 67 columns the content-sized columns plus three characters per flexible one no longer fit; the table
+    goes back to the ratio layout (ellipses everywhere, as on e4e3a85) instead of running past the right edge."""
+    rows = [_node_row("e-1", "203.0.113.4", "VALIDATION_PENDING"), _node_row("e-2", "203.0.113.5", "AVAILABLE")]
+    patched_build_client(_Portal(get_body={"data": rows, "total": 2}))
+    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", "node", "list"], env={"COLUMNS": columns, "TERM": "xterm-256color"})
+    assert result.exit_code == 0, result.output
+    width = int(columns)
+    lines = result.output.splitlines()
+    for line in lines:
+        assert len(line) <= width, f"{len(line)} > {width}: {line!r}"
+    # all eight columns are still on screen (ellipsised down to `…` at 40), where a fixed layout that does not fit
+    # is cropped by Rich at the right edge and the money columns vanish
+    header = next(line for line in lines if line.split()[:1] == ["#"])   # `node list: …` summary and a blank line come first
+    assert len(header.split()) == 8, header
+
+
+def test_node_list_status_column_shrinks_to_its_content(patched_build_client) -> None:
+    """Content-sized means no wasted width either: a listing of short statuses leaves the room to the ID."""
+    rows = [_node_row("8f3c2a1e-9b7d-4c6a-a1f2-0123456789ab", "203.0.113.4", "AVAILABLE")]
+    patched_build_client(_Portal(get_body={"data": rows, "total": 1}))
+    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", "node", "list"], env={"COLUMNS": "80", "TERM": "xterm-256color"})
+    assert result.exit_code == 0, result.output
+    header = next(line for line in result.output.splitlines() if "Status" in line and "ID" in line)
+    # the Status column is as wide as its longest cell, not 18: the ID header starts right after `AVAILABLE `
+    assert header.index("ID") - header.index("Status") <= len("AVAILABLE") + 3, header
+
+
+def test_node_list_defaults_to_own_hotkey(
+    patched_build_client, fake_signer: LocalKeypairSigner
+) -> None:
+    """The portal's ``GET /executors`` is a global listing; without a
+    ``miner_hotkey`` filter a provider with zero nodes sees other providers'
+    machines listed as its own. Default the filter to the active hotkey."""
+    portal = _Portal(get_body={"data": [], "total": 0})
+    patched_build_client(portal)
+    runner = CliRunner()
+    result = runner.invoke(provider_command, ["--hotkey", "hk1", "node", "list"])
+    assert result.exit_code == 0, result.output
+    path, params, _ = portal.gets[0]
+    assert path == "/executors"
+    assert params == {"miner_hotkey": fake_signer.ss58_address}
+
+
+def test_node_list_all_drops_hotkey_filter(patched_build_client) -> None:
+    portal = _Portal(get_body={"data": [{"id": "e-1"}], "total": 1})
+    patched_build_client(portal)
+    runner = CliRunner()
+    result = runner.invoke(
+        provider_command,
+        ["--hotkey", "hk1", "--json", "node", "list", "--all", "--limit", "5"],
+    )
+    assert result.exit_code == 0, result.output
+    path, params, _ = portal.gets[0]
+    assert path == "/executors"
+    assert params == {"limit": 5}
+
+
+def test_node_list_all_and_miner_hotkey_are_exclusive(patched_build_client) -> None:
+    portal = _Portal(get_body={"data": [], "total": 0})
+    patched_build_client(portal)
+    runner = CliRunner()
+    result = runner.invoke(
+        provider_command,
+        [
+            "--hotkey",
+            "hk1",
+            "--json",
+            "node",
+            "list",
+            "--all",
+            "--miner-hotkey",
+            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+        ],
+    )
+    assert result.exit_code != 0
+    payload = json.loads(result.output.strip())
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "ARG_INVALID"
+    assert portal.gets == []
 
 
 def test_node_list_json(patched_build_client) -> None:
@@ -143,6 +277,94 @@ def test_node_get_renders(patched_build_client) -> None:
         ["--hotkey", "hk1", "node", "get", "e-1"],
     )
     assert result.exit_code == 0, result.output
+
+
+def test_node_get_prints_status_message_and_last_error(patched_build_client) -> None:
+    portal = _Portal(
+        get_body={
+            "id": "e-1",
+            "gpu_type": "H100",
+            "computed_status": {
+                "status": "VALIDATION_FAILED",
+                "message": "VerifyX validation failed (network speed too slow) (last success: 3 hours ago)",
+                "last_error": {
+                    "title": "VerifyX validation failed (network speed too slow)",
+                    "message": "VerifyX validation failed (network speed too slow)",
+                    "source": "Validator",
+                    "reason_code": "VERIFYX_FAILED_NETWORK_SPEED_TOO_SLOW",
+                    "impact": "Score set to 0",
+                    "remediation": "EMA download speed is below the minimum threshold.",
+                    "what_we_saw": {"ema_verifyx_download_speed": 61.2},
+                },
+                "last_successful_validation": None,
+            },
+        }
+    )
+    patched_build_client(portal)
+    runner = CliRunner()
+    result = runner.invoke(
+        provider_command,
+        ["--hotkey", "hk1", "node", "get", "e-1"],
+        terminal_width=200,
+    )
+    assert result.exit_code == 0, result.output
+    assert "VALIDATION_FAILED" in result.output
+    assert "network speed too slow" in result.output
+    assert "Impact: Score set to 0" in result.output
+    assert "Fix: EMA download speed is below the minimum threshold." in result.output
+    # The dict is rendered once, as Status / Last Error, not also as a collapsed blob.
+    assert "{4 fields}" not in result.output
+    assert "Computed Status" not in result.output
+
+
+def test_node_get_prints_bracketed_validator_text_verbatim(patched_build_client) -> None:
+    """The validator's free text goes through Rich markup: `[/var/log/x]` used to be parsed as a closing tag and
+    `node get` exited 1 with MarkupError; `[word]` was eaten as a style."""
+    portal = _Portal(
+        get_body={
+            "id": "e-1",
+            "gpu_type": "H100",
+            "computed_status": {
+                "status": "VALIDATION_FAILED",
+                "message": "validator log [truncated]",
+                "last_error": {
+                    "title": "docker inspect failed [exit 1]",
+                    "impact": "Score set to 0",
+                    "remediation": "see [/var/log/executor.log] and [bold] lines",
+                },
+            },
+        }
+    )
+    patched_build_client(portal)
+    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", "node", "get", "e-1"], terminal_width=200)
+    assert result.exit_code == 0, result.output
+    for verbatim in ("validator log [truncated]", "docker inspect failed [exit 1]", "see [/var/log/executor.log] and [bold] lines"):
+        assert verbatim in result.output, result.output
+
+
+def test_node_get_status_without_last_error(patched_build_client) -> None:
+    portal = _Portal(
+        get_body={
+            "id": "e-1",
+            "computed_status": {
+                "status": "AVAILABLE",
+                "message": "8 of 8 GPUs ready for rent",
+                "last_error": None,
+                "last_successful_validation": "2026-09-06T10:00:00Z",
+            },
+        }
+    )
+    patched_build_client(portal)
+    runner = CliRunner()
+    result = runner.invoke(
+        provider_command,
+        ["--hotkey", "hk1", "node", "get", "e-1"],
+        terminal_width=200,
+    )
+    assert result.exit_code == 0, result.output
+    assert "AVAILABLE" in result.output
+    assert "8 of 8 GPUs ready for rent" in result.output
+    assert "Last Error" not in result.output
 
 
 def test_node_get_rejects_path_traversal_in_id(patched_build_client) -> None:
@@ -439,7 +661,6 @@ def test_node_min_gpu_unset(patched_build_client) -> None:
     assert portal.deletes == [("/executors/e-1/min-gpu-count-for-rental", True)]
 
 
-@pytest.mark.xfail(strict=False, reason="_render_generic_rows reads keys.index() inside list.sort(); fixed by #158 (DAH-2936)")
 def test_node_pods(patched_build_client) -> None:
     portal = _Portal(get_body={"data": [{"id": "p-1"}, {"id": "p-2"}]})
     patched_build_client(portal)

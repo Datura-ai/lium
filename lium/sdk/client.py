@@ -5,9 +5,11 @@ import getpass
 import hashlib
 import ipaddress
 import os
+import posixpath
 import re
 import shlex
 import socket
+import stat
 import subprocess
 import time
 import uuid
@@ -15,10 +17,10 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from importlib.metadata import PackageNotFoundError, version
-from typing import Any, Callable, Dict, Generator, List, Optional, Union
+from typing import Any, Callable, Dict, Generator, List, Optional, Sequence, Tuple, Union
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -30,6 +32,7 @@ from lium.__about__ import __version__ as fallback_version
 
 from .config import Config
 from .exceptions import (
+    ClusterNotListedError,
     LiumAuthError,
     LiumError,
     LiumHostKeyError,
@@ -43,6 +46,8 @@ from .exceptions import (
 from .models import (
     BackupConfig,
     BackupLog,
+    Cluster,
+    ClusterOffer,
     ExecutorInfo,
     PodInfo,
     RentResult,
@@ -52,7 +57,15 @@ from .models import (
     VolumeInfo,
 )
 from .ssh_key_cache import fingerprint, load_cache, save_cache
-from .utils import extract_gpu_type, generate_huid, gpu_short_matches, with_retry
+from .utils import (
+    extract_gpu_type,
+    generate_huid,
+    gpu_short_matches,
+    parse_api_timestamp,
+    spend_cap_deadline,
+    with_retry,
+)
+from .workspaces import WorkspacesClient
 
 # The backend feature `Lium.rent` looks for on GET /version before using POST /executors/rent-by-spec.
 RENT_BY_SPEC = "rent_by_spec"
@@ -308,7 +321,7 @@ def _response_error_code(response: requests.Response) -> Optional[str]:
 
 
 def permission_error(
-    detail: str, code: Optional[str] = None, key: Optional[str] = None
+    detail: str, code: Optional[str] = None, key: Optional[str] = None, **context: Optional[str]
 ) -> LiumPermissionError:
     """The exception for a 403: :class:`LiumInsufficientBalanceError` when the server
     refused for lack of funds (with ``required``/``available`` when it said them),
@@ -318,7 +331,8 @@ def permission_error(
     one (:func:`_response_error_code`); it decides. Without it the message text
     decides, which is what every server before lium-platform#210 sends. ``key``
     (the API key's fingerprint and source) is appended so the message says which
-    key the server refused.
+    key the server refused. ``code`` and ``context`` (:func:`_error_context`'s
+    hint/request_id) are carried on the exception.
     """
     message = f"Permission denied: {detail}" + (f" ({key})" if key else "")
     if code is not None:
@@ -326,7 +340,7 @@ def permission_error(
     else:
         insufficient = "insufficient balance" in (detail or "").lower()
     if not insufficient:
-        return LiumPermissionError(message)
+        return LiumPermissionError(message, code=code, **context)
 
     def usd(match: Optional[re.Match]) -> Optional[float]:
         return float(match.group(1).replace(",", "")) if match else None
@@ -335,6 +349,8 @@ def permission_error(
         message,
         required=usd(_REQUIRED_RE.search(detail)),
         available=usd(_AVAILABLE_RE.search(detail)),
+        code=code,
+        **context,
     )
 
 
@@ -393,6 +409,28 @@ def _pod_gpu_count(row: Dict[str, Any]) -> Optional[int]:
     return _int_or_none(row, "gpu_count")
 
 
+def _error_context(response: requests.Response) -> dict:
+    """code/hint/request_id from the API's error envelope (``error: {...}``) and the
+    ``X-Request-Id`` header, for the exception's attributes. Empty when absent (older servers)."""
+    try:
+        error = response.json().get("error")
+    except Exception:
+        error = None
+    error = error if isinstance(error, dict) else {}
+    headers = getattr(response, "headers", None) or {}
+
+    def text(value: Any) -> Optional[str]:
+        # only non-empty strings: the fields are printed and compared as text, and a server
+        # (or a proxy) sending a number or an object here must not break the error path
+        return value if isinstance(value, str) and value else None
+
+    return {
+        "code": _response_error_code(response),  # the same field; #219 reads it through this helper too
+        "hint": text(error.get("hint")),
+        "request_id": text(error.get("request_id")) or text(headers.get("X-Request-Id")),
+    }
+
+
 def _get_client_version() -> str:
     try:
         return version("lium.io")
@@ -416,11 +454,44 @@ class AlphaQuote:
 
 
 # Main SDK Class
+def _remote_file_path(sftp: Any, local: str, remote: str) -> str:
+    """Resolve an SFTP upload destination: a directory becomes ``<dir>/<basename(local)>``.
+
+    Relative paths stay relative (the SFTP session starts in the login home);
+    a leading ``~/`` is dropped because SFTP does not expand it.
+    """
+    if remote.startswith("~/"):
+        remote = remote[2:] or "."
+    if remote.endswith("/"):
+        _sftp_mkdir_p(sftp, remote)
+    else:
+        try:
+            if not stat.S_ISDIR(sftp.stat(remote).st_mode):
+                return remote
+        except IOError:
+            return remote  # a new file at that path
+    return posixpath.join(remote.rstrip("/") or "/", os.path.basename(local))
+
+
+def _sftp_mkdir_p(sftp: Any, path: str) -> None:
+    current = "/" if path.startswith("/") else ""
+    for part in [p for p in path.split("/") if p]:
+        current = posixpath.join(current, part)
+        try:
+            sftp.stat(current)
+        except IOError:
+            sftp.mkdir(current)
+
+
 class Lium:
     """Clean Unix-style SDK for Lium."""
 
-    def __init__(self, config: Optional[Config] = None, source: str = "sdk"):
-        self.config = config or Config.load()
+    def __init__(self, config: Optional[Config] = None, source: str = "sdk", workspace: Optional[str] = None):
+        """``workspace`` picks the API key saved for that workspace (``[workspace.<name>]`` in
+        ~/.lium/config.ini, written by ``lium keys create --workspace … --save``); a key acts in exactly
+        one workspace, so choosing the workspace means choosing the key (lium-platform DAH-2986), and
+        ``ValueError`` is raised when none is saved for it rather than running as another key."""
+        self.config = config or Config.load(workspace=workspace)
         self.source = source
         self.headers = {
             "X-API-KEY": self.config.api_key,
@@ -428,6 +499,7 @@ class Lium:
             "X-Lium-Client-Version": _get_client_version(),
         }
         self._features: Optional[set] = None
+        self.workspaces = WorkspacesClient(self)
         self._ssh_sessions: Dict[str, paramiko.SSHClient] = {}  # pod id -> connection held by ssh_session()
 
     def features(self) -> set:
@@ -519,20 +591,21 @@ class Lium:
         """
         if resp.ok:
             return
+        context = _error_context(resp)
         # Auth failures name the key that was sent: two commands can resolve
         # different keys (environment versus config file), and "invalid API key"
         # alone does not say which one to fix.
         if resp.status_code == 401:
-            raise LiumAuthError(f"Invalid API key ({key})" if key else "Invalid API key")
+            raise LiumAuthError(f"Invalid API key ({key})" if key else "Invalid API key", **context)
         if resp.status_code == 403:
-            raise permission_error(_response_error_message(resp), _response_error_code(resp), key=key)
+            raise permission_error(_response_error_message(resp), key=key, **context)
         if resp.status_code == 404:
-            raise LiumNotFoundError(f"Resource not found: {_response_error_message(resp)}")
+            raise LiumNotFoundError(f"Resource not found: {_response_error_message(resp)}", **context)
         if resp.status_code == 429:
-            raise LiumRateLimitError("Rate limit exceeded")
+            raise LiumRateLimitError("Rate limit exceeded", **context)
         if 500 <= resp.status_code < 600:
-            raise LiumServerError(f"Server error: {resp.status_code}")
-        raise LiumError(f"API error {resp.status_code}: {_response_error_message(resp)}")
+            raise LiumServerError(f"Server error: {resp.status_code}", **context)
+        raise LiumError(f"API error {resp.status_code}: {_response_error_message(resp)}", **context)
 
     def _dict_to_backup_config(self, config_dict: Dict) -> BackupConfig:
         """Convert backup config dict to BackupConfig object."""
@@ -782,6 +855,7 @@ class Lium:
         executor_id: str,
         name: str = "Your Pod",
         template_id: Optional[str] = None,
+        image: Optional[str] = None,
         dockerfile_content: Optional[str] = None,
         volume_id: Optional[str] = None,
         ports: Optional[int] = None,
@@ -797,7 +871,15 @@ class Lium:
             executor_id: Target node ID string.
             name: Human-friendly pod name (defaults to ``"Your Pod"``).
             template_id: Template ID. Defaults to the node's default template.
-                Mutually exclusive with ``dockerfile_content``.
+                Mutually exclusive with ``image`` and ``dockerfile_content``.
+            image: Docker image to run, passed to the backend whole
+                (``"repo/name:tag"``, ``"registry:5000/team/img"``,
+                ``"repo/name@sha256:<hex>"``; the backend splits name, tag and
+                digest and defaults the tag to ``latest``), the same as
+                ``lium up --image``: a private one-time template is created for it
+                with port 22 exposed and the image's own entrypoint/command, and
+                deleted with the pod. Mutually exclusive with ``template_id`` and
+                ``dockerfile_content``.
             dockerfile_content: Raw Dockerfile text to build the pod image from on
                 the node (custom build). Mutually exclusive with ``template_id`` —
                 pass exactly one. The image is built remotely with no network
@@ -819,9 +901,9 @@ class Lium:
         Returns:
             Pod metadata as returned by the rent API (id, name, status, ssh command, etc.).
         """
-        if template_id is not None and dockerfile_content is not None:
+        if sum(x is not None for x in (template_id, image, dockerfile_content)) > 1:
             raise ValueError(
-                "Provide either template_id or dockerfile_content, not both"
+                "Provide only one of template_id, image or dockerfile_content"
             )
         if bool(backup_id) != bool(restore_path):
             raise ValueError("backup_id and restore_path must be provided together")
@@ -829,6 +911,16 @@ class Lium:
         executor_info = self.get_executor(executor_id)
         if not executor_info:
             raise ValueError(f"Node with ID '{executor_id}' not found")
+
+        if image is not None:
+            template_id = self.create_template(
+                name=f"ephemeral-{hashlib.md5(image.encode()).hexdigest()[:8]}",
+                docker_image=image,
+                docker_image_tag="",  # backend splits name/tag/digest
+                ports=[22],
+                is_private=True,
+                one_time_template=True,
+            ).id
 
         if template_id is None and dockerfile_content is None:
             selected_template = self.default_docker_template(executor_info.id)
@@ -1284,8 +1376,10 @@ class Lium:
                 stream=True,
                 timeout=None if follow else 30,
             )
-        except LiumNotFoundError:
-            raise LiumNotFoundError(f"Pod not found: {pod_id}") from None
+        except LiumNotFoundError as e:
+            raise LiumNotFoundError(
+                f"Pod not found: {pod_id}", code=e.code, hint=e.hint, request_id=e.request_id
+            ) from None
 
         with response:
             for line in response.iter_lines():
@@ -1457,6 +1551,10 @@ class Lium:
                 eta_basis=d.get("eta_basis"),
                 phase=d.get("phase"),
                 gpu_count=pod_gpu_count,
+                workspace_id=d.get("workspace_id"),
+                cluster_id=d.get("cluster_id"),
+                cluster_node_index=d.get("cluster_node_index"),
+                cluster_overlay_ip=d.get("cluster_overlay_ip"),
             ))
 
         return pods
@@ -1504,6 +1602,336 @@ class Lium:
         # connection re-pins rather than tripping over the old key.
         forget_host_key(pod)
         return result
+
+    # -- multi-node clusters ---------------------------------------------------------------------
+
+    #: Only an image with this prefix reads the injected overlay config; the API refuses any other.
+    CLUSTER_IMAGE_PREFIX = "daturaai/lium-cluster"
+
+    def clusters(self) -> List[ClusterOffer]:
+        """Groups of free nodes that sit on one RDMA fabric and can be rented as one cluster.
+
+        ``GET /executors/infiniband-clusters``. Each offer names the fabric, whether it is
+        InfiniBand or RoCE, whether the wire between the members was measured, how many
+        nodes the fabric has and which of them are free right now.
+        """
+        data = self._request("GET", "/executors/infiniband-clusters").json()
+        offers: List[ClusterOffer] = []
+        for d in data or []:
+            nodes = [self._dict_to_executor_info(n) for n in d.get("nodes") or []]
+            offers.append(ClusterOffer(
+                fabric_id=d.get("fabric_id", ""),
+                fabric_type=d.get("fabric_type") or "infiniband",
+                link_rate=d.get("link_rate"),
+                fabric_measured=bool(d.get("fabric_measured", False)),
+                node_count=int(d.get("node_count") or len(nodes)),
+                nodes=[n for n in nodes if n is not None],
+            ))
+        return offers
+
+    def cluster_offer(self, fabric_id: str) -> Optional[ClusterOffer]:
+        """The offer for one fabric (exact id, or a unique prefix of it)."""
+        offers = self.clusters()
+        exact = [o for o in offers if o.fabric_id == fabric_id]
+        if exact:
+            return exact[0]
+        prefix = [o for o in offers if o.fabric_id.startswith(fabric_id)]
+        return prefix[0] if len(prefix) == 1 else None
+
+    def cluster_template(self) -> Template:
+        """The template every cluster rental must use (``daturaai/lium-cluster``); newest tag wins."""
+        candidates = [t for t in self.templates() if (t.docker_image or "").startswith(self.CLUSTER_IMAGE_PREFIX)]
+        if not candidates:
+            raise LiumNotFoundError(f"No template with image {self.CLUSTER_IMAGE_PREFIX} is available")
+
+        def tag_key(t: Template):
+            return tuple(int(p) if p.isdigit() else -1 for p in re.split(r"[.\-]", t.docker_image_tag or "0"))
+
+        return max(candidates, key=tag_key)
+
+    def up_cluster(
+        self,
+        executor_ids: List[str],
+        *,
+        name: str,
+        template_id: Optional[str] = None,
+        ssh_keys: Optional[List[str]] = None,
+        ssh_name: Optional[str] = None,
+        ports: Optional[int] = None,
+        enable_volume_encryption: bool | None = True,
+        wait: bool = False,
+        timeout: int = 900,
+    ) -> Cluster:
+        """Rent several nodes of one fabric as a single all-or-nothing cluster.
+
+        ``POST /executors/cluster/rent``. Every node is taken whole and runs the cluster
+        template, which raises the private overlay each member uses to find its peers.
+        The same ``name`` is given to every member pod; the members share ``cluster_id``.
+
+        Args:
+            executor_ids: Nodes to rent; they must all be on one fabric (see :meth:`clusters`).
+            name: Pod name applied to every member.
+            template_id: Defaults to :meth:`cluster_template`.
+            ssh_keys: Public keys to install; defaults to the configured key.
+            ports: Ports to expose per node.
+            enable_volume_encryption: As for :meth:`up`.
+            wait: Block until every member is RUNNING with SSH (``timeout`` seconds).
+
+        Raises:
+            ValueError: fewer than two nodes, or no SSH key.
+            ClusterNotListedError: the nodes are, or may be, rented, but the listing did not show a
+                whole cluster: the API confirmed the order and named the member pods but the listing
+                did not show every one of them (or failed); or the order got no answer and the
+                by-name lookup found fewer members than requested (or could not list). Do not rent again.
+            LiumError: the API refused the group (mixed fabrics, split hosts, wrong image); the pod
+                listing before the order failed (nothing was rented); or the order got no answer and
+                no member appeared.
+        """
+        ids = [str(i) for i in executor_ids]
+        if len(ids) < 2:
+            raise ValueError("A cluster needs at least two nodes")
+        if len(set(ids)) != len(ids):
+            raise ValueError("executor_ids contains duplicates")
+        ssh_material = ssh_keys or self.config.ssh_public_keys
+        if not ssh_material:
+            raise ValueError("No SSH keys found")
+        self._ensure_ssh_keys_registered(ssh_material, name=ssh_name)
+        if template_id is None:
+            template_id = self.cluster_template().id
+
+        payload = {
+            "pod_name": name,
+            "template_id": template_id,
+            "executor_uuids": ids,
+            "user_public_key": ssh_material,
+            "initial_port_count": ports,
+            "enable_volume_encryption": enable_volume_encryption,
+        }
+        # Not idempotent and not retried: a timeout may have rented the group anyway, so look
+        # for it by name before reporting failure rather than sending the order twice. The
+        # by-name lookup only accepts a cluster that did not exist before this call: an older
+        # cluster reusing the pod name must not be handed back (and then, say, --ttl'd). That is
+        # why the snapshot is taken before the order and a failure to take it aborts the order:
+        # nothing is rented yet, so failing here costs nothing, while an empty snapshot would let
+        # the lookup hand back the older cluster.
+        known_clusters = self._cluster_ids_now()
+        try:
+            response = self._request("POST", "/executors/cluster/rent", json=payload).json()
+        except (requests.RequestException, LiumServerError, LiumRateLimitError):
+            response = None
+        if response is not None and not response.get("success", True):
+            # a definite refusal: nothing was rented, so there is nothing to look for
+            raise LiumError(f"Cluster rental refused: {response.get('message') or response}")
+        pod_ids: List[str] = [str(p) for p in (response or {}).get("pod_ids") or []]
+
+        cluster, listed, listing_error = self._find_cluster(
+            pod_ids=pod_ids, name=name, size=len(ids), attempts=3, interval=3, exclude=known_clusters,
+        )
+        if cluster is None:
+            if pod_ids:
+                # The API confirmed the order and named the members: the nodes are rented and
+                # billing whatever the listing shows (or whether it fails), so this is not a
+                # "nothing happened" error and must never be answered with a second `up_cluster`.
+                shown = (
+                    f"failed ({listing_error})" if listing_error is not None
+                    else f"shows {len(listed)} of {len(pod_ids)} members"
+                )
+                raise ClusterNotListedError(
+                    f"Cluster rental of {len(ids)} nodes is confirmed (pods {', '.join(pod_ids)}) but the pod "
+                    f"listing {shown}; the nodes are rented and billing: do not rent again, list the pods to "
+                    "find the cluster",
+                    pod_ids=pod_ids, listed=listed, confirmed=True,
+                )
+            if listing_error is not None:
+                # No answer to the order and no listing either: the rent may have gone through.
+                raise ClusterNotListedError(
+                    f"Cluster rental of {len(ids)} nodes got no answer and the pod listing failed ({listing_error}); "
+                    "the nodes may be rented: do not rent again before the pod list shows whether they are",
+                    listed=[], confirmed=False,
+                )
+            if listed:
+                # No answer to the order, and a new cluster of that name is listed short of the
+                # requested count: the rent may have gone through in full, with members still to
+                # appear, so this is not a "nothing happened" error either.
+                raise ClusterNotListedError(
+                    f"Cluster rental of {len(ids)} nodes got no answer and the pod listing shows {len(listed)} new "
+                    f"pod(s) named {name!r} where {len(ids)} members were requested; the nodes may be rented: do not "
+                    "rent again, list the pods to find the cluster",
+                    listed=listed, confirmed=False,
+                )
+            raise LiumError(f"Cluster rental of {len(ids)} nodes did not produce pods named {name!r}")
+        if wait:
+            cluster = self.wait_cluster_ready(cluster, timeout=timeout)
+        return cluster
+
+    def _cluster_ids_now(self) -> frozenset:
+        """Cluster ids present in ``ps`` right now.
+
+        A listing failure propagates: the caller takes this snapshot before an order and must not
+        place the order without it (see :meth:`up_cluster`).
+        """
+        return frozenset(p.cluster_id for p in self.ps() if p.cluster_id)
+
+    def _find_cluster(
+        self, *, pod_ids: List[str], name: str, size: int, attempts: int, interval: float,
+        exclude: frozenset = frozenset(),
+    ) -> Tuple[Optional[Cluster], List[str], Optional[Exception]]:
+        """The cluster the rental produced, the ids of its members the last listing showed, and the
+        error of the last listing when it failed.
+
+        By member pod ids when the API named them, and then only once EVERY named id is listed,
+        so a cluster is never handed back with a member missing (a `--ttl` would skip it and a
+        `wait` would not wait for it). Else the cluster of that ``name`` that is not in ``exclude``
+        (the ones that existed before), and then only once it has ``size`` members, for the same
+        reason. A listing that fails counts as an attempt; the error of the last one is returned,
+        so the caller can tell "the listing showed too few" from "the listing did not answer".
+        """
+        listed: List[str] = []
+        listing_error: Optional[Exception] = None
+        for attempt in range(attempts):
+            try:
+                pods = self.ps()
+            except (requests.RequestException, LiumError) as exc:
+                listing_error = exc
+                pods = None
+            if pods is not None:
+                listing_error = None
+                if pod_ids:
+                    members = [p for p in pods if p.id in pod_ids]
+                    listed = [p.id for p in members]
+                    if len(members) != len(pod_ids):
+                        members = []
+                else:
+                    members = [p for p in pods if p.name == name and p.cluster_id and p.cluster_id not in exclude]
+                    listed = [p.id for p in members]
+                cluster_ids = {p.cluster_id for p in members if p.cluster_id}
+                if members and len(cluster_ids) == 1:
+                    cid = cluster_ids.pop()
+                    found = Cluster(id=cid, pods=[p for p in pods if p.cluster_id == cid])
+                    if pod_ids or found.size >= size:
+                        return found, listed, None
+            if attempt < attempts - 1:
+                time.sleep(interval)
+        return None, listed, listing_error
+
+    def my_clusters(self) -> List[Cluster]:
+        """The caller's cluster rentals, one :class:`Cluster` per ``cluster_id`` found in :meth:`ps`."""
+        groups: Dict[str, List[PodInfo]] = {}
+        for pod in self.ps():
+            if pod.cluster_id:
+                groups.setdefault(pod.cluster_id, []).append(pod)
+        return [Cluster(id=cid, pods=members) for cid, members in groups.items()]
+
+    def cluster(self, cluster_id: str) -> Cluster:
+        """One cluster by id (exact, or a unique prefix), from the caller's pods.
+
+        Raises:
+            LiumNotFoundError: no pod carries that cluster id.
+        """
+        mine = self.my_clusters()
+        exact = [c for c in mine if c.id == cluster_id]
+        if exact:
+            return exact[0]
+        prefix = [c for c in mine if c.id.startswith(cluster_id)]
+        if len(prefix) == 1:
+            return prefix[0]
+        raise LiumNotFoundError(
+            f"No cluster {cluster_id!r} among your pods" + (" (ambiguous prefix)" if len(prefix) > 1 else "")
+        )
+
+    def wait_cluster_ready(self, cluster: Cluster, *, timeout: int = 900, poll_interval: int = 10) -> Cluster:
+        """Poll until every member of ``cluster`` is RUNNING with SSH metadata.
+
+        The members waited for are the pods of ``cluster`` as given: one of them missing from any
+        poll, the first included, is a member that vanished, not one that is slow.
+
+        Raises:
+            PodStartError: a member reached a terminal status (``FAILED``, ``STOPPED``, …) or is missing from
+                the pod list. Reported at once, not at the deadline, since the other members keep billing.
+            TimeoutError: some member was still not ready after ``timeout`` seconds (all members keep billing).
+        """
+        deadline = time.time() + timeout
+        expected = {p.id for p in cluster.pods}
+        while True:
+            try:
+                pods = [p for p in self.ps() if p.cluster_id == cluster.id]
+            except (requests.RequestException, LiumServerError, LiumRateLimitError) as exc:
+                # A listing that fails is not a member that failed: keep polling until the
+                # deadline, then say so (the members keep billing either way).
+                if time.time() >= deadline:
+                    raise TimeoutError(
+                        f"Cluster {cluster.id} not ready after {timeout}s: the pod listing failed ({exc})"
+                    ) from exc
+                time.sleep(poll_interval)
+                continue
+            fresh = Cluster(id=cluster.id, pods=pods)
+            missing = expected - {p.id for p in pods}
+            if pods and not missing and all(p.status.upper() == "RUNNING" and p.ssh_cmd for p in pods):
+                return fresh
+            dead = [p for p in pods if (p.status or "").upper() in self.TERMINAL_POD_STATUSES]
+            if dead:
+                p = dead[0]
+                raise PodStartError(
+                    f"Cluster {cluster.id}: member {p.name or p.huid} is {p.status.upper()}; the other members keep "
+                    f"billing: remove the cluster or the member",
+                    pod_id=p.id, pod=p, status=p.status.upper(), history=[p.status.upper()],
+                )
+            if missing:
+                raise PodStartError(
+                    f"Cluster {cluster.id}: {len(missing)} member(s) vanished from the pod list "
+                    f"({', '.join(sorted(missing))}); the rest keep billing: remove the cluster",
+                    pod_id=cluster.id, pod=None, status=None, history=[],
+                )
+            if time.time() >= deadline:
+                pending = [f"{p.name or p.huid}={p.status}" for p in pods if p.status.upper() != "RUNNING" or not p.ssh_cmd]
+                raise TimeoutError(
+                    f"Cluster {cluster.id} not ready after {timeout}s: {', '.join(pending) or 'members missing'}"
+                )
+            time.sleep(poll_interval)
+
+    def rm_cluster(self, cluster: Cluster) -> List[Dict[str, Any]]:
+        """Remove every member pod of a cluster with one ``DELETE /clusters/{cluster_id}``.
+
+        Returns one ``{"pod", "huid", "name", "node_rank", "success", "message", "error"}`` per
+        member, in the order the server reports them (``huid`` is the short name ``lium rm`` accepts). The server (lium-platform#411) finds the members by the
+        cluster id, checks ownership and API-key scope on every one of them before the first
+        delete, then tears them down one by one; a member that failed is reported with ``success``
+        false and its error text while the others are still removed, so nothing is left billing by
+        accident. Call again to retry the members that failed. The pinned ssh host key of every
+        member the server accepted is dropped, as :meth:`rm` does for a single pod.
+
+        There is no per-pod fallback: a 404 from the route removes nothing and is raised.
+
+        Raises:
+            LiumNotFoundError: no pod carries the id (the cluster is already gone), or the server
+                has no ``DELETE /clusters/{id}`` route yet. Nothing was removed.
+            LiumPermissionError: a member belongs to another user, or the API key lacks the
+                ``manage`` scope for a pod it did not create. Nothing was removed.
+            LiumError: 409 — a member is still being created and the platform is set not to cancel
+                in-flight creates; nothing was removed, call again later. Also a 200 without the
+                per-member rows, so an unexpected answer is never read as "removed".
+        """
+        data = self._request("DELETE", f"/clusters/{quote(str(cluster.id), safe='')}").json()
+        rows = data.get("pods") if isinstance(data, dict) else None
+        if not isinstance(rows, list) or not rows:
+            raise LiumError(f"Cluster {cluster.id}: the API answered without per-member results ({data!r})")
+        results: List[Dict[str, Any]] = []
+        for row in rows:
+            ok = bool(row.get("success"))
+            message = row.get("message")
+            pod_id = str(row.get("pod_id") or "")
+            results.append({
+                "pod": pod_id,
+                "huid": generate_huid(pod_id) if pod_id else None,
+                "name": row.get("pod_name"),
+                "node_rank": row.get("cluster_node_index"),
+                "success": ok,
+                "message": message,
+                "error": None if ok else (message or "Pod deletion failed"),
+            })
+            if ok and results[-1]["pod"]:
+                forget_host_key(results[-1]["pod"])
+        return results
 
     def get_default_images(self, gpu_model: Optional[str], driver_version: Optional[str]) -> list[dict]:
         """Get default images for GPU type and driver version."""
@@ -2206,11 +2634,17 @@ class Lium:
         return None
 
     def scp(self, pod: PodInfo, *, local: str, remote: str) -> None:
-        """Upload a local file to a pod via SFTP."""
+        """Upload a local file to a pod via SFTP.
+
+        ``remote`` is a file path, or a directory: an existing remote directory, or a
+        path ending in ``/`` (created if missing), receives the file under its own name.
+        """
         with self.ssh_connection(pod) as client:
             sftp = client.open_sftp()
-            sftp.put(local, remote)
-            sftp.close()
+            try:
+                sftp.put(local, _remote_file_path(sftp, local, remote))
+            finally:
+                sftp.close()
 
     def download(self, pod: PodInfo, *, remote: str, local: str) -> None:
         """Download a file from a pod via SFTP.
@@ -2312,13 +2746,66 @@ class Lium:
 
         return shlex.join(self.ssh_argv(pod))
 
-    def rsync(self, pod: PodInfo, *, local: str, remote: str) -> None:
-        """Sync directories with rsync.
+    @staticmethod
+    def rsync_options(
+        *,
+        bwlimit: Optional[int] = None,
+        exclude: Optional[Sequence[str]] = None,
+        delete: bool = False,
+        partial: bool = True,
+        progress: bool = False,
+    ) -> List[str]:
+        """The rsync flags shared by :meth:`rsync` and :meth:`cp`.
+
+        ``partial`` keeps half-copied files so an interrupted transfer resumes
+        instead of starting over — multi-GB pulls over a flaky link are the
+        normal case, not the exception. It stays ``--partial`` only: ``--inplace``
+        would drop rsync's write-then-rename, and a job on the pod could read a
+        half-written checkpoint. ``progress`` is plain ``--progress``, which both
+        GNU rsync and the openrsync stock macOS ships accept (``--info=progress2``
+        needs GNU rsync >= 3.1 and dies before any byte moves on a Mac).
+        """
+        options = ["-az"]
+        if partial:
+            options += ["--partial"]
+        if progress:
+            options += ["--progress"]
+        if bwlimit is not None:
+            if bwlimit <= 0:
+                raise ValueError("bwlimit must be a positive number of KiB/s")
+            options += [f"--bwlimit={int(bwlimit)}"]
+        for pattern in exclude or ():
+            options += [f"--exclude={pattern}"]
+        if delete:
+            options += ["--delete"]
+        return options
+
+    def rsync(
+        self,
+        pod: PodInfo,
+        *,
+        local: str,
+        remote: str,
+        bwlimit: Optional[int] = None,
+        exclude: Optional[Sequence[str]] = None,
+        delete: bool = False,
+        partial: bool = True,
+        progress: bool = False,
+        download: bool = False,
+    ) -> None:
+        """Sync files between the local machine and a pod with rsync.
 
         Args:
             pod: Pod to sync.
-            local: Local path or directory (rsync source).
-            remote: Remote path on the pod.
+            local: Local path (source, or destination when ``download``).
+            remote: Path on the pod (destination, or source when ``download``).
+            bwlimit: Cap the transfer at this many KiB/s (rsync ``--bwlimit``).
+            exclude: Patterns to skip (rsync ``--exclude``), e.g. ``[".git", "*.pt"]``.
+            delete: Remove files at the destination that are not in the source.
+            partial: Keep partially transferred files so a retry resumes (default on).
+            progress: Show rsync's overall progress on the terminal instead of
+                capturing its output.
+            download: Copy from the pod to the local path instead of to it.
 
         Raises:
             RuntimeError: If the rsync command fails.
@@ -2330,11 +2817,212 @@ class Lium:
         ssh_cmd = shlex.join(
             ["ssh", "-i", str(self.config.ssh_key_path), "-p", str(port), *openssh_host_key_options(pod)]
         )
-        cmd = ["rsync", "-avz", "-e", ssh_cmd, local, f"{user}@{host}:{remote}"]
+        remote_spec = f"{user}@{host}:{remote}"
+        endpoints = [remote_spec, local] if download else [local, remote_spec]
+        cmd = [
+            "rsync",
+            *self.rsync_options(bwlimit=bwlimit, exclude=exclude, delete=delete, partial=partial, progress=progress),
+            "-e", ssh_cmd,
+            *endpoints,
+        ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=not progress, text=True)
         if result.returncode != 0:
-            raise RuntimeError(f"Rsync failed: {result.stderr}")
+            raise RuntimeError(f"Rsync failed: {(result.stderr or '').strip() or f'exit {result.returncode}'}")
+
+    def cp(
+        self,
+        src_pod: PodInfo,
+        src_path: str,
+        dst_pod: PodInfo,
+        dst_path: str,
+        *,
+        bwlimit: Optional[int] = None,
+        exclude: Optional[Sequence[str]] = None,
+        delete: bool = False,
+    ) -> Dict[str, Any]:
+        """Copy files from one pod to another over SSH, without passing through this machine.
+
+        Pod-to-pod links are far faster than relaying through the caller. The
+        source pod gets a one-off ed25519 key, its public half is added to the
+        destination pod's ``authorized_keys`` for the duration of the copy, the
+        source runs ``rsync`` straight to the destination, and both halves are
+        removed again whatever happened. The source verifies the destination with
+        the host key this client pinned for it (``~/.lium/known_hosts/<pod id>``,
+        written by the grant connection), copied next to the transfer key; no pin
+        means no copy (``LIUM_SSH_INSECURE=1`` accepts any key, as everywhere).
+
+        Args:
+            src_pod, src_path: Where to copy from. A trailing ``/`` on a
+                directory copies its contents, as in rsync.
+            dst_pod, dst_path: Where to copy to.
+            bwlimit, exclude, delete: As in :meth:`rsync`.
+
+        Returns:
+            The :meth:`exec` result of the rsync on the source pod.
+
+        Raises:
+            LiumHostKeyError: When nothing is pinned for the destination pod.
+            LiumError: When the copy fails; the message carries rsync's stderr
+                (``rsync: command not found`` means ``apt-get install -y rsync``
+                on the pod named).
+        """
+        if src_pod.id == dst_pod.id:
+            result = self.exec(
+                src_pod,
+                command=f"rsync {shlex.join(self.rsync_options(bwlimit=bwlimit, exclude=exclude, delete=delete))} "
+                        f"{shlex.quote(src_path)} {shlex.quote(dst_path)}",
+            )
+            if not result["success"]:
+                raise LiumError(f"Copy on pod {src_pod.name or src_pod.huid} failed: {result['stderr'].strip()}")
+            return result
+
+        if not dst_pod.ssh_cmd or not dst_pod.host:
+            raise ValueError(f"No SSH for destination pod {dst_pod.name or dst_pod.huid}")
+
+        key_path = f"/tmp/lium-cp-{uuid.uuid4().hex[:12]}"
+        keygen = self.exec(
+            src_pod,
+            command=f"ssh-keygen -q -t ed25519 -N '' -f {key_path} && cat {key_path}.pub",
+        )
+        if not keygen["success"]:
+            raise LiumError(
+                f"Could not create a transfer key on pod {src_pod.name or src_pod.huid}: "
+                f"{keygen['stderr'].strip() or keygen['stdout'].strip()}"
+            )
+        public_key = keygen["stdout"].strip().splitlines()[-1]
+        marker = f"lium-cp-{uuid.uuid4().hex[:12]}"
+        authorized_line = f"{public_key} {marker}"
+
+        authorized = False
+        try:
+            grant = self.exec(dst_pod, command=self.grant_transfer_key_command(authorized_line))
+            if not grant["success"]:
+                # `flock -w 30` gives up silently (exit 1) when another cp holds the lock
+                detail = grant["stderr"].strip() or f"exit {grant.get('exit_code')} (another copy may hold {self.TRANSFER_KEY_LOCK})"
+                raise LiumError(f"Could not authorise the transfer key on pod {dst_pod.name or dst_pod.huid}: {detail}")
+            authorized = True
+
+            # The source pod must verify the destination the way this client does: the grant above went
+            # through ssh_connection, which pinned dst's host key under ~/.lium/known_hosts/<pod id>, so
+            # that pin is copied next to the transfer key and ssh on the source is told to insist on it.
+            # LIUM_SSH_INSECURE=1 keeps the old accept-anything hop, like every other SSH path here.
+            if ssh_insecure():
+                host_key_opts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+            else:
+                pinned = self._pinned_host_key_lines(dst_pod)
+                if not pinned:
+                    raise LiumHostKeyError(
+                        f"No pinned host key for pod {dst_pod.name or dst_pod.huid} under "
+                        f"{known_hosts_path(dst_pod)}; the transfer key was not used. Connect to it once "
+                        f"(lium ssh {dst_pod.huid}) or set {_SSH_INSECURE_ENV}=1 to skip host key checks."
+                    )
+                pin_copy = self.exec(
+                    src_pod,
+                    command=f"printf '%s\\n' {shlex.quote(pinned)} > {key_path}.known_hosts && chmod 600 {key_path}.known_hosts",
+                )
+                if not pin_copy["success"]:
+                    raise LiumError(
+                        f"Could not place the destination's host key on pod {src_pod.name or src_pod.huid}: "
+                        f"{pin_copy['stderr'].strip()}"
+                    )
+                host_key_opts = f"-o StrictHostKeyChecking=yes -o UserKnownHostsFile={key_path}.known_hosts"
+            ssh_opts = f"ssh -i {key_path} -p {dst_pod.ssh_port} {host_key_opts} -o LogLevel=ERROR"
+            rsync_cmd = (
+                f"rsync {shlex.join(self.rsync_options(bwlimit=bwlimit, exclude=exclude, delete=delete))} "
+                f"-e {shlex.quote(ssh_opts)} {shlex.quote(src_path)} "
+                f"{shlex.quote(f'{dst_pod.username}@{dst_pod.host}:{dst_path}')}"
+            )
+            result = self.exec(src_pod, command=rsync_cmd)
+            if not result["success"]:
+                detail = result["stderr"].strip() or result["stdout"].strip() or f"exit {result['exit_code']}"
+                raise LiumError(
+                    f"Copy from {src_pod.name or src_pod.huid}:{src_path} to "
+                    f"{dst_pod.name or dst_pod.huid}:{dst_path} failed: {detail}"
+                )
+            return result
+        finally:
+            if authorized:
+                revoke = self.revoke_transfer_key_command(marker)
+                self._exec_quietly(
+                    dst_pod,
+                    revoke,
+                    consequence=(
+                        f"the transfer key '{marker}' is still authorised on pod "
+                        f"{dst_pod.name or dst_pod.huid}; revoke it with: "
+                        f"lium exec {dst_pod.huid} {shlex.quote(revoke)}"
+                    ),
+                )
+            self._exec_quietly(src_pod, f"rm -f {key_path} {key_path}.pub {key_path}.known_hosts")
+
+    @staticmethod
+    def _pinned_host_key_lines(pod: PodInfo) -> str:
+        """The destination's pinned host key(s) as ``known_hosts`` lines, ``""`` when nothing is pinned.
+
+        ``ssh_connection`` writes the file (``[host]:port key-type key``) on the first connection to the pod;
+        the file is per pod, so every line in it is this pod's.
+        """
+        try:
+            text = known_hosts_path(pod).read_text()
+        except OSError:
+            return ""
+        return "\n".join(line for line in text.splitlines() if line.strip() and not line.startswith("#"))
+
+    # Every grant and revoke on a pod runs under this lock: two concurrent ``cp``
+    # into the same pod otherwise both filter the same authorized_keys and the
+    # later ``cat >`` puts back the key the earlier revoke removed.
+    TRANSFER_KEY_LOCK = "~/.ssh/.lium-cp.lock"
+
+    @classmethod
+    def _under_transfer_key_lock(cls, command: str) -> str:
+        """``command`` run by ``flock`` on the pod's transfer-key lock (30 s wait, then fail)."""
+        return f"flock -w 30 {cls.TRANSFER_KEY_LOCK} -c {shlex.quote(command)}"
+
+    @classmethod
+    def grant_transfer_key_command(cls, authorized_line: str) -> str:
+        """The remote line that appends ``authorized_line`` to the pod's authorized_keys."""
+        return (
+            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
+            + cls._under_transfer_key_lock(
+                f"echo {shlex.quote(authorized_line)} >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+            )
+        )
+
+    @classmethod
+    def revoke_transfer_key_command(cls, marker: str) -> str:
+        """The remote line that drops the authorized_keys entry tagged ``marker``.
+
+        The scratch file carries the marker, so two ``cp`` runs into the same
+        pod never share one, and the result is written back with ``cat >``
+        (the way lium-io removes keys) rather than ``mv``: the file keeps its
+        mode and a second run's half-written scratch file can never replace it.
+        ``grep`` exits 1 when nothing is left to keep, which is fine; any other
+        failure leaves authorized_keys untouched. The whole line runs under the
+        transfer-key lock, so a concurrent grant or revoke waits for it.
+        """
+        scratch = f"~/.ssh/authorized_keys.{marker}"
+        return cls._under_transfer_key_lock(
+            f"( grep -vF {shlex.quote(marker)} ~/.ssh/authorized_keys > {scratch} || [ $? -eq 1 ] ) "
+            f"&& cat {scratch} > ~/.ssh/authorized_keys; rc=$?; rm -f {scratch}; exit $rc"
+        )
+
+    def _exec_quietly(self, pod: PodInfo, command: str, *, consequence: Optional[str] = None) -> None:
+        """Cleanup step: report a failure as a warning, never as the error the caller sees.
+
+        ``consequence`` says what a failure leaves behind and how to undo it by hand.
+        """
+        where = f"pod {pod.name or pod.huid}"
+        try:
+            result = self.exec(pod, command=command)
+        except Exception as exc:  # noqa: BLE001 - cleanup must not raise
+            detail = str(exc)
+        else:
+            if result["success"]:
+                return
+            detail = result["stderr"].strip() or f"exit {result['exit_code']}"
+        message = f"lium: cleanup on {where} failed ({detail})"
+        message += f": {consequence}" if consequence else f": {command}"
+        warnings.warn(message, stacklevel=3)
     
     def switch_template(self, pod: PodInfo, *, template_id: str) -> PodInfo:
         """Switch the template of a running pod.
@@ -2978,6 +3666,51 @@ class Lium:
         data = self._request("GET", "/users/me/events", params=params).json()
         return data if isinstance(data, list) else []
 
+    def audit_log(
+        self,
+        *,
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+        action: Optional[str] = None,
+        source: Optional[str] = None,
+        api_key_id: Optional[str] = None,
+        resource_id: Optional[str] = None,
+        cursor: Optional[str] = None,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """One page of the account audit log, newest first (``GET /account/audit``, lium-platform DAH-3245).
+
+        One entry per request that changed something on the account — a pod created, restarted or
+        deleted, a key created or revoked, a login, a top-up requested, a setting or a workspace member
+        changed — with ``action`` (``pod.delete``, ``key.create``, ``login``, …), ``actor`` (``auth``
+        ``session`` or ``api_key``, ``user_id``, ``api_key_id``, ``api_key_name``), ``source`` (``portal``,
+        ``cli``, ``sdk``, ``mcp``, ``admin``, ``api``), ``ip`` (filled on the caller's own entries only),
+        ``user_agent``, ``request_id``, ``method``, ``route``, ``status_code``, ``resource_type``,
+        ``resource_id``, ``summary``. ``action`` filters by prefix (``pod.`` is every pod action).
+        Returns ``{"items": [...], "next_cursor": ...}``; pass ``next_cursor`` back as ``cursor`` for the
+        next (older) page, ``None`` when this page was the last. ``limit`` is 1–500. A key needs the
+        ``read`` scope; a server without the route answers 404 (``LiumNotFoundError``).
+        """
+        params: Dict[str, Any] = {"limit": limit}
+        if since is not None:
+            params["since"] = since.isoformat()
+        if until is not None:
+            params["until"] = until.isoformat()
+        for name, value in (
+            ("action", action),
+            ("source", source),
+            ("api_key_id", api_key_id),
+            ("resource_id", resource_id),
+            ("cursor", cursor),
+        ):
+            if value:
+                params[name] = value
+        data = self._request("GET", "/account/audit", params=params).json()
+        if not isinstance(data, dict):
+            return {"items": [], "next_cursor": None}
+        items = data.get("items")
+        return {"items": items if isinstance(items, list) else [], "next_cursor": data.get("next_cursor")}
+
     def topup_currencies(self, refresh: bool = False) -> List[Dict[str, Any]]:
         """List stablecoin currencies/networks supported for self-serve top-ups.
 
@@ -3086,20 +3819,66 @@ class Lium:
         """
         return self._request("DELETE", f"/volumes/{volume_id}").json()
 
-    def schedule_termination(self, pod: PodInfo, *, termination_time: str) -> Dict[str, Any]:
+    def schedule_termination(self, pod: Union[str, PodInfo, Dict], *, termination_time: str) -> Dict[str, Any]:
         """Schedule a pod for automatic termination at a future date and time.
 
+        The pod does not have to be running: the dict :meth:`up` returns, or its ``id``,
+        is enough, so the schedule can be set before :meth:`wait_ready` — a pod that never
+        becomes ready is billed all the same and is removed at ``termination_time``.
+
         Args:
-            pod: Pod to schedule
+            pod: Pod identifier, PodInfo (or any object with an ``id`` attribute), or dict with an ``id`` field.
             termination_time: ISO 8601 formatted datetime string (e.g., "2025-10-17T15:30:00Z")
 
         Returns:
             Response from the schedule termination API
         """
+        pod_id = pod["id"] if isinstance(pod, dict) else getattr(pod, "id", pod)
         payload = {"removal_scheduled_at": termination_time}
         # Idempotent payload: the same removal time twice is one schedule, so a 5xx or a lost response
         # is retried — one blip after `lium up --ttl` must not leave the pod without its auto-stop.
-        return self._request("POST", f"/pods/{quote(str(pod.id), safe='')}/schedule-removal", json=payload, retry=True).json()
+        return self._request("POST", f"/pods/{quote(str(pod_id), safe='')}/schedule-removal", json=payload, retry=True).json()
+
+    def cap_spend(self, pod: PodInfo, *, budget_usd: float) -> datetime:
+        """Schedule the pod's removal for the moment it will have spent ``budget_usd``.
+
+        The API caps a rental by time only. This computes the time at which the
+        pod, billed at its hourly price since ``created_at``, reaches the budget
+        (:func:`lium.sdk.utils.spend_cap_deadline`) and schedules removal then —
+        unless a removal is already scheduled earlier (a ``--ttl``), which stays,
+        as ``lium up --budget --ttl`` keeps the earlier of the two. Client-side:
+        the pod keeps running if the schedule is cancelled or the price changes.
+
+        Args:
+            pod: A running pod with ``created_at`` and an executor price.
+            budget_usd: Total spend allowed for the pod's lifetime.
+
+        Returns:
+            The scheduled removal time (UTC): the budget deadline, or the earlier
+            removal that was already scheduled.
+
+        Raises:
+            ValueError: Budget not positive, price or creation time unknown,
+                the budget is already spent (the deadline is in the past), or the
+                pod's scheduled removal has already passed.
+        """
+        started_at = parse_api_timestamp(pod.created_at)
+        if started_at is None:
+            raise ValueError(f"Pod {pod.huid} has no usable created_at; cannot cap spend")
+        price = pod.executor.price_per_hour if pod.executor else None
+        deadline = spend_cap_deadline(started_at, price or 0.0, budget_usd)
+        now = datetime.now(timezone.utc)
+        if deadline <= now:
+            raise ValueError(
+                f"Pod {pod.huid} has already spent ${budget_usd:.2f} at ${price:.2f}/h since {pod.created_at}"
+            )
+        existing = parse_api_timestamp(pod.removal_scheduled_at)
+        if existing is not None:
+            if existing <= now:
+                raise ValueError(f"Pod {pod.huid} is already scheduled for removal at {pod.removal_scheduled_at}")
+            deadline = min(deadline, existing.astimezone(timezone.utc))
+        self.schedule_termination(pod, termination_time=deadline.isoformat().replace("+00:00", "Z"))
+        return deadline
 
     def cancel_scheduled_termination(self, pod: PodInfo) -> Dict[str, Any]:
         """Cancel a scheduled termination for a pod.

@@ -16,6 +16,7 @@ from lium.cli.utils import (
     store_executor_selection,
 )
 from lium.cli.completion import get_gpu_completions
+from lium.cli.workspaces.context import show_workspace
 from . import validation, display, filters as node_filters
 from .actions import GetExecutorsAction
 
@@ -186,6 +187,7 @@ def ls_command(
         else:
             ui.error("All GPUs are currently rented out")
             ui.info("Check back later or contact support if this persists")
+        show_workspace(lium)
         return
 
 
@@ -217,6 +219,7 @@ def ls_command(
         ui.dim(display.format_hidden_columns(hidden))
     ui.print("")
     ui.info(tip)
+    show_workspace(lium)
 
     # Store selection for index-based access in up command
     store_executor_selection(sorted_executors)

@@ -8,6 +8,7 @@ cards without peer-to-peer — hours of an 8-GPU bill. ``--min-download`` puts a
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 import json
 
 import pytest
@@ -257,6 +258,8 @@ def test_compact_executor_unknown_topology_is_null():
 
 def _run_ls(monkeypatch, fleet: list[ExecutorInfo], *args: str):
     class _FakeLium:
+        workspaces = SimpleNamespace(current=lambda: None)   # a server without workspaces: no context line (main since lium#152)
+
         def __init__(self, *a, **k):
             pass
 

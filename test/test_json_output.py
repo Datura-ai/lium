@@ -128,6 +128,9 @@ def test_templates_format_json_carries_the_id_and_image(fake_lium):
         "docker_image_tag": "2.6.0-py3.11-cuda12.5.1-devel-ubuntu24.04",
         "category": "PYTORCH",
         "status": "VERIFY_SUCCESS",
+        "cuda_version": 12.5,
+        "torch_version": "2.6.0",
+        "arch": "hopper",
     }]
 
 

@@ -97,6 +97,9 @@ def test_up_names_the_pick_and_its_price_before_renting(monkeypatch):
     rented: dict = {}
 
     class _RentingLium(_FakeLium):
+        # a server without workspaces: `up` reads it for its workspace line (DAH-3033)
+        workspaces = SimpleNamespace(current=lambda: None)
+
         def default_docker_template(self, executor_id):
             return SimpleNamespace(id="tpl-1", name="pytorch")
 

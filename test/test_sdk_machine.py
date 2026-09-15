@@ -50,6 +50,7 @@ class FakeLium:
 
     ready = True
     run_exit_code = None  # None = really run the runner; int = pretend it exited with that code
+    rent_by_spec = False  # True = a backend with POST /executors/rent-by-spec
 
     def __init__(self, sandbox: Path):
         self.sandbox = sandbox
@@ -58,6 +59,18 @@ class FakeLium:
         self.pods = {}      # id -> PodInfo the fake "server" has running
         self.rented = 0
         self.result_paths = []   # where each call's runner writes its envelope (+ ".npz" beside it)
+
+    def supports(self, feature):
+        self.calls.append(("supports", feature))
+        return self.rent_by_spec and feature == "rent_by_spec"
+
+    def rent(self, **kw):
+        # the server's pick: the cheapest node of that size and type, billed per GPU rented
+        self.calls.append(("rent", kw))
+        executor = D._select_executor(EXECUTORS, f"{kw['gpu_count']}x{kw['gpu_type']}")
+        pod = self.up(executor_id=executor.id, name=kw["name"], template_id=kw.get("template_id"))
+        # what Lium.rent returns (a RentResult, #184): the decorator reads executor, price_per_hour, pod
+        return SimpleNamespace(executor=executor, price_per_hour=executor.price_per_gpu * kw["gpu_count"], pod=pod)
 
     def ls(self, **kw):
         self.calls.append(("ls",))
@@ -134,6 +147,7 @@ def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(D, "_WARM", {})
     FakeLium.ready = True
     FakeLium.run_exit_code = None
+    FakeLium.rent_by_spec = False
     return client
 
 
@@ -281,7 +295,7 @@ def test_call_rents_cheapest_sets_ttl_bounds_run_and_cleans_up(fake, capsys):
     assert not any(cmd.startswith("rm -rf") for cmd in _execs(fake))
 
     err = capsys.readouterr().err
-    assert "[lium] double: renting 1xA100 $1.20/h (one-cheap, US), removal in 0.4h" in err
+    assert "[lium] double: rented 1xA100 $1.20/h (one-cheap, US), removal in 0.4h" in err
     assert "[lium] double: done in" in err
     assert "[lium] double: pod removed" in err
 
@@ -302,6 +316,54 @@ def test_the_ttl_is_re_armed_after_setup_so_the_run_gets_its_full_window(fake):
     for i in (first_arm, re_arm[0]):
         ttl = datetime.fromisoformat(fake.calls[i][2]) - datetime.now(timezone.utc)
         assert 600 + 14 * 60 < ttl.total_seconds() <= 600 + 15 * 60
+
+
+def test_a_backend_with_rent_by_spec_gets_one_rent_call_and_no_listing(fake, capsys):
+    FakeLium.rent_by_spec = True
+    remote = D.machine(machine="A100", timeout=600)(double)
+
+    assert remote(21) == 42
+
+    assert not any(c[0] == "ls" for c in fake.calls), "the fleet must not be listed when the backend can pick"
+    (rent,) = [c[1] for c in fake.calls if c[0] == "rent"]
+    assert rent["gpu_type"] == "A100" and rent["gpu_count"] == 1 and rent["template_id"] is None
+    assert rent["name"].startswith("remote-double-")
+    assert ("down", "pod-1") in fake.calls
+    err = capsys.readouterr().err
+    assert "[lium] double: rented 1xA100 $1.20/h (one-cheap, US), removal in 0.4h" in err
+    assert "[lium] double: done in" in err
+
+
+def test_an_older_backend_still_lists_and_rents_by_id(fake):
+    remote = D.machine(machine="A100", quiet=True)(double)
+
+    assert remote(2) == 4
+
+    assert ("supports", "rent_by_spec") in fake.calls
+    assert ("ls",) in fake.calls and not any(c[0] == "rent" for c in fake.calls)
+    assert next(c[1] for c in fake.calls if c[0] == "up")["executor_id"] == "one-cheap-id"
+
+
+def test_the_cost_line_uses_what_the_rental_bills(fake, capsys, monkeypatch):
+    """A 1-GPU split of a larger node is billed per GPU, not at the node's total."""
+    FakeLium.rent_by_spec = True
+    eight = EXECUTORS[0]  # 8xA100 $3.60/h; a 1-GPU split of it bills $0.45/h
+
+    def rent(self, **kw):
+        self.calls.append(("rent", kw))
+        pod = self.up(executor_id=eight.id, name=kw["name"], template_id=None)
+        return SimpleNamespace(executor=eight, price_per_hour=0.45, pod=pod)
+
+    monkeypatch.setattr(FakeLium, "rent", rent)
+    # pin the clock so the run spans exactly one hour: the cost line must read the billed $0.45/h,
+    # not the node's $3.60/h (a sub-second run would print ~$0.000x for either)
+    clock = iter([1_000.0] + [4_600.0] * 50)
+    monkeypatch.setattr(D.time, "time", lambda: next(clock))
+    assert D.machine(machine="A100")(double)(3) == 6
+    err = capsys.readouterr().err
+    assert "rented 1xA100 $0.45/h (eight, US)" in err
+    cost_line = err.split("done in")[1].splitlines()[0]
+    assert "(~$0.4500)" in cost_line and "3.60" not in cost_line
 
 
 def test_timeout_none_means_no_kill_and_24h_ttl(fake):
@@ -950,7 +1012,7 @@ def test_keep_warm_reuses_the_pod_and_rearms_its_ttl(fake, capsys):
         assert 300 + 60 < warm <= 300 + 120
     err = capsys.readouterr().err
     assert "pod stays warm 300s" in err
-    assert err.count("renting") == 1
+    assert err.count("rented 1xA100") == 1
     assert "pod ready" in err.split("done in")[0] and "pod ready" not in err.split("done in")[1]
 
     f.close()
