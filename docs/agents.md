@@ -26,7 +26,7 @@ SSH: the CLI and SDK use `LIUM_SSH_KEY_PATH` if set, else `[ssh] key_path` in `~
 
 Success: the JSON result is on **stdout**, exit code 0.
 
-Failure on a renter command that takes `--json` (`exec`, `describe`, `balance`, `whoami`, `audit`; `fund`, `signup`, `topup currencies` and `topup create` too): stdout is empty, **stderr** holds one JSON object, the exit code is non-zero:
+Failure on a renter command that takes `--json` (`exec`, `describe`, `balance`, `whoami`, `audit`, `cp`, `init`; `fund`, `signup`, `topup currencies`, `topup create`, `keys create`, `keys list`, `workspaces list` and `workspaces members` too): stdout is empty, **stderr** holds one JSON object, the exit code is non-zero:
 
 ```json
 {"ok": false, "error": {"code": "pod_not_found", "message": "No pods match targets: train-1", "hint": "Run 'lium ps' to list pods; a name, huid, id or 1-based index is accepted", "exit_code": 5}}
@@ -180,7 +180,14 @@ trap 'lium rm "$POD" --yes >/dev/null 2>&1 || true' EXIT
 
 ## 5. Discovering the shapes
 
-`lium ps --format json` / `lium ls --format json` return the table-equivalent objects shown above, and `lium describe <pod> --json` returns the full pod manifest.
+`lium ps --format json` / `lium ls --format json` return the table-equivalent objects shown above, and `lium describe <pod> --json` returns the full pod manifest. The other `--json` commands of §2:
+
+- `lium cp <src-pod>:<path> <dst-pod>:<path> --json` returns one object: `ok`, `source` and `destination` (each `{"pod": <huid>, "path": …}`) and rsync's `exit_code`.
+- `lium init --api-key <key> --json` returns one object: `ok`, `api_key_source` (the same value `whoami --json` prints), `saved_from`, `env_key`, `active_workspace`, `config_path`, `ssh_key_path`; `--json` needs `--api-key` or an exported `LIUM_API_KEY`, the browser flows print for a person (rule 1: export the key instead when you can).
+- `lium keys create <name> --json` returns the new key as the server sends it (the secret under `key`, printed this once) plus `workspace_name`; needs `lium workspaces login` first.
+- `lium keys list --json` returns a list of the workspace's key rows (`id`, `name`, `scopes`, `created_at`, `last_used`) without the key material; needs `lium workspaces login` first.
+- `lium workspaces list --json` returns a list of `{"id", "name", "role", "billing_owner_user_id", "pending_billing_owner_user_id", "is_personal", "created_at"}`: the key's own workspace, or every one you belong to with a session.
+- `lium workspaces members [<workspace>] --json` returns a list of `{"user_id", "name", "email", "role", "is_billing_owner", "joined_at"}`.
 
 ## 6. A complete run
 
