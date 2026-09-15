@@ -75,6 +75,18 @@ lium ssh <pod-name>
 lium rm <pod-name>
 ```
 
+### First hour on a pod
+
+A few things that save time on a freshly rented pod (full version in `docs/getting-started.rst`):
+
+- Always pass `--ttl` (or `--until`) to `lium up`; a pod bills until it is removed.
+- The pod's local volume (`/root` on the standard templates; `pod.volume_path` in the SDK) is the only path `lium bk` can back up and the one encryption covers; an attached Volume is under `/mnt`; everything else (`/workspace`, `/tmp`) is plain container filesystem, neither encrypted nor backup-able. Keep weights, datasets and the Hugging Face cache on the volume: `mkdir -p /root/hf /root/logs; export HF_HOME=/root/hf HF_HUB_ENABLE_HF_TRANSFER=1`.
+- Ubuntu 24.04 images: use a venv (`python -m venv /root/venv`) or `export PIP_BREAK_SYSTEM_PACKAGES=1` before `pip install`.
+- Blackwell GPUs (B200, B300, RTX PRO 6000, RTX 5090) need a cu128+ PyTorch build: `pip install torch --index-url https://download.pytorch.org/whl/cu130`. FlashAttention-3 is Hopper-only; use FlashAttention-4 or cuDNN attention on Blackwell.
+- Missing tools: `apt-get update && apt-get install -y ffmpeg rsync`.
+- Background jobs: `nohup setsid cmd > /root/logs/x.log 2>&1 < /dev/null &`.
+- Check utilisation: `nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used --format=csv -l 5 > /root/logs/gpu.csv &`.
+
 ### SDK
 
 The SDK mirrors the CLI's capabilities for programmatic use. Two entry points: the `@lium.machine` decorator for quickly offloading isolated functions, and the `Lium()` client for long-lived orchestration code.
@@ -152,6 +164,7 @@ JSON keeps the API's raw value as `ssh_cmd`.
 - **CLI docs:** https://docs.lium.io/developers/cli/overview
 - **SDK docs:** https://docs.lium.io/developers/sdk
 - **Exit codes and the JSON error envelope:** [docs/exit-codes.md](docs/exit-codes.md) — what a script or agent gets back when a command fails (`--format json`, `LIUM_OUTPUT=json`).
+- **Agents and scripts:** [docs/agents.md](docs/agents.md) — the non-interactive path end to end (env-var auth, JSON output, exit codes, `up → exec → rsync → rm`, pod gotchas).
 
 ## Binary Releases
 
@@ -380,7 +393,7 @@ lium update my-pod
 
 # Manage volumes
 lium volumes list
-lium volumes new mydata -d "My dataset"
+lium volumes new mydata --desc "My dataset"
 lium volumes rm <VOLUME_HUID>
 
 # Multi-node clusters
