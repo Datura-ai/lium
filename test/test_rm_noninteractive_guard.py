@@ -296,9 +296,20 @@ def test_a_piped_rm_with_format_json_is_refused_on_stderr_and_reruns_as_given(mo
     assert "lium rm eager-wolf-aa --format json --yes" in " ".join(result.stderr.split())
 
 
-def test_rerun_line_knows_every_rm_option():
-    """A new `rm` option has to be carried by rerun_with_yes too, or the printed command is not
-    the one the caller ran. This pins the option list; extend both together."""
-    assert {param.name for param in rm_module.rm_command.params} == {
-        "targets", "remove_all", "yes", "in_duration", "at_time", "name_only", "output_format",
-    }
+def test_rerun_line_carries_every_rm_option():
+    """Regression: an `rm` option the parser accepts but `rerun_with_yes` does not know (lium#218's
+    `--format` was one) is dropped from the printed command, so a refused caller re-runs a different
+    command. Every option is parsed from a real argv with a non-default value and must come back out
+    of the rerun line; a new option fails here until both the argv and the rerun line carry it."""
+    argv = ["train", "--all", "--in", "45m", "--at", "2030-01-01T00:00", "--name-only", "--format", "json"]
+    ctx = rm_module.rm_command.make_context("rm", argv)
+    line = rm_module.rerun_with_yes(
+        ctx.params["targets"], ctx.params["remove_all"], ctx.params["in_duration"], ctx.params["at_time"],
+        ctx.params["name_only"], output_format=ctx.params["output_format"],
+    )
+
+    assert line == "lium rm train --all --in 45m --at 2030-01-01T00:00 --name-only --format json --yes"
+    for param in rm_module.rm_command.params:
+        if param.name in ("targets", "yes"):
+            continue
+        assert param.opts[0] in line, f"{param.name} ({param.opts[0]}) is not carried by rerun_with_yes"
