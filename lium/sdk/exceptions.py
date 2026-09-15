@@ -70,6 +70,30 @@ class PodStartError(LiumError):
         self.cause = cause
 
 
+class ClusterNotListedError(LiumError):
+    """The cluster rent may have gone through, but the pod listing did not show a whole
+    cluster within the lookup window.
+
+    Two ways in. ``confirmed`` is True when the rent route confirmed the order and named the
+    member pods (``pod_ids``) but the listing did not show every one of them, or failed: the
+    nodes are rented and billing. ``confirmed`` is False when the rent route gave no answer
+    (timeout, 5xx) and the by-name lookup then found fewer members than requested, or could not
+    list at all: the nodes may be rented. Either way a second ``up_cluster`` may rent a second
+    cluster.
+
+    Attributes:
+        pod_ids: The member pod ids the API returned; empty when the order was not confirmed.
+        listed: The member ids the last listing showed.
+        confirmed: Whether the API confirmed the order.
+    """
+
+    def __init__(self, message: str, *, pod_ids=(), listed=(), confirmed: bool = True):
+        super().__init__(message)
+        self.pod_ids = list(pod_ids)
+        self.listed = list(listed)
+        self.confirmed = confirmed
+
+
 class LiumHostKeyError(LiumError):
     """A pod presented an SSH host key that differs from the pinned one."""
 

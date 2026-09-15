@@ -15,6 +15,8 @@ Core Objects
    ExecutorInfo
    PodInfo
    RentResult
+   ClusterOffer
+   Cluster
    Template
    VolumeInfo
    BackupConfig
