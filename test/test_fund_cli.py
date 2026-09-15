@@ -24,7 +24,13 @@ from lium.sdk.exceptions import LiumNotFoundError, LiumServerError
 
 
 def _fake_bt_wallet(events=None, unlock_error=None):
-    """Wallet double whose coldkey unlock is observable, and optionally fails."""
+    """Wallet double whose coldkey unlock is observable, and optionally fails.
+
+    ``coldkey_file`` mirrors the two ``bittensor_wallet.Keyfile`` reads the CLI's
+    non-interactive gate makes (DAH-3502); this coldkey has no password, so the
+    gate lets every test here through. The encrypted cases live in
+    ``test_cli_noninteractive.py``.
+    """
     def unlock_coldkey():
         if unlock_error is not None:
             raise unlock_error
@@ -33,6 +39,10 @@ def _fake_bt_wallet(events=None, unlock_error=None):
 
     return types.SimpleNamespace(
         coldkeypub=types.SimpleNamespace(ss58_address="coldkey"),
+        coldkey_file=types.SimpleNamespace(
+            is_encrypted=lambda: False,
+            env_var_name=lambda: "BT_PW__HOME_USER__BITTENSOR_WALLETS_DEFAULT_COLDKEY",
+        ),
         unlock_coldkey=unlock_coldkey,
     )
 

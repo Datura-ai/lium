@@ -14,6 +14,7 @@ from lium.cli.utils import (
     EXIT_GENERAL_ERROR,
     handle_errors,
 )
+from lium.cli.interactive import is_interactive, noninteractive_reason
 from lium.cli.settings import config
 from lium.provider.chain_stack import missing_chain_stack_message
 from . import validation
@@ -24,6 +25,7 @@ from .actions import (
     ExecuteTransferAction,
     CheckFreeAlphaAction,
     ExecuteAlphaTransferAction,
+    coldkey_password_env_missing,
 )
 
 # A signed transfer may have reached the chain even though the command failed;
@@ -41,6 +43,35 @@ _RAO_PER_ALPHA = Decimal(10) ** 9
 # moved, re-valued at on-chain inclusion time, so the credited USD can differ from
 # the quote.
 _USD_CAVEAT = "credited USD valued at on-chain inclusion time; may differ from quote"
+
+
+def _refuse_coldkey_prompt_without_a_terminal(bt_wallet, wallet_name: str) -> None:
+    """Fail closed when the coldkey password would be asked for and nobody can type it.
+
+    ``bittensor_wallet`` asks for an encrypted coldkey's password on the terminal
+    itself, outside :mod:`lium.cli.ui`'s gate; ``-y`` does not cover it. Piped, that
+    prompt reads an empty line and the command dies with "Wrong password" only after
+    the balance call and the confirm. So, when prompting is off (no terminal on
+    stdin, or ``LIUM_NONINTERACTIVE``), an encrypted coldkey whose ``BT_PW_…``
+    variable is unset is refused here, before any network call, with the same
+    ``input_required`` failure (exit 2) every other unanswerable prompt produces.
+    A human on a terminal is not affected: the prompt is shown as before.
+    """
+    if is_interactive():
+        return
+    env_name = coldkey_password_env_missing(bt_wallet)
+    if env_name is None:
+        return
+    raise CliFailure(
+        "input_required",
+        f"Input required: coldkey password for wallet '{wallet_name}' "
+        f"(no prompt shown because {noninteractive_reason()}; set {env_name}, "
+        "the variable bittensor_wallet reads for this coldkey, or fund from a "
+        "coldkey without a password)",
+        EXIT_CONFIGURATION_ERROR,
+        hint=f"Set {env_name} the way bittensor_wallet's Keyfile.save_password_to_env() "
+        "does (README, 'Scripts and agents'), or run on a terminal",
+    )
 
 
 def _legacy_tao_fund(wallet: Optional[str], amount: Optional[str], yes: bool) -> None:
@@ -84,6 +115,10 @@ def _legacy_tao_fund(wallet: Optional[str], amount: Optional[str], yes: bool) ->
     tao_amount, error = validation.validate_amount(amount_str)
     if error:
         raise CliFailure("invalid_amount", error, EXIT_CONFIGURATION_ERROR)
+
+    # Piped: an encrypted coldkey nobody can type the password for is refused now,
+    # before the balance call below — not after the confirm, in bittensor's prompt.
+    _refuse_coldkey_prompt_without_a_terminal(bt_wallet, wallet_name)
 
     current_balance = ui.load("Loading balance", lambda: lium.balance())
     ui.info(f"Current balance: {current_balance} USD")
@@ -211,6 +246,10 @@ def _alpha_fund(
     usd_amount, error = validation.validate_amount(amount)
     if error:
         raise LiumError(error)
+
+    # Piped: an encrypted coldkey nobody can type the password for is refused now,
+    # before the registration call — not inside bittensor's own prompt.
+    _refuse_coldkey_prompt_without_a_terminal(bt_wallet, wallet)
 
     # Construct the client BEFORE the unlock so a missing API key aborts without ever
     # asking for the coldkey password.

@@ -336,7 +336,9 @@ def test_fund_confirmation_is_refused_not_skipped_when_piped(monkeypatch):
 
     class _LoadedWallet:
         def execute(self, ctx):
-            return SimpleNamespace(ok=True, data={"wallet": object(), "address": "coldkey"}, error=None)
+            return SimpleNamespace(
+                ok=True, data={"wallet": _coldkey_wallet(encrypted=False), "address": "coldkey"}, error=None
+            )
 
     monkeypatch.setattr(fund_module, "LoadWalletAction", _LoadedWallet)
     monkeypatch.setattr(fund_module, "Lium", lambda *a, **k: SimpleNamespace(balance=lambda: 0.0))
@@ -349,6 +351,208 @@ def test_fund_confirmation_is_refused_not_skipped_when_piped(monkeypatch):
 
     assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
     assert "--yes" in result.output
+
+
+# --- fund: the coldkey password prompt bittensor raises itself ----------------
+
+COLDKEY_PW_ENV = "BT_PW__HOME_USER__BITTENSOR_WALLETS_DEFAULT_COLDKEY"
+
+
+def _coldkey_wallet(encrypted: bool, events=None):
+    """Wallet double with the ``Keyfile`` reads the gate makes and an observable unlock."""
+    return SimpleNamespace(
+        coldkeypub=SimpleNamespace(ss58_address="coldkey"),
+        coldkey_file=SimpleNamespace(
+            is_encrypted=lambda: encrypted, env_var_name=lambda: COLDKEY_PW_ENV
+        ),
+        unlock_coldkey=lambda: (events if events is not None else []).append("unlock_coldkey"),
+    )
+
+
+def _fund_tao_seams(monkeypatch, wallet, events):
+    """Stub the wallet load, the API client and the chain steps; record what runs."""
+    import sys
+    import types
+
+    from lium.cli.actions import ActionResult
+    from lium.cli.fund import command as fund_module
+
+    monkeypatch.setitem(sys.modules, "bittensor", types.ModuleType("bittensor"))
+    monkeypatch.delenv(COLDKEY_PW_ENV, raising=False)
+
+    class _LoadedWallet:
+        def execute(self, ctx):
+            return ActionResult(ok=True, data={"wallet": wallet, "address": "coldkey"})
+
+    def _balance():
+        events.append("balance")
+        return 10.0
+
+    class _Registered:
+        def execute(self, ctx):
+            events.append("register")
+            return ActionResult(ok=True, data={"registered": True})
+
+    class _Transferred:
+        def execute(self, ctx):
+            events.append("transfer")
+            return ActionResult(ok=True, data={})
+
+    monkeypatch.setattr(fund_module, "LoadWalletAction", _LoadedWallet)
+    monkeypatch.setattr(fund_module, "Lium", lambda *a, **k: SimpleNamespace(balance=_balance))
+    monkeypatch.setattr(fund_module, "CheckWalletRegistrationAction", _Registered)
+    monkeypatch.setattr(fund_module, "ExecuteTransferAction", _Transferred)
+    return fund_module
+
+
+@pytest.mark.parametrize(
+    "spelling, args, attached",
+    [
+        ("-y, piped", ["-y"], False),
+        ("--yes, piped", ["--yes"], False),
+        ("LIUM_NONINTERACTIVE=1 on a terminal", ["-y"], True),
+        ("no -y, piped", [], False),
+    ],
+)
+def test_fund_with_an_encrypted_coldkey_fails_before_any_network_call_when_piped(
+    monkeypatch, spelling, args, attached
+):
+    """The regression: bittensor_wallet asks 'Enter your password:' on its own, outside
+    the CLI's gate and past -y. Piped, it read an empty line and failed with 'Wrong
+    password' after the balance call and the confirm. Now the encrypted coldkey is
+    refused first, with the same input_required failure every other prompt gives."""
+    events = []
+    _terminal(monkeypatch, attached=attached)
+    if attached:
+        monkeypatch.setenv(interactive.NONINTERACTIVE_ENV, "1")
+    _fund_tao_seams(monkeypatch, _coldkey_wallet(encrypted=True, events=events), events)
+
+    result = CliRunner().invoke(cli, ["fund", "-w", "default", "-a", "1.5", *args])
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR, (spelling, result.output)
+    assert "coldkey password for wallet 'default'" in result.output
+    assert COLDKEY_PW_ENV in result.output
+    assert interactive.noninteractive_reason() in result.output
+    assert events == [], (spelling, events)
+
+
+def test_fund_with_the_coldkey_password_in_the_environment_runs_piped(monkeypatch):
+    """The documented way out: the BT_PW_ variable bittensor_wallet reads for the keyfile."""
+    events = []
+    _terminal(monkeypatch, attached=False)
+    _fund_tao_seams(monkeypatch, _coldkey_wallet(encrypted=True, events=events), events)
+    monkeypatch.setenv(COLDKEY_PW_ENV, "c2F2ZV9wYXNzd29yZF90b19lbnY=")
+
+    result = CliRunner().invoke(cli, ["fund", "-w", "default", "-a", "1.5", "-y"])
+
+    assert result.exit_code == 0, result.output
+    assert events == ["balance", "unlock_coldkey", "register", "transfer"]
+
+
+def test_fund_with_an_unencrypted_coldkey_runs_piped(monkeypatch):
+    """Nothing to type: the gate must not refuse a coldkey that has no password."""
+    events = []
+    _terminal(monkeypatch, attached=False)
+    _fund_tao_seams(monkeypatch, _coldkey_wallet(encrypted=False, events=events), events)
+
+    result = CliRunner().invoke(cli, ["fund", "-w", "default", "-a", "1.5", "-y"])
+
+    assert result.exit_code == 0, result.output
+    assert events == ["balance", "unlock_coldkey", "register", "transfer"]
+
+
+def test_fund_with_an_encrypted_coldkey_still_prompts_a_human(monkeypatch):
+    """Negative control: on a terminal the gate stays out of the way and bittensor's
+    own prompt (here: the unlock) is reached as before."""
+    events = []
+    _terminal(monkeypatch, attached=True)
+    _fund_tao_seams(monkeypatch, _coldkey_wallet(encrypted=True, events=events), events)
+
+    result = CliRunner().invoke(cli, ["fund", "-w", "default", "-a", "1.5", "-y"])
+
+    assert result.exit_code == 0, result.output
+    assert "unlock_coldkey" in events
+
+
+def test_fund_alpha_with_an_encrypted_coldkey_fails_before_the_pay_api_when_piped(monkeypatch):
+    """Same gate on the alpha path, and the JSON caller gets the envelope."""
+    import json
+    import sys
+    import types
+
+    from lium.cli.actions import ActionResult
+    from lium.cli.fund import command as fund_module
+
+    events = []
+    _terminal(monkeypatch, attached=False)
+    monkeypatch.delenv(COLDKEY_PW_ENV, raising=False)
+    wallet = _coldkey_wallet(encrypted=True, events=events)
+    bt = types.ModuleType("bittensor")
+    bt.Wallet = lambda *a, **k: wallet
+    monkeypatch.setitem(sys.modules, "bittensor", bt)
+    monkeypatch.setattr(fund_module.validation, "resolve_hotkey", lambda hotkey, wallet, bt: (hotkey, ""))
+
+    class _LoadedWallet:
+        def execute(self, ctx):
+            return ActionResult(ok=True, data={"wallet": wallet, "address": "coldkey"})
+
+    class _Api:
+        def __getattr__(self, name):
+            pytest.fail(f"pay API reached ({name}) before the coldkey gate")
+
+    monkeypatch.setattr(fund_module, "LoadWalletAction", _LoadedWallet)
+    monkeypatch.setattr(fund_module, "Lium", lambda *a, **k: _Api())
+
+    result = CliRunner().invoke(
+        cli, ["fund", "--alpha", "-k", "5HotKeyExampleSS58AddressForTestingAAAAAAAAAAAAAAAAA",
+              "-w", "default", "-a", "2", "-y", "--json"],
+    )
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
+    envelope = json.loads(result.output)
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "input_required"
+    assert COLDKEY_PW_ENV in envelope["error"]["message"]
+    assert events == []
+
+
+def test_coldkey_gate_reads_a_real_bittensor_keyfile(tmp_path, monkeypatch):
+    """Against bittensor_wallet itself: an encrypted coldkey names its BT_PW_ variable,
+    the same coldkey with that variable set passes, and a plain coldkey never asks."""
+    bittensor_wallet = pytest.importorskip("bittensor_wallet")
+    from lium.cli.fund.actions import coldkey_password_env_missing
+
+    keypair = bittensor_wallet.Keypair.create_from_mnemonic(bittensor_wallet.Keypair.generate_mnemonic())
+    encrypted = bittensor_wallet.Wallet(name="enc", hotkey="default", path=str(tmp_path))
+    encrypted.set_coldkey(
+        keypair, encrypt=True, overwrite=True, save_coldkey_to_env=False, coldkey_password="hunter22"
+    )
+    plain = bittensor_wallet.Wallet(name="plain", hotkey="default", path=str(tmp_path))
+    plain.set_coldkey(keypair, encrypt=False, overwrite=True)
+
+    name = coldkey_password_env_missing(encrypted)
+
+    assert name is not None and name.startswith("BT_PW_")
+    assert name == encrypted.coldkey_file.env_var_name()
+    monkeypatch.setenv(name, "x")
+    assert coldkey_password_env_missing(encrypted) is None
+    assert coldkey_password_env_missing(plain) is None
+
+
+def test_coldkey_gate_leaves_an_unreadable_keyfile_to_the_unlock():
+    """A coldkey path that is not a readable file makes Keyfile.is_encrypted() raise;
+    the gate must not turn that into a bare value_error without the wallet's name.
+    It steps aside and the unlock reports the file (coldkey_unlock_failed)."""
+    from lium.cli.fund.actions import coldkey_password_env_missing
+
+    def _unreadable():
+        raise ValueError("Keyfile at: /wallets/enc/coldkey is not a file")
+
+    wallet = SimpleNamespace(
+        coldkey_file=SimpleNamespace(is_encrypted=_unreadable, env_var_name=lambda: COLDKEY_PW_ENV)
+    )
+
+    assert coldkey_password_env_missing(wallet) is None
 
 
 def test_backup_param_prompts_fall_back_to_defaults_when_piped(monkeypatch):

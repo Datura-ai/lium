@@ -481,6 +481,24 @@ lium rm my-pod -y                  # -y on every destructive command
 lium fund -w default -a 1.5 -y     # values that would be prompted for must be passed as options
 ```
 
+One prompt is not the CLI's: an encrypted coldkey's password, which `bittensor_wallet` asks for
+in `lium fund`. Without a terminal, `fund` refuses such a coldkey before any network call
+(`input_required`, exit 2) unless the `BT_PW_…` variable `bittensor_wallet` reads for that keyfile
+is set; the message names the variable (`Keyfile.env_var_name()`). Its value is not the plain
+password: `Keyfile.save_password_to_env()` writes the encoded form into the process environment
+(the C environment, so Python's `os.environ` does not show it). A wrapper that calls it and then
+`exec`s `lium` passes it on; the password comes in on stdin, not on the command line:
+
+```bash
+python3 -c '
+import os, sys
+from bittensor_wallet import Wallet
+Wallet(name="default").coldkey_file.save_password_to_env(sys.stdin.readline().rstrip("\n"))
+os.execvp("lium", ["lium", "fund", "-w", "default", "-a", "1.5", "-y"])' < password.txt
+```
+
+A coldkey without a password needs nothing extra.
+
 ### Crash reporting (opt-in, off by default)
 
 The CLI never sends telemetry unless you turn it on:

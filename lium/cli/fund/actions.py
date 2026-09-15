@@ -1,5 +1,6 @@
+import os
 import time
-from typing import Any
+from typing import Any, Optional
 
 from lium.cli.actions import ActionResult
 from .validation import subtensor_class, wallet_class
@@ -90,6 +91,42 @@ class LoadWalletAction:
             )
         except Exception as e:
             return ActionResult(ok=False, data={}, error=str(e))
+
+
+def coldkey_password_env_missing(bt_wallet: Any) -> Optional[str]:
+    """Name the ``BT_PW_…`` variable an encrypted coldkey needs when no one can type its password.
+
+    ``bittensor_wallet`` decrypts a password-protected coldkey either from a prompt
+    (``Enter your password:`` straight on the terminal, outside every CLI gate) or
+    from the environment variable ``Keyfile.env_var_name()`` names for that keyfile
+    (``BT_PW_`` plus the keyfile path upper-cased, ``/`` as ``_``; the value is what
+    ``Keyfile.save_password_to_env()`` writes). Without a terminal the prompt reads
+    an empty line and fails with "Wrong password" — after the confirm and after the
+    balance was fetched.
+
+    Returns:
+        The variable's name when the coldkey is encrypted and that variable is not
+        set, so the caller can refuse before any network call. ``None`` when the
+        coldkey is not encrypted (nothing to type) or the variable is set (the
+        unlock will read it). A coldkey file that does not exist, or cannot be
+        read, is not this check's to report: ``None``, and the unlock names the
+        file and the wallet itself.
+    """
+    keyfile = bt_wallet.coldkey_file
+    try:
+        encrypted = keyfile.is_encrypted()
+    except (ValueError, OSError):
+        # bittensor_wallet 4.0.1 raises ValueError when the path is not a regular
+        # file (a directory, say); an unreadable file is an OSError. Neither is a
+        # coldkey this gate can judge: the unlock reads the same file next and
+        # fails with coldkey_unlock_failed naming it, so nothing is lost here.
+        return None
+    if not encrypted:
+        return None
+    name = keyfile.env_var_name()
+    if os.environ.get(name):
+        return None
+    return name
 
 
 class UnlockColdkeyAction:
