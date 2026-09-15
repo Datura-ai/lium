@@ -35,9 +35,12 @@ class ResolveExecutorAction:
                     return ActionResult(ok=False, data={}, error=error or "Failed to resolve node index")
                 executor_id = resolved_ids[0]
 
-            executor = lium.get_executor(executor_id)
+            try:
+                executor = lium.get_executor(executor_id)
+            except ValueError as ambiguous:  # a HUID shared by several listed nodes
+                return ActionResult(ok=False, data={}, error=str(ambiguous))
             if not executor:
-                return ActionResult(ok=False, data={}, error=f"Node '{executor_id}' not found")
+                return ActionResult(ok=False, data={}, error=Lium.executor_not_found_message(executor_id))
 
             if ports and (not executor.available_port_count or executor.available_port_count < ports):
                 available = executor.available_port_count or 0

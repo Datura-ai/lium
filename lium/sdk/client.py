@@ -903,7 +903,7 @@ class Lium:
 
         executor_info = self.get_executor(executor_id)
         if not executor_info:
-            raise ValueError(f"Node with ID '{executor_id}' not found")
+            raise ValueError(self.executor_not_found_message(executor_id))
 
         if image is not None:
             template_id = self.create_template(
@@ -1959,7 +1959,7 @@ class Lium:
         """
         executor = self.get_executor(executor_id)
         if not executor:
-            raise ValueError(f"No node found with id {executor_id}")
+            raise ValueError(self.executor_not_found_message(executor_id))
 
         default_images = self.get_default_images(executor.gpu_model, executor.driver_version)
 
@@ -2020,18 +2020,46 @@ class Lium:
 
 
     def get_executor(self, executor: str) -> Optional[ExecutorInfo]:
-        """Resolve a node by ID.
+        """Resolve a node by UUID or HUID against the same listing :meth:`ls` returns.
 
         Args:
-            executor: Node ID string.
+            executor: Node UUID, or the HUID ``lium ls`` prints for it (``cosmic-hawk-f2``).
 
         Returns:
-            Matching :class:`ExecutorInfo` or ``None`` if not found.
+            Matching :class:`ExecutorInfo` or ``None`` if no listed node has that id.
+
+        Raises:
+            ValueError: the HUID names more than one listed node. HUIDs are
+                client-side draws (10 adjectives × 10 nouns × 256 tails), so a
+                full listing can hold two nodes with the same one; picking the
+                first in API order would rent a different node than the one
+                ``lium ls`` showed, so the caller is asked for the UUID instead.
         """
-        for e in self.ls():
-            if e.id == executor:
-                return e
-        return None
+        matches = [e for e in self.ls() if executor in (e.id, e.huid)]
+        if len(matches) > 1:
+            exact = [e for e in matches if e.id == executor]
+            if len(exact) == 1:
+                return exact[0]
+            raise ValueError(self.ambiguous_executor_message(executor, matches))
+        return matches[0] if matches else None
+
+    @staticmethod
+    def ambiguous_executor_message(executor: str, matches: List[ExecutorInfo]) -> str:
+        """The sentence for a HUID that is shared by several listed nodes."""
+        ids = ", ".join(f"{e.id} ({e.gpu_count}×{e.gpu_type})" for e in matches)
+        return (
+            f"Node id '{executor}' matches {len(matches)} listed nodes: {ids}. "
+            "Use the UUID ('lium ls --format json' shows both) so the right node is rented."
+        )
+
+    @staticmethod
+    def executor_not_found_message(executor: str) -> str:
+        """The one sentence every caller prints when a node id resolves to nothing."""
+        return (
+            f"Node '{executor}' is not in the current listing (looked up by UUID and HUID). "
+            "It may have been rented or gone offline since 'lium ls'; "
+            "run 'lium ls --format json' for the ids rentable now."
+        )
 
     def _resolve_machine_name(self, gpu_short: str) -> Optional[str]:
         """Resolve a short GPU name to all matching full machine names from API.
