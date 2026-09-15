@@ -28,6 +28,7 @@ from lium.cli.utils import (
 )
 from lium.cli.completion import get_gpu_completions
 from . import validation, parsing
+from .budget import MIN_BUDGET_MINUTES, budget_deadline, budget_hours, rental_price_per_hour
 from .actions import (
     ResolveExecutorAction,
     ResolveTemplateAction,
@@ -107,7 +108,7 @@ def _in_hours(termination_time: datetime) -> str:
 @click.option("--volume", "-v", help="Volume spec: 'id:<HUID>' or 'new:name=<NAME>[,desc=<DESC>]'")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @click.option("--gpu", help="Filter nodes by GPU type (e.g., H200, A6000)", shell_complete=get_gpu_completions)
-@click.option("--count", "-c", type=int, help="Number of GPUs per pod")
+@click.option("--count", "-c", type=int, help="Number of GPUs per pod (with NODE_ID: rent that many of the node's GPUs, if the provider allows splitting)")
 @click.option("--country", help="Filter nodes by ISO country code (e.g., US, FR)")
 @click.option("--min-cpus", "min_cpus", type=int, help="Minimum CPU thread count (the CPUs column of 'lium ls')")
 @click.option("--ports", "-p", type=int, help="Minimum number of available ports required")
@@ -120,6 +121,13 @@ def _in_hours(termination_time: datetime) -> str:
     "--until",
     help="Auto-terminate at time in local timezone (e.g., 'today 23:00', 'tomorrow 01:00', '2025-10-20 15:30'). "
          "Scheduled as soon as the pod exists, so it holds even if the pod never becomes ready.",
+)
+@click.option(
+    "--budget",
+    "budget_usd",
+    type=click.FloatRange(min=0, min_open=True),
+    metavar="USD",
+    help="Auto-terminate once the pod has spent this much (price/h × uptime), scheduled client-side through the same removal mechanism as --ttl. Set once the pod is ready: a pod that never becomes ready is not capped by --budget (add --ttl for that). Combined with --ttl/--until the earlier deadline wins.",
 )
 @click.option("--jupyter", is_flag=True, help="Install Jupyter Notebook (automatically selects available port)")
 @click.option("--no-ssh", "no_ssh", is_flag=True, help="Create the pod and return instead of opening an SSH session")
@@ -177,6 +185,7 @@ def up_command(
     ports: Optional[int],
     ttl: Optional[str],
     until: Optional[str],
+    budget_usd: Optional[float],
     jupyter: bool,
     no_ssh: bool,
     timeout: int,
@@ -197,6 +206,9 @@ def up_command(
     """\b
     Create a new GPU pod on a node.
     \b
+    The node's $/h price is charged per second, from deploy until the pod is
+    removed, with no minimum.
+    \b
     NODE_ID: Node UUID, HUID, or index from last 'lium ls'.
     If not provided, the filters pick the node and the pick is printed before renting.
     With --gpu the backend chooses: the cheapest $/GPU·h node matching the filters
@@ -209,6 +221,7 @@ def up_command(
       lium up 1                             # Create pod on node #1 from last ls
       lium up --gpu H200                    # Auto-select cheapest optimal H200 node
       lium up --gpu A6000 -c 2              # Auto-select cheapest optimal 2×A6000 node
+      lium up cosmic-hawk-f2 -c 1           # Rent 1 GPU of a splittable multi-GPU node
       lium up --country US                  # Auto-select cheapest optimal node in US
       lium up --gpu H200 --country FR       # Combine multiple filters
       lium up --gpu H100 --min-cpus 32      # Only nodes with at least 32 CPU threads
@@ -221,6 +234,7 @@ def up_command(
       lium up --gpu H100 --timeout 600      # Give the whole rent 10 minutes, then exit 1 naming the pod
       lium up 1 --until "today 23:00"       # Auto-terminate at 23:00 local time today
       lium up 1 --until "tomorrow 01:00"    # Auto-terminate at 01:00 local time tomorrow
+      lium up --gpu H100 --budget 12.50     # Auto-terminate once $12.50 has been spent
       lium up 1 --jupyter                   # Install Jupyter Notebook (auto-selects port)
       lium up --gpu H200 -c 8 --verify-gpus # Fail if the pod exposes fewer GPUs than billed
       lium up --gpu H200 -c 8 --verify-gpus --strict-gpus  # ...and remove the pod on mismatch
@@ -355,7 +369,8 @@ def up_command(
     executor = result.data["executor"]
     # What the rental bills: the server's figure when it picked (a split of a larger node
     # costs price_per_gpu × count, not the node's total), else the node's total $/h.
-    price_per_hour = result.data.get("price_per_hour") or executor.price_per_hour
+    server_price_per_hour = result.data.get("price_per_hour")
+    price_per_hour = server_price_per_hour or executor.price_per_hour
     # The GPUs the rental gets, next to what they cost: on the spec path the server may rent a
     # split of a larger node, so the node's own count would overstate it.
     gpu_count = result.data.get("gpu_count") or executor.gpu_count
@@ -440,11 +455,64 @@ def up_command(
         except Exception:
             pass
 
+    if budget_usd is not None:
+        # What the rental will bill. On the spec path the server priced the pick (price_per_hour
+        # above, #209) and that figure stands. On the node path: price_per_gpu × GPUs for a split,
+        # the node's total otherwise; no --count rents the node's free GPUs (rented_gpu_count), not
+        # the whole host — on a partially rented split host the host total would overstate the
+        # price and refuse a valid budget.
+        if server_price_per_hour is None:
+            price_per_hour = rental_price_per_hour(
+                executor, count if count is not None else rented_gpu_count(executor)
+            )
+        hours = budget_hours(budget_usd, price_per_hour)
+        if hours is None:
+            raise CliFailure(
+                "invalid_arguments",
+                f"Cannot apply --budget: node {executor.huid} has no hourly price",
+                EXIT_CONFIGURATION_ERROR,
+            )
+        if hours * 60 < MIN_BUDGET_MINUTES:
+            raise CliFailure(
+                "invalid_arguments",
+                f"--budget {budget_usd:.2f} buys {hours * 60:.1f} min at ${price_per_hour:.2f}/h; "
+                f"the minimum is {MIN_BUDGET_MINUTES} min (${price_per_hour * MIN_BUDGET_MINUTES / 60:.2f})",
+                EXIT_CONFIGURATION_ERROR,
+            )
+        ui.dim(f"Budget ${budget_usd:.2f} at ${price_per_hour:.2f}/h ≈ {hours:.1f}h of runtime")
+    # `lium up <node> -c N` rents N of the node's GPUs. The count is always sent, the host total
+    # included: the API refuses a count the node cannot serve right now before anything is billed,
+    # and the provider's splitting policy decides whether N is allowed. Without -c the rent takes
+    # the node's free GPUs, so the prompt names that count and its price. On the spec path the
+    # server already picked the split and priced it (gpu_count / price_per_hour above).
+    requested_gpu_count = count if executor_id and count else None
+    if spec:
+        rent_count, rent_price = gpu_count, price_per_hour
+    else:
+        rent_count = requested_gpu_count or rented_gpu_count(executor)
+        # What the API would refuse anyway is refused here, before a prompt that would read
+        # "0×H200 of 4 at $0.00/h" or "5×H200 of 2". A count within the host but above the
+        # free GPUs is left to the API: the provider's splitting policy decides that one.
+        if rent_count < 1:
+            raise CliFailure(
+                "no_free_gpus",
+                f"No GPU of {executor.huid} is free right now ({executor.gpu_count} on the node, all rented).",
+                EXIT_GENERAL_ERROR,
+            )
+        if rent_count > executor.gpu_count:
+            raise CliFailure(
+                "invalid_arguments",
+                f"-c {rent_count}: {executor.huid} has {executor.gpu_count} GPU(s).",
+                EXIT_CONFIGURATION_ERROR,
+            )
+        rent_price = executor.price_per_gpu * rent_count if rent_count != executor.gpu_count else price_per_hour
+
     if not yes:
         confirm_msg = (
             f"Acquire pod on {executor.huid} "
-            f"({gpu_count}×{executor.gpu_type}) "
-            f"at ${price_per_hour:.2f}/h?"
+            f"({rent_count}×{executor.gpu_type}"
+            f"{f' of {executor.gpu_count}' if rent_count != executor.gpu_count else ''}) "
+            f"at ${rent_price:.2f}/h?"
         )
         if restore_backup_id:
             confirm_msg += f" Restore backup {restore_backup_id} to {restore_path} after startup."
@@ -498,6 +566,7 @@ def up_command(
                 "enable_volume_encryption": volume_encryption,
                 "backup_id": restore_backup_id,
                 "restore_path": restore_path,
+                "gpu_count": requested_gpu_count,
             })
         )
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
@@ -597,21 +666,55 @@ def up_command(
         # differently from a stuck pod — and with its removal time, when there is one.
         hint = result.data.get("eta_hint")
         backend = f" (backend: {hint})" if hint else ""
+        # A --budget cap is computed from the ready pod (below), so a wait that gives up leaves the pod
+        # uncapped by it — say so and name the remedy; --ttl/--until were scheduled at the rent and
+        # _termination_note covers them.
+        budget_not_scheduled = (
+            f" The --budget cap was NOT scheduled (it is computed from the ready pod); cap it with "
+            f"'lium rm {pod_name} --in <duration>' or remove the pod."
+            if budget_usd is not None else ""
+        )
         raise CliFailure(
             "pod_not_ready",
             f"Pod {pod_name} (id: {pod_id}) is still starting after {wait_timeout}s and is billing{backend}."
-            f"{_termination_note(termination_time, termination_scheduled, pod_name)} "
+            f"{_termination_note(termination_time, termination_scheduled, pod_name)}{budget_not_scheduled} "
             f"Wait with 'lium ps', or remove it with 'lium rm {pod_name}'.",
             EXIT_GENERAL_ERROR,
         )
 
     pod = result.data["pod"]
-    pod_label = f"Pod {ui.styled(pod.huid, 'pod_id')} (name: {pod_name}, id: {pod_id})"
+    pod_label = f"Pod {ui.styled(pod.huid, 'pod_id')} (name: {escape(pod_name)}, id: {escape(str(pod_id))})"
+
+    if budget_usd is not None:
+        # The cap counts from the pod's created_at, the one timestamp the API gives (the platform
+        # bills from RUNNING but does not say when that began; lium spend and lium rm count from
+        # the same point), at the pod's own price. With --ttl/--until too, the earlier wins.
+        deadline = budget_deadline(pod, budget_usd, fallback_price=price_per_hour)
+        if deadline is None:
+            ui.warning(f"{pod_label} is running but the --budget cap could not be computed (no price or created_at)")
+        elif deadline <= datetime.now(timezone.utc):
+            # Starting took longer than the whole budget buys. A past deadline is a 400 from
+            # the API and the pod would run uncapped, so the cap is applied the only way
+            # left: the pod goes now, and the caller hears why.
+            ui.warning(f"{pod_label} took longer to start than its ${budget_usd:.2f} budget buys; removing it")
+            lium.down(pod)
+            raise CliFailure(
+                "budget_exhausted",
+                f"Pod {pod.huid} became usable only after the {hours * 60:.0f} min that ${budget_usd:.2f} buys "
+                f"at ${price_per_hour:.2f}/h (created {pod.created_at}); it has been removed. Pick a larger "
+                "--budget or a cheaper node ('lium ls --sort price_total')",
+                EXIT_GENERAL_ERROR,
+            )
+        elif termination_time is None or deadline < termination_time:
+            termination_time = deadline
+            termination_scheduled = False  # the cap is earlier than what the rent scheduled; schedule it below
+            ui.dim(f"Spend cap ${budget_usd:.2f}: removal scheduled for {deadline:%Y-%m-%d %H:%M UTC}")
 
     if termination_time and not termination_scheduled:
-        # The schedule call failed right after the rent; the pod is ready now, so try it once
-        # more before anything else runs on the pod. A second failure ends the command: the
-        # caller asked for an end time and must not read a ready pod as having one.
+        # The schedule call failed right after the rent, or --budget set an earlier deadline than
+        # the rent scheduled; the pod is ready now, so schedule it before anything else runs on the
+        # pod. A failure ends the command: the caller asked for an end time and must not read a
+        # ready pod as having one.
         action = ScheduleTerminationAction()
         try:
             ui.load(

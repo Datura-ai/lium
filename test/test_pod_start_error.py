@@ -302,6 +302,14 @@ def test_up_ready_timeout_with_ttl_names_the_removal_time(monkeypatch):
     assert result.exit_code == EXIT_GENERAL_ERROR, result.output
     assert "Auto-termination is scheduled for" in " ".join(result.output.split())
 
+    # DAH-2884: a --budget cap is computed from the ready pod, so it is not set yet when the wait gives up.
+    result = _run_up(monkeypatch, _Wait, ["--ready-timeout", "90", "--budget", "5"])
+
+    assert result.exit_code == EXIT_GENERAL_ERROR, result.output
+    text = " ".join(result.output.split())
+    assert "The --budget cap was NOT scheduled (it is computed from the ready pod)" in text
+    assert "lium rm train --in <duration>" in text
+
     result = _run_up(monkeypatch, _Wait, ["--ready-timeout", "90"])
 
     assert result.exit_code == EXIT_GENERAL_ERROR, result.output

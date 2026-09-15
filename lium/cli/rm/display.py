@@ -1,9 +1,50 @@
 """Display formatting logic for rm command."""
 
 from datetime import datetime, timezone
-from typing import List
+from typing import Any, Dict, List, Optional
 
 from lium.sdk import PodInfo
+from lium.cli.ps.display import _parse_timestamp, format_duration
+from lium.cli.spend.report import NOT_YET_BILLING
+
+
+def pod_spend(pod: PodInfo, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Uptime and estimated spend of a pod: uptime × list $/h.
+
+    The API does not return a billed figure, so ``spent_is_estimate`` is always
+    true; ``None`` marks the fields that cannot be computed (no timestamp, no
+    price). ``uptime`` is spelled the way ``ps --format json`` spells it
+    (``1.5h``), parsed with the same helper, so the key means one thing.
+    """
+    dt_created = _parse_timestamp(pod.created_at) if pod.created_at else None
+    price = pod.executor.price_per_hour if pod.executor and pod.executor.price_per_hour else None
+    hours = None
+    if dt_created:
+        hours = max(0.0, ((now or datetime.now(timezone.utc)) - dt_created).total_seconds() / 3600)
+    if hours is None or price is None:
+        spent = None
+    elif getattr(pod, "status", None) in NOT_YET_BILLING:
+        # the same rule as `lium spend`: a pod that never left PENDING has not billed
+        spent = 0.0
+    else:
+        spent = round(hours * price, 2)
+
+    return {
+        "uptime": format_duration(hours * 3600) if hours is not None else None,
+        "uptime_hours": round(hours, 2) if hours is not None else None,
+        "price_per_hour": price,
+        "spent_usd": spent,
+        "spent_is_estimate": True,
+    }
+
+
+def format_removed_line(pod: PodInfo, spend: Dict[str, Any]) -> str:
+    """``removed <name> — <uptime> at $X/h ≈ $Y``; ``≈`` because it is not a billed figure."""
+    name = pod.name or pod.huid
+    uptime = spend["uptime"] or "?"
+    if spend["spent_usd"] is None:
+        return f"removed {name} — {uptime} (no $/h on record)"
+    return f"removed {name} — {uptime} at ${spend['price_per_hour']:.2f}/h ≈ ${spend['spent_usd']:.2f}"
 
 
 def calculate_pod_cost(pod: PodInfo) -> float:
@@ -15,22 +56,7 @@ def calculate_pod_cost(pod: PodInfo) -> float:
     Returns:
         Total cost in dollars
     """
-    if not pod.executor or not pod.executor.price_per_hour or not pod.created_at:
-        return 0.0
-
-    try:
-        if pod.created_at.endswith('Z'):
-            dt_created = datetime.fromisoformat(pod.created_at.replace('Z', '+00:00'))
-        else:
-            dt_created = datetime.fromisoformat(pod.created_at)
-            if not dt_created.tzinfo:
-                dt_created = dt_created.replace(tzinfo=timezone.utc)
-
-        now_utc = datetime.now(timezone.utc)
-        hours = (now_utc - dt_created).total_seconds() / 3600
-        return hours * pod.executor.price_per_hour
-    except Exception:
-        return 0.0
+    return pod_spend(pod)["spent_usd"] or 0.0
 
 
 def format_pods_for_removal(pods: List[PodInfo], show_cost: bool = True) -> str:

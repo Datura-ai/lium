@@ -8,7 +8,7 @@ Exit-code mapping (used by ``lium/cli/provider/_render.py``):
 
     0  success
     1  user error (bad arg)
-    2  auth error
+    2  auth error, or a valid token refused for this hotkey (PORTAL_FORBIDDEN)
     3  portal error (server-side, not auth)
     5  SSH error
     6  config error
@@ -33,6 +33,7 @@ HOTKEY_NOT_REGISTERED = "HOTKEY_NOT_REGISTERED"
 PORTAL_AUTH_EXPIRED = "PORTAL_AUTH_EXPIRED"
 PORTAL_AUTH_INVALID = "PORTAL_AUTH_INVALID"
 PORTAL_AUTH_REFRESH_RACE = "PORTAL_AUTH_REFRESH_RACE"
+PORTAL_FORBIDDEN = "PORTAL_FORBIDDEN"
 
 # Portal
 PORTAL_CONTRACT_DRIFT = "PORTAL_CONTRACT_DRIFT"
@@ -59,6 +60,7 @@ _HINTS: dict[str, str] = {
     PORTAL_AUTH_EXPIRED: "Run `lium provider portal login` to refresh the JWT.",
     PORTAL_AUTH_INVALID: "Token rejected. Re-login with `lium provider portal login`.",
     PORTAL_AUTH_REFRESH_RACE: "Another lium provider process is refreshing the token; retry in a moment.",
+    PORTAL_FORBIDDEN: "The portal accepted the token but refused the action for this hotkey (e.g. machine-request detail needs a validator-verified node).",
     PORTAL_CONTRACT_DRIFT: "Portal payload schema mismatch. The portal API may have changed; report to maintainers.",
     PORTAL_NOT_FOUND: "The portal returned 404 for that resource (wrong UUID or already removed).",
     PORTAL_SERVER_ERROR: "Portal 5xx. Retry; if persistent, check portal status.",
@@ -170,6 +172,7 @@ __all__ = [
     "PORTAL_AUTH_EXPIRED",
     "PORTAL_AUTH_INVALID",
     "PORTAL_AUTH_REFRESH_RACE",
+    "PORTAL_FORBIDDEN",
     "PORTAL_CONTRACT_DRIFT",
     "PORTAL_NOT_FOUND",
     "PORTAL_RATE_LIMIT",

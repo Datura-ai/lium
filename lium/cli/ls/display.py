@@ -152,22 +152,24 @@ def _sort_key_factory(name: str) -> Callable[[ExecutorInfo], Any]:
 # has room, and dropped from the end when it has not — Rich would otherwise squeeze
 # every column evenly, which at 80 columns hides Id and prints the price as "0…".
 # Nominal widths: Id fits "★ golden-matrix-ff (DinD)", Location most country names;
-# both grow with the terminal.
+# both grow with the terminal. `ratio` is the nominal width plus the 2-char padding, so
+# Rich splits the slack in the proportion fit_columns reserved; with a smaller ratio a
+# no-slack fit gave Location 12 chars and "United States" folded onto a second line.
 _COLUMNS = [
     ("", 3, None, dict(justify="right", width=3, no_wrap=True, style="dim")),
-    ("Id", 25, None, dict(justify="left", ratio=8, min_width=25, overflow="fold")),
+    ("Id", 25, None, dict(justify="left", ratio=27, min_width=25, overflow="fold")),
     ("Config", 12, None, dict(justify="left", width=12, no_wrap=True)),
     ("Tier", 8, 1, dict(justify="left", width=8, no_wrap=True)),
     ("Max CUDA", 10, 4, dict(justify="right", width=10, no_wrap=True)),
     ("$/GPU·h", 8, None, dict(justify="right", width=8, no_wrap=True)),
-    ("Location", 13, None, dict(justify="left", ratio=4, min_width=13, overflow="fold")),
+    ("Location", 13, None, dict(justify="left", ratio=15, min_width=13, overflow="fold")),
     ("VRAM (Gb)", 11, 3, dict(justify="right", width=11, no_wrap=True)),
     ("RAM (Gb)", 10, 6, dict(justify="right", width=10, no_wrap=True)),
     ("CPUs", 5, 7, dict(justify="right", width=5, no_wrap=True)),
     ("Disk free (Gb)", 14, 8, dict(justify="right", width=14, no_wrap=True)),
     ("Upload (Mbps)", 14, 5, dict(justify="right", width=14, no_wrap=True)),
     ("Download (Mbps)", 16, 2, dict(justify="right", width=16, no_wrap=True)),
-    ("Ports", 5, 9, dict(justify="left", ratio=3, min_width=5, overflow="fold")),
+    ("Ports", 5, 9, dict(justify="left", ratio=7, min_width=5, overflow="fold")),
 ]
 _COLUMN_GAP = 2  # padding=(0, 1) on both sides of a cell, pad_edge=False
 

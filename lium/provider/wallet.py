@@ -48,6 +48,7 @@ def load_hotkey_keypair(
         except ImportError as e:  # pragma: no cover - dep missing
             raise ProviderConfigError(
                 f"loading a wallet needs the chain stack. Reason: {missing_chain_stack_message()}",
+                hint="",  # the reason names the fix; `lium init` is the renter's setup
                 cause=e,
             ) from e
         wallet_factory = bittensor.Wallet

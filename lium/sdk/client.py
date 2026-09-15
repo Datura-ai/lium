@@ -5,9 +5,11 @@ import getpass
 import hashlib
 import ipaddress
 import os
+import posixpath
 import re
 import shlex
 import socket
+import stat
 import subprocess
 import time
 import uuid
@@ -15,7 +17,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Callable, Dict, Generator, List, Optional, Sequence, Tuple, Union
@@ -67,7 +69,14 @@ from .models import (
     VolumeInfo,
 )
 from .ssh_key_cache import fingerprint, load_cache, save_cache
-from .utils import extract_gpu_type, generate_huid, gpu_short_matches, with_retry
+from .utils import (
+    extract_gpu_type,
+    generate_huid,
+    gpu_short_matches,
+    parse_api_timestamp,
+    spend_cap_deadline,
+    with_retry,
+)
 from .workspaces import WorkspacesClient
 
 # The backend feature `Lium.rent` looks for on GET /version before using POST /executors/rent-by-spec.
@@ -457,6 +466,35 @@ class AlphaQuote:
 
 
 # Main SDK Class
+def _remote_file_path(sftp: Any, local: str, remote: str) -> str:
+    """Resolve an SFTP upload destination: a directory becomes ``<dir>/<basename(local)>``.
+
+    Relative paths stay relative (the SFTP session starts in the login home);
+    a leading ``~/`` is dropped because SFTP does not expand it.
+    """
+    if remote.startswith("~/"):
+        remote = remote[2:] or "."
+    if remote.endswith("/"):
+        _sftp_mkdir_p(sftp, remote)
+    else:
+        try:
+            if not stat.S_ISDIR(sftp.stat(remote).st_mode):
+                return remote
+        except IOError:
+            return remote  # a new file at that path
+    return posixpath.join(remote.rstrip("/") or "/", os.path.basename(local))
+
+
+def _sftp_mkdir_p(sftp: Any, path: str) -> None:
+    current = "/" if path.startswith("/") else ""
+    for part in [p for p in path.split("/") if p]:
+        current = posixpath.join(current, part)
+        try:
+            sftp.stat(current)
+        except IOError:
+            sftp.mkdir(current)
+
+
 class Lium:
     """Clean Unix-style SDK for Lium."""
 
@@ -826,6 +864,7 @@ class Lium:
         enable_volume_encryption: bool | None = True,
         backup_id: Optional[str] = None,
         restore_path: Optional[str] = None,
+        gpu_count: Optional[int] = None,
         wait: bool = False,
         timeout: int = 600,
     ) -> Union[Dict[str, Any], PodInfo]:
@@ -866,6 +905,10 @@ class Lium:
                 from the moment the rent call returns, so a timeout raises a
                 :class:`LiumError` that names the pod id rather than hiding it.
             timeout: Seconds to wait for readiness when ``wait`` is set.
+            gpu_count: Rent only this many of the node's GPUs (GPU splitting). ``None``
+                takes every GPU that is free on the node right now (the whole node when
+                none of it is rented). The API rejects a count above the free GPUs, below
+                the provider's minimum, or on nodes that do not allow splitting.
 
         Returns:
             Pod metadata as returned by the rent API (id, name, status, ssh command,
@@ -884,6 +927,7 @@ class Lium:
             enable_volume_encryption=enable_volume_encryption,
             backup_id=backup_id,
             restore_path=restore_path,
+            gpu_count=gpu_count,
         )
         if not wait:
             return created
@@ -912,6 +956,7 @@ class Lium:
         enable_volume_encryption: bool | None,
         backup_id: Optional[str],
         restore_path: Optional[str],
+        gpu_count: Optional[int] = None,
     ) -> Dict[str, Any]:
         """The rent call itself; :meth:`up` adds the optional wait on top."""
         if sum(x is not None for x in (template_id, image, dockerfile_content)) > 1:
@@ -923,7 +968,7 @@ class Lium:
 
         executor_info = self.get_executor(executor_id)
         if not executor_info:
-            raise ValueError(f"Node with ID '{executor_id}' not found")
+            raise ValueError(self.executor_not_found_message(executor_id))
 
         if image is not None:
             template_id = self.create_template(
@@ -956,6 +1001,8 @@ class Lium:
             "backup_log_id": backup_id,
             "restore_path": restore_path,
         }
+        if gpu_count is not None:
+            payload["gpu_count"] = gpu_count
 
         # The rent call is not idempotent, so it is never retried blindly. A
         # timeout or a 5xx may have created the pod anyway; look for it before
@@ -1157,7 +1204,7 @@ class Lium:
         rent_args = dict(
             name="Your Pod", template_id=None, image=None, dockerfile_content=None, volume_id=None,
             ports=None, ssh_keys=None, ssh_name=None, enable_volume_encryption=True,
-            backup_id=None, restore_path=None,
+            backup_id=None, restore_path=None, gpu_count=None,
         )
         unknown = set(up_kwargs) - set(rent_args)
         if unknown:
@@ -2092,7 +2139,7 @@ class Lium:
         """
         executor = self.get_executor(executor_id)
         if not executor:
-            raise ValueError(f"No node found with id {executor_id}")
+            raise ValueError(self.executor_not_found_message(executor_id))
 
         default_images = self.get_default_images(executor.gpu_model, executor.driver_version)
 
@@ -2153,18 +2200,46 @@ class Lium:
 
 
     def get_executor(self, executor: str) -> Optional[ExecutorInfo]:
-        """Resolve a node by ID.
+        """Resolve a node by UUID or HUID against the same listing :meth:`ls` returns.
 
         Args:
-            executor: Node ID string.
+            executor: Node UUID, or the HUID ``lium ls`` prints for it (``cosmic-hawk-f2``).
 
         Returns:
-            Matching :class:`ExecutorInfo` or ``None`` if not found.
+            Matching :class:`ExecutorInfo` or ``None`` if no listed node has that id.
+
+        Raises:
+            ValueError: the HUID names more than one listed node. HUIDs are
+                client-side draws (10 adjectives × 10 nouns × 256 tails), so a
+                full listing can hold two nodes with the same one; picking the
+                first in API order would rent a different node than the one
+                ``lium ls`` showed, so the caller is asked for the UUID instead.
         """
-        for e in self.ls():
-            if e.id == executor:
-                return e
-        return None
+        matches = [e for e in self.ls() if executor in (e.id, e.huid)]
+        if len(matches) > 1:
+            exact = [e for e in matches if e.id == executor]
+            if len(exact) == 1:
+                return exact[0]
+            raise ValueError(self.ambiguous_executor_message(executor, matches))
+        return matches[0] if matches else None
+
+    @staticmethod
+    def ambiguous_executor_message(executor: str, matches: List[ExecutorInfo]) -> str:
+        """The sentence for a HUID that is shared by several listed nodes."""
+        ids = ", ".join(f"{e.id} ({e.gpu_count}×{e.gpu_type})" for e in matches)
+        return (
+            f"Node id '{executor}' matches {len(matches)} listed nodes: {ids}. "
+            "Use the UUID ('lium ls --format json' shows both) so the right node is rented."
+        )
+
+    @staticmethod
+    def executor_not_found_message(executor: str) -> str:
+        """The one sentence every caller prints when a node id resolves to nothing."""
+        return (
+            f"Node '{executor}' is not in the current listing (looked up by UUID and HUID). "
+            "It may have been rented or gone offline since 'lium ls'; "
+            "run 'lium ls --format json' for the ids rentable now."
+        )
 
     def _resolve_machine_name(self, gpu_short: str) -> Optional[str]:
         """Resolve a short GPU name to all matching full machine names from API.
@@ -3048,11 +3123,17 @@ class Lium:
         return None
 
     def scp(self, pod: PodInfo, *, local: str, remote: str) -> None:
-        """Upload a local file to a pod via SFTP."""
+        """Upload a local file to a pod via SFTP.
+
+        ``remote`` is a file path, or a directory: an existing remote directory, or a
+        path ending in ``/`` (created if missing), receives the file under its own name.
+        """
         with self.ssh_connection(pod) as client:
             sftp = client.open_sftp()
-            sftp.put(local, remote)
-            sftp.close()
+            try:
+                sftp.put(local, _remote_file_path(sftp, local, remote))
+            finally:
+                sftp.close()
 
     def download(self, pod: PodInfo, *, remote: str, local: str) -> None:
         """Download a file from a pod via SFTP.
@@ -4044,6 +4125,9 @@ class Lium:
     def balance(self) -> float:
         """Get current account balance.
 
+        Pods are billed per second at their hourly price; the balance is
+        debited every 5 minutes.
+
         Returns:
             Floating-point balance value reported by ``/users/me``.
         """
@@ -4246,6 +4330,47 @@ class Lium:
         # Idempotent payload: the same removal time twice is one schedule, so a 5xx or a lost response
         # is retried — one blip after `lium up --ttl` must not leave the pod without its auto-stop.
         return self._request("POST", f"/pods/{quote(str(pod_id), safe='')}/schedule-removal", json=payload, retry=True).json()
+
+    def cap_spend(self, pod: PodInfo, *, budget_usd: float) -> datetime:
+        """Schedule the pod's removal for the moment it will have spent ``budget_usd``.
+
+        The API caps a rental by time only. This computes the time at which the
+        pod, billed at its hourly price since ``created_at``, reaches the budget
+        (:func:`lium.sdk.utils.spend_cap_deadline`) and schedules removal then —
+        unless a removal is already scheduled earlier (a ``--ttl``), which stays,
+        as ``lium up --budget --ttl`` keeps the earlier of the two. Client-side:
+        the pod keeps running if the schedule is cancelled or the price changes.
+
+        Args:
+            pod: A running pod with ``created_at`` and an executor price.
+            budget_usd: Total spend allowed for the pod's lifetime.
+
+        Returns:
+            The scheduled removal time (UTC): the budget deadline, or the earlier
+            removal that was already scheduled.
+
+        Raises:
+            ValueError: Budget not positive, price or creation time unknown,
+                the budget is already spent (the deadline is in the past), or the
+                pod's scheduled removal has already passed.
+        """
+        started_at = parse_api_timestamp(pod.created_at)
+        if started_at is None:
+            raise ValueError(f"Pod {pod.huid} has no usable created_at; cannot cap spend")
+        price = pod.executor.price_per_hour if pod.executor else None
+        deadline = spend_cap_deadline(started_at, price or 0.0, budget_usd)
+        now = datetime.now(timezone.utc)
+        if deadline <= now:
+            raise ValueError(
+                f"Pod {pod.huid} has already spent ${budget_usd:.2f} at ${price:.2f}/h since {pod.created_at}"
+            )
+        existing = parse_api_timestamp(pod.removal_scheduled_at)
+        if existing is not None:
+            if existing <= now:
+                raise ValueError(f"Pod {pod.huid} is already scheduled for removal at {pod.removal_scheduled_at}")
+            deadline = min(deadline, existing.astimezone(timezone.utc))
+        self.schedule_termination(pod, termination_time=deadline.isoformat().replace("+00:00", "Z"))
+        return deadline
 
     def cancel_scheduled_termination(self, pod: PodInfo) -> Dict[str, Any]:
         """Cancel a scheduled termination for a pod.

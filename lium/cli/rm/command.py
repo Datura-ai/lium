@@ -1,7 +1,8 @@
 """Remove (rm) command implementation."""
 
+import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 import click
 
@@ -16,7 +17,7 @@ from lium.cli.utils import (
     TargetMatch,
     handle_errors,
 )
-from . import validation, parsing
+from . import validation, parsing, display
 from .actions import RemovePodsAction, ScheduleRemovalAction
 
 
@@ -38,8 +39,13 @@ def build_removal_plan(
     in_duration: Optional[str],
     at_time: Optional[str],
     allow_index: Optional[bool] = None,
+    quiet: bool = False,
 ) -> Optional[RemovalPlan]:
-    """Resolve TARGETS into a plan. None means there was nothing to remove."""
+    """Resolve TARGETS into a plan. None means there was nothing to remove.
+
+    ``quiet`` keeps the "nothing to remove" note off stdout (``--format json``
+    prints its own payload there).
+    """
     is_valid, error = validation.validate(targets, remove_all, in_duration, at_time)
     if not is_valid:
         raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
@@ -50,7 +56,8 @@ def build_removal_plan(
         # Naming a pod that is not there is a failure — that is a typo, and it
         # must not read like a successful teardown.
         if remove_all:
-            ui.warning("No active pods")
+            if not quiet:
+                ui.warning("No active pods")
             return None
         raise CliFailure(
             "pod_not_found", f"{parsing.NO_MATCHING_PODS}: {targets}", EXIT_POD_NOT_FOUND
@@ -82,7 +89,7 @@ def describe_index_match(match: TargetMatch) -> str:
     return f"{match.target} → {pod.huid}{name}"
 
 
-def human_approved_index_targets(matches: List[TargetMatch], yes: bool = False) -> bool:
+def human_approved_index_targets(matches: List[TargetMatch], yes: bool = False, on_stderr: bool = False) -> bool:
     """Show what each row number resolved to; ask before acting when someone can answer.
 
     A number is the one way to name a pod the caller may never have looked at, so
@@ -90,9 +97,11 @@ def human_approved_index_targets(matches: List[TargetMatch], yes: bool = False) 
     removed, with or without --yes. Without a terminal nobody can answer, so the
     command fails closed (``confirmation_required``) unless ``--yes`` was given:
     a script names its intent with the flag, never by the absence of a prompt.
+    ``on_stderr`` keeps the line off stdout when stdout is a JSON document
+    (``--format json``).
     """
     for match in matches:
-        ui.info(f"Pod {describe_index_match(match)}")
+        (ui.notice if on_stderr else ui.info)(f"Pod {describe_index_match(match)}")
     if yes:
         return True
     try:
@@ -133,6 +142,12 @@ def human_approved_removing_every_pod(pods: List[PodInfo]) -> bool:
     is_flag=True,
     help="Treat TARGETS as ids, names or huids only; never as 'lium ps' row numbers (for scripts).",
 )
+@click.option(
+    "--format", "output_format",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    help="Output format. 'json' emits the removed pods with uptime and estimated spend.",
+)
 @handle_errors
 def rm_command(
     targets: Optional[str],
@@ -141,6 +156,7 @@ def rm_command(
     in_duration: Optional[str],
     at_time: Optional[str],
     name_only: bool,
+    output_format: str,
 ):
     """Remove (terminate) GPU pods.
 
@@ -155,19 +171,28 @@ def rm_command(
     \b
     Removal is irreversible. Exits non-zero when nothing matched TARGETS, so a
     typo cannot look like a successful teardown.
+    \b
+    Each removed pod is reported with its uptime and estimated spend
+    (uptime × $/h, marked ≈ because the API returns no billed figure).
     """
     lium = Lium()
-    show_workspace(lium, acting=True)
+    # --format json: stdout is one JSON document, so the workspace context line goes to stderr
+    show_workspace(lium, acting=True, on_stderr=output_format == "json")
     plan = build_removal_plan(
-        lium, targets, remove_all, in_duration, at_time, allow_index=False if name_only else None
+        lium, targets, remove_all, in_duration, at_time,
+        allow_index=False if name_only else None, quiet=output_format == "json",
     )
     if plan is None:
+        if output_format == "json":
+            click.echo(json.dumps({"removed": [], "failed": []}))
         return
 
     if remove_all and not yes and not human_approved_removing_every_pod(plan.pods):
         return
 
-    if plan.index_matches and not human_approved_index_targets(plan.index_matches, yes):
+    if plan.index_matches and not human_approved_index_targets(
+        plan.index_matches, yes, on_stderr=output_format == "json"
+    ):
         return
 
     context = {"pods": plan.pods, "lium": lium}
@@ -180,11 +205,35 @@ def rm_command(
         done_verb = "Removed"
 
     failed_huids = action.execute(context).data["failed_huids"]
-    removed_huids = [pod.huid for pod in plan.pods if pod.huid not in failed_huids]
+    done_pods = [pod for pod in plan.pods if pod.huid not in failed_huids]
+    removed_huids = [pod.huid for pod in done_pods]
 
-    # Say what happened: silence is indistinguishable from having done nothing.
-    if removed_huids:
+    # The pods were listed before the delete, so their $/h and start time are
+    # still in hand: report the final spend now, or the caller has to rebuild
+    # it from `ps` history.
+    now = datetime.now(timezone.utc)
+    spends = {pod.huid: display.pod_spend(pod, now) for pod in done_pods}
+
+    if output_format == "json":
+        payload = {
+            "scheduled" if plan.termination_time else "removed": [
+                {"id": pod.id, "huid": pod.huid, "name": pod.name, **spends[pod.huid]} for pod in done_pods
+            ],
+            "failed": failed_huids,
+        }
+        if plan.termination_time:
+            payload["termination_time"] = context["termination_time"]
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        if failed_huids:
+            # The payload already names the failures; a second message on stdout
+            # would break json.loads for the caller. The exit code says it failed.
+            raise SystemExit(EXIT_GENERAL_ERROR)
+    elif removed_huids:
+        # Say what happened: silence is indistinguishable from having done nothing.
         ui.success(f"{done_verb} {len(removed_huids)} pod(s): {', '.join(removed_huids)}")
+        if not plan.termination_time:
+            for pod in done_pods:
+                ui.info(display.format_removed_line(pod, spends[pod.huid]))
 
     if failed_huids:
         raise CliFailure(

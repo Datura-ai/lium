@@ -62,6 +62,8 @@ lium up --gpu A100  # Auto-select best A100 node
 
 # List your pods
 lium ps
+lium ps --filter status=RUNNING --sort spent   # running pods, most expensive so far first
+lium spend                                     # burn per hour, spend per pod, runway
 
 # Copy files to pod
 lium scp 1 ./my_script.py
@@ -72,6 +74,18 @@ lium ssh <pod-name>
 # Stop a pod — billing is per second and runs until you do this
 lium rm <pod-name>
 ```
+
+### First hour on a pod
+
+A few things that save time on a freshly rented pod (full version in `docs/getting-started.rst`):
+
+- Always pass `--ttl` (or `--until`) to `lium up`; a pod bills until it is removed.
+- The pod's local volume (`/root` on the standard templates; `pod.volume_path` in the SDK) is the only path `lium bk` can back up and the one encryption covers; an attached Volume is under `/mnt`; everything else (`/workspace`, `/tmp`) is plain container filesystem, neither encrypted nor backup-able. Keep weights, datasets and the Hugging Face cache on the volume: `mkdir -p /root/hf /root/logs; export HF_HOME=/root/hf HF_HUB_ENABLE_HF_TRANSFER=1`.
+- Ubuntu 24.04 images: use a venv (`python -m venv /root/venv`) or `export PIP_BREAK_SYSTEM_PACKAGES=1` before `pip install`.
+- Blackwell GPUs (B200, B300, RTX PRO 6000, RTX 5090) need a cu128+ PyTorch build: `pip install torch --index-url https://download.pytorch.org/whl/cu130`. FlashAttention-3 is Hopper-only; use FlashAttention-4 or cuDNN attention on Blackwell.
+- Missing tools: `apt-get update && apt-get install -y ffmpeg rsync`.
+- Background jobs: `nohup setsid cmd > /root/logs/x.log 2>&1 < /dev/null &`.
+- Check utilisation: `nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used --format=csv -l 5 > /root/logs/gpu.csv &`.
 
 ### SDK
 
@@ -183,12 +197,14 @@ JSON keeps the API's raw value as `ssh_cmd`.
 - **CLI docs:** https://docs.lium.io/developers/cli/overview
 - **SDK docs:** https://docs.lium.io/developers/sdk
 - **Exit codes and the JSON error envelope:** [docs/exit-codes.md](docs/exit-codes.md) — what a script or agent gets back when a command fails (`--format json`, `LIUM_OUTPUT=json`).
+- **Agents and scripts:** [docs/agents.md](docs/agents.md) — the non-interactive path end to end (env-var auth, JSON output, exit codes, `up → exec → rsync → rm`, pod gotchas).
 
 ## Binary Releases
 
 - Supported binary targets: `darwin-amd64`, `darwin-arm64`, `linux-amd64`, `linux-arm64`
-- Maintainers can build locally with `bash scripts/build.sh [macos|linux|all]`
-- Release artifacts publish through GitHub Releases with matching checksums
+- Maintainers can build locally with `bash scripts/build.sh [macos|linux|all]` (Linux builds go through `Dockerfile.build`)
+- A release is a GitHub release published on a `vX.Y.Z` tag (`.github/workflows/release.yml`): the version is the tag (hatch-vcs; nothing in the tree is bumped), the workflow builds the four binaries with `.sha256` checksums, uploads them (plus `install.sh`, a combined `checksums.txt` and the sdist/wheel) to the release and then clears the pre-release flag; a separate job publishes the sdist/wheel to PyPI as soon as the Python build passes, independent of the binaries. Create the release with `--prerelease` so `latest` does not point at it before the assets are uploaded.
+- Changes are recorded as fragments in `changelog.d/` (one file per PR, named after its ticket; see `changelog.d/README.md`) and folded into `CHANGELOG.md` by `scripts/changelog.py` at release time.
 
 ## CLI Reference
 
@@ -201,8 +217,9 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium balance` - Show the account balance (add `--format json` for machine-readable output)
 - `lium whoami` - Show which API key is in use, where it came from, and the account it belongs to
 - `lium ls [--gpu TYPE] [--count N] [--country CODE] [--min-vram GB] [--max-price USD] [--tier spot|secure] [--format json]` - List available nodes
-- `lium up [NODE_ID]` - Create a pod (use node ID or filters like `--gpu`, `--count`, `--country`)
-- `lium ps` - List active pods; the `#` column is the row number `rm`/`ssh`/`exec`/`scp` accept in the same shell, for 10 minutes, and only while the pod shown on that row is still listed. Use the huid in scripts.
+- `lium up [NODE_ID]` - Create a pod (NODE_ID is the HUID or UUID from `lium ls`, or its row number; or use filters like `--gpu`, `--count`, `--country`; cap it with `--ttl 6h` or `--budget 12.50`)
+- `lium ps [--sort KEY] [--filter KEY=VALUE] [--watch N] [--wide] [--format json]` - List active pods; the `#` column is the row number `rm`/`ssh`/`exec`/`scp` accept in the same shell, for 10 minutes, and only while the pod shown on that row is still listed — the rows of the last listing, in the order shown (sorted or filtered). Use the huid in scripts.
+- `lium spend [--format json]` - Hourly burn, estimated spend per pod, balance and runway
 - `lium describe <POD>` - Full manifest of one pod: ports, GPU, template, billing, last lifecycle event (why it is REBOOT_FAILED/BROKEN) and the node's disk health (add `--json` for machine-readable output). A deleted pod can still be described by its id: you get the events the backend kept for it and the reason it went away.
 - `lium ssh <POD>` - SSH into a pod
 - `lium exec <POD> <COMMAND>` - Execute command on pod (`--json` for stdout/stderr/exit_code; `-d/--detach` starts it in the background and returns immediately)
@@ -215,7 +232,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium reboot <POD>` - Reboot a pod
 - `lium audit [--pod POD] [--since 24h] [--key ID]` - Who did what to the account's pods, and when: every rent, reboot, edit and delete with the session or API key that requested it (add `--json` for machine-readable output)
 - `lium audit --account [--action pod.] [--source cli] [--since 7d] [--cursor <next_cursor>]` - The account audit log: every request that changed something (pods, keys, logins, balance, settings, team members) with the client and IP it came from; your own IPs only, 90 days (`--json` prints the page with `next_cursor`)
-- `lium update <POD>` - Install Jupyter on a pod
+- `lium update <POD> --jupyter <PORT>` - Install Jupyter Notebook on a pod, served on that internal port (`--jupyter` is the only update; without it the command prints `No updates specified`)
 - `lium templates [SEARCH] [--arch hopper|blackwell] [--format json]` - List Docker templates with the CUDA build and the GPU generations it runs on
 - `lium fund` - Fund account with TAO from Bittensor wallet
 - `lium topup create -a <USD> -c <COIN> -n <NETWORK>` - Top up with a stablecoin (`lium topup currencies` lists them)
@@ -297,14 +314,14 @@ Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, 
 - `lium provider config show|opt-in|opt-out|set-email|set-subscriptions` - Portal-account configuration (incl. lium.io central miner server toggle)
 - `lium provider sync from-miner-server|to-miner-server` - Batch node-state sync between portal and the central miner server
 - `lium provider billing list [--all | --miner-hotkey HK] [--page N] [--limit N]` - Paginated billing history (active hotkey by default; `--all` for every provider's)
-- `lium provider machine-request list|get` - Pending tenant machine requests
+- `lium provider machine-request list|get` - Pending tenant machine requests (the portal shows per-request detail once one of your nodes is verified by a validator — lium-platform#248, not deployed; until then `list` returns counts per GPU class and hourly budget band, and `get` exits 2 with `PORTAL_FORBIDDEN`)
 - `lium provider machine list|estimate` - Machine catalogue + reward estimates
 
 Full reference with every flag and runnable examples: <https://docs.lium.io/developers/cli/reference/provider>.
 
 ### Other Commands
 
-- `lium theme [THEME]` - Get or set UI theme (light/dark/auto)
+- `lium theme dark|light` - Set the CLI colour theme (the argument is required; there is no `auto`; the value is stored as `[ui] theme` — `lium config get ui.theme` reads it back)
 - `lium mine` - Set up a compute subnet node/miner
 - `lium mine --register <TOKEN>` - Same, then add the node to your portal account from what the host reports and wait until it is listed (token from the portal's Add Node page; the account, and what the node reports under, come from the token — no `-k`)
 - `sudo lium gpu-splitting setup [--device /dev/...] [--yes]` - Prepare Docker storage for LIUM GPU splitting
@@ -362,6 +379,7 @@ lium up 1 --volume new:name=mydata,desc="My dataset"
 
 # Create pod with auto-termination
 lium up 1 --ttl 6h                    # Terminate after 6 hours
+lium up 1 --budget 12.50              # Terminate once $12.50 has been spent
 lium up 1 --until "today 23:00"       # Terminate at 11 PM today
 
 # Create pod with Jupyter
@@ -409,12 +427,12 @@ lium cp 1:/workspace/ckpt/ 2:/workspace/ckpt/ --exclude '*.tmp'
 lium rm my-pod-1 my-pod-2
 lium rm all  # Remove all pods
 
-# Install Jupyter on existing pod
-lium update my-pod
+# Install Jupyter on existing pod (internal port 8888)
+lium update my-pod --jupyter 8888
 
 # Manage volumes
 lium volumes list
-lium volumes new mydata -d "My dataset"
+lium volumes new mydata --desc "My dataset"
 lium volumes rm <VOLUME_HUID>
 
 # Multi-node clusters
@@ -446,9 +464,8 @@ lium config set ssh.key_path /path/to/key
 lium config edit
 
 # Theme management
-lium theme          # Show current theme
 lium theme dark     # Set to dark theme
-lium theme auto     # Auto-detect based on system
+lium theme light    # Set to light theme
 
 # Fund account with TAO
 lium fund                           # Interactive mode
@@ -569,7 +586,8 @@ warning on stderr and keeps reporting off; the command itself still runs.
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.10 – 3.14 (`requires-python = ">=3.10, <3.15"`)
+- The chain commands (`lium provider …`, `lium fund`) need the `provider` extra — `pip install 'lium.io[provider]'` — whose chain libraries build only on Python < 3.14; on 3.14 the install stays quiet and the CLI explains the gap when a provider command runs
 
 ## Development
 
@@ -581,6 +599,23 @@ cd lium
 # Install in development mode
 pip install -e .
 ```
+
+The repository is a `uv` project (`uv.lock`); CI installs with `uv sync --frozen --extra dev --extra provider`
+and runs the unit tests on Python 3.10 and 3.12:
+
+```bash
+uv sync --frozen --extra dev --extra provider
+uv run pytest test/ -q
+```
+
+`.github/workflows/ci.yml` (`CI - Build Verification`) runs on every PR: the unit tests, the packaging-inputs
+check, an sdist/wheel build, the binary-target matrix check (`test/test_release_binary_targets.py`) and the
+Linux amd64 binary build. The Linux arm64 and macOS builds run only when a packaging input changes
+(`pyproject.toml`, `uv.lock`, `lium.spec`, `lium_entry.py`, `Dockerfile.build`, `scripts/install.sh`,
+`scripts/linux_bundle_report.py`, `ci.yml`, `release.yml`) or on a manual dispatch. The live e2e
+(`./e2e/run.sh`, see `e2e/README.md`) runs when `lium/`, `e2e/`, `pyproject.toml`, `uv.lock` or `ci.yml`
+changes, on a manual dispatch, and once a day on a schedule. `ci-ok` (the aggregate of the test, packaging,
+wheel and target-matrix jobs) and `e2e-live` are the two status checks the `main` ruleset requires.
 
 
 ## License

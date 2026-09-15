@@ -152,7 +152,7 @@ def test_up_sends_min_cpus_in_the_spec_when_the_backend_picks():
     ("executor_id", "min_cpus", "expected_error"),
     [
         (None, 32, ""),
-        ("node-1", 32, "Cannot use filters (--gpu, --count, --country, --min-cpus) when specifying a node ID"),
+        ("node-1", 32, "Cannot use filters (--gpu, --country, --min-cpus) when specifying a node ID"),  # -c with a node ID is the GPU count (DAH-3074)
         # 0 is falsy: it must reach the positivity check, not read as "no filter given"
         (None, 0, "--min-cpus must be a positive integer"),
         ("node-1", 0, "--min-cpus must be a positive integer"),

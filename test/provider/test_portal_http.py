@@ -7,6 +7,7 @@ import requests
 
 from lium.provider.errors import (
     PORTAL_AUTH_INVALID,
+    PORTAL_FORBIDDEN,
     PORTAL_CONTRACT_DRIFT,
     PORTAL_NOT_FOUND,
     PORTAL_RATE_LIMIT,
@@ -115,7 +116,7 @@ def test_2xx_with_empty_body_returns_empty_dict() -> None:
     "status,exc_type,expected_code",
     [
         (401, ProviderAuthError, PORTAL_AUTH_INVALID),
-        (403, ProviderAuthError, PORTAL_AUTH_INVALID),
+        (403, ProviderAuthError, PORTAL_FORBIDDEN),
         (404, ProviderNotFoundError, PORTAL_NOT_FOUND),
         (422, ProviderPortalContractError, PORTAL_CONTRACT_DRIFT),
         (429, ProviderServerError, PORTAL_RATE_LIMIT),

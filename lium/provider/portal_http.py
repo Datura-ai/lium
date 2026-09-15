@@ -19,6 +19,7 @@ import requests
 from lium.provider.errors import (
     PORTAL_AUTH_EXPIRED,
     PORTAL_AUTH_INVALID,
+    PORTAL_FORBIDDEN,
     PORTAL_NOT_FOUND,
     PORTAL_RATE_LIMIT,
     PORTAL_SERVER_ERROR,
@@ -191,9 +192,11 @@ def _parse_response(
             context=context,
         )
     if status == 403:
+        # The token is valid; the portal refused this action for this hotkey. Re-login does not help, so this is
+        # not PORTAL_AUTH_INVALID (DAH-2269: machine-request detail needs a validator-verified node).
         raise ProviderAuthError(
             "portal forbade the requested action",
-            code=PORTAL_AUTH_INVALID,
+            code=PORTAL_FORBIDDEN,
             context=context,
         )
     if status == 404:

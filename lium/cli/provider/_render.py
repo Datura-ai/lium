@@ -37,6 +37,7 @@ from lium.provider.errors import (
     PORTAL_AUTH_INVALID,
     PORTAL_AUTH_REFRESH_RACE,
     PORTAL_CONTRACT_DRIFT,
+    PORTAL_FORBIDDEN,
     PORTAL_NOT_FOUND,
     PORTAL_RATE_LIMIT,
     PORTAL_SERVER_ERROR,
@@ -63,10 +64,11 @@ _EXIT_CODES: dict[str, int] = {
     ARG_INVALID: 1,
     PORTS_INVALID: 1,
     HOTKEY_NOT_REGISTERED: 1,
-    # 2: auth errors
+    # 2: auth errors, and a valid token refused for this hotkey
     PORTAL_AUTH_INVALID: 2,
     PORTAL_AUTH_EXPIRED: 2,
     WALLET_NOT_FOUND: 2,
+    PORTAL_FORBIDDEN: 2,
     # 3: portal (server-side)
     PORTAL_SERVER_ERROR: 3,
     PORTAL_NOT_FOUND: 3,
@@ -116,6 +118,11 @@ def render(
     # Special-case: aggregated status snapshot.
     if isinstance(payload, ProviderStatus):
         _render_provider_status(payload)
+        return
+
+    # Special-case: the machine-request feed's aggregate tier (two count tables, no per-request row).
+    if isinstance(body, dict) and body.get("tier") == "aggregate":
+        _render_machine_request_summary(body)
         return
 
     # List envelope: ``{data: [...], total, page, limit}``.
@@ -644,6 +651,32 @@ def _format_generic_value(key: str, value: Any) -> str:
     if len(text) > 36:
         return _truncate_id(text, 36)
     return text
+
+
+def _render_machine_request_summary(body: Mapping[str, Any]) -> None:
+    """The aggregate tier of ``GET /machine-requests``: counts per GPU class and per hourly budget band.
+
+    The portal answers with this shape until one of the provider's nodes is verified by a validator; it carries no
+    request id, requester or free-form field, so the per-request presets do not apply.
+    """
+    for key, header, name_key in (
+        ("by_gpu_class", "GPU class", "machine_name"),
+        ("by_hourly_budget_band", "Hourly budget", "band"),
+    ):
+        rows = body.get(key) or []
+        if not isinstance(rows, list) or not rows:
+            continue
+        table = _new_table()
+        table.add_column(header, justify="left", overflow="fold")
+        table.add_column("Open requests", justify="right", no_wrap=True)
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            table.add_row(
+                _value_or_dash(row.get(name_key)),
+                _value_or_dash(row.get("open_requests")),
+            )
+        console.print(table)
 
 
 def _print_meta_line(meta: Mapping[str, Any]) -> None:

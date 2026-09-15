@@ -35,9 +35,12 @@ class ResolveExecutorAction:
                     return ActionResult(ok=False, data={}, error=error or "Failed to resolve node index")
                 executor_id = resolved_ids[0]
 
-            executor = lium.get_executor(executor_id)
+            try:
+                executor = lium.get_executor(executor_id)
+            except ValueError as ambiguous:  # a HUID shared by several listed nodes
+                return ActionResult(ok=False, data={}, error=str(ambiguous))
             if not executor:
-                return ActionResult(ok=False, data={}, error=f"Node '{executor_id}' not found")
+                return ActionResult(ok=False, data={}, error=Lium.executor_not_found_message(executor_id))
 
             if ports and (not executor.available_port_count or executor.available_port_count < ports):
                 available = executor.available_port_count or 0
@@ -226,6 +229,9 @@ class RentPodAction:
         enable_volume_encryption: bool | None = ctx.get("enable_volume_encryption")
         backup_id: Optional[str] = ctx.get("backup_id")
         restore_path: Optional[str] = ctx.get("restore_path")
+        # `lium up <node> -c N`: the node path only. On the spec path the count is part of the
+        # spec the server selects on, so it is not sent twice.
+        requested_gpu_count: Optional[int] = ctx.get("gpu_count")
 
         if not name:
             name = executor.huid
@@ -243,7 +249,13 @@ class RentPodAction:
         )
         spec: Optional[Dict] = ctx.get("spec")
         price_per_hour = getattr(executor, "price_per_hour", None)
-        gpu_count = getattr(executor, "gpu_count", None)
+        # The GPUs this rent gets: on the node path -c N, else the node's free GPUs (the host
+        # total when the API sent no free count).
+        gpu_count = (
+            requested_gpu_count
+            or getattr(executor, "available_gpu_count", None)
+            or getattr(executor, "gpu_count", None)
+        )
         if spec:
             # The server re-selects at rent time, so a pick taken since the dry run falls
             # through to the next candidate — never one dearer than the price confirmed.
@@ -251,7 +263,7 @@ class RentPodAction:
             pod_info, executor = result.pod, result.executor
             price_per_hour, gpu_count = result.price_per_hour, result.gpu_count
         else:
-            pod_info = lium.up(executor_id=executor.id, **rental)
+            pod_info = lium.up(executor_id=executor.id, gpu_count=requested_gpu_count, **rental)
 
         pod_id = pod_info.get('id') or pod_info.get('name', '')
         return ActionResult(

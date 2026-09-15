@@ -5,10 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "lium.io"
 dynamic = ["version"]
-description = "A custom CLI tool for Lium. Lium CLI provides tools for interacting with the Lium ecosystem from the command line."
+description = "Rent cloud GPUs by the hour from the Lium marketplace (H200, B200, H100, RTX 5090, RTX 4090 and more). CLI and Python SDK to launch, manage and scale GPU pods."
 readme = "README.md"
 requires-python = ">=3.10, <3.15"
 license = "MIT"
+keywords = ["gpu", "cloud-gpu", "gpu-cloud", "gpu-rental", "cloud-compute", "h100", "h200", "b200", "rtx-4090", "machine-learning", "deep-learning", "bittensor", "cli", "sdk"]
 authors = [{ name = "Lium", email = "support@lium.io" }]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -78,6 +79,7 @@ packages = ["lium"]
 
 
 [project.urls]
-Homepage = "https://github.com/Datura-ai/lium"
+Homepage = "https://lium.io"
+Documentation = "https://docs.lium.io"
 Repository = "https://github.com/Datura-ai/lium"
 Issues = "https://github.com/Datura-ai/lium/issues"

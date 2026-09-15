@@ -36,9 +36,10 @@ def acts_elsewhere(workspace: WorkspaceInfo, requested: Optional[str], requested
     return not workspace.matches(requested)
 
 
-def show_workspace(lium: Lium, acting: bool = False) -> None:
+def show_workspace(lium: Lium, acting: bool = False, on_stderr: bool = False) -> None:
     """Print the workspace line (under ``ps`` / ``ls`` output, before ``up`` / ``rm`` act); nothing on a
-    server without workspaces.
+    server without workspaces. With ``on_stderr=True`` (a command whose stdout is one JSON document)
+    the line and the read-failure warning go to stderr, so ``… --format json | jq`` still parses.
 
     The line is context, not the command: a ``GET /users/me`` that fails is reported as a warning with
     the server's reason and the command goes on with the key it has. When the workspace named by
@@ -58,7 +59,7 @@ def show_workspace(lium: Lium, acting: bool = False) -> None:
                 "could not be checked; retry, or run `lium workspaces` to see the full error",
                 EXIT_CONFIGURATION_ERROR,
             )
-        ui.warning(
+        (ui.notice_warning if on_stderr else ui.warning)(
             f"Workspace not shown — GET /users/me failed: {escape(str(e))}. Run `lium workspaces` to see the full error."
         )
         return
@@ -66,7 +67,7 @@ def show_workspace(lium: Lium, acting: bool = False) -> None:
         return
     requested, requested_id = lium.config.workspace, lium.config.workspace_id
     if not acts_elsewhere(workspace, requested, requested_id):
-        ui.dim(context_line(workspace))
+        (ui.notice if on_stderr else ui.dim)(context_line(workspace))
         return
     which_key = f"the key saved for '{requested}'" if requested_id else "the key this command ran with"
     mismatch = (
@@ -76,4 +77,4 @@ def show_workspace(lium: Lium, acting: bool = False) -> None:
     if acting and lium.config.workspace_explicit:
         # handle_errors escapes the message once before rendering
         raise CliFailure("workspace_mismatch", f"Not acting in '{requested}': {mismatch}", EXIT_CONFIGURATION_ERROR)
-    ui.warning(f"{context_line(workspace)} — {escape(mismatch)}")
+    (ui.notice_warning if on_stderr else ui.warning)(f"{context_line(workspace)} — {escape(mismatch)}")

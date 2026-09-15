@@ -310,7 +310,7 @@ def test_ps_table_leads_with_the_row_number():
     assert table.columns[1].header == "Pod"
 
 
-def test_ps_table_for_a_filtered_listing_has_no_row_number():
+def test_ps_table_for_a_single_pod_lookup_has_no_row_number():
     table, _ = ps_display.build_pods_table([MINE], show_index=False)
 
     assert table.columns[0].header == "Pod"
