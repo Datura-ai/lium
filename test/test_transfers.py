@@ -284,6 +284,18 @@ def test_cp_does_not_revoke_what_it_never_granted():
     assert any(c.startswith("rm -f /tmp/lium-cp-") for c in commands)
 
 
+def test_cp_refuses_a_destination_record_ssh_target_refuses_before_any_exec():
+    # DAH-3446: the hop the source pod runs is told only a user, host and port ssh_target() accepted
+    client = _cp_client()
+    bad_dst = _pod("pod-2", "train", "brave-lion-11", "5.6.7.8", 31000)
+    bad_dst.ssh_cmd = "ssh root@5.6.7.8 -p 31000 -o ProxyCommand=id"
+
+    with pytest.raises(ValueError, match="Unexpected ssh command from the API"):
+        client.cp(SRC, "/workspace/a/", bad_dst, "/workspace/b/")
+
+    assert client.sent == []
+
+
 def test_cp_within_one_pod_is_a_local_rsync():
     client = _RecordingLium()
 

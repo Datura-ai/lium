@@ -377,3 +377,70 @@ def test_ssh_session_reuses_one_connection_for_every_operation_inside(monkeypatc
     with client.ssh_connection(pod):              # outside a session: a fresh connection again
         pass
     assert connects == ["203.0.113.10", "203.0.113.10"] and closes == [True, True]
+
+
+# DAH-3446: ssh_connection (paramiko) checks pod.ssh_cmd with ssh_target() like ssh_argv does.
+# Regression: it split the string itself and read the port from PodInfo.ssh_port, so a record the
+# OpenSSH path refuses (an extra token, a user starting with "-", a port over 65535) still reached
+# paramiko's connect() with the caller's key.
+@pytest.mark.parametrize(
+    "ssh_cmd",
+    [
+        "ssh root@203.0.113.10 -p 20299 extra-token",
+        "ssh -root@203.0.113.10 -p 20299",
+        "ssh root@203.0.113.10 -p 99999",
+        "ssh root@'203.0.113.10;id' -p 20299",
+        "ssh root@203.0.113.10 -o ProxyCommand=id",
+    ],
+)
+def test_ssh_connection_refuses_what_ssh_target_refuses_before_connecting(monkeypatch, tmp_path, ssh_cmd):
+    key_path = tmp_path / "id_ed25519"
+    key_path.write_text("key")
+    connects = []
+
+    class FakeSSHClient:
+        # only connect() and close() matter: the check runs before the key load and the host-key setup
+        def connect(self, **kwargs):
+            connects.append(kwargs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sdk_client.paramiko, "SSHClient", FakeSSHClient)
+    client = Lium(Config(api_key="test", ssh_key_path=key_path))
+    pod = _pod()
+    pod.ssh_cmd = ssh_cmd
+    assert sdk_client.pod_ssh_command(pod) is None   # the OpenSSH path already refuses this record
+
+    with pytest.raises(ValueError, match="Unexpected ssh command from the API"):
+        with client.ssh_connection(pod):
+            pass
+    assert connects == []
+
+
+def test_ssh_connection_connects_to_the_validated_user_host_and_default_port(monkeypatch, tmp_path):
+    # positive control for the test above: a record ssh_target() accepts still connects, to its parts
+    monkeypatch.setenv("LIUM_SSH_INSECURE", "1")  # no known_hosts file to load in this fake
+    key_path = tmp_path / "id_ed25519"
+    key_path.write_text("key")
+    monkeypatch.setattr(sdk_client.paramiko.Ed25519Key, "from_private_key_file", lambda p: object())
+    connects = []
+
+    class FakeSSHClient:
+        def set_missing_host_key_policy(self, policy):
+            pass
+
+        def connect(self, **kwargs):
+            connects.append((kwargs["username"], kwargs["hostname"], kwargs["port"]))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sdk_client.paramiko, "SSHClient", FakeSSHClient)
+    client = Lium(Config(api_key="test", ssh_key_path=key_path))
+    pod = _pod()
+    pod.ssh_cmd = "ssh ubuntu@pod-7.example.net"   # no -p: ssh_target's default, the same as OpenSSH's
+
+    with client.ssh_connection(pod):
+        pass
+    assert connects == [("ubuntu", "pod-7.example.net", 22)]
