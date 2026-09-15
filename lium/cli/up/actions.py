@@ -10,31 +10,10 @@ from lium.sdk.client import RENT_BY_SPEC
 from lium.cli.utils import (
     MIN_DOWNLOAD_MBPS,
     _api_error_data,
-    calculate_pareto_frontier,
     resolve_executor_indices,
     get_pytorch_template_id,
     wait_for_pod_ready,
 )
-
-
-def _pareto_flags_per_rent_count(executors: list[ExecutorInfo], rent_count: Callable[[ExecutorInfo], int]) -> list[bool]:
-    """Pareto flags with the frontier drawn among nodes that would rent the same GPU count.
-
-    The frontier compares $/GPU, so nodes renting different counts must not exclude
-    each other (an 8x node at a lower $/GPU would hide an equal 1x node although the
-    renter pays eight times as much per hour); the caller ranks the optimal ones by
-    total $/h. Same shape as calculate_pareto_frontier: one flag per executor, in the
-    executors' order. With -c every node rents the same count, so this is one frontier.
-    """
-    flags = [False] * len(executors)
-    by_count: dict[int, list[int]] = {}
-    for index, executor in enumerate(executors):
-        by_count.setdefault(rent_count(executor), []).append(index)
-    for indexes in by_count.values():
-        group_flags = calculate_pareto_frontier([executors[i] for i in indexes])
-        for index, is_pareto in zip(indexes, group_flags):
-            flags[index] = is_pareto
-    return flags
 
 
 class ResolveExecutorAction:
@@ -78,7 +57,7 @@ class ResolveExecutorAction:
                 "country": country,
                 "min_ports": ports,
                 "min_cpus": min_cpus,
-                # the floor the Pareto path below has always applied
+                # server-side floor for the --gpu pick; the ls-row-1 path below applies none
                 "min_download_mbps": MIN_DOWNLOAD_MBPS,
             }
             spec = {key: value for key, value in spec.items() if value is not None}
@@ -93,7 +72,7 @@ class ResolveExecutorAction:
                 if type(exc) is not LiumError:
                     raise  # auth, permission, not-found, rate-limit and server errors keep their own codes
                 # "No node matches …" (client-side) or the server's 409: the same outcome as the
-                # Pareto path's empty list below — node_selection_failed, not an API error. The
+                # ls path's empty list below — node_selection_failed, not an API error. The
                 # server's hint and request_id ride along in data (DAH-3057); the command lifts
                 # the hint out into the failure's own.
                 data = {**(_api_error_data(exc) or {}), **({"hint": exc.hint} if exc.hint else {})}
@@ -148,46 +127,18 @@ class ResolveExecutorAction:
                 return ActionResult(ok=False, data={}, error=f"No nodes available with {filter_desc}")
 
             from lium.cli.ls.command import ls_store_executor
+            from lium.cli.ls.display import sort_executors
             ls_store_executor(gpu_type=gpu)
 
-            # What a rent on each node takes and costs: -c GPUs, else the node's free
-            # GPUs (DAH-2877) at that node's $/GPU. The frontier is drawn per rented
-            # count and the optimal nodes are ranked by that total $/h.
-            def rent_count(e: ExecutorInfo) -> int:
-                return count if count else rented_gpu_count(e)
-
-            def rent_price(e: ExecutorInfo) -> float:
-                return e.price_per_gpu * rent_count(e)
-
-            # The SDK maps a missing price to 0 and a booked node has 0 free GPUs: neither
-            # is a rent, so neither enters the frontier — alone in its count group, a
-            # booked host would be "optimal" and the pick, at $inf/h, before a rent the
-            # API refuses.
-            rentable = [e for e in executors if e.price_per_gpu and rent_count(e) > 0]
-            if not rentable:
-                return ActionResult(
-                    ok=False,
-                    data={},
-                    error=f"No rentable nodes among {len(executors)} match(es): every one is fully booked or unpriced",
-                )
-
-            pareto_flags = _pareto_flags_per_rent_count(rentable, rent_count)
-            pareto_executors = [e for e, is_pareto in zip(rentable, pareto_flags) if is_pareto]
-            # Nothing is optimal only when every match is below the download floor;
-            # then the cheapest match is still the best answer, and the line says so.
-            candidates = pareto_executors or rentable
-            # min() keeps the first of a tie, so equal prices fall back to the listing order.
-            executor = min(candidates, key=rent_price)
+            # One rule for `ls` and `up`: the pick is row 1 of `lium ls` with the same
+            # filters, in the order `ls` prints (cheapest $/GPU·h first, unpriced last;
+            # DAH-3079). `up` ranks nothing on its own, so what the renter just saw in
+            # `ls` is what it rents. Ties keep the API's listing order, as in `ls`.
+            ordered, _ = sort_executors(executors, show_pareto=False)
+            executor = ordered[0]
             return ActionResult(
                 ok=True,
-                data={
-                    "executor": executor,
-                    "auto_selected": True,
-                    "candidates": len(candidates),
-                    "pareto": bool(pareto_executors),
-                    "rent_count": rent_count(executor),
-                    "rent_price": rent_price(executor),
-                },
+                data={"executor": executor, "auto_selected": True, "candidates": len(ordered)},
             )
 
         return ActionResult(ok=True, data={"executor": executor})
