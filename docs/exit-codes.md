@@ -49,16 +49,37 @@ When a command is run for a machine reader, every failure is one JSON object:
 - `code` is a stable `snake_case` identifier to branch on; `message` is for people and may change wording. When the API refused with its own `error.code` (`insufficient_balance`, `pod_not_found`, …) that code is the one you get; the CLI's code for the failure class (table below) otherwise. `exit_code` is always the CLI's, by class.
 - `hint` is always present: the next command or option to try. When the API sent a hint with its refusal, that is the one you get; the CLI's own hint for the code otherwise.
 - `exit_code` repeats the process exit status for readers that only see the streams.
-- `data` (optional) carries anything the caller must not lose along with the failure — `lium signup --json`, for one, returns the credentials it generated; an API refusal puts the server's `request_id` here (also printed as `request_id: …` in the text rendering) to quote to support.
+- `data` (optional) carries anything the caller must not lose along with the failure — `lium signup --json`, for one, returns the credentials it generated; an API refusal puts the server's `request_id` here (also printed as `request_id: …` in the text rendering) to quote to support; `lium up` puts the pod it rented in `data.pod_id` / `data.pod_name` on the failures it raises after the rent (`pod_not_ready`, `pod_start_failed`, `gpu_count_mismatch` with `data.pod_removed` true or false under `--strict-gpus`, `gpu_verification_failed`, `jupyter_install_failed`) and on an API error (`server_error`, `rate_limited`, …) or an API that stops answering (`api_timeout`: the transport error `Lium.ps()` and `schedule_termination` re-raise once their retries run out, `install_jupyter` on the first lost connection) during the wait, the `--ttl` retry or the Jupyter install, because that pod exists and bills; a lost connection on the `--strict-gpus` removal is `gpu_count_mismatch` with `data.pod_removed` false; when `--volume new:…` created a volume, `lium up` puts it in `data.volume_id` (the API id) and `data.volume_huid` (what `--volume id:<HUID>` takes) on `timeout_before_rent` and on the failures at the rent itself (`api_timeout`, `rent_rejected`, and an API error such as `server_error`), because the volume exists and is kept.
 
 The envelope goes to **stderr**, stdout is left empty, and the process exits
 with `exit_code`. On success stdout carries the result JSON. Read both streams;
 do not `2>/dev/null`.
 
+`lium up --json` acts before it answers, so its progress lines (the node
+picked, the rent, the wait, the price prompt) go to stderr and stdout holds
+exactly one document, the bare payload, as `ps`, `describe` and `rm --format
+json` print theirs (no `ok` wrapper: exit 0 says it worked):
+
+```json
+{
+  "pod": {"id": "…", "huid": "eager-wolf-aa", "name": "train", "status": "RUNNING", "ssh_cmd": "…", "ssh_command": "…", "ports": {…}, "gpu_type": "…", "gpu_count": 1, "price_per_hour": 0.24, "…": "…"},
+  "termination_time": "2026-09-15T12:00:00+00:00"
+}
+```
+
+`up --json` implies `--no-ssh`: the command ends once the pod is ready, and `pod`
+has the keys of one row of `lium ps --format json`. `termination_time` is the
+time the backend was given by `--ttl`, `--until` or the `--budget` cap, and is
+absent when none was set. Pair `--json` with `--yes`: behind a pipe the price
+prompt cannot be asked and the command fails with `confirmation_required`
+before anything is rented. The teardown is `lium rm … --format json` (its
+`{"removed": […], "failed": […]}` payload carries each pod's uptime and
+estimated spend); `rm` takes `--format json`, not `--json`.
+
 Machine mode is on when any of these holds:
 
-- `--format json` (list commands: `ls`, `ps`, `templates`, `balance`, `describe`, and every `clusters` command);
-- `--json` (accepted everywhere `--format json` is, and on `exec`, `describe`, `fund`, `signup`, `init`, `audit`, `topup`);
+- `--format json` (list commands: `ls`, `ps`, `templates`, `balance`, `describe`, `spend`, and every `clusters` command; and `rm`);
+- `--json` (accepted everywhere `--format json` is except `rm`, and on `up`, `exec`, `describe`, `fund`, `signup`, `init`, `audit`, `topup`);
 - the environment variable `LIUM_OUTPUT=json` — this switches *failures* to the envelope on every command; success output is JSON only on commands that take `--format json`/`--json`, so pass the flag as well when you need to parse the result.
 
 Without any of these, the same information is printed as text: the error on one

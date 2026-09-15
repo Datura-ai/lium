@@ -21,7 +21,9 @@ from lium.cli.actions import ActionResult
 from lium.cli.up import actions as up_actions
 from lium.cli.up import command as up_command
 from lium.cli.utils import EXIT_API_ERROR, EXIT_GENERAL_ERROR
-from lium.sdk import Config, Lium, LiumAuthError, LiumError, LiumNotFoundError, PodInfo, PodStartError
+from lium.sdk import (
+    Config, Lium, LiumAuthError, LiumError, LiumNotFoundError, LiumServerError, PodInfo, PodStartError, VolumeInfo,
+)
 
 CREATE_FAILED_EVENT = {
     "event_type": "executor-rent.failed",
@@ -52,6 +54,10 @@ def _pod(status: str, ssh_cmd: str | None = "ssh user@pod.example -p 20299") -> 
         jupyter_installation_status=None,
         jupyter_url=None,
     )
+
+
+def _volume() -> VolumeInfo:
+    return VolumeInfo(id="vol-1", huid="calm-lake-01", name="my-data", description="", created_at="2026-09-05T10:00:00Z")
 
 
 class _Client(Lium):
@@ -378,7 +384,7 @@ def test_a_budget_spent_creating_the_volume_names_the_volume_it_keeps(monkeypatc
     class _SlowVolume:
         def execute(self, ctx):
             clock["now"] += 121  # the volume request retried past the whole --timeout
-            return ActionResult(ok=True, data={"volume": None, "volume_id": "vol-1"})
+            return ActionResult(ok=True, data={"volume": _volume(), "volume_id": "vol-1"})
 
     class _Rent:
         def execute(self, ctx):
@@ -452,6 +458,35 @@ def test_a_rejected_rent_names_the_node_and_the_reason_and_points_at_ps(monkeypa
     assert "Run 'lium ps' to check whether a pod was created" in output
     assert "No pod was created" not in output
     assert "lium ls --format json" in output
+
+
+@pytest.mark.parametrize(
+    "error, code_text",
+    [
+        (requests.exceptions.ConnectTimeout("connect timed out"), "got no answer from the API"),
+        (LiumError("API error 400: Executor has a pending rental"), "could not be rented"),
+        (LiumServerError("API error 503: Service Unavailable"), "API error 503"),
+    ],
+)
+def test_a_rent_that_fails_after_creating_the_volume_says_the_volume_is_kept(monkeypatch, error, code_text):
+    # The volume was created before the rent and nothing removes it; the timeout message said so,
+    # the rent failures (ours, and the SDK errors handle_errors renders) did not, so a reader made
+    # a second volume on the retry.
+    class _Volume:
+        def execute(self, ctx):
+            return ActionResult(ok=True, data={"volume": _volume(), "volume_id": "vol-1"})
+
+    class _Rent:
+        def execute(self, ctx):
+            raise error
+
+    monkeypatch.setattr(up_command, "CreateVolumeAction", _Volume)
+    result = _run_up(monkeypatch, rent_action=_Rent, args=["--volume", "new:name=my-data"])
+
+    assert result.exit_code == EXIT_API_ERROR
+    output = _flat(result.output)
+    assert code_text in output
+    assert ". The volume my-data was created and is kept." in output  # a sentence of its own, after every message
 
 
 def test_an_auth_failure_on_rent_is_not_reported_as_a_rejected_rent(monkeypatch):
