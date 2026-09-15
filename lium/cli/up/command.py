@@ -108,7 +108,7 @@ def _in_hours(termination_time: datetime) -> str:
 @click.option("--volume", "-v", help="Volume spec: 'id:<HUID>' or 'new:name=<NAME>[,desc=<DESC>]'")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @click.option("--gpu", help="Filter nodes by GPU type (e.g., H200, A6000)", shell_complete=get_gpu_completions)
-@click.option("--count", "-c", type=int, help="Number of GPUs per pod")
+@click.option("--count", "-c", type=int, help="Number of GPUs per pod (with NODE_ID: rent that many of the node's GPUs, if the provider allows splitting)")
 @click.option("--country", help="Filter nodes by ISO country code (e.g., US, FR)")
 @click.option("--min-cpus", "min_cpus", type=int, help="Minimum CPU thread count (the CPUs column of 'lium ls')")
 @click.option("--ports", "-p", type=int, help="Minimum number of available ports required")
@@ -218,6 +218,7 @@ def up_command(
       lium up 1                             # Create pod on node #1 from last ls
       lium up --gpu H200                    # Auto-select cheapest optimal H200 node
       lium up --gpu A6000 -c 2              # Auto-select cheapest optimal 2×A6000 node
+      lium up cosmic-hawk-f2 -c 1           # Rent 1 GPU of a splittable multi-GPU node
       lium up --country US                  # Auto-select cheapest optimal node in US
       lium up --gpu H200 --country FR       # Combine multiple filters
       lium up --gpu H100 --min-cpus 32      # Only nodes with at least 32 CPU threads
@@ -476,12 +477,39 @@ def up_command(
                 EXIT_CONFIGURATION_ERROR,
             )
         ui.dim(f"Budget ${budget_usd:.2f} at ${price_per_hour:.2f}/h ≈ {hours:.1f}h of runtime")
+    # `lium up <node> -c N` rents N of the node's GPUs. The count is always sent, the host total
+    # included: the API refuses a count the node cannot serve right now before anything is billed,
+    # and the provider's splitting policy decides whether N is allowed. Without -c the rent takes
+    # the node's free GPUs, so the prompt names that count and its price. On the spec path the
+    # server already picked the split and priced it (gpu_count / price_per_hour above).
+    requested_gpu_count = count if executor_id and count else None
+    if spec:
+        rent_count, rent_price = gpu_count, price_per_hour
+    else:
+        rent_count = requested_gpu_count or rented_gpu_count(executor)
+        # What the API would refuse anyway is refused here, before a prompt that would read
+        # "0×H200 of 4 at $0.00/h" or "5×H200 of 2". A count within the host but above the
+        # free GPUs is left to the API: the provider's splitting policy decides that one.
+        if rent_count < 1:
+            raise CliFailure(
+                "no_free_gpus",
+                f"No GPU of {executor.huid} is free right now ({executor.gpu_count} on the node, all rented).",
+                EXIT_GENERAL_ERROR,
+            )
+        if rent_count > executor.gpu_count:
+            raise CliFailure(
+                "invalid_arguments",
+                f"-c {rent_count}: {executor.huid} has {executor.gpu_count} GPU(s).",
+                EXIT_CONFIGURATION_ERROR,
+            )
+        rent_price = executor.price_per_gpu * rent_count if rent_count != executor.gpu_count else price_per_hour
 
     if not yes:
         confirm_msg = (
             f"Acquire pod on {executor.huid} "
-            f"({gpu_count}×{executor.gpu_type}) "
-            f"at ${price_per_hour:.2f}/h?"
+            f"({rent_count}×{executor.gpu_type}"
+            f"{f' of {executor.gpu_count}' if rent_count != executor.gpu_count else ''}) "
+            f"at ${rent_price:.2f}/h?"
         )
         if restore_backup_id:
             confirm_msg += f" Restore backup {restore_backup_id} to {restore_path} after startup."
@@ -535,6 +563,7 @@ def up_command(
                 "enable_volume_encryption": volume_encryption,
                 "backup_id": restore_backup_id,
                 "restore_path": restore_path,
+                "gpu_count": requested_gpu_count,
             })
         )
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
