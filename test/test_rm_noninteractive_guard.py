@@ -279,9 +279,26 @@ def test_rerun_line_names_the_workspace_the_caller_named(monkeypatch):
     assert "lium --workspace research rm --all --yes" in _text(result)
 
 
+def test_rerun_line_carries_format():
+    """`lium rm a --format json </dev/null` (--format landed in lium#218) is re-run as given; the
+    default table format is not spelled out."""
+    assert rm_module.rerun_with_yes("a", False, None, None, False, output_format="json") == "lium rm a --format json --yes"
+    assert rm_module.rerun_with_yes("a", False, None, None, False, output_format="table") == "lium rm a --yes"
+
+
+def test_a_piped_rm_with_format_json_is_refused_on_stderr_and_reruns_as_given(monkeypatch):
+    """`lium rm eager-wolf-aa --format json </dev/null`: refused like any other piped rm, the printed command
+    keeps `--format json`, and stdout stays empty — a caller piping into `jq` gets no half document."""
+    result = _run(monkeypatch, [TRAIN], ["eager-wolf-aa", "--format", "json"])
+
+    _refused(result)
+    assert result.stdout == ""
+    assert "lium rm eager-wolf-aa --format json --yes" in " ".join(result.stderr.split())
+
+
 def test_rerun_line_knows_every_rm_option():
-    """A new `rm` option (lium#218 adds --format) has to be carried by rerun_with_yes too, or the
-    printed command is not the one the caller ran. This pins the option list; extend both together."""
+    """A new `rm` option has to be carried by rerun_with_yes too, or the printed command is not
+    the one the caller ran. This pins the option list; extend both together."""
     assert {param.name for param in rm_module.rm_command.params} == {
-        "targets", "remove_all", "yes", "in_duration", "at_time", "name_only",
+        "targets", "remove_all", "yes", "in_duration", "at_time", "name_only", "output_format",
     }

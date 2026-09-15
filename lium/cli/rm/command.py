@@ -134,12 +134,14 @@ def rerun_with_yes(
     at_time: Optional[str],
     name_only: bool,
     workspace: Optional[str] = None,
+    output_format: str = "table",
 ) -> str:
     """The command line that was given, with ``--yes`` added — what a refused caller re-runs.
 
     ``workspace`` is the workspace the caller named (``-w`` / ``LIUM_WORKSPACE``, lium#183): the
     line must carry it, or ``lium -w research rm --all </dev/null`` would suggest a
-    ``lium rm --all --yes`` that wipes the default workspace instead.
+    ``lium rm --all --yes`` that wipes the default workspace instead. ``output_format``
+    (``--format``, lium#218) is carried the same way when it is not the default.
     """
     words = ["lium", "--workspace", shlex.quote(workspace), "rm"] if workspace else ["lium", "rm"]
     if targets:
@@ -152,6 +154,8 @@ def rerun_with_yes(
         words.extend(["--at", shlex.quote(at_time)])
     if name_only:
         words.append("--name-only")
+    if output_format != "table":
+        words.extend(["--format", output_format])
     words.append("--yes")
     return " ".join(words)
 
@@ -244,6 +248,7 @@ def rm_command(
             plan, rerun_with_yes(
                 targets, remove_all, in_duration, at_time, name_only,
                 workspace=lium.config.workspace if lium.config.workspace_explicit else None,
+                output_format=output_format,
             )
         )
 
