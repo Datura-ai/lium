@@ -174,6 +174,7 @@ def rm_command(
     \b
     Each removed pod is reported with its uptime and estimated spend
     (uptime × $/h, marked ≈ because the API returns no billed figure).
+    \b
     Examples:
       lium rm my-pod
       lium rm 1,2 --yes                 # no confirmation
