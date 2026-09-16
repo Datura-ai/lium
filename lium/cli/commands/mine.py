@@ -966,13 +966,21 @@ def _register_and_wait(
     if wait_minutes == 0:
         return 0
 
-    console.print(escape(f"\n● [8/{total_steps}] Waiting for the validator (up to {wait_minutes} min; Ctrl-C leaves the node registered)"))
+    # the status poll reads with the register token (lium-platform#458), so it cannot outlive the token: the wait
+    # stops half a minute before the token does, and the node page carries on
+    timeout_s = reg.wait_budget_s(wait_minutes * 60, token.seconds_left())
+    if timeout_s < wait_minutes * 60:
+        console.warning(escape(
+            f"The register token expires in {reg.minutes_text(token.seconds_left() or 0)}, so the wait stops then; "
+            f"the node page keeps updating on its own: {node_url}"
+        ))
+    console.print(escape(f"\n● [8/{total_steps}] Waiting for the validator (up to {reg.minutes_text(timeout_s)}; Ctrl-C leaves the node registered)"))
     started = time.monotonic()
     try:
         final = reg.wait_until_listed(
             http,
             record.node_id,
-            timeout_s=wait_minutes * 60,
+            timeout_s=timeout_s,
             on_change=lambda s, t: console.print(escape(reg.status_line(s, t))),
         )
     except KeyboardInterrupt:

@@ -59,7 +59,7 @@ def node_command() -> None:
     "all_miners",
     is_flag=True,
     default=False,
-    help="List every provider's nodes (the portal's global view), not only yours.",
+    help="List every provider's nodes as the portal's public view (id, hotkey, GPU, price, tier, region, status, uptime), not only yours.",
 )
 @click.option("--page", type=int, default=None, help="1-indexed page number.")
 @click.option("--limit", type=int, default=None, help="Page size.")
@@ -74,9 +74,11 @@ def list_nodes(
 ) -> None:
     """List nodes registered with the portal.
 
-    By default only the active hotkey's nodes are listed. The portal's
-    listing is global, so ``--all`` shows every provider's nodes and
-    ``--miner-hotkey`` shows one other provider's.
+    By default only the active hotkey's nodes are listed, in full. ``--all``
+    shows every provider's nodes and ``--miner-hotkey`` one other provider's,
+    both as the portal's public rows: no address, keys, collateral or revenue
+    (lium-platform#458). ``--all`` is read without the session token, which
+    the portal would otherwise take as "my own nodes".
     """
     require_hotkey(ctx, group="node")
     if all_miners and miner_hotkey:

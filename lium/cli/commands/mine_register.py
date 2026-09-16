@@ -2,8 +2,10 @@
 
 The token is the one the portal's Add Node page prints next to the command (``POST /executors/register-token``,
 lium-platform). It is a short-lived portal JWT; the CLI reads the account it was issued for out of it and uses it
-as the bearer for exactly one call, ``POST /executors``. Everything else here is unauthenticated: the node list and
-the per-node status the portal shows are public reads.
+as the bearer for the three calls the portal opens to it: ``POST /executors`` (the add), ``GET /executors`` (the
+account's own list, to find the node's id by address) and ``GET /executors/{id}`` (the node's status). Since
+lium-platform#458 (DAH-3509) the list without a token is a public projection with no address to match on and the
+detail needs a token; a portal from before it ignores the header on both reads, so this works against either.
 
 Nothing about the node is typed by hand: GPU model and count come from ``nvidia-smi`` on this host, the port from
 the executor's own ``.env``, the address from the host's public IPv4, the price is the model's base price from the
@@ -311,12 +313,15 @@ def _known_gpu_types() -> list[str]:
 def find_node_id(
     http: PortalHTTP, *, miner_hotkey: str, ip_address: str, port: int, max_pages: int = 10
 ) -> str | None:
-    """The id of the account's node at ``ip_address:port`` from the public ``GET /executors`` list, or None."""
+    """The id of the account's node at ``ip_address:port`` from the account's own ``GET /executors`` list, or None.
+
+    Read with the register token: the portal answers its own account's full rows, address included. Without the
+    token the list is the public projection (lium-platform#458), which carries no address to match on.
+    """
     for page in range(1, max_pages + 1):
         body = http.get(
             EXECUTORS,
             params={"miner_hotkey": miner_hotkey, "page": page, "limit": 100},
-            auth=False,
         )
         rows = body.get("data") if isinstance(body, dict) else None
         if not isinstance(rows, list) or not rows:
@@ -347,8 +352,12 @@ class NodeStatus:
 
 
 def read_status(http: PortalHTTP, node_id: str) -> NodeStatus:
-    """The portal's computed status for one node — the same text the Nodes page shows."""
-    body = http.get(EXECUTOR_BY_ID.format(id=node_id), auth=False)
+    """The portal's computed status for one node — the same text the Nodes page shows.
+
+    Read with the register token: since lium-platform#458 the node detail is the owner's only (401 without a
+    token, 404 for another account's node), and the register token is accepted for the account's own node.
+    """
+    body = http.get(EXECUTOR_BY_ID.format(id=node_id))
     computed = body.get("computed_status") if isinstance(body, dict) else None
     if not isinstance(computed, dict):
         return NodeStatus(status="UNKNOWN", message="", fix="")
@@ -418,6 +427,27 @@ def wait_until_listed(
                 return last_settled or NodeStatus(status="UNKNOWN", message="", fix="")
             return last or NodeStatus(status="UNKNOWN", message="", fix="")
         sleep(interval_s)
+
+
+TOKEN_EXPIRY_MARGIN_S = 30.0
+"""How long before the register token's ``exp`` the status poll stops: one late read on a dead token is a 401."""
+
+
+def wait_budget_s(wait_s: float, token_seconds_left: int | None) -> float:
+    """How long ``wait_until_listed`` may run: ``--wait``, capped at the register token's remaining life.
+
+    The poll reads ``GET /executors/{id}`` with the token (lium-platform#458); once it expires every read is a
+    401 and the wait would run its full length printing nothing. A token with no ``exp`` has no cap.
+    """
+    if token_seconds_left is None:
+        return wait_s
+    return max(0.0, min(wait_s, token_seconds_left - TOKEN_EXPIRY_MARGIN_S))
+
+
+def minutes_text(seconds: float) -> str:
+    """``"19 min"``, or ``"less than a minute"`` under 60 s (a negative or zero budget reads the same)."""
+    minutes = max(0, int(seconds)) // 60
+    return f"{minutes} min" if minutes else "less than a minute"
 
 
 def opt_in_fix(token: RegisterToken, portal_api_url: str | None) -> str | None:
@@ -494,7 +524,9 @@ __all__: list[str] = [
     "OFFLINE_CONFIRM_S",
     "RegisterError",
     "RegisterToken",
+    "TOKEN_EXPIRY_MARGIN_S",
     "build_http",
+    "minutes_text",
     "executor_port",
     "find_node_id",
     "find_node_id_after_add",
@@ -509,5 +541,6 @@ __all__: list[str] = [
     "resolve_price",
     "result_summary",
     "status_line",
+    "wait_budget_s",
     "wait_until_listed",
 ]

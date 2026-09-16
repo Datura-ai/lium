@@ -436,10 +436,17 @@ class ProviderClient:
         """``GET /executors`` -- paginated node list.
 
         The portal endpoint is a global listing (its frontend exposes an
-        "All miners" mode), so without a ``miner_hotkey`` filter it returns
-        every provider's nodes. Default to the caller's own hotkey so the
+        "All miners" mode). Default to the caller's own hotkey so the
         result describes *this* provider's fleet; pass ``all_miners=True``
         for the unfiltered view, or ``miner_hotkey`` for another provider.
+
+        Since lium-platform#458 (DAH-3509) the route has two shapes: with
+        the session token and no filter, or your own hotkey, it answers
+        your own nodes in full; without a token, or with another hotkey,
+        every matching node as a public projection (id, hotkey, GPU, price,
+        tier, region, status, uptime — no address, keys or revenue). So
+        ``all_miners`` reads without the token: with it, "no filter" would
+        be the caller's own list with a 200.
 
         Returns the raw envelope (``{data: [...], total, page, limit}``) so
         list callers can read pagination metadata.
@@ -453,7 +460,7 @@ class ProviderClient:
             params["page"] = page
         if limit is not None:
             params["limit"] = limit
-        return self._http.get(EXECUTORS, params=params or None)
+        return self._http.get(EXECUTORS, params=params or None, auth=not all_miners)
 
     def get_node(self, node_id: str) -> dict[str, Any]:
         """``GET /executors/{id}`` -- fetch one node's full record."""

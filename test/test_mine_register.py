@@ -199,7 +199,9 @@ def _listing(node_id: str = "node-1", ip: str = "203.0.113.7", port: int = 8080)
     ], "total": 1})
 
 
-def test_register_node_posts_with_the_token_and_finds_the_id_without_it() -> None:
+def test_register_node_posts_and_finds_the_id_with_the_register_token() -> None:
+    """lium-platform#458: the list without a token is a public projection with no `executor_ip_address`, so the
+    lookup reads the account's own list with the register token (before: `auth=False`, and every install exited 2)."""
     portal = _Portal()
     portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued"}}))
     portal.on("GET", "/executors", _listing())
@@ -210,8 +212,18 @@ def test_register_node_posts_with_the_token_and_finds_the_id_without_it() -> Non
     assert post["headers"]["Authorization"] == "Bearer TOKEN"
     assert post["json"] == {"gpu_type": "NVIDIA L4", "ip_address": "203.0.113.7", "port": 8080,
                             "price_per_gpu": 0.11, "gpu_count": 1}
-    assert "Authorization" not in get["headers"]
+    assert get["headers"]["Authorization"] == "Bearer TOKEN"
     assert get["params"] == {"miner_hotkey": HOTKEY, "page": 1, "limit": 100}
+
+
+def test_find_node_id_sees_nothing_in_the_public_projection() -> None:
+    """What the anonymous list looks like since lium-platform#458: the row is there, the address is not. The CLI
+    cannot match on it — which is why the lookup sends the token — and it must return None, not a wrong id."""
+    portal = _Portal()
+    portal.on("GET", "/executors", _Resp(200, {"data": [{"id": "node-1", "miner_hotkey": HOTKEY, "gpu_type": "NVIDIA L4",
+                                                         "gpu_count": 1, "price_per_gpu": 0.11, "tier": "standard",
+                                                         "computed_status": {"status": "AVAILABLE"}}], "total": 1}))
+    assert reg.find_node_id(_http(portal), miner_hotkey=HOTKEY, ip_address="203.0.113.7", port=8080) is None
 
 
 def test_register_node_retries_the_lookup_after_a_successful_add(monkeypatch) -> None:
@@ -307,7 +319,20 @@ def test_wait_until_listed_prints_changes_only_and_stops_at_available() -> None:
     assert final.listed and final.status == "AVAILABLE"
     # three reads (0 s, 15 s, 30 s); the unchanged second reading prints nothing
     assert seen == ["[00:00] VALIDATION_PENDING — Waiting for first validation", "[00:30] AVAILABLE"]
-    assert all("Authorization" not in c["headers"] for c in portal.calls)
+    # the detail is the owner's only since lium-platform#458: every poll carries the register token
+    assert all(c["headers"]["Authorization"] == "Bearer TOKEN" for c in portal.calls)
+
+
+def test_wait_budget_is_the_wait_capped_at_the_tokens_life() -> None:
+    """The poll reads with the register token, so a 45-min wait on a token with 20 min left would spend 25 min on
+    401s and print nothing; the budget stops half a minute before the token does. No expiry, no cap."""
+    assert reg.wait_budget_s(45 * 60, None) == 45 * 60
+    assert reg.wait_budget_s(45 * 60, 20 * 60) == 20 * 60 - reg.TOKEN_EXPIRY_MARGIN_S
+    assert reg.wait_budget_s(10 * 60, 20 * 60) == 10 * 60
+    assert reg.wait_budget_s(45 * 60, 10) == 0.0
+    # what the CLI prints for a budget: whole minutes, and never "0 min" or a negative
+    assert reg.minutes_text(19 * 60 + 25) == "19 min"
+    assert reg.minutes_text(59) == reg.minutes_text(0) == reg.minutes_text(-30) == "less than a minute"
 
 
 def test_wait_until_listed_keeps_polling_through_not_detected() -> None:
@@ -605,6 +630,31 @@ def test_mine_register_exit_one_on_a_named_fix_and_zero_with_wait_zero(monkeypat
     # --wait 0: registered, no waiting, exit 0
     result = CliRunner().invoke(mine.mine_command, args[:-2] + ["--wait", "0"])
     assert result.exit_code == 0 and "Waiting for the validator" not in result.output
+
+
+def test_mine_register_caps_the_wait_at_the_tokens_life_and_says_so(monkeypatch, tmp_path: Path) -> None:
+    """A token with 20 min left and --wait 45: the poll would read 401s for 25 min. The wait is capped and the
+    provider is told where the status keeps updating."""
+    target, _ = _stub_host(monkeypatch, tmp_path)
+    budgets: list[float] = []
+
+    def capture_wait(http, node_id, **kw):
+        budgets.append(kw["timeout_s"])
+        return reg.NodeStatus(status="VALIDATION_PENDING", message="Waiting for first validation", fix="")
+
+    monkeypatch.setattr(reg, "wait_until_listed", capture_wait)
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued"}}))
+    portal.on("GET", "/executors", _listing())
+    monkeypatch.setattr(reg, "build_http", lambda url, token: _http(portal))
+    # 19 min 55 s left: "19 min" for any run under 25 s (a round 20 min read "20 min" on a fast box, "19 min" on a slow one)
+    exp = int(time.time()) + 20 * 60 - 5
+    result = CliRunner().invoke(mine.mine_command, ["--register", _token(exp=exp), "--dir", str(target), "--wait", "45"])
+    assert result.exit_code == 2, result.output
+    assert len(budgets) == 1 and 19 * 60 < budgets[0] <= 20 * 60 - 5 - reg.TOKEN_EXPIRY_MARGIN_S
+    flat = " ".join(result.output.split())
+    assert "register token expires in 19 min, so the wait stops then" in flat
+    assert "up to 19 min" in flat
 
 
 def test_mine_register_reports_the_add_and_exits_two_when_the_list_lags(monkeypatch, tmp_path: Path) -> None:

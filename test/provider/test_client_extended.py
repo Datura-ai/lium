@@ -408,13 +408,25 @@ def test_list_nodes_without_a_resolvable_hotkey_refuses_instead_of_listing_every
     assert portal.gets == []
 
 
-def test_list_nodes_all_miners_sends_no_hotkey_filter(client) -> None:
+def test_list_nodes_all_miners_sends_no_hotkey_filter_and_no_token(client) -> None:
+    """lium-platform#458: a session token with no filter is the caller's own list, so a signed-in ``--all`` sent
+    with the token came back as the caller's nodes with a 200 (Pixel). The public view is read without it."""
     portal = _Portal(get_body={"data": [], "total": 0})
     c = client(portal)
     c.list_nodes(all_miners=True)
-    path, params, _ = portal.gets[0]
+    path, params, auth = portal.gets[0]
     assert path == "/executors"
     assert params is None
+    assert auth is False
+
+
+def test_list_nodes_own_and_explicit_hotkey_send_the_token(client, fake_signer) -> None:
+    """Your own list needs the token for the full rows; another hotkey is the projection either way."""
+    portal = _Portal(get_body={"data": [], "total": 0})
+    c = client(portal)
+    c.list_nodes()
+    c.list_nodes(miner_hotkey="5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY")
+    assert [auth for _, _, auth in portal.gets] == [True, True]
 
 
 def test_list_nodes_explicit_hotkey_wins(client) -> None:
