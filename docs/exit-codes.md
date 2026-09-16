@@ -74,12 +74,12 @@ absent when none was set. Pair `--json` with `--yes`: behind a pipe the price
 prompt cannot be asked and the command fails with `confirmation_required`
 before anything is rented. The teardown is `lium rm … --format json` (its
 `{"removed": […], "failed": […]}` payload carries each pod's uptime and
-estimated spend); `rm` takes `--format json`, not `--json`.
+estimated spend); `rm --json` is a hidden alias for it.
 
 Machine mode is on when any of these holds:
 
 - `--format json` (list commands: `ls`, `ps`, `templates`, `balance`, `describe`, `spend`, and every `clusters` command; and `rm`);
-- `--json` (accepted everywhere `--format json` is except `rm`, and on `up`, `exec`, `describe`, `fund`, `signup`, `init`, `audit`, `topup`);
+- `--json` (accepted everywhere `--format json` is, and on `up`, `exec`, `describe`, `whoami`, `cp`, `fund`, `signup`, `init`, `audit`, `topup`, `keys`, `workspaces`);
 - the environment variable `LIUM_OUTPUT=json` — this switches *failures* to the envelope on every command; success output is JSON only on commands that take `--format json`/`--json`, so pass the flag as well when you need to parse the result.
 
 Without any of these, the same information is printed as text: the error on one
