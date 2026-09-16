@@ -253,7 +253,17 @@ def _new_table(*, headers: bool = True, expand: bool = True) -> Table:
 
 
 def _human_label(key: str) -> str:
-    return key.replace("_", " ").title()
+    return escape(key.replace("_", " ").title())
+
+
+def _text(value: Any) -> str:
+    """Portal or provider text as a Rich cell: escaped, so a ``[`` in a GPU name, machine name or id stays text.
+
+    Every cell string here is parsed as Rich markup (``console.get_styled`` wraps it in style tags), and the portal
+    hands back strings other providers typed or their executors reported: ``[/]`` in one of them raised
+    ``MarkupError`` and ``node list --all`` exited without a table; ``[red]`` vanished from what was shown.
+    """
+    return escape(str(value))
 
 
 def _bool_icon(value: Any, *, true_label: str = "yes", false_label: str = "no") -> str:
@@ -270,7 +280,7 @@ def _money(value: Any, *, decimals: int = 2) -> str:
     try:
         v = float(value)
     except (TypeError, ValueError):
-        return str(value)
+        return _text(value)
     text = f"${v:.{decimals}f}"
     return text
 
@@ -280,11 +290,11 @@ def _truncate_id(value: Any, width: int = 14) -> str:
         return console.get_styled("—", "dim")
     text = str(value)
     if len(text) <= width:
-        return console.get_styled(text, "id")
+        return console.get_styled(escape(text), "id")
     keep = width - 1
     left = keep // 2
     right = keep - left
-    return console.get_styled(f"{text[:left]}…{text[-right:]}", "id")
+    return console.get_styled(escape(f"{text[:left]}…{text[-right:]}"), "id")
 
 
 def _truncate_hotkey(value: Any, width: int = 18) -> str:
@@ -294,7 +304,7 @@ def _truncate_hotkey(value: Any, width: int = 18) -> str:
 def _short_timestamp(value: Any) -> str:
     if value is None or value == "":
         return console.get_styled("—", "dim")
-    text = str(value)
+    text = escape(str(value))
     if "T" not in text:
         return console.get_styled(text, "dim")
     head, _, tail = text.partition("T")
@@ -354,10 +364,10 @@ def _computed_status_rows(value: Mapping[str, Any]) -> list[tuple[str, str]]:
 
 def _gpu_config(row: Mapping[str, Any]) -> str:
     gpu_count = row.get("gpu_count")
-    gpu_type = row.get("gpu_type") or row.get("executor_machine_name") or "—"
+    gpu_type = _text(row.get("gpu_type") or row.get("executor_machine_name") or "—")
     if gpu_count:
-        return f"{gpu_count}×{gpu_type}"
-    return str(gpu_type)
+        return f"{_text(gpu_count)}×{gpu_type}"
+    return gpu_type
 
 
 def _ip_port(row: Mapping[str, Any]) -> str:
@@ -366,8 +376,8 @@ def _ip_port(row: Mapping[str, Any]) -> str:
     if not ip and not port:
         return console.get_styled("—", "dim")
     if ip and port:
-        return f"{ip}:{port}"
-    return str(ip or port)
+        return f"{_text(ip)}:{_text(port)}"
+    return _text(ip or port)
 
 
 def _rented_fraction(row: Mapping[str, Any]) -> str:
@@ -378,15 +388,15 @@ def _rented_fraction(row: Mapping[str, Any]) -> str:
         return console.get_styled("—", "dim")
     if used is not None and total is not None:
         if used:
-            return console.get_styled(f"{used}/{total}", "warning")
-        return console.get_styled(f"{used}/{total}", "dim")
+            return console.get_styled(f"{_text(used)}/{_text(total)}", "warning")
+        return console.get_styled(f"{_text(used)}/{_text(total)}", "dim")
     return _bool_icon(rented_flag)
 
 
 def _value_or_dash(v: Any) -> str:
     if v is None or v == "":
         return console.get_styled("—", "dim")
-    return str(v)
+    return _text(v)
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +428,7 @@ def _trim_money(value: Any, decimals: int = 4) -> str:
     try:
         v = float(value)
     except (TypeError, ValueError):
-        return str(value)
+        return _text(value)
     text = f"${v:.{decimals}f}"
     if "." in text:
         text = text.rstrip("0").rstrip(".")
@@ -446,8 +456,8 @@ def _billing_preset() -> _TablePreset:
         ("Day",      lambda r: _value_or_dash(r.get("billing_day")),                 "left",  2, 10, True),
         (
             "Machine",
-            lambda r: f"{r.get('executor_gpu_count') or '?'}× "
-            + str(r.get("executor_machine_name") or "—"),
+            lambda r: f"{_text(r.get('executor_gpu_count') or '?')}× "
+            + _text(r.get("executor_machine_name") or "—"),
             "left", 4, 14, True,
         ),
         ("Amount",   lambda r: _trim_money(r.get("amount"), decimals=2),             "right", 2,  8, True),
@@ -526,7 +536,7 @@ def _render_rows(rows: Iterable[Any], *, meta: Mapping[str, Any] | None = None) 
     # Heterogeneous list of non-mappings: bullet list.
     if not all(isinstance(it, Mapping) for it in items):
         for it in items:
-            console.print(f"  • {it}")
+            console.print(f"  • {escape(str(it))}")
         if meta:
             _print_meta_line(meta)
         return
@@ -650,7 +660,7 @@ def _format_generic_value(key: str, value: Any) -> str:
         return _short_timestamp(text)
     if len(text) > 36:
         return _truncate_id(text, 36)
-    return text
+    return escape(text)
 
 
 def _render_machine_request_summary(body: Mapping[str, Any]) -> None:
@@ -684,7 +694,7 @@ def _print_meta_line(meta: Mapping[str, Any]) -> None:
     parts: list[str] = []
     for key in interesting:
         if key in meta and meta[key] not in (None, "", {}):
-            parts.append(f"{key}={meta[key]}")
+            parts.append(f"{key}={_text(meta[key])}")
     if parts:
         console.print(console.get_styled("  " + ", ".join(parts), "dim"))
 
@@ -756,7 +766,7 @@ def _format_record_value(key: str, value: Any) -> str:
         if not value:
             return console.get_styled("(empty)", "dim")
         if all(not isinstance(v, (dict, list, tuple)) for v in value):
-            return ", ".join(str(v) for v in value)
+            return ", ".join(_text(v) for v in value)
         return console.get_styled(f"[{len(value)} items]", "dim")
     if isinstance(value, dict):
         if not value:
@@ -764,7 +774,7 @@ def _format_record_value(key: str, value: Any) -> str:
         if len(value) <= 4 and all(
             not isinstance(v, (dict, list, tuple)) for v in value.values()
         ):
-            return ", ".join(f"{k}={v}" for k, v in value.items())
+            return ", ".join(f"{_text(k)}={_text(v)}" for k, v in value.items())
         return console.get_styled(f"{{{len(value)} fields}}", "dim")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if key in _PRICE_KEYS:
@@ -784,8 +794,8 @@ def _format_record_value(key: str, value: Any) -> str:
     if key in {"created_at", "updated_at", "deleted_at", "billing_day"}:
         return _short_timestamp(text)
     if "hotkey" in key or "coldkey" in key or key == "id" or key.endswith("_id"):
-        return console.get_styled(text, "id")
-    return text
+        return console.get_styled(escape(text), "id")
+    return escape(text)
 
 
 def _format_extra_incentive_eligible(
