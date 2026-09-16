@@ -16,6 +16,7 @@ from lium.cli.utils import (
     CliFailure,
     TargetMatch,
     handle_errors,
+    resolve_output_format,
 )
 from . import validation, parsing, display
 from .actions import RemovePodsAction, ScheduleRemovalAction
@@ -148,6 +149,7 @@ def human_approved_removing_every_pod(pods: List[PodInfo]) -> bool:
     default="table",
     help="Output format. 'json' emits the removed pods with uptime and estimated spend.",
 )
+@click.option("--json", "json_output", is_flag=True, hidden=True, help="Alias for --format json")
 @handle_errors
 def rm_command(
     targets: Optional[str],
@@ -157,6 +159,7 @@ def rm_command(
     at_time: Optional[str],
     name_only: bool,
     output_format: str,
+    json_output: bool,
 ):
     """Remove (terminate) GPU pods.
 
@@ -175,6 +178,8 @@ def rm_command(
     Each removed pod is reported with its uptime and estimated spend
     (uptime × $/h, marked ≈ because the API returns no billed figure).
     """
+    # `--json` is the hidden alias `ps`, `ls`, `spend` and `templates` accept; `--format json` is the documented spelling
+    output_format = resolve_output_format(output_format, json_output)
     lium = Lium()
     # --format json: stdout is one JSON document, so the workspace context line goes to stderr
     show_workspace(lium, acting=True, on_stderr=output_format == "json")
