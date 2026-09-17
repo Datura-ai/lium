@@ -343,3 +343,22 @@ def test_older_backend_reads_interconnect_from_the_node_specs(client):
     result = client.rent(gpu_type="H100", interconnect="nvlink", template_id="tpl-1", ssh_keys=[KEY], dry_run=True)
 
     assert result.executor.id == "linked" and result.candidates == 1
+
+
+@responses.activate
+def test_older_backend_reads_the_nvlink_verdict_off_a_summary_row(client):
+    # `ls()` asks for `view=summary`, whose rows carry the verdict at the top level and no `specs.interconnect`
+    # (lium-platform#522); a check that read only specs.interconnect matched no node on that view
+    _version(None)
+    responses.add(responses.GET, f"{BASE}/machines", json=[{"name": "NVIDIA H100 NVL"}])
+    linked = _node("linked", price=1.5)
+    linked["nvlink"] = True
+    linked["interconnect"] = {"nvlink": True, "nvlink_links": 18, "p2p": True}
+    plain = _node("plain", price=1.2)
+    plain["nvlink"] = False
+    responses.add(responses.GET, f"{BASE}/executors", json=[plain, linked])
+
+    result = client.rent(gpu_type="H100", interconnect="nvlink", template_id="tpl-1", ssh_keys=[KEY], dry_run=True)
+
+    assert result.executor.id == "linked" and result.candidates == 1
+    assert "interconnect" not in linked["specs"]

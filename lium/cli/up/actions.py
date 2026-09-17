@@ -5,7 +5,7 @@ import time
 from lium.cli.actions import ActionResult
 from lium.sdk import ExecutorInfo, Template, PodInfo, Lium, LiumError
 from lium.sdk.client import RENT_BY_SPEC
-from lium.sdk.client import paramiko  # imported on first use (DAH-3053); `lium up` pays for it only when SSH fails
+from lium.sdk.client import paramiko  # the lazy stand-in (DAH-3053): `paramiko.SSHException` below resolves when the except runs, not at import
 from lium.cli.utils import (
     MIN_DOWNLOAD_MBPS,
     _api_error_data,

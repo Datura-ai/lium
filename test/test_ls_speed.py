@@ -17,7 +17,10 @@ from lium.cli.cli import cli
 from lium.cli.ls.display import compact_executor
 from lium.sdk import Config, Lium
 
-# One row of `GET /executors?view=summary` (lium-platform DAH-3052 `LISTING_VIEWS["summary"]`).
+# One row of `GET /executors?view=summary` (lium-platform `services/executor.py LISTING_VIEWS["summary"]`, DAH-3052 +
+# DAH-3053). The backend's `test_dah3053_summary_view_carries_the_cli_columns.py::CLI_LISTING_READS` pins the keys the
+# CLI reads off a row; this row mirrors it. `interconnect` carries no `matrix` on the summary view (the full view and
+# `lium describe` do).
 SUMMARY_ROW = {
     "id": "ad83de56-8a04-4ab1-ac5a-4ab007b4e2b3",
     "machine_name": "NVIDIA H200",
@@ -31,6 +34,19 @@ SUMMARY_ROW = {
     "is_bookmarked": False,
     "effective_upload_speed_mbps": 1200.5,
     "effective_download_speed_mbps": 2400.1,
+    "nvlink": True,
+    "interconnect": {
+        "gpu_count": 8,
+        "gpu_pairs": 28,
+        "nvlink": True,
+        "nvlink_links": 18,
+        "nvlink_pairs": 28,
+        "nvlink_active_links": 18,
+        "pcie_class": None,
+        "p2p": True,
+        "p2p_pairs": 28,
+        "p2p_ok_pairs": 28,
+    },
     "location": {"country": "The Netherlands", "country_code": "NL", "city": "Amsterdam", "lat": 52.352, "lon": 4.9392},
     "specs": {
         "gpu": {
@@ -93,15 +109,19 @@ def test_a_summary_row_carries_every_field_the_table_and_json_render():
     assert (executor.gpu_type, executor.gpu_count, executor.price_per_gpu, executor.price_per_hour) == ("H200", 8, 2.5, 20.0)
     assert (executor.gpu_model, executor.driver_version, executor.docker_in_docker) == ("NVIDIA H200", "570.86.15", True)
     assert (executor.download_speed, executor.upload_speed, executor.tier, executor.max_cuda_version) == (2400.1, 1200.5, "secure", 12.8)
+    # the Link column and the `--nvlink` filter (lium#149) read these; a summary view without them shows no Link
+    assert (executor.nvlink, executor.link, executor.p2p) == (True, "NV18", True)
     # the `lium ls --format json` object, name for name as README.md documents it
     assert set(row) == {
         "index", "id", "huid", "config", "gpu_type", "gpu_count", "price_per_gpu_hour", "price_per_hour", "country",
         "country_code", "city", "vram_gb", "ram_gb", "cpu_count", "disk_gb", "disk_total_gb", "upload_mbps",
         "download_mbps", "available_ports", "docker_in_docker", "is_pareto", "max_cuda_version", "tier", "machine_name",
+        "link", "nvlink", "p2p", "interconnect",
     }
     assert None not in row.values()
     assert (row["country"], row["vram_gb"], row["ram_gb"], row["disk_gb"], row["available_ports"]) == ("The Netherlands", 140, 1512, 6199, 30)
     assert (row["country_code"], row["city"], row["cpu_count"], row["disk_total_gb"], row["machine_name"]) == ("NL", "Amsterdam", 192, 6676, "NVIDIA H200")
+    assert (row["link"], row["nvlink"], row["p2p"], row["interconnect"]["nvlink_links"]) == ("NV18", True, True, 18)
 
 
 LAZY_MODULES = ("paramiko", "lium.sdk._hostkeys", "lium.cli.provider", "lium.provider.client", "jwt")

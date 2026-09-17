@@ -302,7 +302,9 @@ def _satisfies_spec(executor: ExecutorInfo, spec: Dict[str, Any]) -> bool:
         return False
     if spec.get("docker_in_docker") and not executor.docker_in_docker:
         return False
-    if spec.get("interconnect") == "nvlink" and (specs.get("interconnect") or {}).get("nvlink") is not True:
+    # ExecutorInfo.nvlink is the top-level verdict when the row carries one (the summary view does, lium-platform#522)
+    # and specs.interconnect.nvlink on an older full row; a summary row has no specs.interconnect at all
+    if spec.get("interconnect") == "nvlink" and executor.nvlink is not True:
         return False
     return True
 
