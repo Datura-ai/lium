@@ -22,6 +22,7 @@ from lium.provider.errors import (
     PORTAL_FORBIDDEN,
     PORTAL_NOT_FOUND,
     PORTAL_RATE_LIMIT,
+    PORTAL_REQUEST_REJECTED,
     PORTAL_SERVER_ERROR,
     ProviderAuthError,
     ProviderError,
@@ -229,12 +230,36 @@ def _parse_response(
             code=PORTAL_SERVER_ERROR,
             context=context,
         )
+    if 400 <= status < 500:
+        # The portal refused the request and said why (``{"detail": "Unsupported
+        # gpu type."}``); that reason is the message, and it is not a 5xx to retry.
+        raise ProviderError(
+            f"portal rejected the request ({status}): {_portal_detail(body)}",
+            code=PORTAL_REQUEST_REJECTED,
+            context=context,
+        )
     # Anything else: treat as a generic ProviderError but keep context.
     raise ProviderError(
         f"unexpected portal status {status}",
         code=PORTAL_SERVER_ERROR,
         context=context,
     )
+
+
+def _portal_detail(body: Any) -> str:
+    """The portal's own reason for a 4xx, flattened to one line."""
+    detail = body.get("detail", body) if isinstance(body, dict) else body
+    if isinstance(detail, str):
+        flat = detail.strip()
+    elif isinstance(detail, dict):
+        flat = "; ".join(f"{k}: {v}" for k, v in detail.items())
+    elif isinstance(detail, list):
+        flat = "; ".join(
+            str(d.get("msg", d)) if isinstance(d, dict) else str(d) for d in detail
+        )
+    else:
+        flat = "" if detail is None else str(detail)
+    return flat or "no detail given"
 
 
 __all__ = ["DEFAULT_PORTAL_URL", "PortalHTTP", "TokenProvider"]
