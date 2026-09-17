@@ -10,6 +10,13 @@ Target (env):
                 CLI shows the ISO code when the listing has no country name). An explicit empty value lifts it.
   E2E_EXCLUDE_EXECUTORS  comma-separated executor ids or huids never rented (a node known to be defective — B-119's
                 brave-shark-ff billed 2 GPUs and exposed 1 — would otherwise be the cheapest pick on every run).
+  E2E_MIN_RELIABILITY  the lowest `reliability_score` (0–100, the public listing's blended provider score) the suite
+                rents; default 90. 10 Sep 2026 (DAH-3383): a listed 2×3090 at $0.32/h scored 72 and had an unreachable
+                SSH port map — it was the cheapest pick for three PRs in a row. A node with no score yet (null) is not
+                excluded: that is a new node, not a bad one. The SDK's ExecutorInfo and `ls --format json` do not carry the
+                score, so `reliability_scores()` reads the same public listing once per journey. The platform's own
+                rental check (`rental_check_verified_status`) is not on GET /executors and, on 10 Sep 2026, 452 of 473
+                verified executors were still PENDING, so it cannot be the rule here.
   E2E_KEEP_POD  =1 leaves the pod up on failure for a human to look at (never in CI): once a step has failed, no
                 removal this run would do runs — the `rental`/`sdk_pod` finalizers, the renter journey's `rm` step
                 (skipped) and the stale-pod sweep at the start; the pod's own 30-min TTL still applies — or, when
@@ -27,6 +34,8 @@ import os
 import shutil
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,6 +47,7 @@ LIUM = os.environ.get("E2E_LIUM", "lium")
 MAX_PRICE = float(os.environ.get("E2E_MAX_PRICE", "0.50"))
 EXCLUDE_COUNTRIES = {c.strip().lower() for c in os.environ.get("E2E_EXCLUDE_COUNTRIES", "Russia,Belarus,RU,BY").split(",") if c.strip()}
 EXCLUDE_EXECUTORS = {e.strip().lower() for e in os.environ.get("E2E_EXCLUDE_EXECUTORS", "").split(",") if e.strip()}
+MIN_RELIABILITY = float(os.environ.get("E2E_MIN_RELIABILITY", "90"))
 KEEP_POD = os.environ.get("E2E_KEEP_POD", "") == "1"
 ARTIFACTS = Path(os.environ.get("E2E_ARTIFACTS", Path(__file__).parent / "artifacts"))
 
@@ -55,13 +65,39 @@ def keep_pod() -> bool:
 
 
 def rentable(gpu_count: int | str | None, price_per_hour: float | str | None, country: str | None,
-             executor_id: str | None, huid: str | None) -> bool:
-    """≥ 1 GPU, within the price cap, not in an excluded country, not an excluded executor (id or huid)."""
+             executor_id: str | None, huid: str | None, reliability: float | str | None = None) -> bool:
+    """≥ 1 GPU, within the price cap, not in an excluded country, not an excluded executor (id or huid), and a
+    `reliability_score` at or above E2E_MIN_RELIABILITY when the listing has one (None = no score yet: kept)."""
     if int(gpu_count or 0) < 1 or float(price_per_hour or 9e9) > MAX_PRICE:
         return False
     if str(country or "").strip().lower() in EXCLUDE_COUNTRIES:
         return False
+    if reliability is not None and float(reliability) < MIN_RELIABILITY:
+        return False
     return not ({str(executor_id or "").lower(), str(huid or "").lower()} & EXCLUDE_EXECUTORS)
+
+
+def reliability_scores(url: str = API_URL, attempts: int = 3, pause_s: float = 3.0, sleep=time.sleep) -> dict[str, float | None]:
+    """`reliability_score` by executor id from the public listing (GET /executors, no key needed) — the field the SDK's
+    ExecutorInfo and `ls --format json` do not surface. The same URL the SDK's `ls()` reads, as one unauthenticated
+    request retried the way the SDK retries its own (three attempts on a 429, a 5xx or a network error); a 4xx other
+    than 429 is raised at once."""
+    req = urllib.request.Request(f"{url}/executors?size=1000", headers={"Accept": "application/json"})
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310 — https URL from E2E_API_URL, the suite's own target
+                rows = json.load(resp)
+            break
+        except urllib.error.HTTPError as e:
+            if attempt == attempts or (e.code != 429 and e.code < 500):
+                raise
+        except (urllib.error.URLError, OSError):
+            if attempt == attempts:
+                raise
+        sleep(pause_s)
+    if not isinstance(rows, list):
+        raise AssertionError(f"GET /executors did not return a list: {str(rows)[:200]!r}")
+    return {str(row.get("id")): row.get("reliability_score") for row in rows if isinstance(row, dict) and row.get("id")}
 
 
 @dataclass
