@@ -2218,6 +2218,11 @@ class Lium:
 
         Yields:
             An active ``paramiko.SSHClient``.
+
+        Raises:
+            ValueError: no ``ssh_cmd`` or no SSH key configured, or ``pod.ssh_cmd`` is not
+                ``ssh <user>@<host> [-p <port>]`` (:func:`ssh_target`, the check the
+                OpenSSH path applies). Nothing is connected then.
         """
         held = self._ssh_sessions.get(pod.id)
         if held is not None:
@@ -2230,11 +2235,9 @@ class Lium:
         if not self.config.ssh_key_path:
             raise ValueError("No SSH key configured")
 
-        # Parse SSH command
-        parts = shlex.split(pod.ssh_cmd)
-        user_host = parts[1]
-        user, host = user_host.split("@")
-        port = pod.ssh_port
+        # The same shape check the OpenSSH path (ssh_argv, pod_ssh_command) applies: only
+        # `ssh <user>@<host> [-p <port>]` reaches connect(); anything else is a ValueError here.
+        user, host, port = ssh_target(pod.ssh_cmd)
 
         # Load SSH key
         key = None
@@ -2916,8 +2919,10 @@ class Lium:
                 raise LiumError(f"Copy on pod {src_pod.name or src_pod.huid} failed: {result['stderr'].strip()}")
             return result
 
-        if not dst_pod.ssh_cmd or not dst_pod.host:
+        if not dst_pod.ssh_cmd:
             raise ValueError(f"No SSH for destination pod {dst_pod.name or dst_pod.huid}")
+        # the hop from the source pod is told the same user, host and port this client validated
+        dst_user, dst_host, dst_port = ssh_target(dst_pod.ssh_cmd)
 
         # The key pair is made here, not on the source pod: whatever the source prints is never
         # what the destination authorises (bounty report 6, DAH-3511).
@@ -2969,11 +2974,11 @@ class Lium:
                         f"{pin_copy['stderr'].strip()}"
                     )
                 host_key_opts = f"-o StrictHostKeyChecking=yes -o UserKnownHostsFile={key_path}.known_hosts"
-            ssh_opts = f"ssh -i {key_path} -p {dst_pod.ssh_port} {host_key_opts} -o LogLevel=ERROR"
+            ssh_opts = f"ssh -i {key_path} -p {dst_port} {host_key_opts} -o LogLevel=ERROR"
             rsync_cmd = (
                 f"rsync {shlex.join(self.rsync_options(bwlimit=bwlimit, exclude=exclude, delete=delete))} "
                 f"-e {shlex.quote(ssh_opts)} {shlex.quote(src_path)} "
-                f"{shlex.quote(f'{dst_pod.username}@{dst_pod.host}:{dst_path}')}"
+                f"{shlex.quote(f'{dst_user}@{dst_host}:{dst_path}')}"
             )
             result = self.exec(src_pod, command=rsync_cmd)
             if not result["success"]:
