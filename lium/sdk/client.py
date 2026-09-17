@@ -1,6 +1,7 @@
 """Lium SDK - Clean, Unix-style SDK for GPU pod management."""
 
 import getpass
+import hashlib
 import ipaddress
 import os
 import posixpath
