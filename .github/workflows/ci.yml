@@ -310,16 +310,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    # One live suite at a time repo-wide: two suites on one account would sweep each other's pods (the cleanup step
-    # below removes every e2e-… pod it sees), so this group must stay repo-wide, never per PR. `queue: max` makes the
-    # group a queue: up to 100 jobs wait as `pending`, served first-in-first-out by the time each started waiting
-    # (GitHub: the order is not guaranteed, since when a job starts waiting varies); only a job past the cap of 100
-    # is cancelled. Without it (the default, `queue: single`) the group held ONE pending job and cancelled it when a
-    # third PR pushed, so any push on any PR turned another PR's e2e-live red as "cancelled" for a job that never
-    # ran (three PRs in one night, 9 Sep 2026). `cancel-in-progress` is left at its default (false): `true` cannot be
-    # combined with `queue: max`, and superseding pushes on the SAME PR are already cancelled — run and all, this job
-    # included — by the workflow-level group at the top, keyed per PR. A waiting job is `pending` (yellow, not red)
-    # and holds no runner, so timeout-minutes covers the suite alone.
+    # The group stays repo-wide, never per PR: two suites on one account would sweep each other's pods (the cleanup
+    # step below removes every e2e-… pod it sees). `queue: max` queues the waiting jobs as `pending`; the default
+    # (`queue: single`) keeps one pending job and cancels it when another PR's job arrives. `cancel-in-progress: true`
+    # cannot be combined with `queue: max`; a newer push on the same PR is cancelled by the workflow-level group.
     concurrency:
       group: e2e-live-staging
       queue: max
