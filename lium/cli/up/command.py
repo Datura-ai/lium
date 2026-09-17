@@ -212,8 +212,9 @@ def up_command(
     NODE_ID: Node UUID, HUID, or index from last 'lium ls'.
     If not provided, the filters pick the node and the pick is printed before renting.
     With --gpu the backend chooses: the cheapest $/GPU·h node matching the filters
-    (one GPU unless -c) with ≥ 100 Mbps ingress, rented in the same call; a pick taken
-    meanwhile falls through to the next node at or below the confirmed price. Without
+    (one GPU unless -c) with no download floor, so a node 'lium ls --gpu X' shows is
+    not skipped, rented in the same call; a pick taken meanwhile falls through to the
+    next node at or below the confirmed price. Without
     --gpu (or on an older backend) row 1 of 'lium ls' with the same filters is rented:
     one rule for both commands, cheapest $/GPU·h first, nodes without a price last.
     \b

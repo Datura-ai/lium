@@ -215,3 +215,6 @@ def test_help_states_the_one_rule():
     assert "row 1 of 'lium ls' with the same filters" in result.output
     assert "optimal" not in result.output
     assert "best node" not in result.output
+    # option A (17 Sep): the --gpu path filters like `ls` too; the help no longer promises a floor
+    assert "no download floor" in result.output
+    assert "100 Mbps" not in result.output

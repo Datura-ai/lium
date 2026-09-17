@@ -8,7 +8,6 @@ from lium.cli.actions import ActionResult
 from lium.sdk import ExecutorInfo, Template, PodInfo, Lium, LiumError
 from lium.sdk.client import RENT_BY_SPEC
 from lium.cli.utils import (
-    MIN_DOWNLOAD_MBPS,
     _api_error_data,
     resolve_executor_indices,
     get_pytorch_template_id,
@@ -50,15 +49,16 @@ class ResolveExecutorAction:
                 )
         elif gpu and lium.supports(RENT_BY_SPEC):
             # The backend picks: one dry-run call instead of listing the fleet here. The same
-            # spec, capped at the price shown, rents in RentPodAction (DAH-3047).
+            # spec, capped at the price shown, rents in RentPodAction (DAH-3047). The spec
+            # carries the command's filters and nothing else: no download floor, so a node
+            # `ls --gpu X` shows is never skipped here, and the server's cheapest $/GPU·h key
+            # is the one `ls` sorts on (DAH-2980, Mikhail 17 Sep: option A).
             spec = {
                 "gpu_type": gpu,
                 "gpu_count": count or 1,
                 "country": country,
                 "min_ports": ports,
                 "min_cpus": min_cpus,
-                # server-side floor for the --gpu pick; the ls-row-1 path below applies none
-                "min_download_mbps": MIN_DOWNLOAD_MBPS,
             }
             spec = {key: value for key, value in spec.items() if value is not None}
             try:
