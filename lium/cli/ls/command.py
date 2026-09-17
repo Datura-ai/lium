@@ -3,6 +3,7 @@
 import json
 from typing import Optional, List
 import click
+from rich.markup import escape
 
 from lium.sdk import Lium, ExecutorInfo
 from lium.cli import ui
@@ -36,6 +37,20 @@ def ls_store_executor(gpu_type: Optional[str] = None) -> List[ExecutorInfo]:
 @click.option("--max-price", "max_price", type=float, metavar="USD", help="Maximum price per GPU-hour, e.g. 2.50")
 @click.option("--tier", type=click.Choice(["spot", "secure"]), help="Only spot (reclaimable) or secure nodes")
 @click.option("--min-cpus", "min_cpus", type=int, help="Minimum CPU thread count, e.g. 32 (the CPUs column)")
+@click.option(
+    "--nvlink",
+    is_flag=True,
+    default=False,
+    help="Only nodes whose GPUs are all joined by NVLink (Link column NV#). Nodes with no topology report yet are excluded.",
+)
+@click.option(
+    "--min-download",
+    "--min-ingress",
+    "min_download_mbps",
+    type=float,
+    default=None,
+    help="Minimum Download (Mbps) a node must report; nodes with no figure are excluded.",
+)
 @click.option("--lat", type=float, help="Latitude for distance filtering")
 @click.option("--lon", type=float, help="Longitude for distance filtering")
 @click.option("--max-distance", "max_distance", type=int, help="Maximum distance in miles from --lat/--lon")
@@ -71,6 +86,8 @@ def ls_command(
     max_price: Optional[float],
     tier: Optional[str],
     min_cpus: Optional[int],
+    nvlink: bool,
+    min_download_mbps: Optional[float],
 ):
     """List available GPU nodes.
 
@@ -82,6 +99,10 @@ def ls_command(
     before the hardware specs). Nodes under 100 Mbps download are never ★.
     --sort picks another key.
 
+    Link shows how the GPUs of a node are wired to each other (NV18 = NVLink with
+    18 links, PCIe/SYS = PCIe only, worst class shown); it is "—" until the node's
+    validator reports it.
+
     \b
     Examples:
       lium ls --gpu H100 --count 8
@@ -91,7 +112,10 @@ def ls_command(
     """
     output_format = resolve_output_format(output_format, json_output)
 
-    _, error = validation.validate(limit, lat, lon, max_distance, min_cuda_version, min_vram_gb, max_price, min_cpus)
+    _, error = validation.validate(
+        limit, lat, lon, max_distance, min_cuda_version,
+        min_vram_gb=min_vram_gb, max_price=max_price, min_cpus=min_cpus, min_download_mbps=min_download_mbps,
+    )
     if error:
         raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
     filters = node_filters.NodeFilters(
@@ -112,6 +136,8 @@ def ls_command(
         "max_distance": max_distance,
         "min_cuda_version": min_cuda_version,
         "min_cpus": min_cpus,
+        "nvlink": nvlink,
+        "min_download_mbps": min_download_mbps,
     }
 
     action = GetExecutorsAction()
@@ -131,13 +157,31 @@ def ls_command(
             ui.error(f"No nodes match {node_filters.describe(filters)}")
             ui.info(f"Tip: loosen a filter, or {ui.styled('lium ls --gpu ' + gpu_type if gpu_type else 'lium ls', 'success')} to see everything")
             return
+        known = lium.unknown_gpu_type(gpu_type) if gpu_type else None
+        if known is not None:
+            ui.error(f"No GPU type matches '{escape(gpu_type)}'")
+            ui.info(f"Types on the marketplace: {', '.join(known)}")
+            ui.info(f"Tip: {ui.styled('lium ls --gpu RTX4090', 'success')} {ui.styled('# or just 4090', 'dim')}")
+            return
+        if nvlink or min_download_mbps is not None:
+            wanted = [w for w in (
+                "NVLink between every GPU pair" if nvlink else None,
+                f"Download ≥ {min_download_mbps:g} Mbps" if min_download_mbps is not None else None,
+            ) if w]
+            ui.error(f"No available node reports {' and '.join(wanted)}")
+            # each filter's rule, as the help text states it: --nvlink needs a topology report; --min-download
+            # judges the Download (Mbps) column
+            rules = [r for r in (
+                "--nvlink excludes nodes with no topology report yet" if nvlink else None,
+                "--min-download judges the Download (Mbps) column" if min_download_mbps is not None else None,
+            ) if r]
+            if nvlink:
+                tail = f"Drop the filter and check on the pod: {ui.styled('nvidia-smi topo -m', 'success')}"
+            else:
+                tail = "Drop the filter or lower the floor"
+            ui.info(f"{'; '.join(rules)}. {tail}")
+            return
         if gpu_type:
-            known = lium.unknown_gpu_type(gpu_type)
-            if known is not None:
-                ui.error(f"No GPU type matches '{gpu_type}'")
-                ui.info(f"Types on the marketplace: {', '.join(known)}")
-                ui.info(f"Tip: {ui.styled('lium ls --gpu RTX4090', 'success')} {ui.styled('# or just 4090', 'dim')}")
-                return
             ui.error(f"All {gpu_type} GPUs are currently rented out")
             ui.info(f"Tip: {ui.styled('lium ls', 'success')}")
         else:

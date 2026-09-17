@@ -72,6 +72,11 @@ def _executor() -> SimpleNamespace:
         docker_in_docker=False,
         max_cuda_version=12.8,
         tier="secure",
+        # DAH-2924: the interconnect fields `ls`/`describe` JSON now carry; None = the node has not reported them
+        interconnect=None,
+        nvlink=None,
+        link=None,
+        p2p=None,
     )
 
 

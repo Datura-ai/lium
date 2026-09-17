@@ -41,6 +41,10 @@ def _executor(huid: str, price: float, country: str = "United States") -> Simple
         docker_in_docker=True,
         max_cuda_version=13.0,
         tier="spot",
+        interconnect=None,
+        nvlink=None,
+        link=None,
+        p2p=None,
     )
 
 
@@ -88,7 +92,7 @@ def test_80_columns_keeps_index_id_config_price_and_country(monkeypatch):
     assert "0.40" in output and "12.50" in output
     assert "0…" not in output and "1…" not in output
     assert "United States" in output
-    assert "8 more columns hidden — widen the terminal or use --format json" in output   # CPUs joined the table (DAH-2981)
+    assert "9 more columns hidden — widen the terminal or use --format json" in output   # CPUs (DAH-2981) and Link (DAH-2924) joined the table
     assert all(len(line) <= 80 for line in output.splitlines())
 
 
@@ -98,7 +102,7 @@ def test_120_columns_adds_download_and_vram_before_the_rest(monkeypatch):
 
     assert header == ["Id", "Config", "Tier", "$/GPU·h", "Location", "VRAM (Gb)", "Download (Mbps)"]
     assert "1224" in output and "80" in output
-    assert "6 more columns hidden" in output   # CPUs joined the table (DAH-2981)
+    assert "7 more columns hidden" in output   # CPUs (DAH-2981) and Link (DAH-2924) joined the table
     assert all(len(line) <= 120 for line in output.splitlines())
 
 
@@ -125,10 +129,10 @@ def test_fit_columns_keeps_the_core_set_and_fits_the_width(width):
 
 def test_fit_columns_drops_in_priority_order():
     """A wider terminal never loses a column a narrower one had, and the optional columns
-    present are always the first N of the priority list (Tier, Download, VRAM, Max CUDA,
+    present are always the first N of the priority list (Tier, Download, VRAM, Link, Max CUDA,
     Upload, RAM, CPUs, Disk free, Ports) — a swap of two priorities fails here."""
     by_priority = [h for h, *_ in sorted((c for c in display._COLUMNS if c[2] is not None), key=lambda c: c[2])]
-    assert by_priority == ["Tier", "Download (Mbps)", "VRAM (Gb)", "Max CUDA", "Upload (Mbps)", "RAM (Gb)", "CPUs", "Disk free (Gb)", "Ports"]
+    assert by_priority == ["Tier", "Download (Mbps)", "VRAM (Gb)", "Link", "Max CUDA", "Upload (Mbps)", "RAM (Gb)", "CPUs", "Disk free (Gb)", "Ports"]
     previous: set = set()
     for width in range(60, 220):
         shown, hidden = display.fit_columns(width)
