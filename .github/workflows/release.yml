@@ -107,7 +107,7 @@ jobs:
       with:
         fetch-depth: 0
 
-    - uses: astral-sh/setup-uv@v6
+    - uses: astral-sh/setup-uv@v7
 
     # the build image has no git (Dockerfile.build): the version hatch-vcs derives from the tags here is handed in
     - name: Build Linux bundle in Docker
