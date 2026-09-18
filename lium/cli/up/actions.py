@@ -2,11 +2,10 @@ from typing import Callable, Dict, List, Optional
 import re
 import time
 
-import paramiko
-
 from lium.cli.actions import ActionResult
 from lium.sdk import ExecutorInfo, Template, PodInfo, Lium, LiumError
 from lium.sdk.client import RENT_BY_SPEC
+from lium.sdk.client import paramiko  # the lazy stand-in (DAH-3053): `paramiko.SSHException` below resolves when the except runs, not at import
 from lium.cli.utils import (
     _api_error_data,
     resolve_executor_indices,
@@ -378,7 +377,6 @@ _GPU_LINE = re.compile(r"^GPU \d+:", re.MULTILINE)
 # connection is retried for about this long before the check is given up.
 SSH_RETRY_SECONDS = 90
 SSH_RETRY_INTERVAL = 5
-SSH_RETRY_ERRORS = (OSError, EOFError, paramiko.SSHException)
 
 
 def parse_visible_gpu_count(stdout: str) -> Optional[int]:
@@ -444,7 +442,7 @@ class VerifyGpuCountAction:
             try:
                 result = lium.exec(pod, command=VISIBLE_GPU_COUNT_COMMAND)
                 break
-            except SSH_RETRY_ERRORS as exc:
+            except (OSError, EOFError, paramiko.SSHException) as exc:  # resolved here, not at import
                 last_error = exc
                 if attempt + 1 < attempts:
                     sleep(SSH_RETRY_INTERVAL)

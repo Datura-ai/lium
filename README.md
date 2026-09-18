@@ -441,6 +441,30 @@ lium fund -w default -a 1.5        # Fund with specific wallet and amount
 lium fund -w mywal -a 0.5 -y       # Skip confirmation
 ```
 
+### `lium ls --format json` fields
+
+One object per node, sorted as the table is; the names are stable and pinned by `test/test_ls_speed.py`:
+
+| field | meaning |
+|---|---|
+| `index` | row number, what `lium up <index>` takes |
+| `id`, `huid` | node UUID (what the API wants) and its human id (`lium up <huid>`) |
+| `config`, `gpu_type`, `gpu_count`, `machine_name` | `8×H100`, `H100`, `8`, `NVIDIA H100 80GB HBM3` |
+| `price_per_gpu_hour`, `price_per_hour` | USD per GPU-hour and for the whole node |
+| `country`, `country_code`, `city` | country name, ISO code, city |
+| `vram_gb`, `ram_gb`, `cpu_count` | per-GPU VRAM (GiB), host RAM (GiB), CPU threads |
+| `disk_gb`, `disk_total_gb` | free and total host disk (GiB) |
+| `upload_mbps`, `download_mbps` | the backend's effective speeds |
+| `available_ports` | ports free for `--ports` |
+| `docker_in_docker` | sysbox runtime, i.e. `docker run` works inside the pod |
+| `is_pareto` | the ★ mark |
+| `max_cuda_version` | highest CUDA the driver supports |
+| `tier` | `secure` or `spot` (reclaimable) |
+| `link`, `nvlink`, `p2p` | the Link column (`NV18` = NVLink with 18 links per GPU, `PCIe/SYS` = the worst PCIe class), `true` when every GPU pair is on NVLink, `true` when every pair passed the P2P check; `null` until the node's validator has reported its topology |
+| `interconnect` | the validator's topology object: pair and link counts, `pcie_class`, `p2p`; on the listing it has no `matrix` (the GPU x GPU table is in `lium describe <pod>`) |
+
+The listing asks for `GET /executors?view=summary`, about 1 KB per node instead of about 8.6 KB. `link`, `nvlink`, `p2p` and `interconnect` need lium-platform#522 deployed; until then the summary view carries neither key and the four fields are `null`. `Lium.ls(view="full")` returns the whole validator scrape in `ExecutorInfo.specs`.
+
 ## Features
 
 - **Dual Interface**: Same package ships both the `lium` CLI and a Python SDK (`lium.sdk.Lium` + `@lium.machine` decorator)
