@@ -249,17 +249,19 @@ def up_command(
     NODE_ID: Node UUID, HUID, or index from last 'lium ls'.
     If not provided, the filters pick the node and the pick is printed before renting.
     With --gpu the backend chooses: the cheapest $/GPU·h node matching the filters
-    (one GPU unless -c) with ≥ 100 Mbps ingress, rented in the same call; a pick taken
-    meanwhile falls through to the next node at or below the confirmed price. Without
-    --gpu (or on an older backend) the cheapest ★ optimal node of 'lium ls' is rented.
+    (one GPU unless -c) with no download floor, so a node 'lium ls --gpu X' shows is
+    not skipped, rented in the same call; a pick taken meanwhile falls through to the
+    next node at or below the confirmed price. Without
+    --gpu (or on an older backend) row 1 of 'lium ls' with the same filters is rented:
+    one rule for both commands, cheapest $/GPU·h first, nodes without a price last.
     \b
     Examples:
       lium up cosmic-hawk-f2                # Create pod on specific node
       lium up 1                             # Create pod on node #1 from last ls
-      lium up --gpu H200                    # Auto-select cheapest optimal H200 node
-      lium up --gpu A6000 -c 2              # Auto-select cheapest optimal 2×A6000 node
+      lium up --gpu H200                    # Auto-select cheapest H200 node
+      lium up --gpu A6000 -c 2              # Auto-select cheapest 2×A6000 node
       lium up cosmic-hawk-f2 -c 1           # Rent 1 GPU of a splittable multi-GPU node
-      lium up --country US                  # Auto-select cheapest optimal node in US
+      lium up --country US                  # Row 1 of 'lium ls --country US'
       lium up --gpu H200 --country FR       # Combine multiple filters
       lium up --gpu H100 --min-cpus 32      # Only nodes with at least 32 CPU threads
       lium up --ports 5                     # Auto-select with minimum 5 ports
@@ -420,8 +422,12 @@ def up_command(
         ui.info(
             f"Selected {ui.styled(executor.huid, 'id')} "
             f"({gpu_count}×{executor.gpu_type}{', ' + country if country else ''}) "
-            f"at ${price_per_hour:.2f}/h — cheapest of {result.data['candidates']} "
-            f"{'matching' if spec else 'optimal'} node(s)"
+            f"at ${price_per_hour:.2f}/h — "
+            + (
+                f"cheapest of {result.data['candidates']} matching node(s)"
+                if spec
+                else f"row 1 of 'lium ls' with these filters ({result.data['candidates']} listed)"
+            )
         )
 
     def _show_estimate(est_secs, dl_speed, img_gb, is_slow, warning_msg):
