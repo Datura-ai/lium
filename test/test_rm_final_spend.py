@@ -131,6 +131,18 @@ def test_rm_json_carries_the_spend_fields(monkeypatch):
     }]
 
 
+def test_rm_json_flag_is_an_alias_for_format_json(monkeypatch):
+    """`lium rm x --json` was a usage error (exit 2) while `ps`, `ls`, `spend` and `templates` took the alias
+    (lium#252 review, 15 Sep 2026). Same document as `--format json`, and the flag stays out of --help."""
+    alias, _ = _run_rm(monkeypatch, _pod(), "--json")
+    spelled, _ = _run_rm(monkeypatch, _pod(), "--format", "json")
+
+    assert alias.exit_code == 0, alias.output
+    assert json.loads(alias.output) == json.loads(spelled.output)
+    help_text = CliRunner().invoke(cli, ["rm", "--help"]).output
+    assert "--format" in help_text and "--json" not in help_text
+
+
 def test_rm_json_on_a_workspace_server_keeps_stdout_one_document(monkeypatch):
     """On a server with workspaces (main since lium#183) `rm` prints a `Workspace: …` context line before it acts.
     With --format json that line must go to stderr: `lium rm … --format json | jq` reads stdout alone, and a

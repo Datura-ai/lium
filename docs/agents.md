@@ -26,7 +26,7 @@ SSH: the CLI and SDK use `LIUM_SSH_KEY_PATH` if set, else `[ssh] key_path` in `~
 
 Success: the JSON result is on **stdout**, exit code 0.
 
-Failure on a renter command that takes `--json` (`exec`, `describe`, `balance`, `whoami`, `audit`, `cp`, `init`; `fund`, `signup`, `topup currencies`, `topup create`, `keys create`, `keys list`, `workspaces list` and `workspaces members` too): stdout is empty, **stderr** holds one JSON object, the exit code is non-zero:
+Failure on a renter command that takes `--json` (`up`, `exec`, `describe`, `balance`, `whoami`, `audit`, `cp`, `init`; `fund`, `signup`, `topup currencies`, `topup create`, `keys create`, `keys list`, `workspaces list` and `workspaces members` too): stdout is empty, **stderr** holds one JSON object, the exit code is non-zero:
 
 ```json
 {"ok": false, "error": {"code": "pod_not_found", "message": "No pods match targets: train-1", "hint": "Run 'lium ps' to list pods; a name, huid, id or 1-based index is accepted", "exit_code": 5}}
@@ -83,15 +83,13 @@ lium ls --gpu H100 --count 1 --format json | jq -r '.[0].huid'
 
 ### Rent it
 
-`lium up` has no JSON output, so name the pod yourself and read it back from `lium ps`:
+`lium up --json` prints the ready pod as one JSON document on stdout, `{"pod": {…}}` with the keys of one `lium ps --format json` row (plus `termination_time` when `--ttl`, `--until` or `--budget` set one), and returns instead of opening a shell; progress lines go to stderr:
 
 ```bash
-NAME="job-$(date +%s)"
-lium up "$NODE" --name "$NAME" --ttl 4h --yes --no-ssh
-POD=$(lium ps --format json | jq -r --arg n "$NAME" '.[] | select(.name==$n) | .huid')
+POD=$(lium up "$NODE" --ttl 4h --yes --json | jq -r '.pod.huid')
 ```
 
-`--yes` skips the price confirmation, `--no-ssh` returns instead of opening a shell, `--ttl` is the safety net. `up` waits until SSH is reachable before returning. Check the GPU count yourself before spending on the job:
+`--yes` skips the price confirmation (behind a pipe it cannot be asked, and `up` fails with `confirmation_required` before renting), `--json` implies `--no-ssh`, `--ttl` is the safety net. `up` waits until SSH is reachable before printing. When `up` fails after the rent landed (`pod_not_ready`, `api_timeout`, …), the envelope's `data.pod_id` / `data.pod_name` name the pod that bills: `lium rm` it, do not run `up` again. Check the GPU count yourself before spending on the job:
 
 ```bash
 lium exec "$POD" --json "nvidia-smi -L | wc -l"    # must equal gpu_count from `lium ps --format json`
@@ -196,9 +194,7 @@ trap 'lium rm "$POD" --yes >/dev/null 2>&1 || true' EXIT
 set -euo pipefail
 
 NODE=$(lium ls --gpu H100 --count 1 --format json | jq -r '.[0].huid')
-NAME="job-$(date +%s)"
-lium up "$NODE" --name "$NAME" --ttl 4h --yes --no-ssh
-POD=$(lium ps --format json | jq -r --arg n "$NAME" '.[] | select(.name==$n) | .huid')
+POD=$(lium up "$NODE" --ttl 4h --yes --json | jq -r '.pod.huid')
 trap 'lium rm "$POD" --yes >/dev/null 2>&1 || true' EXIT
 
 lium rsync "$POD" ./project /root/project

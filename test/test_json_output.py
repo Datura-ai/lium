@@ -173,7 +173,7 @@ def test_ps_json_alias_is_hidden_from_help(fake_lium):
     assert "--json" not in result.output
 
 
-@pytest.mark.parametrize("command", ["ps", "ls", "templates", "balance", "describe"])
+@pytest.mark.parametrize("command", ["ps", "ls", "templates", "balance", "describe", "up"])
 def test_help_mentions_the_machine_readable_format(fake_lium, command):
     result = _invoke([command, "--help"])
 

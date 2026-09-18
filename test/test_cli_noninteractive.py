@@ -83,7 +83,7 @@ def test_confirm_names_the_flag_the_caller_gave_it(monkeypatch):
 
 def test_confirm_still_asks_a_human(monkeypatch):
     _terminal(monkeypatch, attached=True)
-    monkeypatch.setattr(ui.Confirm, "ask", lambda message, default=False: True)
+    monkeypatch.setattr(ui.Confirm, "ask", lambda message, default=False, **kwargs: True)
 
     assert ui.confirm("Proceed?") is True
 

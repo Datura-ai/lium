@@ -426,6 +426,40 @@ def _render_human_error(message: str, hint: str, request_id: str | None = None) 
         console.dim(escape(f"request_id: {request_id}"))
 
 
+@contextmanager
+def console_on_stderr():
+    """Every Rich line written inside (spinners, notes, warnings, prompts) goes to stderr.
+
+    A command invoked with ``--json`` promises one JSON document on stdout. ``up``
+    narrates what it does through ``console`` (the pick, the rent, the wait, the price
+    prompt); that narration still has a reader, a person tailing stderr, so under
+    ``--json`` it moves there instead of being dropped. Rich resolves ``sys.stderr`` at
+    write time, so the switch also holds under a test runner that swaps the streams.
+    (``rm --format json`` keeps its few lines off stdout with per-call ``on_stderr``/``quiet``
+    flags instead; it has three, ``up`` has about twenty and eight spinners.)
+    """
+    previous = console.stderr
+    console.stderr = True
+    try:
+        yield
+    finally:
+        console.stderr = previous
+
+
+def narrate_on_stderr_under_json(func):
+    """Decorator: run the command inside :func:`console_on_stderr` when it got ``--json``.
+
+    Sits under ``handle_errors``: the JSON error envelope already goes to stderr on its own.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if kwargs.get("json_output"):
+            with console_on_stderr():
+                return func(*args, **kwargs)
+        return func(*args, **kwargs)
+    return wrapper
+
+
 def resolve_output_format(output_format: Optional[str], json_output: bool) -> str:
     """The format a command should render: ``--json`` is an alias for ``--format json``.
 
@@ -485,17 +519,23 @@ def _classify_sdk_error(error: LiumError) -> tuple[str, int]:
     return "lium_error", EXIT_API_ERROR
 
 
-def sdk_error_failure(error: LiumError, data: dict | None = None) -> CliFailure:
+def sdk_error_failure(error: LiumError, data: dict | None = None, *, note: str = "") -> CliFailure:
     """The failure ``handle_errors`` raises for an SDK error, with ``data`` attached.
 
     For a command that caught the error to finish its report first (``whoami``) and must still fail
     with the same code, exit status and hint as every other command — plus the report as ``data``.
     Like ``handle_errors``, it prefers the API's own code, hint and request_id when the
     server sent them (DAH-3057).
+
+    ``note`` is appended to the message: what the caller knows and the error does not (``up``: that
+    the volume it created is kept), so the text reader learns it too, not only the ``data`` reader.
     """
     code, exit_code = _classify_sdk_error(error)
     merged = {**(_api_error_data(error) or {}), **(data or {})} or None
-    return CliFailure(error.code or code, str(error), exit_code, data=merged, hint=error.hint)
+    message = str(error)
+    if note and not message.endswith((".", "!", "?")):
+        message += "."  # API messages carry no full stop; the note is a sentence of its own
+    return CliFailure(error.code or code, message + note, exit_code, data=merged, hint=error.hint)
 
 
 def _api_error_data(e: LiumError) -> dict | None:
