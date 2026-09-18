@@ -81,8 +81,8 @@ load_dotenv()
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # checked with fullmatch: `$` would let a trailing newline through
 # HTTP methods that are safe to repeat after a lost response; see ``Lium._request``.
 IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-# `request_same_origin` in `.utils` follows redirects for every HTTP path in this package (DAH-3543);
-# `_MAX_REDIRECTS` stays as the name the tests read.
+# `request_same_origin` in `.utils` follows redirects for the credential-bearing HTTP paths of this package — renter SDK,
+# provider portal, signup (DAH-3543); `_MAX_REDIRECTS` stays as the name the tests read.
 _MAX_REDIRECTS = MAX_REDIRECTS
 
 
