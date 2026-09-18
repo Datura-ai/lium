@@ -64,6 +64,23 @@ copying ``/app/dist/lium`` out of the image to ``dist/lium``:
 
    python3 scripts/linux_bundle_report.py --bundle dist/lium --image lium-build:local
 
+How the Linux bundle is built in CI
+-----------------------------------
+
+``Dockerfile.build`` copies ``pyproject.toml`` and ``uv.lock`` and runs
+``uv sync --frozen --no-install-project`` before it copies the source, so the
+dependency layer is reused by every build whose lockfile did not change; the
+source ``COPY``, the project install and PyInstaller are the only steps a code
+change reruns. ``ci.yml`` and ``release.yml`` build with
+``docker/build-push-action`` on a ``docker-container`` builder and keep the
+layers in the GitHub Actions cache (``type=gha``, one scope per asset:
+``linux-bundle-lium-linux-amd64``, ``linux-bundle-lium-linux-arm64``), so a
+PR push after the first one starts from cached layers; a cache export the
+service refuses does not fail the build (``ignore-error=true``). The context
+excludes ``.git``, ``dist``, ``build``, ``.venv`` and ``**/__pycache__``
+(``.dockerignore``); the version is handed in as ``LIUM_VERSION`` because the
+image has no git.
+
 What the macOS bundles ship
 ---------------------------
 
