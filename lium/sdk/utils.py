@@ -197,8 +197,10 @@ def with_retry(max_attempts: int = 3, delay: float = 1.0, exceptions: tuple = TR
 
 # Redirects (DAH-3543). `requests` drops only `Authorization` when a redirect changes host: a key in `X-API-KEY`, a
 # portal Bearer token and a 307/308 body (the signup password) travel on to whatever host a `Location` names. Every
-# HTTP path in this package sends with `allow_redirects=False` and lets `request_same_origin` decide: a redirect that
-# keeps scheme, host and port is followed (at most MAX_REDIRECTS hops); any other raises LiumError.
+# credential-bearing HTTP path in this package (renter SDK, provider portal, signup) sends with `allow_redirects=False`
+# and lets `request_same_origin` decide: a redirect that keeps scheme, host and port is followed (at most MAX_REDIRECTS
+# hops); any other raises LiumError. The two device-auth polls in `lium/cli/init/auth.py` carry no credential and keep
+# `requests`' default.
 REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 MAX_REDIRECTS = 5
 
