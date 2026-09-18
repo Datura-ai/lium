@@ -22,7 +22,7 @@ from decimal import Decimal
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Callable, Dict, Generator, List, Optional, Sequence, Tuple, Union
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import paramiko
 import requests
@@ -58,10 +58,12 @@ from .models import (
 )
 from .ssh_key_cache import fingerprint, load_cache, save_cache
 from .utils import (
+    MAX_REDIRECTS,
     extract_gpu_type,
     generate_huid,
     gpu_short_matches,
     parse_api_timestamp,
+    request_same_origin,
     spend_cap_deadline,
     with_retry,
 )
@@ -79,35 +81,10 @@ load_dotenv()
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # checked with fullmatch: `$` would let a trailing newline through
 # HTTP methods that are safe to repeat after a lost response; see ``Lium._request``.
 IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-# Redirect statuses ``Lium._request_once`` follows itself, and how many hops before it gives up.
-_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
-_MAX_REDIRECTS = 5
+# `request_same_origin` in `.utils` follows redirects for every HTTP path in this package (DAH-3543);
+# `_MAX_REDIRECTS` stays as the name the tests read.
+_MAX_REDIRECTS = MAX_REDIRECTS
 
-
-def _redirect_location(resp: Any) -> Optional[str]:
-    """The ``Location`` of a redirect response, or ``None`` for anything else (including test doubles without headers)."""
-    if getattr(resp, "status_code", None) not in _REDIRECT_CODES:
-        return None
-    headers = getattr(resp, "headers", None) or {}
-    location = headers.get("Location") or headers.get("location")
-    return str(location) if location else None
-
-
-def _origin(url: str) -> str:
-    """``scheme://host[:port]`` of ``url``, the part a redirect must keep for the API key to travel with it."""
-    parts = urlparse(url)
-    scheme = parts.scheme.lower()
-    try:
-        port = parts.port or {"https": 443, "http": 80}.get(scheme, "")
-    except ValueError:  # a port that is not a number: keep the netloc as written so it never equals a real origin
-        return f"{scheme}://{parts.netloc.lower()}"
-    return f"{scheme}://{(parts.hostname or '').lower()}:{port}"
-
-
-def _host_label(url: str) -> str:
-    """``scheme://host[:port]`` as written in ``url``, for error text (the key itself is never in a message)."""
-    parts = urlparse(url)
-    return f"{parts.scheme}://{parts.netloc}"
 
 # Public API key for the pay API (pay-tao-api-v2). Single source of truth so the
 # literal is not re-typed across every pay-API call site.
@@ -601,41 +578,15 @@ class Lium:
         url = f"{base_url or self.config.base_url}/{endpoint.lstrip('/')}"
         request_headers = headers or self.headers
         timeout = kwargs.pop("timeout", 30)
-        kwargs.pop("allow_redirects", None)
-        # Redirects are followed here, not by `requests`: `requests` drops only `Authorization` when the
-        # host changes, so the key in `X-API-KEY` (and a 307/308 body) would be replayed to whatever host a
+        # Redirects are followed by `request_same_origin`, not by `requests`: `requests` drops only `Authorization`
+        # when the host changes, so the key in `X-API-KEY` (and a 307/308 body) would be replayed to whatever host a
         # `Location` names. Only a redirect that keeps scheme, host and port is followed (ticket-0260 report 7).
-        for _hop in range(_MAX_REDIRECTS + 1):
-            resp = requests.request(
-                method, url, headers=request_headers, timeout=timeout, allow_redirects=False, **kwargs
-            )
-            location = _redirect_location(resp)
-            if location is None:
-                break
-            close = getattr(resp, "close", None)
-            if callable(close):
-                close()
-            try:
-                next_url = urljoin(url, location)
-                other_origin = _origin(next_url) != _origin(url)
-            except ValueError as exc:  # a `Location` that does not parse as a URL
-                raise LiumError(f"{_host_label(url)} redirected {method.upper()} to a Location that is not a URL") from exc
-            if other_origin:
-                raise LiumError(
-                    f"{_host_label(url)} redirected {method.upper()} {urlparse(url).path} to {_host_label(next_url)}; "
-                    "the API key is sent only to the configured API host, so the request was not repeated there"
-                )
-            # the method rewrite `requests` applies: 303 and 302 turn anything but HEAD into a GET, 301 only a POST;
-            # a rewritten request carries no body. The `Location` already holds the query, so `params` is not re-added.
-            upper = method.upper()
-            if (resp.status_code in (302, 303) and upper != "HEAD") or (resp.status_code == 301 and upper == "POST"):
-                method = "GET"
-                for body_key in ("json", "data", "files"):
-                    kwargs.pop(body_key, None)
-            kwargs.pop("params", None)
-            url = next_url
-        else:
-            raise LiumError(f"{_host_label(url)} redirected {method.upper()} more than {_MAX_REDIRECTS} times")
+        resp = request_same_origin(
+            lambda m, u, **kw: requests.request(m, u, headers=request_headers, timeout=timeout, **kw),
+            method,
+            url,
+            **kwargs,
+        )
         try:
             self._raise_for_status(resp, key=self.config.api_key_description)
         except Exception:

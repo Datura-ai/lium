@@ -418,3 +418,45 @@ def test_ssh_setup_creates_the_ssh_directory_when_missing(tmp_path, monkeypatch)
     assert result.ok, result.error
     assert (tmp_path / ".ssh" / "id_ed25519").exists()
     assert stored["ssh.key_path"] == str(tmp_path / ".ssh" / "id_ed25519")
+
+
+# ---------------------------------------------------------------------------
+# Redirects (DAH-3543 follow-up): signup follows only same-origin redirects. Before this change `requests`
+# followed any `Location`, and a 307 carried the e-mail and password to the other host.
+
+
+class RedirectResponse(FakeResponse):
+    def __init__(self, status_code: int, location: str):
+        super().__init__(status_code, {})
+        self.headers = {"Location": location}
+
+
+def test_signup_sends_without_requests_own_redirect_following(monkeypatch, stored_config, ssh_setup_ok):
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(kwargs)
+        return FakeResponse(200, {"api_key": "sk_inline"})
+
+    monkeypatch.setattr(signup_actions.requests, "post", fake_post)
+    result = signup_actions.SignupAction("ada@example.com", "pw-for-this-test", "Ada").execute({})
+    assert result.ok
+    assert calls[0]["allow_redirects"] is False
+
+
+def test_signup_refuses_a_redirect_to_another_host_and_keeps_the_password_there(
+    monkeypatch, stored_config, ssh_setup_ok
+):
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(url)
+        return RedirectResponse(307, "https://evil.example/users")
+
+    monkeypatch.setattr(signup_actions.requests, "post", fake_post)
+    result = signup_actions.SignupAction("ada@example.com", "pw-for-this-test", "Ada").execute({})
+    assert not result.ok
+    assert calls == [f"{signup_actions.base_url()}/users"], "nothing was sent to the redirect target"
+    assert "evil.example" in result.error
+    assert "pw-for-this-test" not in result.error  # the message names hosts, never the credential
+    assert result.data.get("account_may_exist") is True

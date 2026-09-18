@@ -7,10 +7,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Callable, Optional, TypeVar
+from urllib.parse import urljoin, urlparse
 
 import requests
 
-from .exceptions import LiumRateLimitError, LiumServerError
+from .exceptions import LiumError, LiumRateLimitError, LiumServerError
 
 F = TypeVar("F", bound=Callable[..., object])
 
@@ -194,4 +195,82 @@ def with_retry(max_attempts: int = 3, delay: float = 1.0, exceptions: tuple = TR
     return decorator
 
 
-__all__ = ["generate_huid", "extract_gpu_type", "expand_gpu_shorthand", "normalize_gpu_short", "gpu_short_matches", "GPU_TYPE_ALIASES", "with_retry"]
+# Redirects (DAH-3543). `requests` drops only `Authorization` when a redirect changes host: a key in `X-API-KEY`, a
+# portal Bearer token and a 307/308 body (the signup password) travel on to whatever host a `Location` names. Every
+# HTTP path in this package sends with `allow_redirects=False` and lets `request_same_origin` decide: a redirect that
+# keeps scheme, host and port is followed (at most MAX_REDIRECTS hops); any other raises LiumError.
+REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
+MAX_REDIRECTS = 5
+
+
+def redirect_location(resp: object) -> Optional[str]:
+    """The ``Location`` of a redirect response, or ``None`` for anything else (including test doubles without headers)."""
+    if getattr(resp, "status_code", None) not in REDIRECT_CODES:
+        return None
+    headers = getattr(resp, "headers", None) or {}
+    location = headers.get("Location") or headers.get("location")
+    return str(location) if location else None
+
+
+def origin(url: str) -> str:
+    """``scheme://host[:port]`` of ``url``, the part a redirect must keep for credentials to travel with it."""
+    parts = urlparse(url)
+    scheme = parts.scheme.lower()
+    try:
+        port = parts.port or {"https": 443, "http": 80}.get(scheme, "")
+    except ValueError:  # a port that is not a number: keep the netloc as written so it never equals a real origin
+        return f"{scheme}://{parts.netloc.lower()}"
+    return f"{scheme}://{(parts.hostname or '').lower()}:{port}"
+
+
+def host_label(url: str) -> str:
+    """``scheme://host[:port]`` as written in ``url``, for error text (a credential is never in a message)."""
+    parts = urlparse(url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def request_same_origin(
+    send: Callable[..., requests.Response], method: str, url: str, **kwargs
+) -> requests.Response:
+    """Send ``send(method, url, allow_redirects=False, **kwargs)`` and follow only same-origin redirects.
+
+    ``send`` is ``requests.request``, a ``Session.request`` or a test double with that signature. The method
+    rewrite is the one ``requests`` applies (302/303 turn anything but HEAD into a GET, 301 only a POST; a rewritten
+    request carries no body); the ``Location`` already holds the query, so ``params`` is not re-added. A redirect
+    to another origin, a ``Location`` that is not a URL, or more than ``MAX_REDIRECTS`` hops raise ``LiumError``
+    naming the two hosts and never the credential.
+    """
+    kwargs.pop("allow_redirects", None)
+    for _hop in range(MAX_REDIRECTS + 1):
+        resp = send(method, url, allow_redirects=False, **kwargs)
+        location = redirect_location(resp)
+        if location is None:
+            return resp
+        close = getattr(resp, "close", None)
+        if callable(close):
+            close()
+        try:
+            next_url = urljoin(url, location)
+            other_origin = origin(next_url) != origin(url)
+        except ValueError as exc:  # a `Location` that does not parse as a URL
+            raise LiumError(f"{host_label(url)} redirected {method.upper()} to a Location that is not a URL") from exc
+        if other_origin:
+            raise LiumError(
+                f"{host_label(url)} redirected {method.upper()} {urlparse(url).path} to {host_label(next_url)}; "
+                "the API key is sent only to the configured API host, so the request was not repeated there"
+            )
+        upper = method.upper()
+        if (resp.status_code in (302, 303) and upper != "HEAD") or (resp.status_code == 301 and upper == "POST"):
+            method = "GET"
+            for body_key in ("json", "data", "files"):
+                kwargs.pop(body_key, None)
+        kwargs.pop("params", None)
+        url = next_url
+    raise LiumError(f"{host_label(url)} redirected {method.upper()} more than {MAX_REDIRECTS} times")
+
+
+__all__ = [
+    "generate_huid", "extract_gpu_type", "expand_gpu_shorthand", "normalize_gpu_short", "gpu_short_matches",
+    "GPU_TYPE_ALIASES", "with_retry", "REDIRECT_CODES", "MAX_REDIRECTS", "redirect_location", "origin", "host_label",
+    "request_same_origin",
+]
