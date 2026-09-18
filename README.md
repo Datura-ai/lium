@@ -529,7 +529,7 @@ the flag to pass:
 export LIUM_API_KEY=...            # no browser login is attempted without a terminal
 lium init --api-key $KEY           # or save the key once, without a browser
 lium up --gpu H100 -y --no-ssh     # -y: rent without the confirmation prompt
-lium rm my-pod -y                  # -y on every destructive command
+lium rm my-pod -y                  # -y on every destructive command; a piped rm without it exits 2 and removes nothing
 lium fund -w default -a 1.5 -y     # values that would be prompted for must be passed as options
 ```
 
