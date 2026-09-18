@@ -30,7 +30,8 @@ from lium.provider.errors import (
     ProviderPortalContractError,
     ProviderServerError,
 )
-from lium.sdk.utils import with_retry
+from lium.sdk.exceptions import LiumError
+from lium.sdk.utils import request_same_origin, with_retry
 
 logger = logging.getLogger("lium.provider.portal_http")
 
@@ -122,14 +123,23 @@ class PortalHTTP:
                 headers["Authorization"] = f"Bearer {token}"
 
         try:
-            response = self._session.request(
-                method=method,
-                url=url,
+            # Same-origin redirects only (DAH-3543): `requests` would replay the Bearer token's request
+            # body and every non-Authorization header to whatever host a `Location` names.
+            response = request_same_origin(
+                lambda m, u, **kw: self._session.request(method=m, url=u, **kw),
+                method,
+                url,
                 headers=headers,
                 params=params,
                 json=json_body,
                 timeout=self._timeout,
             )
+        except LiumError as e:
+            raise ProviderError(
+                str(e),
+                code=PORTAL_REQUEST_REJECTED,
+                context={"url": url, "method": method},
+            ) from e
         except requests.RequestException as e:
             # Network-level failure: with_retry will retry; on the final
             # attempt the exception bubbles up. Wrap into ProviderError.
