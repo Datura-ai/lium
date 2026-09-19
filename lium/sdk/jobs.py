@@ -29,8 +29,6 @@ import shlex
 import time
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-import paramiko
-
 from .exceptions import LiumError
 from .models import PodInfo
 
@@ -39,6 +37,18 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 DEFAULT_JOB_DIR = "/workspace/logs"
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def _ssh_exception() -> type:
+    """``paramiko.SSHException``, imported when an exec fails rather than with the CLI.
+
+    Importing the CLI must not load paramiko (DAH-3053); ``client.py`` keeps it lazy
+    and so does this module — by the time an exec raises, ``ssh_connection`` has
+    imported it anyway.
+    """
+    import paramiko
+
+    return paramiko.SSHException
 
 
 def validate_job_name(name: str) -> str:
@@ -313,7 +323,7 @@ class Job:
             try:
                 stdout = self._client.exec(self.pod, command=probe, timeout=30).get("stdout", "")
                 last_error = None
-            except (OSError, LiumError, paramiko.SSHException) as exc:  # SSH not reachable right now: keep polling
+            except (OSError, LiumError, _ssh_exception()) as exc:  # SSH not reachable right now: keep polling
                 stdout, last_error = "", str(exc)
             port_open = "port open" in stdout
             status = parse_status(stdout)
