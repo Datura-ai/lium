@@ -22,6 +22,7 @@ from lium.provider.errors import (
     PORTAL_FORBIDDEN,
     PORTAL_NOT_FOUND,
     PORTAL_RATE_LIMIT,
+    PORTAL_REQUEST_REJECTED,
     PORTAL_SERVER_ERROR,
     ProviderAuthError,
     ProviderError,
@@ -29,7 +30,8 @@ from lium.provider.errors import (
     ProviderPortalContractError,
     ProviderServerError,
 )
-from lium.sdk.utils import with_retry
+from lium.sdk.exceptions import LiumError
+from lium.sdk.utils import request_same_origin, with_retry
 
 logger = logging.getLogger("lium.provider.portal_http")
 
@@ -121,14 +123,23 @@ class PortalHTTP:
                 headers["Authorization"] = f"Bearer {token}"
 
         try:
-            response = self._session.request(
-                method=method,
-                url=url,
+            # Same-origin redirects only (DAH-3543): `requests` would replay the Bearer token's request
+            # body and every non-Authorization header to whatever host a `Location` names.
+            response = request_same_origin(
+                lambda m, u, **kw: self._session.request(method=m, url=u, **kw),
+                method,
+                url,
                 headers=headers,
                 params=params,
                 json=json_body,
                 timeout=self._timeout,
             )
+        except LiumError as e:
+            raise ProviderError(
+                str(e),
+                code=PORTAL_REQUEST_REJECTED,
+                context={"url": url, "method": method},
+            ) from e
         except requests.RequestException as e:
             # Network-level failure: with_retry will retry; on the final
             # attempt the exception bubbles up. Wrap into ProviderError.
@@ -229,12 +240,36 @@ def _parse_response(
             code=PORTAL_SERVER_ERROR,
             context=context,
         )
+    if 400 <= status < 500:
+        # The portal refused the request and said why (``{"detail": "Unsupported
+        # gpu type."}``); that reason is the message, and it is not a 5xx to retry.
+        raise ProviderError(
+            f"portal rejected the request ({status}): {_portal_detail(body)}",
+            code=PORTAL_REQUEST_REJECTED,
+            context=context,
+        )
     # Anything else: treat as a generic ProviderError but keep context.
     raise ProviderError(
         f"unexpected portal status {status}",
         code=PORTAL_SERVER_ERROR,
         context=context,
     )
+
+
+def _portal_detail(body: Any) -> str:
+    """The portal's own reason for a 4xx, flattened to one line."""
+    detail = body.get("detail", body) if isinstance(body, dict) else body
+    if isinstance(detail, str):
+        flat = detail.strip()
+    elif isinstance(detail, dict):
+        flat = "; ".join(f"{k}: {v}" for k, v in detail.items())
+    elif isinstance(detail, list):
+        flat = "; ".join(
+            str(d.get("msg", d)) if isinstance(d, dict) else str(d) for d in detail
+        )
+    else:
+        flat = "" if detail is None else str(detail)
+    return flat or "no detail given"
 
 
 __all__ = ["DEFAULT_PORTAL_URL", "PortalHTTP", "TokenProvider"]

@@ -15,8 +15,38 @@ SHELLS: Dict[str, Tuple[str, str]] = {
 }
 
 
+def completion_script(shell: str) -> str:
+    """The line a shell rc file needs for `lium` tab completion."""
+    if shell not in SHELLS:
+        raise ValueError(f"Unsupported shell '{shell}'; choose one of {', '.join(SHELLS)}")
+    return SHELLS[shell][1]
+
+
+def install_completion(shell: str) -> Tuple[bool, str]:
+    """Append the completion line to the shell's rc file. Returns ``(changed, rc_path)``."""
+    config_file, script = SHELLS[shell]
+    config_path = Path(config_file).expanduser()
+    if config_path.exists() and "_LIUM_COMPLETE" in config_path.read_text():
+        return False, str(config_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with config_path.open("a") as f:
+        f.write(f"\n# Lium CLI completion\n{script}\n")
+    return True, str(config_path)
+
+
 def ensure_completion() -> None:
-    """Silently ensure shell completion is installed."""
+    """Silently ensure shell completion is installed.
+
+    Only when a person is at a terminal: a script, a CI job or an agent
+    piping `lium` must not have its rc files edited as a side effect.
+    Installs through :func:`install_completion`, the same path as
+    ``lium completion --install``, so the rc line is appended once.
+    """
+    from .interactive import is_interactive
+
+    if not is_interactive():
+        return
+
     # Check if already processed this installation
     marker_file = Path.home() / ".lium_completion_installed"
     if marker_file.exists():
@@ -26,36 +56,25 @@ def ensure_completion() -> None:
     if shell not in SHELLS:
         return
 
-    config_file, script = SHELLS[shell]
-    config_path = Path(config_file).expanduser()
-
-    # Check if already installed in shell config
     try:
-        if config_path.exists() and "_LIUM_COMPLETE" in config_path.read_text():
-            # Mark as installed to avoid future checks
-            marker_file.touch()
-            return
+        changed, rc_path = install_completion(shell)
+        # Mark as installed either way, so the rc file is not re-read on every start
+        marker_file.touch()
     except IOError:
+        return  # Silent fail
+
+    if not changed:
         return
 
-    # Install completion and notify user
-    try:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        with config_path.open("a") as f:
-            f.write(f"\n# Lium CLI completion\n{script}\n")
-        # Mark as installed
-        marker_file.touch()
+    # stderr, so a command invoked with --json still emits clean stdout
+    from rich.markup import escape
 
-        # stderr, so a command invoked with --json still emits clean stdout
-        from .utils import notice_console
-        console = notice_console()
-        console.success("✓ Shell completions have been configured for tab support")
-        console.info("✓ Please restart your terminal or run:")
-        console.info(f"  source {config_file}")
-        console.print()
-
-    except IOError:
-        pass  # Silent fail
+    from .utils import notice_console
+    console = notice_console()
+    console.success("✓ Shell completions have been configured for tab support")
+    console.info("✓ Please restart your terminal or run:")
+    console.info(f"  source {escape(str(rc_path))}")  # a `[` in $HOME is not Rich markup
+    console.print()
 
 
 @cache

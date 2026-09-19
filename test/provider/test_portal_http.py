@@ -11,6 +11,7 @@ from lium.provider.errors import (
     PORTAL_CONTRACT_DRIFT,
     PORTAL_NOT_FOUND,
     PORTAL_RATE_LIMIT,
+    PORTAL_REQUEST_REJECTED,
     PORTAL_SERVER_ERROR,
     ProviderAuthError,
     ProviderError,
@@ -133,11 +134,58 @@ def test_status_code_mapping(status: int, exc_type: type, expected_code: str) ->
     assert exc.value.context["body"] == {"detail": "boom"}
 
 
-def test_unknown_status_raises_generic_provider_error() -> None:
+def test_unmapped_4xx_is_a_rejected_request() -> None:
     http, _ = _make_http(_FakeResponse(418, {"i": "am a teapot"}))
     with pytest.raises(ProviderError) as exc:
         http.get("/teapot")
     assert exc.value.context["status"] == 418
+    assert exc.value.code == PORTAL_REQUEST_REJECTED
+
+
+def test_unknown_status_outside_4xx_5xx_raises_generic_provider_error() -> None:
+    http, _ = _make_http(_FakeResponse(600, {"i": "am not http"}))
+    with pytest.raises(ProviderError) as exc:
+        http.get("/odd")
+    assert exc.value.context["status"] == 600
+    assert exc.value.code == PORTAL_SERVER_ERROR
+    assert exc.value.message == "unexpected portal status 600"
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        ({"detail": "Unsupported gpu type."}, "Unsupported gpu type."),
+        ({"detail": {"miner": "not registered"}}, "miner: not registered"),
+        (
+            {"detail": [{"loc": ["body", "port"], "msg": "field required"}]},
+            "field required",
+        ),
+        ("plain text body", "plain text body"),
+        ({"detail": {}}, "no detail given"),
+        ("", "no detail given"),
+    ],
+)
+def test_400_is_a_rejected_request_with_the_portals_reason(body, expected) -> None:
+    # A 400 is the portal saying "your input is wrong", not a 5xx to retry:
+    # `lium provider node add --gpu-type "RTX 3090"` used to print
+    # "[PORTAL_SERVER_ERROR] unexpected portal status 400 -- Portal 5xx. Retry".
+    if isinstance(body, str):
+        # a non-JSON body: `response.json()` raises and the text is the detail
+        http, _ = _make_http(_FakeResponse(400, text=body))
+    else:
+        http, _ = _make_http(_FakeResponse(400, body))
+    with pytest.raises(ProviderError) as exc:
+        http.post("/executors", json_body={"gpu_type": "RTX 3090"})
+    assert exc.value.code == PORTAL_REQUEST_REJECTED
+    assert exc.value.message == f"portal rejected the request (400): {expected}"
+    assert "retrying the same call will not help" in exc.value.hint
+    assert "5xx" not in exc.value.hint
+    assert exc.value.context["status"] == 400
+    from lium.cli.provider._render import exit_code_for
+
+    assert exit_code_for(exc.value) == 1, (
+        "a refused request is a user error, not a portal fault (3)"
+    )
 
 
 def test_network_error_raises_provider_server_error() -> None:
@@ -165,3 +213,60 @@ def test_path_without_leading_slash_is_normalised() -> None:
     http.get("auth/me")  # no leading slash
     assert session.last_call is not None
     assert session.last_call["url"].endswith("/auth/me")
+
+
+# ---------------------------------------------------------------------------
+# Redirects (DAH-3543 follow-up): the portal transport follows only same-origin redirects. Before this change
+# `requests` followed any `Location`, replaying every non-Authorization header and a 307 body to the other host.
+
+
+class _RedirectThenOk:
+    """A session that answers the first call with a redirect and records every call."""
+
+    def __init__(self, status_code: int, location: str) -> None:
+        self._redirect = _FakeResponse(status_code, {})
+        self._redirect.headers = {"Location": location}  # type: ignore[attr-defined]
+        self.calls: list[dict] = []
+
+    def request(self, **kwargs: object) -> _FakeResponse:
+        self.calls.append(dict(kwargs))
+        if len(self.calls) == 1:
+            return self._redirect
+        return _FakeResponse(200, {"success": True, "data": {"ok": True}})
+
+
+def test_portal_requests_are_sent_without_requests_own_redirect_following() -> None:
+    http, session = _make_http(_FakeResponse(200, {}))
+    http.get("/auth/me")
+    assert session.last_call is not None
+    assert session.last_call["allow_redirects"] is False
+
+
+def test_a_redirect_to_another_host_is_refused_and_the_token_is_not_sent_there() -> None:
+    session = _RedirectThenOk(307, "https://evil.example/collect")
+    http = PortalHTTP(
+        base_url="https://portal.example.com",
+        token_provider=lambda: "jwt-token",
+        session=session,  # type: ignore[arg-type]
+    )
+    with pytest.raises(ProviderError) as exc:
+        http.post("/machines", json_body={"hotkey": "h"})
+    assert len(session.calls) == 1, "nothing was sent to the redirect target"
+    assert "evil.example" in exc.value.message
+    assert "jwt-token" not in exc.value.message
+    assert exc.value.code == "PORTAL_REQUEST_REJECTED"
+
+
+def test_a_same_origin_redirect_is_followed() -> None:
+    session = _RedirectThenOk(307, "https://portal.example.com/v2/auth/me")
+    http = PortalHTTP(
+        base_url="https://portal.example.com",
+        token_provider=lambda: "jwt-token",
+        session=session,  # type: ignore[arg-type]
+    )
+    assert http.get("/auth/me") == {"ok": True}
+    assert [c["url"] for c in session.calls] == [
+        "https://portal.example.com/auth/me",
+        "https://portal.example.com/v2/auth/me",
+    ]
+    assert session.calls[1]["headers"]["Authorization"] == "Bearer jwt-token"

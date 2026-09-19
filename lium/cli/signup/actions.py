@@ -9,6 +9,8 @@ import requests
 
 from lium.cli.actions import ActionResult
 from lium.cli.settings import config
+from lium.sdk.exceptions import LiumError
+from lium.sdk.utils import request_same_origin
 
 PASSWORD_ALPHABET = string.ascii_letters + string.digits + "!@#$%^&*-_"
 PASSWORD_LENGTH = 20
@@ -24,6 +26,11 @@ def generate_password() -> str:
 def base_url() -> str:
     # read at call time so LIUM_BASE_URL can point signup at staging, same as the SDK
     return os.getenv("LIUM_BASE_URL", DEFAULT_BASE_URL)
+
+
+def _send(method: str, url: str, **kwargs) -> requests.Response:
+    # `requests.post` / `requests.get` by name so the module-level functions stay the seam tests replace
+    return getattr(requests, method.lower())(url, **kwargs)
 
 
 def _json_object(response: requests.Response) -> dict:
@@ -116,12 +123,15 @@ class SignupAction:
 
     def _create_account(self) -> ActionResult:
         try:
-            response = requests.post(
+            # same-origin redirects only (DAH-3543): a 307 elsewhere would carry the e-mail and password there
+            response = request_same_origin(
+                _send,
+                "POST",
                 f"{base_url()}/users",
                 json={"name": self.display_name, "email": self.email, "password": self.password},
                 timeout=REQUEST_TIMEOUT,
             )
-        except requests.RequestException as e:
+        except (requests.RequestException, LiumError) as e:
             # the account is created and its mail sent inside the call, so any transport failure
             # after the request left can still leave an account behind
             return ActionResult(
@@ -148,7 +158,9 @@ class SignupAction:
 
     def _read_minted_key(self) -> str | None:
         try:
-            login_response = requests.post(
+            login_response = request_same_origin(
+                _send,
+                "POST",
                 f"{base_url()}/users/login",
                 json={"email": self.email, "password": self.password},
                 timeout=REQUEST_TIMEOUT,
@@ -158,14 +170,16 @@ class SignupAction:
             if not token:
                 return None
 
-            keys_response = requests.get(
+            keys_response = request_same_origin(
+                _send,
+                "GET",
                 f"{base_url()}/keys",
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=REQUEST_TIMEOUT,
             )
             keys_response.raise_for_status()
             api_keys = keys_response.json()
-        except (requests.RequestException, ValueError):
+        except (requests.RequestException, LiumError, ValueError):
             return None
 
         if not isinstance(api_keys, list):

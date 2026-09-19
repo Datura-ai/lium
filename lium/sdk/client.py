@@ -1,6 +1,5 @@
 """Lium SDK - Clean, Unix-style SDK for GPU pod management."""
 
-import base64
 import getpass
 import hashlib
 import ipaddress
@@ -19,12 +18,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Callable, Dict, Generator, List, Optional, Sequence, Tuple, Union
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-import paramiko
 import requests
 from dotenv import load_dotenv
 
@@ -70,10 +69,12 @@ from .models import (
 )
 from .ssh_key_cache import fingerprint, load_cache, save_cache
 from .utils import (
+    MAX_REDIRECTS,
     extract_gpu_type,
     generate_huid,
     gpu_short_matches,
     parse_api_timestamp,
+    request_same_origin,
     spend_cap_deadline,
     with_retry,
 )
@@ -91,6 +92,10 @@ load_dotenv()
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # checked with fullmatch: `$` would let a trailing newline through
 # HTTP methods that are safe to repeat after a lost response; see ``Lium._request``.
 IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# `request_same_origin` in `.utils` follows redirects for the credential-bearing HTTP paths of this package — renter SDK,
+# provider portal, signup (DAH-3543); `_MAX_REDIRECTS` stays as the name the tests read.
+_MAX_REDIRECTS = MAX_REDIRECTS
+
 
 # Public API key for the pay API (pay-tao-api-v2). Single source of truth so the
 # literal is not re-typed across every pay-API call site.
@@ -117,12 +122,6 @@ def known_hosts_path(pod: Union[PodInfo, str]) -> Path:
     pod_id = pod if isinstance(pod, str) else pod.id
     safe_id = _POD_ID_SAFE.sub("_", pod_id or "unknown")
     return Path.home() / ".lium" / "known_hosts" / safe_id
-
-
-def host_key_fingerprint(key: paramiko.PKey) -> str:
-    """``SHA256:<base64>`` as ``ssh-keygen -lf`` prints it, so a user can compare the two."""
-    digest = hashlib.sha256(key.asbytes()).digest()
-    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
 
 
 def forget_host_key(pod: Union[PodInfo, str]) -> None:
@@ -232,42 +231,31 @@ def pod_ssh_command(pod: PodInfo) -> Optional[str]:
     return shlex.join(["ssh", "-p", str(port), *options, f"{user}@{host}"])
 
 
-class _PinOnFirstUsePolicy(paramiko.MissingHostKeyPolicy):
-    """Trust-on-first-use: record the key of a pod we have never talked to.
+class _LazyModule:
+    """A module imported on first attribute access, so `paramiko.X` anywhere in this file stays lazy.
 
-    Later connections to the same pod are checked against the recorded key by
-    paramiko itself (``BadHostKeyException`` on mismatch); ``ssh_connection``
-    turns that into :class:`LiumHostKeyError`.
+    Reading an attribute imports the module and reads it there; setting or deleting one does it on
+    the module, so `monkeypatch.setattr(client.paramiko, "SSHClient", Fake)` patches paramiko itself.
     """
 
-    def missing_host_key(self, client, hostname, key):  # noqa: D401 - paramiko interface
-        client._host_keys.add(hostname, key.get_name(), key)
-        if client._host_keys_filename is not None:
-            client.save_host_keys(client._host_keys_filename)
-        fp = host_key_fingerprint(key)
-        warnings.warn(
-            f"Pinning {key.get_name()} host key {fp} for {hostname} "
-            f"(first connection to this pod; {_SSH_INSECURE_ENV}=1 disables pinning)",
-            stacklevel=2,
-        )
+    def __init__(self, name: str) -> None:
+        object.__setattr__(self, "_name", name)
+
+    def __getattr__(self, attr: str) -> Any:
+        return getattr(import_module(self._name), attr)
+
+    def __setattr__(self, attr: str, value: Any) -> None:
+        setattr(import_module(self._name), attr, value)
+
+    def __delattr__(self, attr: str) -> None:
+        delattr(import_module(self._name), attr)
 
 
-class _InsecureAcceptPolicy(paramiko.MissingHostKeyPolicy):
-    """Accept whatever key the host presents. Installed only under ``LIUM_SSH_INSECURE=1``.
-
-    This is the pre-pinning behaviour (paramiko's ``AutoAddPolicy``) spelled out:
-    the key is kept for the life of this client so the connection proceeds, nothing
-    is written to disk, and every acceptance is reported so the opt-out is never
-    silent. The default path uses :class:`_PinOnFirstUsePolicy`.
-    """
-
-    def missing_host_key(self, client, hostname, key):  # noqa: D401 - paramiko interface
-        client.get_host_keys().add(hostname, key.get_name(), key)
-        warnings.warn(
-            f"Accepting unverified {key.get_name()} host key {host_key_fingerprint(key)} for "
-            f"{hostname}: {_SSH_INSECURE_ENV}=1 disabled host key verification",
-            stacklevel=2,
-        )
+# paramiko is a quarter of the CLI's import time (about 100 ms on a pod, 450 ms on a fresh box) and only
+# ssh_connection() uses it (DAH-3053). The host-key policies that subclass it live in _hostkeys, imported
+# by ssh_connection(); these three names still resolve on this module for callers and tests (DAH-2904).
+paramiko = _LazyModule("paramiko")
+_HOSTKEY_NAMES = ("host_key_fingerprint", "_PinOnFirstUsePolicy", "_InsecureAcceptPolicy")
 
 
 def _satisfies_spec(executor: ExecutorInfo, spec: Dict[str, Any]) -> bool:
@@ -303,7 +291,9 @@ def _satisfies_spec(executor: ExecutorInfo, spec: Dict[str, Any]) -> bool:
         return False
     if spec.get("docker_in_docker") and not executor.docker_in_docker:
         return False
-    if spec.get("interconnect") == "nvlink" and (specs.get("interconnect") or {}).get("nvlink") is not True:
+    # ExecutorInfo.nvlink is the top-level verdict when the row carries one (the summary view does, lium-platform#522)
+    # and specs.interconnect.nvlink on an older full row; a summary row has no specs.interconnect at all
+    if spec.get("interconnect") == "nvlink" and executor.nvlink is not True:
         return False
     return True
 
@@ -364,6 +354,14 @@ def permission_error(
         code=code,
         **context,
     )
+
+
+def __getattr__(name: str) -> Any:
+    if name in _HOSTKEY_NAMES:
+        from . import _hostkeys
+
+        return getattr(_hostkeys, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _response_error_message(response: requests.Response) -> str:
@@ -554,6 +552,10 @@ class Lium:
         backup or pod; a repeated DELETE turns a completed removal into "not
         found". ``retry=True`` retries every transient failure, ``retry=False``
         sends exactly once, whatever the method.
+
+        A redirect is followed only to the same scheme, host and port; one that
+        points anywhere else raises ``LiumError`` instead of sending the API key
+        (and a 307/308 body) to that host.
         """
         if retry is True or (retry is None and method.upper() in IDEMPOTENT_METHODS):
             return self._request_with_retry(method, endpoint, base_url=base_url, headers=headers, **kwargs)
@@ -580,7 +582,15 @@ class Lium:
         url = f"{base_url or self.config.base_url}/{endpoint.lstrip('/')}"
         request_headers = headers or self.headers
         timeout = kwargs.pop("timeout", 30)
-        resp = requests.request(method, url, headers=request_headers, timeout=timeout, **kwargs)
+        # Redirects are followed by `request_same_origin`, not by `requests`: `requests` drops only `Authorization`
+        # when the host changes, so the key in `X-API-KEY` (and a 307/308 body) would be replayed to whatever host a
+        # `Location` names. Only a redirect that keeps scheme, host and port is followed (ticket-0260 report 7).
+        resp = request_same_origin(
+            lambda m, u, **kw: requests.request(m, u, headers=request_headers, timeout=timeout, **kw),
+            method,
+            url,
+            **kwargs,
+        )
         try:
             self._raise_for_status(resp, key=self.config.api_key_description)
         except Exception:
@@ -740,6 +750,16 @@ class Lium:
         price_per_gpu = executor_dict.get("price_per_gpu") or 0
         price_per_hour = price_per_gpu * gpu_count
 
+        # Typed top-level fields when the backend sends them; the raw specs object from an older
+        # backend otherwise, so the CLI reads the same thing either way.
+        interconnect = executor_dict.get("interconnect")
+        if not isinstance(interconnect, dict):
+            interconnect = specs.get("interconnect") if isinstance(specs.get("interconnect"), dict) else None
+        nvlink = executor_dict.get("nvlink")
+        if not isinstance(nvlink, bool):
+            nvlink = (interconnect or {}).get("nvlink")
+            nvlink = nvlink if isinstance(nvlink, bool) else None
+
         return ExecutorInfo(
             id=executor_dict.get("id", ""),
             ip=executor_dict.get("executor_ip_address", ""),
@@ -759,6 +779,8 @@ class Lium:
             max_cuda_version=executor_dict.get("max_cuda_version"),
             tier=executor_dict.get("tier"),
             available_gpu_count=_int_or_none(executor_dict, "available_gpu_count"),
+            interconnect=interconnect,
+            nvlink=nvlink,
         )
 
     def list_ssh_keys(self) -> List[SSHKey]:
@@ -1610,6 +1632,9 @@ class Lium:
         max_distance_miles: Optional[int] = None,
         min_cuda_version: Optional[float] = None,
         min_cpus: Optional[int] = None,
+        nvlink: Optional[bool] = None,
+        min_download_mbps: Optional[float] = None,
+        view: str = "summary",
     ) -> List[ExecutorInfo]:
         """List available nodes.
 
@@ -1624,11 +1649,29 @@ class Lium:
                 backward compatible, so a node with a higher driver CUDA version satisfies the requirement.
             min_cpus: Optional minimum CPU thread count (``specs.cpu.count``). Nodes that report fewer
                 CPUs, or none, are excluded.
+            nvlink: ``True`` keeps only nodes whose validator saw every GPU pair on NVLink
+                (:attr:`ExecutorInfo.nvlink`). Nodes with no verdict yet are excluded — a renter who asks
+                for NVLink must not be handed a PCIe box. ``False``/``None`` do not filter.
+            min_download_mbps: Minimum Download in Mbps, judged on
+                :attr:`ExecutorInfo.effective_download_speed_mbps` (the figure ``lium ls`` shows as
+                Download). Nodes with no figure are excluded.
+            view: ``"summary"`` (default) asks the API for the fields a listing reads — price, GPU/CPU/RAM/disk
+                headline specs, location, tier, network; an API that does not know the parameter returns the
+                full row. ``"full"`` asks for the whole validator scrape in :attr:`ExecutorInfo.specs` (docker
+                info, verified ports, per-GPU telemetry, checksums).
 
         Returns:
             A list of :class:`ExecutorInfo` objects that satisfy the filters.
         """
-        params: Dict[str, Any] = {"size": 1000}
+        # no `size`: the API applies it only together with `page`, and a bare `size` made the
+        # request miss the server's listing cache (DAH-3052)
+        params: Dict[str, Any] = {"view": view}
+        # Sent to the server (which filters when it knows the parameters) AND applied below, so the
+        # result is the same against a backend that predates them.
+        if nvlink:
+            params["nvlink"] = "true"
+        if min_download_mbps is not None:
+            params["min_download_mbps"] = min_download_mbps
         if gpu_type:
             # Try to map short GPU name to full machine name
             machine_name = self._resolve_machine_name(gpu_type)
@@ -1656,6 +1699,13 @@ class Lium:
             executors = [
                 e for e in executors
                 if e.max_cuda_version is not None and e.max_cuda_version >= min_cuda_version
+            ]
+        if nvlink:
+            executors = [e for e in executors if e.nvlink is True]
+        if min_download_mbps is not None:
+            executors = [
+                e for e in executors
+                if e.effective_download_speed_mbps is not None and e.effective_download_speed_mbps >= min_download_mbps
             ]
 
         if min_cpus is not None:
@@ -2365,6 +2415,11 @@ class Lium:
 
         Yields:
             An active ``paramiko.SSHClient``.
+
+        Raises:
+            ValueError: no ``ssh_cmd`` or no SSH key configured, or ``pod.ssh_cmd`` is not
+                ``ssh <user>@<host> [-p <port>]`` (:func:`ssh_target`, the check the
+                OpenSSH path applies). Nothing is connected then.
         """
         held = self._ssh_sessions.get(pod.id)
         if held is not None:
@@ -2377,11 +2432,11 @@ class Lium:
         if not self.config.ssh_key_path:
             raise ValueError("No SSH key configured")
 
-        # Parse SSH command
-        parts = shlex.split(pod.ssh_cmd)
-        user_host = parts[1]
-        user, host = user_host.split("@")
-        port = pod.ssh_port
+        from ._hostkeys import _InsecureAcceptPolicy, _PinOnFirstUsePolicy, host_key_fingerprint
+
+        # The same shape check the OpenSSH path (ssh_argv, pod_ssh_command) applies: only
+        # `ssh <user>@<host> [-p <port>]` reaches connect(); anything else is a ValueError here.
+        user, host, port = ssh_target(pod.ssh_cmd)
 
         # Load SSH key
         key = None
@@ -3332,11 +3387,15 @@ class Lium:
     ) -> Dict[str, Any]:
         """Copy files from one pod to another over SSH, without passing through this machine.
 
-        Pod-to-pod links are far faster than relaying through the caller. The
-        source pod gets a one-off ed25519 key, its public half is added to the
-        destination pod's ``authorized_keys`` for the duration of the copy, the
-        source runs ``rsync`` straight to the destination, and both halves are
-        removed again whatever happened. The source verifies the destination with
+        Pod-to-pod links are far faster than relaying through the caller. This
+        client makes a one-off ed25519 key, places the private half on the
+        source pod (sent over the exec session's stdin, never on a command line)
+        and adds the public half to the destination pod's ``authorized_keys``
+        for the duration of the copy; the source runs ``rsync`` straight to the
+        destination, and both halves are removed again whatever happened. The
+        source pod's output never decides what the destination trusts: the key
+        the destination authorises is the one this client generated, and the
+        revoke removes exactly that key. The source verifies the destination with
         the host key this client pinned for it (``~/.lium/known_hosts/<pod id>``,
         written by the grant connection), copied next to the transfer key; no pin
         means no copy (``LIUM_SSH_INSECURE=1`` accepts any key, as everywhere).
@@ -3366,20 +3425,25 @@ class Lium:
                 raise LiumError(f"Copy on pod {src_pod.name or src_pod.huid} failed: {result['stderr'].strip()}")
             return result
 
-        if not dst_pod.ssh_cmd or not dst_pod.host:
+        if not dst_pod.ssh_cmd:
             raise ValueError(f"No SSH for destination pod {dst_pod.name or dst_pod.huid}")
+        # the hop from the source pod is told the same user, host and port this client validated
+        dst_user, dst_host, dst_port = ssh_target(dst_pod.ssh_cmd)
 
+        # The key pair is made here, not on the source pod: whatever the source prints is never
+        # what the destination authorises (bounty report 6, DAH-3511).
+        private_key, public_key = self.transfer_keypair()
         key_path = f"/tmp/lium-cp-{uuid.uuid4().hex[:12]}"
-        keygen = self.exec(
+        placed = self.exec(
             src_pod,
-            command=f"ssh-keygen -q -t ed25519 -N '' -f {key_path} && cat {key_path}.pub",
+            command=f"umask 077 && printf '%s' \"${self.TRANSFER_KEY_ENV}\" > {key_path}",
+            env={self.TRANSFER_KEY_ENV: private_key},
         )
-        if not keygen["success"]:
+        if not placed["success"]:
             raise LiumError(
-                f"Could not create a transfer key on pod {src_pod.name or src_pod.huid}: "
-                f"{keygen['stderr'].strip() or keygen['stdout'].strip()}"
+                f"Could not place the transfer key on pod {src_pod.name or src_pod.huid}: "
+                f"{placed['stderr'].strip() or placed['stdout'].strip()}"
             )
-        public_key = keygen["stdout"].strip().splitlines()[-1]
         marker = f"lium-cp-{uuid.uuid4().hex[:12]}"
         authorized_line = f"{public_key} {marker}"
 
@@ -3416,11 +3480,11 @@ class Lium:
                         f"{pin_copy['stderr'].strip()}"
                     )
                 host_key_opts = f"-o StrictHostKeyChecking=yes -o UserKnownHostsFile={key_path}.known_hosts"
-            ssh_opts = f"ssh -i {key_path} -p {dst_pod.ssh_port} {host_key_opts} -o LogLevel=ERROR"
+            ssh_opts = f"ssh -i {key_path} -p {dst_port} {host_key_opts} -o LogLevel=ERROR"
             rsync_cmd = (
                 f"rsync {shlex.join(self.rsync_options(bwlimit=bwlimit, exclude=exclude, delete=delete))} "
                 f"-e {shlex.quote(ssh_opts)} {shlex.quote(src_path)} "
-                f"{shlex.quote(f'{dst_pod.username}@{dst_pod.host}:{dst_path}')}"
+                f"{shlex.quote(f'{dst_user}@{dst_host}:{dst_path}')}"
             )
             result = self.exec(src_pod, command=rsync_cmd)
             if not result["success"]:
@@ -3432,7 +3496,7 @@ class Lium:
             return result
         finally:
             if authorized:
-                revoke = self.revoke_transfer_key_command(marker)
+                revoke = self.revoke_transfer_key_command(public_key, marker)
                 self._exec_quietly(
                     dst_pod,
                     revoke,
@@ -3442,7 +3506,32 @@ class Lium:
                         f"lium exec {dst_pod.huid} {shlex.quote(revoke)}"
                     ),
                 )
-            self._exec_quietly(src_pod, f"rm -f {key_path} {key_path}.pub {key_path}.known_hosts")
+            self._exec_quietly(src_pod, f"rm -f {key_path} {key_path}.known_hosts")
+
+    # The private half of the transfer key travels to the source pod in this variable, over the
+    # exec session's stdin (see ``exec(env=...)``): ``ps`` on the pod never shows it.
+    TRANSFER_KEY_ENV = "LIUM_CP_PRIVATE_KEY"
+
+    @staticmethod
+    def transfer_keypair() -> Tuple[str, str]:
+        """A fresh ed25519 key pair for one copy, as OpenSSH text.
+
+        Returns:
+            ``(private_key, public_key)``: the private key in OpenSSH PEM form
+            (what ``ssh -i`` reads) and the public key as one ``ssh-ed25519
+            <base64>`` line with no comment.
+        """
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        key = Ed25519PrivateKey.generate()
+        private_key = key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.OpenSSH, serialization.NoEncryption()
+        ).decode("ascii")
+        public_key = key.public_key().public_bytes(
+            serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH
+        ).decode("ascii")
+        return private_key, public_key
 
     @staticmethod
     def _pinned_host_key_lines(pod: PodInfo) -> str:
@@ -3478,10 +3567,12 @@ class Lium:
         )
 
     @classmethod
-    def revoke_transfer_key_command(cls, marker: str) -> str:
-        """The remote line that drops the authorized_keys entry tagged ``marker``.
+    def revoke_transfer_key_command(cls, public_key: str, marker: str) -> str:
+        """The remote line that drops every authorized_keys entry carrying ``public_key``.
 
-        The scratch file carries the marker, so two ``cp`` runs into the same
+        The match is the key itself (``ssh-ed25519 <base64>``, unique to one
+        ``cp`` run), not the comment: a line that lost its marker still goes.
+        The scratch file carries the ``marker``, so two ``cp`` runs into the same
         pod never share one, and the result is written back with ``cat >``
         (the way lium-io removes keys) rather than ``mv``: the file keeps its
         mode and a second run's half-written scratch file can never replace it.
@@ -3491,7 +3582,7 @@ class Lium:
         """
         scratch = f"~/.ssh/authorized_keys.{marker}"
         return cls._under_transfer_key_lock(
-            f"( grep -vF {shlex.quote(marker)} ~/.ssh/authorized_keys > {scratch} || [ $? -eq 1 ] ) "
+            f"( grep -vF {shlex.quote(public_key)} ~/.ssh/authorized_keys > {scratch} || [ $? -eq 1 ] ) "
             f"&& cat {scratch} > ~/.ssh/authorized_keys; rc=$?; rm -f {scratch}; exit $rc"
         )
 

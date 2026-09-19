@@ -176,6 +176,13 @@ def build_manifest(pod: PodInfo, detail: Optional[dict] = None) -> dict:
             "model": executor.gpu_model or None,
             "driver_version": executor.driver_version or None,
             "max_cuda_version": executor.max_cuda_version,
+            # How the GPUs are wired to each other, as the node's validator saw it with
+            # `nvidia-smi topo -m`. `link` is the one-word answer for a TP/FSDP job; `interconnect`
+            # carries the counts and the GPU x GPU matrix. None until the node reports it.
+            "link": executor.link,
+            "nvlink": executor.nvlink,
+            "p2p": executor.p2p,
+            "interconnect": executor.interconnect,
         } if executor else None,
         "machine": {
             "executor_id": executor.id,
@@ -183,6 +190,8 @@ def build_manifest(pod: PodInfo, detail: Optional[dict] = None) -> dict:
             "location": executor.location,
             "tier": executor.tier,
             "docker_in_docker": executor.docker_in_docker,
+            "download_mbps": executor.effective_download_speed_mbps,
+            "upload_mbps": executor.effective_upload_speed_mbps,
         } if executor else None,
         "ports": _ports_section(pod.ports),
         "access": {
@@ -227,6 +236,42 @@ def _format_ports(ports_section: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_link(gpu: dict) -> str:
+    """One line a renter can act on: the link class, the P2P verdict, the pair counts."""
+    if gpu.get("link") is None:
+        return "— (not reported by the node's validator yet; run nvidia-smi topo -m on the pod)"
+    interconnect = gpu.get("interconnect") or {}
+    parts = ["NVLink" if gpu["nvlink"] else "PCIe"]
+    if gpu["nvlink"] and interconnect.get("nvlink_links"):
+        parts[0] += f" ×{interconnect['nvlink_links']}"
+    if not gpu["nvlink"] and interconnect.get("pcie_class"):
+        parts[0] += f" ({interconnect['pcie_class']})"
+    if interconnect.get("gpu_pairs"):
+        parts.append(f"{interconnect.get('nvlink_pairs') or 0}/{interconnect['gpu_pairs']} pairs on NVLink")
+    if gpu.get("p2p") is True:
+        parts.append("P2P ok")
+    elif gpu.get("p2p") is False:
+        parts.append("no P2P (NCCL needs NCCL_P2P_DISABLE=1)")
+    return ", ".join(parts)
+
+
+def _format_topology(interconnect: dict | None) -> str | None:
+    """The GPU x GPU matrix as `nvidia-smi topo -m` prints it, one row per GPU; None when absent."""
+    matrix = (interconnect or {}).get("matrix")
+    if not matrix or not isinstance(matrix, list):
+        return None
+    width = max((len(str(cell)) for row in matrix for cell in row), default=1)
+    return "\n".join(
+        f"GPU{index} " + " ".join(f"{str(cell):>{width}}" for cell in row) for index, row in enumerate(matrix)
+    )
+
+
+def _format_net(machine: dict) -> str:
+    """The speed-test figures in Mbps, ``↓300 ↑480 Mbps (speed test)``; a dash for a missing one."""
+    down, up = machine.get("download_mbps"), machine.get("upload_mbps")
+    return f"↓{int(down) if down else '—'} ↑{int(up) if up else '—'} Mbps (speed test)"
+
+
 def build_manifest_table(manifest: dict) -> Table:
     """Human-readable rendering of the same manifest the --json flag emits."""
     table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 1))
@@ -249,9 +294,15 @@ def build_manifest_table(manifest: dict) -> Table:
         table.add_row("GPU", config)
         table.add_row("Driver", gpu["driver_version"] or "—")
         table.add_row("Max CUDA", str(gpu["max_cuda_version"]) if gpu["max_cuda_version"] else "—")
+        if (gpu["count"] or 0) > 1 or gpu.get("link") is not None:
+            table.add_row("Link", _format_link(gpu))
+            topology = _format_topology(gpu.get("interconnect"))
+            if topology:
+                table.add_row("Topology", topology)
     if machine:
         table.add_row("IP", machine["ip"] or "—")
         table.add_row("Tier", machine["tier"] or "—")
+        table.add_row("Net", _format_net(machine))
     if template:
         table.add_row("Template", template["name"] or "—")
         table.add_row("Image", template["docker_image"] or "—")

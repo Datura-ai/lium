@@ -82,6 +82,14 @@ def _maybe_gi_from_big_number(n: Any) -> str:
     return str(round(v / (1024 * 1024)))
 
 
+def _link_display(exe: ExecutorInfo) -> str:
+    """Interconnect cell: NV# in success, PCIe/<class> in warning, dash when the node has not reported it."""
+    link = exe.link
+    if link is None:
+        return "—"
+    return console.get_styled(link, "success" if exe.nvlink else "warning")
+
+
 def _first_gpu_detail(specs: Optional[Dict]) -> Dict:
     """Get first GPU detail from specs."""
     if not specs:
@@ -159,17 +167,18 @@ _COLUMNS = [
     ("", 3, None, dict(justify="right", width=3, no_wrap=True, style="dim")),
     ("Id", 25, None, dict(justify="left", ratio=27, min_width=25, overflow="fold")),
     ("Config", 12, None, dict(justify="left", width=12, no_wrap=True)),
+    ("Link", 9, 4, dict(justify="left", width=9, no_wrap=True)),
     ("Tier", 8, 1, dict(justify="left", width=8, no_wrap=True)),
-    ("Max CUDA", 10, 4, dict(justify="right", width=10, no_wrap=True)),
+    ("Max CUDA", 10, 5, dict(justify="right", width=10, no_wrap=True)),
     ("$/GPU·h", 8, None, dict(justify="right", width=8, no_wrap=True)),
     ("Location", 13, None, dict(justify="left", ratio=15, min_width=13, overflow="fold")),
     ("VRAM (Gb)", 11, 3, dict(justify="right", width=11, no_wrap=True)),
-    ("RAM (Gb)", 10, 6, dict(justify="right", width=10, no_wrap=True)),
-    ("CPUs", 5, 7, dict(justify="right", width=5, no_wrap=True)),
-    ("Disk free (Gb)", 14, 8, dict(justify="right", width=14, no_wrap=True)),
-    ("Upload (Mbps)", 14, 5, dict(justify="right", width=14, no_wrap=True)),
+    ("RAM (Gb)", 10, 7, dict(justify="right", width=10, no_wrap=True)),
+    ("CPUs", 5, 8, dict(justify="right", width=5, no_wrap=True)),
+    ("Disk free (Gb)", 14, 9, dict(justify="right", width=14, no_wrap=True)),
+    ("Upload (Mbps)", 14, 6, dict(justify="right", width=14, no_wrap=True)),
     ("Download (Mbps)", 16, 2, dict(justify="right", width=16, no_wrap=True)),
-    ("Ports", 5, 9, dict(justify="left", ratio=7, min_width=5, overflow="fold")),
+    ("Ports", 5, 10, dict(justify="left", ratio=7, min_width=5, overflow="fold")),
 ]
 _COLUMN_GAP = 2  # padding=(0, 1) on both sides of a cell, pad_edge=False
 
@@ -252,6 +261,10 @@ def compact_executor(exe: ExecutorInfo, is_pareto: bool, index: int) -> Dict[str
         "is_pareto": is_pareto,
         "max_cuda_version": exe.max_cuda_version,
         "tier": exe.tier,
+        "link": exe.link,
+        "nvlink": exe.nvlink,
+        "p2p": exe.p2p,
+        "interconnect": exe.interconnect,
         "machine_name": getattr(exe, "machine_name", None),
     }
 
@@ -340,6 +353,7 @@ def build_executors_table(
             "": str(idx),
             "Id": huid_display,
             "Config": _cfg(exe),
+            "Link": _link_display(exe),
             "Tier": _tier_display(exe),
             "Max CUDA": cuda_display,
             "$/GPU·h": console.get_styled(_money(exe.price_per_gpu), 'success'),

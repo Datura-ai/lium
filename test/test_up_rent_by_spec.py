@@ -65,8 +65,11 @@ def test_resolve_dry_runs_the_spec_instead_of_listing():
     assert result.data["executor"] is CHEAP
     assert result.data["candidates"] == 4 and result.data["price_per_hour"] == 0.30
     assert result.data["template_id"] == "tpl-default"
-    assert result.data["spec"] == {"gpu_type": "RTX4090", "gpu_count": 2, "country": "de", "min_ports": 5,
-                                   "min_download_mbps": 100.0}
+    # DAH-2980 (Mikhail, 17 Sep, option A): the spec is the command's filters and nothing else.
+    # The old head added `min_download_mbps: 100.0`, a floor `lium ls --gpu` does not apply, so
+    # the two commands could name different nodes.
+    assert result.data["spec"] == {"gpu_type": "RTX4090", "gpu_count": 2, "country": "de", "min_ports": 5}
+    assert "min_download_mbps" not in result.data["spec"]
     assert lium.rents == [{**result.data["spec"], "template_id": None, "dockerfile_content": None, "dry_run": True}]
 
 
@@ -144,7 +147,7 @@ def test_an_explicit_node_id_never_rents_by_spec():
 
 def test_rent_action_re_selects_on_the_server_capped_at_the_confirmed_price():
     lium = _SpecLium()
-    spec = {"gpu_type": "RTX4090", "gpu_count": 1, "min_download_mbps": 100.0}
+    spec = {"gpu_type": "RTX4090", "gpu_count": 1}
 
     result = RentPodAction().execute(
         {"lium": lium, "executor": CHEAP, "spec": spec, "template": SimpleNamespace(id="tpl-1"),
@@ -154,7 +157,8 @@ def test_rent_action_re_selects_on_the_server_capped_at_the_confirmed_price():
     assert result.ok and result.data["pod_id"] == "pod-uuid-1"
     assert result.data["executor"] is CHEAP and result.data["price_per_hour"] == 0.30
     (rent,) = lium.rents
-    assert rent["gpu_type"] == "RTX4090" and rent["gpu_count"] == 1 and rent["min_download_mbps"] == 100.0
+    assert rent["gpu_type"] == "RTX4090" and rent["gpu_count"] == 1
+    assert "min_download_mbps" not in rent
     assert rent["max_price_per_gpu_hour"] == 0.30
     assert rent["template_id"] == "tpl-1" and rent["name"] == "my-pod" and rent["ports"] == 5
     assert "dry_run" not in rent

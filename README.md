@@ -214,10 +214,11 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 
 - `lium signup` - Create an account from the terminal and store its API key
 - `lium init` - Initialize configuration for an existing account (API key, SSH keys); `--api-key <key>` for machines without a browser
+- `lium completion [bash|zsh|fish] [--install]` - Print or install shell tab completion
 - `lium balance` - Show the account balance (add `--format json` for machine-readable output)
 - `lium whoami` - Show which API key is in use, where it came from, and the account it belongs to
 - `lium ls [--gpu TYPE] [--count N] [--country CODE] [--min-vram GB] [--max-price USD] [--tier spot|secure] [--format json]` - List available nodes
-- `lium up [NODE_ID]` - Create a pod (NODE_ID is the HUID or UUID from `lium ls`, or its row number; or use filters like `--gpu`, `--count`, `--country`; cap it with `--ttl 6h` or `--budget 12.50`)
+- `lium up [NODE_ID]` - Create a pod (NODE_ID is the HUID or UUID from `lium ls`, or its row number; or use filters like `--gpu`, `--count`, `--country`; cap it with `--ttl 6h` or `--budget 12.50`; `--json` prints the ready pod as JSON instead of opening SSH)
 - `lium ps [--sort KEY] [--filter KEY=VALUE] [--watch N] [--wide] [--format json]` - List active pods; the `#` column is the row number `rm`/`ssh`/`exec`/`scp` accept in the same shell, for 10 minutes, and only while the pod shown on that row is still listed — the rows of the last listing, in the order shown (sorted or filtered). Use the huid in scripts.
 - `lium spend [--format json]` - Hourly burn, estimated spend per pod, balance and runway
 - `lium describe <POD>` - Full manifest of one pod: ports, GPU, template, billing, last lifecycle event (why it is REBOOT_FAILED/BROKEN) and the node's disk health (add `--json` for machine-readable output). A deleted pod can still be described by its id: you get the events the backend kept for it and the reason it went away.
@@ -228,7 +229,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium scp <POD> <LOCAL_FILE> [REMOTE_PATH]` - Copy files to pods (add `-d` to download from pods)
 - `lium rsync <POD> <LOCAL_DIR> [REMOTE_PATH]` - Sync directories to pods (`--bwlimit`, `--exclude`, `--delete`, `--progress`; resumes on re-run)
 - `lium cp <SRC_POD>:<PATH> <DST_POD>:<PATH>` - Copy files from one pod to another over SSH
-- `lium rm <POD>` - Remove/stop a pod (`--name-only` to refuse `lium ps` row numbers in scripts)
+- `lium rm <POD>` - Remove/stop a pod (`--name-only` to refuse `lium ps` row numbers in scripts; `--format json` prints what was removed with its estimated spend)
 - `lium reboot <POD>` - Reboot a pod
 - `lium audit [--pod POD] [--since 24h] [--key ID]` - Who did what to the account's pods, and when: every rent, reboot, edit and delete with the session or API key that requested it (add `--json` for machine-readable output)
 - `lium audit --account [--action pod.] [--source cli] [--since 7d] [--cursor <next_cursor>]` - The account audit log: every request that changed something (pods, keys, logins, balance, settings, team members) with the client and IP it came from; your own IPs only, 90 days (`--json` prints the page with `next_cursor`)
@@ -238,7 +239,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium topup create -a <USD> -c <COIN> -n <NETWORK>` - Top up with a stablecoin (`lium topup currencies` lists them)
 - `lium ssh-keys list|sync` - SSH public keys registered on the account
 
-`ls`, `ps`, `templates`, `balance` and `describe` all accept `--format json` (and `--json`) and print a JSON error envelope on stderr when the command fails, so the same flag works across commands in scripts.
+`ls`, `ps`, `spend`, `templates`, `balance` and `describe` all accept `--format json` (and `--json`); `rm` accepts `--format json`; `up` accepts `--json`. All of them print a JSON error envelope on stderr when the command fails, so the same flag works across commands in scripts.
 
 ### Volume Commands
 
@@ -336,6 +337,11 @@ lium ls --gpu H100
 lium ls --gpu H100 --count 8 --country US,NL --max-price 2.50
 lium ls --min-vram 80 --min-cuda 12.8 --tier secure
 lium ls --format json          # machine-readable
+
+# Multi-GPU jobs: only nodes whose GPUs are all on NVLink (Link column NV#), and a floor on
+# the Download (Mbps) column — tensor parallelism and 700 GB checkpoints behave very
+# differently on a PCIe box or a slow link that the price does not reveal
+lium ls --gpu H200 --nvlink --min-download 2000
 
 # Create pod with node index
 lium up 1 --name my-pod --yes
@@ -472,6 +478,30 @@ lium fund                           # Interactive mode
 lium fund -w default -a 1.5        # Fund with specific wallet and amount
 lium fund -w mywal -a 0.5 -y       # Skip confirmation
 ```
+
+### `lium ls --format json` fields
+
+One object per node, sorted as the table is; the names are stable and pinned by `test/test_ls_speed.py`:
+
+| field | meaning |
+|---|---|
+| `index` | row number, what `lium up <index>` takes |
+| `id`, `huid` | node UUID (what the API wants) and its human id (`lium up <huid>`) |
+| `config`, `gpu_type`, `gpu_count`, `machine_name` | `8×H100`, `H100`, `8`, `NVIDIA H100 80GB HBM3` |
+| `price_per_gpu_hour`, `price_per_hour` | USD per GPU-hour and for the whole node |
+| `country`, `country_code`, `city` | country name, ISO code, city |
+| `vram_gb`, `ram_gb`, `cpu_count` | per-GPU VRAM (GiB), host RAM (GiB), CPU threads |
+| `disk_gb`, `disk_total_gb` | free and total host disk (GiB) |
+| `upload_mbps`, `download_mbps` | the backend's effective speeds |
+| `available_ports` | ports free for `--ports` |
+| `docker_in_docker` | sysbox runtime, i.e. `docker run` works inside the pod |
+| `is_pareto` | the ★ mark |
+| `max_cuda_version` | highest CUDA the driver supports |
+| `tier` | `secure` or `spot` (reclaimable) |
+| `link`, `nvlink`, `p2p` | the Link column (`NV18` = NVLink with 18 links per GPU, `PCIe/SYS` = the worst PCIe class), `true` when every GPU pair is on NVLink, `true` when every pair passed the P2P check; `null` until the node's validator has reported its topology |
+| `interconnect` | the validator's topology object: pair and link counts, `pcie_class`, `p2p`; on the listing it has no `matrix` (the GPU x GPU table is in `lium describe <pod>`) |
+
+The listing asks for `GET /executors?view=summary`, about 1 KB per node instead of about 8.6 KB. `link`, `nvlink`, `p2p` and `interconnect` need lium-platform#522 deployed; until then the summary view carries neither key and the four fields are `null`. `Lium.ls(view="full")` returns the whole validator scrape in `ExecutorInfo.specs`.
 
 ## Features
 

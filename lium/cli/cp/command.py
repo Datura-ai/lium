@@ -38,8 +38,9 @@ def cp_command(
     """Copy files between two pods directly over SSH.
 
     The data goes pod to pod, not through this machine: a one-off key is
-    created on the source pod, authorised on the destination for the duration
-    of the copy, and removed afterwards. Both pods need rsync
+    created here, its private half placed on the source pod and its public
+    half authorised on the destination for the duration of the copy, and both
+    are removed afterwards. Both pods need rsync
     (apt-get install -y rsync); the destination also needs flock (util-linux,
     on every Ubuntu/Debian image) to serialise copies into the same pod.
 

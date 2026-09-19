@@ -2,15 +2,12 @@ from typing import Callable, Dict, List, Optional
 import re
 import time
 
-import paramiko
-
 from lium.cli.actions import ActionResult
 from lium.sdk import ExecutorInfo, Template, PodInfo, Lium, LiumError
 from lium.sdk.client import RENT_BY_SPEC
+from lium.sdk.client import paramiko  # the lazy stand-in (DAH-3053): `paramiko.SSHException` below resolves when the except runs, not at import
 from lium.cli.utils import (
-    MIN_DOWNLOAD_MBPS,
     _api_error_data,
-    calculate_pareto_frontier,
     resolve_executor_indices,
     get_pytorch_template_id,
     wait_for_pod_ready,
@@ -51,15 +48,16 @@ class ResolveExecutorAction:
                 )
         elif gpu and lium.supports(RENT_BY_SPEC):
             # The backend picks: one dry-run call instead of listing the fleet here. The same
-            # spec, capped at the price shown, rents in RentPodAction (DAH-3047).
+            # spec, capped at the price shown, rents in RentPodAction (DAH-3047). The spec
+            # carries the command's filters and nothing else: no download floor, so a node
+            # `ls --gpu X` shows is never skipped here, and the server's cheapest $/GPU·h key
+            # is the one `ls` sorts on (DAH-2980, Mikhail 17 Sep: option A).
             spec = {
                 "gpu_type": gpu,
                 "gpu_count": count or 1,
                 "country": country,
                 "min_ports": ports,
                 "min_cpus": min_cpus,
-                # the floor the Pareto path below has always applied
-                "min_download_mbps": MIN_DOWNLOAD_MBPS,
             }
             spec = {key: value for key, value in spec.items() if value is not None}
             try:
@@ -73,7 +71,7 @@ class ResolveExecutorAction:
                 if type(exc) is not LiumError:
                     raise  # auth, permission, not-found, rate-limit and server errors keep their own codes
                 # "No node matches …" (client-side) or the server's 409: the same outcome as the
-                # Pareto path's empty list below — node_selection_failed, not an API error. The
+                # ls path's empty list below — node_selection_failed, not an API error. The
                 # server's hint and request_id ride along in data (DAH-3057); the command lifts
                 # the hint out into the failure's own.
                 data = {**(_api_error_data(exc) or {}), **({"hint": exc.hint} if exc.hint else {})}
@@ -128,17 +126,18 @@ class ResolveExecutorAction:
                 return ActionResult(ok=False, data={}, error=f"No nodes available with {filter_desc}")
 
             from lium.cli.ls.command import ls_store_executor
+            from lium.cli.ls.display import sort_executors
             ls_store_executor(gpu_type=gpu)
 
-            pareto_flags = calculate_pareto_frontier(executors)
-            pareto_executors = [e for e, is_pareto in zip(executors, pareto_flags) if is_pareto]
-            candidates = pareto_executors or executors
-            # Cheapest $/GPU·h of the optimal set; min() keeps the first of a
-            # tie, so equal prices fall back to the listing order as before.
-            executor = min(candidates, key=lambda e: e.price_per_gpu or float("inf"))
+            # One rule for `ls` and `up`: the pick is row 1 of `lium ls` with the same
+            # filters, in the order `ls` prints (cheapest $/GPU·h first, unpriced last;
+            # DAH-3079). `up` ranks nothing on its own, so what the renter just saw in
+            # `ls` is what it rents. Ties keep the API's listing order, as in `ls`.
+            ordered, _ = sort_executors(executors, show_pareto=False)
+            executor = ordered[0]
             return ActionResult(
                 ok=True,
-                data={"executor": executor, "auto_selected": True, "candidates": len(candidates)},
+                data={"executor": executor, "auto_selected": True, "candidates": len(ordered)},
             )
 
         return ActionResult(ok=True, data={"executor": executor})
@@ -378,7 +377,6 @@ _GPU_LINE = re.compile(r"^GPU \d+:", re.MULTILINE)
 # connection is retried for about this long before the check is given up.
 SSH_RETRY_SECONDS = 90
 SSH_RETRY_INTERVAL = 5
-SSH_RETRY_ERRORS = (OSError, EOFError, paramiko.SSHException)
 
 
 def parse_visible_gpu_count(stdout: str) -> Optional[int]:
@@ -444,7 +442,7 @@ class VerifyGpuCountAction:
             try:
                 result = lium.exec(pod, command=VISIBLE_GPU_COUNT_COMMAND)
                 break
-            except SSH_RETRY_ERRORS as exc:
+            except (OSError, EOFError, paramiko.SSHException) as exc:  # resolved here, not at import
                 last_error = exc
                 if attempt + 1 < attempts:
                     sleep(SSH_RETRY_INTERVAL)

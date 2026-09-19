@@ -72,6 +72,11 @@ def _executor() -> SimpleNamespace:
         docker_in_docker=False,
         max_cuda_version=12.8,
         tier="secure",
+        # DAH-2924: the interconnect fields `ls`/`describe` JSON now carry; None = the node has not reported them
+        interconnect=None,
+        nvlink=None,
+        link=None,
+        p2p=None,
     )
 
 
@@ -168,7 +173,7 @@ def test_ps_json_alias_is_hidden_from_help(fake_lium):
     assert "--json" not in result.output
 
 
-@pytest.mark.parametrize("command", ["ps", "ls", "templates", "balance", "describe"])
+@pytest.mark.parametrize("command", ["ps", "ls", "templates", "balance", "describe", "up"])
 def test_help_mentions_the_machine_readable_format(fake_lium, command):
     result = _invoke([command, "--help"])
 
