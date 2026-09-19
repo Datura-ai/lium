@@ -17,12 +17,14 @@ from .exceptions import (
     PodStartError,
     RemoteExecutionError,
 )
+from .jobs import Job
 from .models import (
     BackupConfig,
     BackupLog,
     Cluster,
     ClusterOffer,
     ExecutorInfo,
+    GpuStats,
     PodInfo,
     RentResult,
     RestoreLog,
@@ -48,6 +50,8 @@ __all__ = [
     "Cluster",
     "ClusterOffer",
     "Template",
+    "GpuStats",
+    "Job",
     "VolumeInfo",
     "BackupConfig",
     "BackupLog",
