@@ -20,6 +20,15 @@
   <a href="https://discord.gg/lium">Discord</a>
 </div>
 
+<p align="center">
+  <a href="https://pypi.org/project/lium.io/"><img src="https://img.shields.io/pypi/v/lium.io?label=pypi%20lium.io" alt="PyPI: lium.io" /></a>
+  <a href="https://pypi.org/project/lium.io/"><img src="https://img.shields.io/pypi/pyversions/lium.io" alt="Python versions" /></a>
+  <a href="https://github.com/Datura-ai/lium/releases"><img src="https://img.shields.io/github/v/release/Datura-ai/lium?label=binary%20release" alt="Latest binary release" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Datura-ai/lium" alt="License: MIT" /></a>
+  <a href="https://lium.io/pricing"><img src="https://img.shields.io/badge/live%20GPU%20prices-lium.io%2Fpricing-2ea44f" alt="Live GPU prices" /></a>
+  <a href="https://github.com/Datura-ai/lium-skill"><img src="https://img.shields.io/badge/agent%20skill-Datura--ai%2Flium--skill-blue" alt="Agent skill" /></a>
+</p>
+
 ![Lium](https://github.com/user-attachments/assets/089e3a25-f246-4664-a069-1366d8357fe3)
 
 ## Installation
@@ -165,6 +174,16 @@ JSON keeps the API's raw value as `ssh_cmd`.
 - **SDK docs:** https://docs.lium.io/developers/sdk
 - **Exit codes and the JSON error envelope:** [docs/exit-codes.md](docs/exit-codes.md) — what a script or agent gets back when a command fails (`--format json`, `LIUM_OUTPUT=json`).
 - **Agents and scripts:** [docs/agents.md](docs/agents.md) — the non-interactive path end to end (env-var auth, JSON output, exit codes, `up → exec → rsync → rm`, pod gotchas).
+
+## Where Lium is listed
+
+Lium (lium.io) publishes its inventory and prices without an account — https://lium.io/pricing.json (one row per GPU model) and https://lium.io/api/public/v1/nodes (every rentable node) — and independent sites index them:
+
+- Price comparison: [rentgpu.org](https://rentgpu.org/providers/lium) · [getdeploying.com](https://getdeploying.com/lium) · [computeprices.com](https://computeprices.com/providers/lium)
+- Bittensor Subnet 51 directories: [taostats.io](https://taostats.io/subnets/51/chart) · [bittensor.ai](https://bittensor.ai/subnets/51) · [subnetalpha.ai](https://subnetalpha.ai/)
+- Packages: [PyPI `lium.io`](https://pypi.org/project/lium.io/) · [libraries.io](https://libraries.io/pypi/lium.io) · the agent skill on [skills.sh](https://skills.sh/Datura-ai/lium-skill)
+
+Running a comparison site or catalog? The two JSON feeds above are documented at https://docs.lium.io/developers/public-nodes-feed.md and need no key.
 
 ## Binary Releases
 
