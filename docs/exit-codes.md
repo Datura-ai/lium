@@ -115,7 +115,10 @@ Codes raised by the shared error handler (any command can produce them) when the
 Commands add their own codes for the failures only they can have — for example
 `up` raises `node_selection_failed`, `template_failed`, `jupyter_install_failed`,
 `unreadable_dockerfile`; `exec` raises `unreadable_script`; `rm` raises
-`removal_failed`; `fund` raises `transfer_failed`; `init` raises `api_unreachable` (3, the
+`removal_failed`; `fund` raises `transfer_failed`; `topup card` passes on the platform's own
+`CARD_AUTHENTICATION_REQUIRED`, `CARD_DECLINED`, `NO_SAVED_CARD` and `NO_DEFAULT_CARD` (3: the
+API refused the charge and the balance did not move; `data` carries `dashboard_url`, the bank's
+`decline_code` and the `payment_intent_id`); `init` raises `api_unreachable` (3, the
 key passed with `--api-key` was not checked) and `empty_api_key` (2), and its `invalid_api_key` hint says
 nothing was saved. They follow the same envelope
 and use the exit code of their family from the table above. Where re-running

@@ -146,9 +146,38 @@ class LiumInsufficientBalanceError(LiumPermissionError):
         self.available = available
 
 
+class LiumCardTopUpError(LiumError):
+    """A card top-up (``POST /payments/topup``, :meth:`Lium.topup_card`) did not charge (402).
+
+    ``code`` says why: ``CARD_AUTHENTICATION_REQUIRED`` (the bank wants a one-time confirmation
+    the API cannot show — top up once by card at ``dashboard_url``, then retry), ``CARD_DECLINED``
+    (``decline_code`` is the bank's reason), ``NO_SAVED_CARD`` or ``NO_DEFAULT_CARD``. The
+    message is the server's plain sentence; the balance did not change.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        hint: str | None = None,
+        request_id: str | None = None,
+        status: str | None = None,
+        decline_code: str | None = None,
+        dashboard_url: str | None = None,
+        payment_intent_id: str | None = None,
+    ) -> None:
+        super().__init__(message, code=code, hint=hint, request_id=request_id)
+        self.status = status
+        self.decline_code = decline_code
+        self.dashboard_url = dashboard_url
+        self.payment_intent_id = payment_intent_id
+
+
 __all__ = [
     "LiumError",
     "LiumAuthError",
+    "LiumCardTopUpError",
     "LiumRateLimitError",
     "LiumServerError",
     "LiumNotFoundError",

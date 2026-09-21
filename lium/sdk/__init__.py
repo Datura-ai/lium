@@ -6,6 +6,7 @@ from .decorators import machine
 from .exceptions import (
     ClusterNotListedError,
     LiumAuthError,
+    LiumCardTopUpError,
     LiumError,
     LiumHostKeyError,
     LiumInsufficientBalanceError,
@@ -60,6 +61,7 @@ __all__ = [
     "ClusterNotListedError",
     "LiumError",
     "LiumAuthError",
+    "LiumCardTopUpError",
     "LiumRateLimitError",
     "LiumServerError",
     "LiumNotFoundError",

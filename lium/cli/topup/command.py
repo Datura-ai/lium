@@ -10,19 +10,30 @@ import json
 
 import click
 
-from lium.sdk import Lium, LiumError
+from lium.sdk import Lium, LiumCardTopUpError, LiumError
 from lium.cli import ui
-from lium.cli.utils import handle_errors
+from lium.cli.utils import EXIT_API_ERROR, CliFailure, handle_errors
+
+# What to do next when the server's 402 carried no hint (an older server); the current server
+# sends one naming the Billing page (lium-platform errors/codes.py) and that one wins.
+_CARD_HINTS = {
+    "CARD_AUTHENTICATION_REQUIRED": "Top up once by card on the Billing page (that confirms and saves "
+                                    "the card), then retry",
+    "CARD_DECLINED": "Use another saved card (--card <pm_id>) or fix the card on the Billing page",
+    "NO_SAVED_CARD": "Add a card, or top up once by card, on the Billing page; then retry",
+    "NO_DEFAULT_CARD": "Pass --card <pm_id>, or set a default card on the Billing page",
+}
 
 
 @click.group("topup")
 def topup_command():
-    """Top up your Lium balance with a stablecoin.
+    """Top up your Lium balance with a stablecoin, or a saved card.
 
     \b
     Examples:
       lium topup currencies
       lium topup create -a 20 -c USDT -n tron
+      lium topup card -a 50
     """
 
 
@@ -100,3 +111,93 @@ def create_command(amount: float, currency: str, network: str, json_output: bool
         ui.dim(f"Expires at:      {invoice.get('expires_at')}")
     if invoice.get("hosted_invoice_url"):
         ui.dim(f"Hosted page:     {invoice.get('hosted_invoice_url')}")
+
+
+@topup_command.command("card")
+@click.option("--amount", "-a", type=float, required=True, help="Top-up amount in USD (at least $10)")
+@click.option(
+    "--card", "payment_method_id", default=None, metavar="PM_ID",
+    help="A saved card's pm_… id; omitted, the default card (or the only saved one)",
+)
+@click.option(
+    "--idempotency-key", default=None, metavar="KEY",
+    help="Repeat the command with the same key and amount within 24 h and the first charge is "
+         "returned instead of a second one being made",
+)
+@click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON")
+@handle_errors
+def card_command(amount: float, payment_method_id: str | None, idempotency_key: str | None, json_output: bool):
+    """Charge a saved card and top up the balance, with no browser (lium-platform#631, not released).
+
+    The card must already be saved on the account (a card top-up on the Billing page saves it).
+    The charge is made straight away; the balance is credited by Stripe's confirmation, usually
+    within seconds, so the balance printed here may not include it yet. The API key must hold
+    the `billing` scope: today's read / rent / manage keys are refused.
+
+    A bank that wants a one-time confirmation (3-D Secure) cannot get one through this path:
+    the command fails with CARD_AUTHENTICATION_REQUIRED and the Billing page to confirm the
+    card on; a decline fails with CARD_DECLINED and the bank's reason. Nothing is charged
+    in either case.
+
+    \b
+    Examples:
+      lium topup card -a 50
+      lium topup card -a 50 --card pm_1Abc... --json
+      lium topup card -a 50 --idempotency-key nightly-2026-09-21
+    """
+    client = Lium()
+    try:
+        result = client.topup_card(
+            amount, payment_method_id=payment_method_id, idempotency_key=idempotency_key
+        )
+    except LiumCardTopUpError as e:
+        raise card_topup_failure(e)
+
+    # Best effort: the charge is done, so a balance read that fails must not turn the command
+    # into a failure a caller would retry (and charge again).
+    try:
+        balance = client.balance()
+    except LiumError:
+        balance = None
+
+    if json_output:
+        click.echo(json.dumps({**result, "balance": balance}, sort_keys=True))
+        return
+
+    card = result.get("card") or {}
+    card_text = " ".join(part for part in [(card.get("brand") or "card").capitalize(),
+                                           f"····{card['last4']}" if card.get("last4") else ""] if part)
+    amount_usd = result.get("amount_usd", amount)
+    if result.get("status") == "processing":
+        ui.warning(f"Charging ${amount_usd:,.2f} to {card_text} — the card network has not settled it yet")
+    else:
+        ui.success(f"Charged ${amount_usd:,.2f} to {card_text}")
+    ui.info(f"Payment intent:  {result.get('payment_intent_id', '')}")
+    if balance is not None:
+        ui.info(f"Balance:         ${balance:,.2f}")
+    ui.dim("The credit lands within seconds of Stripe's confirmation; 'lium balance' shows it.")
+
+
+def card_topup_failure(error: LiumCardTopUpError) -> CliFailure:
+    """The failure for a 402 from ``POST /payments/topup``: the server's code (``CARD_DECLINED``, …)
+    and sentence, the bank's ``decline_code`` in the text, and the structured fields — ``status``,
+    ``decline_code``, ``dashboard_url``, ``payment_intent_id``, ``request_id`` — in ``data`` for a
+    machine reader. Exit 3: the API refused the call, and the balance did not change."""
+    message = str(error)
+    if error.decline_code:
+        message = f"{message.rstrip('.')} (decline_code: {error.decline_code})."
+    if error.dashboard_url:
+        message = f"{message} Billing page: {error.dashboard_url}"
+    data = {
+        key: value
+        for key, value in {
+            "status": error.status,
+            "decline_code": error.decline_code,
+            "dashboard_url": error.dashboard_url,
+            "payment_intent_id": error.payment_intent_id,
+            "request_id": error.request_id,
+        }.items()
+        if value
+    }
+    code = error.code or "card_topup_failed"
+    return CliFailure(code, message, EXIT_API_ERROR, data=data or None, hint=error.hint or _CARD_HINTS.get(code))

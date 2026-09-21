@@ -34,6 +34,7 @@ from .config import Config
 from .exceptions import (
     ClusterNotListedError,
     LiumAuthError,
+    LiumCardTopUpError,
     LiumError,
     LiumHostKeyError,
     LiumNotFoundError,
@@ -320,6 +321,36 @@ def _response_error_code(response: requests.Response) -> Optional[str]:
     error = payload.get("error") if isinstance(payload, dict) else None
     code = error.get("code") if isinstance(error, dict) else None
     return code if isinstance(code, str) and code else None
+
+
+# The 402 codes `POST /payments/topup` answers with (lium-platform services/api_card_topup.py); a 402 with any
+# other code (a spend cap, an older server) stays a plain LiumError.
+CARD_TOPUP_ERROR_CODES = frozenset(
+    {"CARD_AUTHENTICATION_REQUIRED", "CARD_DECLINED", "NO_SAVED_CARD", "NO_DEFAULT_CARD"}
+)
+
+
+def card_topup_error(response: requests.Response, **context: Optional[str]) -> LiumCardTopUpError:
+    """The exception for a card top-up 402: the server's sentence as the message, and the fields
+    of its structured body (``status``, ``decline_code``, ``dashboard_url``, ``payment_intent_id``)."""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    detail = payload.get("message") if isinstance(payload, dict) else None
+    detail = detail if isinstance(detail, dict) else {}
+
+    def text(value: Any) -> Optional[str]:
+        return value if isinstance(value, str) and value else None
+
+    return LiumCardTopUpError(
+        _response_error_message(response),
+        status=text(detail.get("status")),
+        decline_code=text(detail.get("decline_code")),
+        dashboard_url=text(detail.get("dashboard_url")),
+        payment_intent_id=text(detail.get("payment_intent_id")),
+        **context,
+    )
 
 
 def permission_error(
@@ -625,6 +656,8 @@ class Lium:
             raise LiumNotFoundError(f"Resource not found: {_response_error_message(resp)}", **context)
         if resp.status_code == 429:
             raise LiumRateLimitError("Rate limit exceeded", **context)
+        if resp.status_code == 402 and context.get("code") in CARD_TOPUP_ERROR_CODES:
+            raise card_topup_error(resp, **context)
         if 500 <= resp.status_code < 600:
             raise LiumServerError(f"Server error: {resp.status_code}", **context)
         raise LiumError(f"API error {resp.status_code}: {_response_error_message(resp)}", **context)
@@ -4331,6 +4364,45 @@ class Lium:
             "crypto_network": crypto_network,
         }
         return self._request("POST", "/tmc-pay/create-invoice", json=payload).json()
+
+    def topup_card(
+        self,
+        amount_usd: float,
+        payment_method_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Top up the balance from a saved card, with no browser (``POST /payments/topup``;
+        lium-platform#631, not released — behind a switch the team turns on).
+
+        The card must already be saved on the account (a card top-up on the Billing page
+        saves it). The charge is made off-session; the balance is credited by the same
+        Stripe webhook that credits a Checkout top-up, usually within seconds, so
+        :meth:`balance` may lag this call briefly. The key must hold the ``billing``
+        scope (or be a browser session); today's ``read`` / ``rent`` / ``manage`` keys are
+        refused with :class:`LiumPermissionError`.
+
+        Args:
+            amount_usd: At least $10, the card form's minimum.
+            payment_method_id: A saved card's ``pm_…`` id; omitted, the default card (or the
+                only saved one).
+            idempotency_key: Repeat the call with the same key and amount within 24 h and
+                the first charge is returned instead of a second one being made.
+
+        Returns:
+            ``{"status": "succeeded", "payment_intent_id", "amount_usd", "card": {"brand", "last4"}}``
+            (``status`` is ``"processing"`` in the rare case the card network has not settled yet).
+
+        Raises:
+            LiumCardTopUpError: the bank wants a confirmation (``CARD_AUTHENTICATION_REQUIRED``,
+                see ``dashboard_url``), declined the card (``CARD_DECLINED``), or no card is
+                saved / none is the default. Nothing was charged.
+        """
+        payload: Dict[str, Any] = {"amount_usd": amount_usd}
+        if payment_method_id:
+            payload["payment_method_id"] = payment_method_id
+        if idempotency_key:
+            payload["idempotency_key"] = idempotency_key
+        return self._request("POST", "/payments/topup", json=payload).json()
 
     def volumes(self) -> List[VolumeInfo]:
         """List all volumes for the current user.
