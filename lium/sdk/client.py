@@ -4418,7 +4418,7 @@ class Lium:
         if payment_method_id:
             payload["payment_method_id"] = payment_method_id
         try:
-            return self._request("POST", "/payments/topup", json=payload).json()
+            body = self._request("POST", "/payments/topup", json=payload).json()
         except (requests.RequestException, LiumServerError) as exc:
             # Stripe charges before it answers: a lost answer is not "nothing happened"
             raise LiumChargeOutcomeUnknownError(
@@ -4429,6 +4429,9 @@ class Lium:
                 code="charge_outcome_unknown",
                 request_id=getattr(exc, "request_id", None),
             ) from exc
+        # the key the charge was made under, whether or not the server echoes it back
+        body.setdefault("idempotency_key", key)
+        return body
 
     def volumes(self) -> List[VolumeInfo]:
         """List all volumes for the current user.

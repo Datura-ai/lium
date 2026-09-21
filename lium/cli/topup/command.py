@@ -9,6 +9,7 @@ provider confirms the transfer — the transfer itself happens outside Lium.
 import json
 
 import click
+from rich.markup import escape
 
 from lium.sdk import Lium, LiumCardTopUpError, LiumChargeOutcomeUnknownError, LiumError
 from lium.cli import ui
@@ -186,9 +187,9 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     amount_usd = result.get("amount_usd", amount)
     ui.success(f"Charged ${amount_usd:,.2f} to {card_text}")
     if result.get("payment_intent_id"):
-        ui.info(f"Payment intent:  {result['payment_intent_id']}")
+        ui.info(f"Payment intent:  {escape(str(result['payment_intent_id']))}")
     if result.get("idempotency_key"):
-        ui.info(f"Idempotency key: {result['idempotency_key']}")
+        ui.info(f"Idempotency key: {escape(str(result['idempotency_key']))}")
     if balance is not None:
         ui.info(f"Balance:         ${balance:,.2f}")
     ui.dim("The credit lands within seconds of Stripe's confirmation; 'lium balance' shows it.")

@@ -140,6 +140,21 @@ def test_a_202_processing_is_returned_not_raised(client):
 
 
 @responses.activate
+def test_a_body_without_the_key_gets_the_key_the_charge_was_made_under(client):
+    """An older platform's 202 does not echo `idempotency_key`; the SDK made (or was given) the key the charge
+    went out under, so the result carries it anyway — the CLI never prints `--idempotency-key None`."""
+    responses.post(TOPUP, json={k: v for k, v in PROCESSING.items() if k != "idempotency_key"}, status=202)
+
+    result = client.topup_card(50, idempotency_key="nightly-1")
+    assert result["idempotency_key"] == "nightly-1"
+
+    responses.post(TOPUP, json={k: v for k, v in CHARGED.items() if k != "idempotency_key"})
+    result = client.topup_card(50)
+    sent = json.loads(responses.calls[1].request.body)["idempotency_key"]
+    assert result["idempotency_key"] == sent and len(sent) == 32
+
+
+@responses.activate
 def test_authentication_required_is_a_card_topup_error_with_the_dashboard_url(client):
     responses.post(TOPUP, json=AUTHENTICATION_REQUIRED, status=402)
 
@@ -302,6 +317,17 @@ def test_card_charges_and_prints_the_card_and_the_balance(fake_lium):
     assert "Balance:         $61.25" in result.output
     assert "'lium balance' shows it" in _text(result)
     assert fake_lium.calls == [(50.0, None, None)]
+
+
+def test_card_prints_the_servers_values_literally_not_as_rich_markup(fake_lium):
+    """The intent id and the key go through Rich: a value with brackets prints as it is, not as a style tag."""
+    fake_lium.charge = {**CHARGED, "payment_intent_id": "pi_[bold]x", "idempotency_key": "[red]run-1[/red]"}
+
+    result = _run("-a", "50")
+
+    assert result.exit_code == 0, result.output
+    assert "Payment intent:  pi_[bold]x" in result.output
+    assert "Idempotency key: [red]run-1[/red]" in result.output
 
 
 def test_card_passes_the_named_card_and_the_idempotency_key(fake_lium):
