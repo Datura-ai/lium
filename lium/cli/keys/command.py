@@ -124,14 +124,15 @@ def keys_list_command(workspace: Optional[str], json_output: bool):
     for column in ("Name", "Scopes", "Budget", "Pods", "Created", "Last used", "ID"):
         table.add_column(column, overflow="fold")
     for key in keys:
+        # every cell is the server's text, printed literally: a `[` in a name or scope is not markup
         table.add_row(
             Text(key.name),
-            ",".join(key.scopes) or "—",
-            budget_cell(key),
-            _pods_cell(key),
+            Text(",".join(key.scopes) or "—"),
+            Text(budget_cell(key)),
+            Text(_pods_cell(key)),
             format_date(key.created_at) if key.created_at else "—",
             format_date(key.last_used) if key.last_used else "—",
-            key.id,
+            Text(key.id),
         )
     ui.info(f"API keys of {escape(target.name)}  ({len(keys)} total)")
     ui.print(table)
@@ -257,7 +258,7 @@ def keys_create_command(
     ui.success(f"Key '{escape(name)}' created in {escape(target.name)}")
     ui.print(Text(key.key or ""))
     budget = budget_cell(key)
-    ui.dim(f"Scopes: {', '.join(key.scopes) or ', '.join(chosen)}" + (f"  ·  Budget: {budget}" if budget != "—" else ""))
+    ui.dim(escape(f"Scopes: {', '.join(key.scopes) or ', '.join(chosen)}" + (f"  ·  Budget: {budget}" if budget != "—" else "")))
     ui.dim(
         f"Saved for `lium --workspace {escape(target.name)} …`" if save else "Not saved; add --save to use it with --workspace"
     )
@@ -391,7 +392,7 @@ def keys_show_command(key: str, workspace: Optional[str], json_output: bool):
         return
     visibility = found.pod_visibility or "—"
     described = lium.api_keys.pod_visibilities().get(found.pod_visibility or "") if found.pod_visibility else None
-    ui.info(f"{escape(found.name)}  ({found.id})")
+    ui.info(escape(f"{found.name}  ({found.id})"))
     rows = [
         ("Workspace", target.name),
         ("Scopes", ", ".join(found.scopes) or "—"),
@@ -479,7 +480,7 @@ def keys_scopes_command(json_output: bool):
         allows = scope.description or "—"
         if scope.can:
             allows += "\n" + "\n".join(f"• {line}" for line in scope.can)
-        table.add_row(Text(scope.scope), "yes" if scope.default else "no", Text(allows), ", ".join(scope.route_families) or "—")
+        table.add_row(Text(scope.scope), "yes" if scope.default else "no", Text(allows), Text(", ".join(scope.route_families) or "—"))
     ui.info(f"API key scopes  ({len(scopes)} total)")
     ui.print(table)
     if visibilities:
@@ -487,7 +488,7 @@ def keys_scopes_command(json_output: bool):
         for value, text in visibilities.items():
             ui.print(Text(f"  {value}: {text}"))
     defaults = [s.scope for s in scopes if s.default] or list(DEFAULT_SCOPES)
-    ui.dim(f"A key made without --scope gets {', '.join(defaults)}; {BILLING_SCOPE} only when asked for")
+    ui.dim(escape(f"A key made without --scope gets {', '.join(defaults)}; {BILLING_SCOPE} only when asked for"))
 
 
 @keys_command.command("budget")
@@ -580,7 +581,7 @@ def keys_budget_command(
     if json_output:
         click.echo(json.dumps(updated.to_dict(), indent=2))
         return
-    ui.success(f"Budget of '{escape(updated.name)}' is now {budget_cell(updated)}")
+    ui.success(escape(f"Budget of '{updated.name}' is now {budget_cell(updated)}"))
 
 
 def _no_patch_route(exc: LiumError) -> bool:

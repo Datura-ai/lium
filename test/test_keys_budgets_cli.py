@@ -1232,6 +1232,50 @@ def test_refusals_sort_and_count_on_the_parsed_stamp_whatever_its_form():
 
 
 @responses.activate
+def test_markup_in_a_key_name_scope_or_server_sentence_prints_literally_everywhere(home, monkeypatch, wide_terminal):
+    """Names, scopes, descriptions and day strings are the server's or the user's text: a `[red]x[/red]` name or a
+    `[` in a sentence is printed as typed, never read as Rich markup (which would colour it or raise)."""
+    session(monkeypatch)
+    name = "[red]x[/red]"
+    row = {**fixture("keys")[0], "name": name, "scopes": ["read", "[bold]odd[/bold]"]}
+    responses.add(responses.GET, f"{API}/keys", json=[row])
+    scopes = fixture("scopes")
+    scopes["scopes"][0]["description"] = "See [docs] for read"
+    scopes["scopes"][0]["can"] = ["list pods [and nodes]"]
+    scopes["scopes"][0]["route_families"] = ["GET /pods[?filters]"]
+    scopes["pod_visibility"][0]["description"] = "own [default]"
+    responses.add(responses.GET, f"{API}/keys/scopes", json=scopes)
+    responses.add(responses.GET, f"{API}/keys/{AGENT_KEY}/refusals", json=[])
+    responses.add(responses.POST, f"{API}/keys", json={**row, "key": "sk_test_fixture_key_not_a_secret_0000000000"})
+    responses.add(responses.PATCH, f"{API}/keys/{AGENT_KEY}", json=row)
+    statement = fixture("statement")
+    statement["start_day"], statement["end_day"] = "2026-09-[01]", "2026-09-21"
+    statement["pods"][0]["gpu_name"] = "H100 [SXM]"
+    responses.add(responses.GET, f"{API}/billing/statement", json=statement)
+    me()
+
+    outputs = {
+        "list": run("keys", "list"),
+        "show": run("keys", "show", name),
+        "scopes": run("keys", "scopes"),
+        "create": run("keys", "create", name, "--scope", "read", "--daily-budget", "20", "--allow-unbudgeted"),
+        "budget": run("keys", "budget", name, "--daily-budget", "20"),
+        "history": run("billing", "history", "--key", AGENT_KEY),
+    }
+
+    for command, result in outputs.items():
+        assert result.exit_code == 0, (command, result.output)
+        assert "MarkupError" not in result.output, command
+    assert name in outputs["list"].output and "[bold]odd[/bold]" in outputs["list"].output
+    assert name in outputs["show"].output and "list pods [and nodes]" in outputs["show"].output
+    assert "See [docs] for read" in outputs["scopes"].output and "GET /pods[?filters]" in outputs["scopes"].output
+    assert "own [default]" in outputs["scopes"].output
+    assert f"Key '{name}' created" in outputs["create"].output and "[bold]odd[/bold]" in outputs["create"].output
+    assert f"Budget of '{name}' is now" in outputs["budget"].output
+    assert "2026-09-[01] to 2026-09-21" in outputs["history"].output and "H100 [SXM]" in outputs["history"].output
+
+
+@responses.activate
 def test_sdk_update_sends_only_what_is_named_and_refuses_an_empty_change():
     responses.add(responses.PATCH, f"{API}/keys/{AGENT_KEY}", json=patched_agent(daily_budget_usd=None, max_budget_usd=300.0))
     lium = Lium(Config(api_key="k", session_token=SESSION))

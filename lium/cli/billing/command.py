@@ -51,7 +51,7 @@ def build_table(pods: List[Dict[str, Any]], show_key: bool) -> Table:
     table.add_column("From (UTC)", no_wrap=True)
     table.add_column("To (UTC)", no_wrap=True)
     for pod in pods:
-        gpu = f"{pod.get('gpu_count') or ''}×{pod.get('gpu_name')}" if pod.get("gpu_name") else "—"
+        gpu = Text(f"{pod.get('gpu_count') or ''}×{pod.get('gpu_name')}" if pod.get("gpu_name") else "—")
         row = [Text(str(pod.get("pod_name") or pod.get("pod_id") or "—")), gpu]
         if show_key:
             row.append(Text(str(pod.get("api_key_name") or pod.get("api_key_id") or "—")))
@@ -120,7 +120,7 @@ def billing_history_command(
         return lium.billing_statement(start_day=start_day, end_day=end_day, api_key_id=api_key_id)
 
     statement = fetch() if output_format == "json" else ui.load("Loading the statement", fetch)
-    scope = ""
+    scope = ""  # already escaped: the key is the user's text
     if api_key_id:
         # a server before per-key charges ignores `api_key_id` and stamps no pod: the statement is then the
         # whole account's — say so, and never head it "through key …"; a server that stamps them filtered (or
@@ -137,12 +137,13 @@ def billing_history_command(
         return
 
     pods = statement.get("pods") or []
-    period = " to ".join(p for p in (statement.get("start_day"), statement.get("end_day")) if p) or "all time"
+    # the server's day strings, printed literally
+    period = escape(" to ".join(str(p) for p in (statement.get("start_day"), statement.get("end_day")) if p) or "all time")
     if not pods:
         ui.warning(f"No charges{scope} ({period})")
         show_workspace(lium)
         return
     ui.info(f"Charges{scope}: {len(pods)} pod{'s' if len(pods) != 1 else ''}, {period}")
     ui.print(build_table(pods, show_key=any(p.get("api_key_name") or p.get("api_key_id") for p in pods)))
-    ui.dim(f"Total {_usd(statement.get('total'))} — what the ledger debited; running pods keep accruing")
+    ui.dim(escape(f"Total {_usd(statement.get('total'))} — what the ledger debited; running pods keep accruing"))
     show_workspace(lium)
