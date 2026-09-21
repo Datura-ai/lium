@@ -1,6 +1,6 @@
 """P235: `lium topup card` and `Lium.topup_card` — a card top-up with no browser.
 
-The route is lium-platform's `POST /payments/topup` (#631, behind `API_CARD_TOPUP_ENABLED`). The
+The route is lium-platform's `POST /payments/topup` (#633, behind `API_CARD_TOPUP_ENABLED`). The
 SDK tests record its answers with `responses`: the 200, the three 402s a caller must act on
 (`CARD_AUTHENTICATION_REQUIRED`, `CARD_DECLINED`, `NO_SAVED_CARD`), a 402 of another code, and
 the 403 a key without the `billing` scope gets. The CLI tests fake the SDK: what is printed,
