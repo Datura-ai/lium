@@ -8,6 +8,10 @@ price (per-second, no 15-minute floor). The error contract agents depend on: wro
 error, no key exit 2 naming what to do, unknown pod exit 5 for `exec`/`describe`/`rm`, `ps --format json` is a JSON list.
 Then the SDK, the way `docs/developers/sdk/examples/pod-lifecycle.md` uses it: `ls` → `up` → `wait_ready` → `exec`
 (success and a non-zero exit as a dict) → `upload`/`download` → `ps` → `rm`.
+Then `keys_scopes` (`test_keys_scopes_journey.py`, rents nothing): `billing history --format json` is the ledger
+statement; `keys scopes --json` lists the server's four scopes with `billing` off by default; `ps --key <id>` and
+`billing history --key <id>` answer nothing for an id no key has. The last two skip, saying so, on a server before
+lium-platform#630 (no `GET /keys/scopes`, `api_key_id` ignored).
 
 These are PERSONA_TESTS' renter journeys (7 Sep 2026, 31 + 16 steps by hand on staging) as tests that run on every
 PR. They rent the cheapest ≥1-GPU node under `E2E_MAX_PRICE` (default $0.50/h) for a few minutes — $0.03 a run on

@@ -226,7 +226,7 @@ def _warn_billing(lium: Lium, json_output: bool) -> None:
 @keys_command.command("show")
 @click.argument("key")
 @click.option("--workspace", "-w", default=None, help="Workspace name or id (default: the current one)")
-@click.option("--json", "json_output", is_flag=True, help="Machine-readable output (the row plus `can_do` and `pods`)")
+@click.option("--json", "json_output", is_flag=True, help="Machine-readable output (the row, `pods_count` included, plus `can_do`)")
 @handle_errors
 def keys_show_command(key: str, workspace: Optional[str], json_output: bool):
     """One key by name or id: what it can do, its budget and spend, its pod visibility and pod count.

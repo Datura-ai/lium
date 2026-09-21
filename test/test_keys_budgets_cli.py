@@ -11,9 +11,7 @@ from pathlib import Path
 
 import pytest
 import responses
-from click.testing import CliRunner
 
-from lium.cli.cli import cli
 from lium.cli.utils import EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, EXIT_PERMISSION_DENIED, _classify_sdk_error
 from lium.sdk import Config, Lium, LiumBudgetExceededError, LiumPermissionError, LiumScopeError
 from lium.sdk.api_keys import DEFAULT_SCOPES
