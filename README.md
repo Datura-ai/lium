@@ -492,7 +492,8 @@ One object per node, sorted as the table is; the names are stable and pinned by 
 | `country`, `country_code`, `city` | country name, ISO code, city |
 | `vram_gb`, `ram_gb`, `cpu_count` | per-GPU VRAM (GiB), host RAM (GiB), CPU threads |
 | `disk_gb`, `disk_total_gb` | free and total host disk (GiB) |
-| `upload_mbps`, `download_mbps` | the backend's effective speeds |
+| `upload_mbps`, `download_mbps` | the backend's effective speeds: what the validator measured, else the node's own report |
+| `upload_source`, `download_source` | `measured` (a validator check) or `reported` (the node's own scrape only — the table's `~`); `null` with no figure |
 | `available_ports` | ports free for `--ports` |
 | `docker_in_docker` | sysbox runtime, i.e. `docker run` works inside the pod |
 | `is_pareto` | the ★ mark |

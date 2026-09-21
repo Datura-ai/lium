@@ -90,6 +90,46 @@ def _link_display(exe: ExecutorInfo) -> str:
     return console.get_styled(link, "success" if exe.nvlink else "warning")
 
 
+def _float(x: Any) -> Optional[float]:
+    """A positive number, else None: a zero, a missing key and a non-numeric value all read as "no figure"."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return None
+    return float(x) if x > 0 else None
+
+
+# Where a speed figure comes from: MEASURED = one of the validator's checks (VerifyX or speed-test
+# average); REPORTED = only the node's own scrape (`specs.network.*_speed`), nothing measured yet.
+MEASURED = "measured"
+REPORTED = "reported"
+# The table's `~` legend, printed under the table with the other tips.
+REPORTED_FOOTNOTE = "~ = the node's own figure; the validator has not measured this node's speed yet"
+
+
+def network_speed(executor: ExecutorInfo, direction: str) -> tuple[Optional[float], Optional[str]]:
+    """The Mbps figure `lium ls` shows for ``direction`` (``"download"`` / ``"upload"``) and its source.
+
+    The backend's ``effective_*_speed_mbps`` is the first figure it trusts: a VerifyX average, then a
+    speed-test average, then the node's own scrape (``specs.network.*_speed``). The listing carries the
+    effective figure and the raw one, not the intermediates, so the source is read off the two: an
+    effective figure that equals the raw one is the scrape falling through; one that differs came from
+    a measurement. No effective figure (an API that predates it) falls back to the raw one, marked
+    REPORTED. Returns ``(None, None)`` when there is no figure at all.
+    """
+    effective = _float(getattr(executor, f"effective_{direction}_speed_mbps", None))
+    raw = _float(((executor.specs or {}).get("network") or {}).get(f"{direction}_speed"))
+    if effective is None:
+        return (raw, REPORTED) if raw is not None else (None, None)
+    return effective, (REPORTED if raw is not None and raw == effective else MEASURED)
+
+
+def _speed_cell(value: Optional[float], source: Optional[str]) -> str:
+    """``~300`` when the figure is the node's own, ``300`` when measured, ``—`` when unknown."""
+    if value is None:
+        return "—"
+    figure = str(int(value))
+    return f"~{figure}" if source == REPORTED else figure
+
+
 def _first_gpu_detail(specs: Optional[Dict]) -> Dict:
     """Get first GPU detail from specs."""
     if not specs:
@@ -102,8 +142,12 @@ def _first_gpu_detail(specs: Optional[Dict]) -> Dict:
 def _specs_row(executor: ExecutorInfo) -> Dict[str, str]:
     """Extract display fields from an executor."""
     specs = executor.specs
+    download, download_source = network_speed(executor, "download")
+    upload, upload_source = network_speed(executor, "upload")
     if not specs:
-        return {k: "—" for k in ["VRAM", "RAM", "CPUs", "Disk", "DiskTotal", "PCIe", "Mem", "TFLOPs", "Upload", "Download", "Ports"]}
+        row = {k: "—" for k in ["VRAM", "RAM", "CPUs", "Disk", "DiskTotal", "Country", "PCIe", "Ports"]}
+        row.update(Upload=_speed_cell(upload, upload_source), Download=_speed_cell(download, download_source))
+        return row
 
     d = _first_gpu_detail(specs)
     ram = specs.get("ram", {})
@@ -119,8 +163,8 @@ def _specs_row(executor: ExecutorInfo) -> Dict[str, str]:
         "DiskTotal": _maybe_gi_from_big_number(disk.get("total")),
         "Country": _country_name(specs.get("location")),
         "PCIe": _maybe_int(d.get("pcie_speed")),
-        "Upload": _maybe_int(executor.upload_speed or None),
-        "Download": _maybe_int(executor.download_speed or None),
+        "Upload": _speed_cell(upload, upload_source),
+        "Download": _speed_cell(download, download_source),
         "Ports": _maybe_int(specs.get("available_port_count")),
     }
 
@@ -133,8 +177,9 @@ _SORT_KEY_FUNCS: Dict[str, Callable[[ExecutorInfo], Any]] = {
     "loc": lambda e: _country_name(e.location),
     "id": lambda e: e.huid,
     "gpu": lambda e: (e.gpu_type, e.gpu_count),
-    "download": lambda e: -(e.specs.get("network", {}).get("download_speed", 0) or 0),
-    "upload": lambda e: -(e.specs.get("network", {}).get("upload_speed", 0) or 0),
+    # the figure the column shows (effective, else the node's own), fastest first; no figure last
+    "download": lambda e: -(network_speed(e, "download")[0] or 0),
+    "upload": lambda e: -(network_speed(e, "upload")[0] or 0),
 }
 
 # Aliases let a caller sort by the field name `--format json` emits.
@@ -230,13 +275,16 @@ def format_tip() -> str:
     return (
         f"Tip: {console.get_styled('lium up <index>', 'success')} {console.get_styled('# e.g. lium up 1', 'dim')}\n"
         f"{console.get_styled('default order: cheapest $/GPU·h first; --sort picks another key', 'dim')}\n"
-        f"{console.get_styled('★ = no other node beats it: a 10% faster download wins outright, else better on price and specs (VRAM, RAM, disk, PCIe, memory bandwidth, TFLOPS, upload, US location)', 'dim')}"
+        f"{console.get_styled('★ = no other node beats it: a 10% faster download wins outright, else better on price and specs (VRAM, RAM, disk, PCIe, memory bandwidth, TFLOPS, upload, US location)', 'dim')}\n"
+        f"{console.get_styled(REPORTED_FOOTNOTE, 'dim')}"
     )
 
 
 def compact_executor(exe: ExecutorInfo, is_pareto: bool, index: int) -> Dict[str, Any]:
     """Slim, table-equivalent JSON view of an executor."""
     s = _specs_row(exe)
+    download, download_source = network_speed(exe, "download")
+    upload, upload_source = network_speed(exe, "upload")
     return {
         "index": index,
         "id": exe.id,
@@ -254,8 +302,12 @@ def compact_executor(exe: ExecutorInfo, is_pareto: bool, index: int) -> Dict[str
         "cpu_count": _intish(s["CPUs"]),
         "disk_gb": _intish(s["Disk"]),
         "disk_total_gb": _intish(s["DiskTotal"]),
-        "upload_mbps": _intish(s["Upload"]),
-        "download_mbps": _intish(s["Download"]),
+        "upload_mbps": _intish(upload),
+        "download_mbps": _intish(download),
+        # MEASURED (a validator check) / REPORTED (the node's own scrape only) / None — what the
+        # table's `~` marks, as a field
+        "upload_source": upload_source,
+        "download_source": download_source,
         "available_ports": _intish(s["Ports"]),
         "docker_in_docker": exe.docker_in_docker,
         "is_pareto": is_pareto,
@@ -339,8 +391,8 @@ def build_executors_table(
         huid += " (DinD)" if exe.docker_in_docker else ""
         huid_display = f"{console.get_styled('★', 'success')} {console.get_styled(huid, 'id')}" if is_pareto else f"  {console.get_styled(huid, 'id')}"
 
-        # Style download speed in yellow when below 100 Mbps
-        dl_val = _intish(s["Download"])
+        # Style download speed in yellow when below 100 Mbps (the slow-node line the backend draws)
+        dl_val, _ = network_speed(exe, "download")
         dl_display = (
             console.get_styled(s["Download"], "warning")
             if dl_val is not None and dl_val < 100

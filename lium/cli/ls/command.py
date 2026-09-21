@@ -103,6 +103,11 @@ def ls_command(
     18 links, PCIe/SYS = PCIe only, worst class shown); it is "—" until the node's
     validator reports it.
 
+    Download and Upload (Mbps) are the rates the validator measured on the node
+    (the figure the platform lists and gates on). A "~" in front marks a node the
+    validator has not measured yet: the number is the node's own report. --sort
+    download / --sort upload order by the figure shown.
+
     \b
     Examples:
       lium ls --gpu H100 --count 8
