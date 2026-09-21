@@ -156,15 +156,39 @@ jobs:
     - uses: astral-sh/setup-uv@v6
 
     # the build image has no git (Dockerfile.build): the version hatch-vcs derives from the tags here is handed in
-    - name: Build Linux bundle in Docker
+    - name: Bundle version (hatch-vcs, from the tags)
+      id: version
       run: |
         version="$(uvx --from hatchling --with hatch-vcs hatchling version)"
         echo "version $version"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    # docker-container builder: the one that can export its layer cache (the default `docker` driver cannot)
+    - uses: docker/setup-buildx-action@v3
+
+    # Layers cached in the GitHub Actions cache, one scope per asset (amd64 and arm64 layers differ). Dockerfile.build
+    # installs the dependencies from the lockfile before it copies the source, so a push that changes only code
+    # reuses the apt, libssl, uv and dependency layers; the source copy, the project install and PyInstaller rerun.
+    # `ignore-error`: a cache export the cache service refuses (429, timeout) must not fail a build that produced
+    # the image — release-assets needs this job. `load` puts the image in the engine for the extract and the report.
+    - name: Build Linux bundle in Docker
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: Dockerfile.build
+        platforms: ${{ matrix.platform }}
+        build-args: LIUM_VERSION=${{ steps.version.outputs.version }}
+        tags: lium-build:${{ github.sha }}-${{ matrix.asset_name }}
+        load: true
+        cache-from: type=gha,scope=linux-bundle-${{ matrix.asset_name }}
+        cache-to: type=gha,scope=linux-bundle-${{ matrix.asset_name }},ignore-error=true
+
+    - name: Extract the bundle from the image
+      run: |
         mkdir -p dist
         rm -rf dist/lium
         docker rm -f lium-extract >/dev/null 2>&1 || true
-        docker build --build-arg LIUM_VERSION="$version" --platform ${{ matrix.platform }} -f Dockerfile.build -t lium-build:${GITHUB_SHA}-${{ matrix.asset_name }} .
-        docker create --name lium-extract lium-build:${GITHUB_SHA}-${{ matrix.asset_name }} true
+        docker create --name lium-extract "lium-build:${GITHUB_SHA}-${{ matrix.asset_name }}" true
         docker cp lium-extract:/app/dist/lium dist/lium
         docker rm -f lium-extract
         tar -czf dist/${{ matrix.asset_name }}.tar.gz -C dist lium
