@@ -142,6 +142,11 @@ def compact_pod(pod: PodInfo, index: Optional[int] = None) -> dict:
     if workspace_id is not None:
         # only when the server has workspaces: a server without them keeps today's JSON exactly
         view["workspace_id"] = workspace_id
+    api_key_id = getattr(pod, "api_key_id", None)
+    if api_key_id is not None:
+        # the key that rented the pod (lium-platform P235); absent, not null, from a server without the field
+        view["api_key_id"] = api_key_id
+        view["api_key_name"] = getattr(pod, "api_key_name", None)
     return view
 
 
