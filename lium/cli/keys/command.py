@@ -196,6 +196,7 @@ def keys_create_command(
     if section:
         settings.set_in_section(section, "id", target.id)
         settings.set_in_section(section, "api_key", key.key or "")
+    _warn_unrecorded(key, daily_budget, max_budget, json_output)
     if json_output:
         click.echo(json.dumps({**key.raw, "workspace_name": target.name}, indent=2))
         return
@@ -206,6 +207,26 @@ def keys_create_command(
     ui.dim(
         f"Saved for `lium --workspace {escape(target.name)} …`" if save else "Not saved; add --save to use it with --workspace"
     )
+
+
+def _warn_unrecorded(key: ApiKeyInfo, daily_budget: Optional[float], max_budget: Optional[float], json_output: bool) -> None:
+    """A server before lium-platform#630 accepts `POST /keys` and drops the budget and pod-visibility fields it
+    does not know (its request model ignores extra fields): the key exists with NO budget and sees every pod
+    of the account. The row it answers has no `pod_visibility`, so that is the tell; say it, once, rather than
+    let a renter trust a cap that was never set. The key is still printed: it is real."""
+    if key.pod_visibility is not None:
+        return
+    asked = [f"--{name} {_usd(value)}" for name, value in (("daily-budget", daily_budget), ("max-budget", max_budget)) if value is not None]
+    verb = "were" if len(asked) > 1 else "was"
+    line = (
+        "Warning: this server has no per-key budgets or pod visibility yet (lium-platform#630, not released): "
+        + (f"{' and '.join(asked)} {verb} not recorded — the key has no budget, and it " if asked else "the key ")
+        + "sees every pod of the account"
+    )
+    if json_output:
+        click.echo(line, err=True)
+    else:
+        ui.warning(escape(line))
 
 
 def _warn_billing(lium: Lium, json_output: bool) -> None:
@@ -278,7 +299,7 @@ def keys_scopes_command(json_output: bool):
     """Every API-key scope and pod-visibility value with what it allows, in the server's words (`GET /keys/scopes`).
 
     Needs a server with the route (lium-platform#630, not released); older servers answer `not_found`. No
-    session or key is checked: the table is static text.
+    session is needed: the table is static text, sent to any caller (the configured key goes along unchecked).
 
     \b
     Examples:

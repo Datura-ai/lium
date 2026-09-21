@@ -531,8 +531,9 @@ class ApiKeyInfo:
     The budget fields are USD; ``spent_today_usd`` / ``spent_total_usd`` are what the key's pods were
     billed today (UTC) and ever; a budget is ``None`` when the key has none. ``pod_visibility`` is ``own``
     (the key lists only the pods it rented) or ``account`` (every pod of the account); ``None`` from a server
-    before P235. ``key`` is the secret, filled only by ``create`` and never by a listing. ``raw`` is the
-    server's row, for fields this class does not name.
+    before P235. ``key`` is the secret when the server sent it (``POST /keys`` always; the list rows on servers
+    that echo it): kept out of ``repr`` and of :meth:`to_dict`, so it is printed only where ``create`` prints it
+    once. ``raw`` is the server's row, for fields this class does not name.
     """
 
     id: str
@@ -548,7 +549,7 @@ class ApiKeyInfo:
     pod_visibility: Optional[str] = None
     # active pods the key created, as the server counts them; None from a server before P235
     pods_count: Optional[int] = None
-    key: Optional[str] = None
+    key: Optional[str] = field(default=None, repr=False)
     raw: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     def matches(self, name_or_id: str) -> bool:

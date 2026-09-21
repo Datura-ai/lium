@@ -68,6 +68,12 @@ def query_of(call) -> dict:
     return {k: v[0] for k, v in parse_qs(urlparse(call.request.url).query).items()}
 
 
+def created(name="ci", **fields):
+    """A `POST /keys` answer from a lium-platform#630 server: the DAH-2944 row plus the P235 fields, no budget."""
+    return {**ws_fixture("key_created"), "name": name, "daily_budget_usd": None, "max_budget_usd": None,
+            "spent_today_usd": 0.0, "spent_total_usd": 0.0, "pod_visibility": "own", "pods_count": 0, **fields}
+
+
 def pods_rented_by_agent():
     """`GET /pods` rows: the workspaces fixture's pod, rented through agent-1 (`api_key_id` as P235 names it)."""
     rows = ws_fixture("pods_research")
@@ -80,7 +86,7 @@ def pods_rented_by_agent():
 @responses.activate
 def test_create_without_scope_sends_read_rent_manage_and_never_billing(home, monkeypatch):
     session(monkeypatch)
-    responses.add(responses.POST, f"{API}/keys", json=ws_fixture("key_created"))
+    responses.add(responses.POST, f"{API}/keys", json=created("ci"))
 
     result = run("keys", "create", "ci")
 
@@ -90,6 +96,29 @@ def test_create_without_scope_sends_read_rent_manage_and_never_billing(home, mon
     assert body == {"name": "ci", "scopes": ["read", "rent", "manage"], "pod_visibility": "own"}
     assert not calls_to("/keys/scopes")  # no warning to print, so the scopes route is not read
     assert "Warning" not in result.output
+
+
+@responses.activate
+def test_create_on_a_server_before_budgets_says_the_budget_and_visibility_were_not_recorded(home, monkeypatch):
+    """Today's server (dtos/api_key.py on main) ignores fields it does not know: the key is minted with no budget and
+    sees the whole account. The row it answers has no `pod_visibility`; the CLI says so instead of printing a cap
+    that does not exist. The key is still printed and exit is 0: it is real."""
+    session(monkeypatch)
+    responses.add(responses.POST, f"{API}/keys", json=ws_fixture("key_created"))  # the DAH-2944 row
+
+    result = run("keys", "create", "ci", "--daily-budget", "20", "--max-budget", "200")
+    text = " ".join(result.output.split())
+
+    assert result.exit_code == 0, result.output
+    assert "sk_test_fixture_key_not_a_secret_0000000000" in text
+    assert ("Warning: this server has no per-key budgets or pod visibility yet (lium-platform#630, not released): "
+            "--daily-budget $20.00 and --max-budget $200.00 were not recorded — the key has no budget, and it sees every "
+            "pod of the account") in text
+    assert "Budget:" not in text  # nothing to show as set
+
+    machine = run("keys", "create", "ci", "--json")
+    assert machine.exit_code == 0 and json.loads(machine.stdout)["key"]
+    assert "Warning: this server has no per-key budgets" in machine.stderr and "the key sees every pod" in machine.stderr
 
 
 @responses.activate
@@ -116,7 +145,7 @@ def test_create_sends_the_named_scopes_and_budgets_as_numbers(home, monkeypatch)
 def test_create_with_billing_scope_prints_the_servers_warning_before_the_post(home, monkeypatch):
     session(monkeypatch)
     responses.add(responses.GET, f"{API}/keys/scopes", json=fixture("scopes"))
-    responses.add(responses.POST, f"{API}/keys", json=ws_fixture("key_created"))
+    responses.add(responses.POST, f"{API}/keys", json=created("payer", scopes=["read", "billing"], pod_visibility="account"))
 
     result = run("keys", "create", "payer", "--scope", "read", "--scope", "billing", "--pod-visibility", "account")
 
@@ -134,20 +163,21 @@ def test_create_with_billing_scope_prints_the_servers_warning_before_the_post(ho
 def test_create_with_billing_scope_under_json_puts_the_warning_on_stderr(home, monkeypatch):
     session(monkeypatch)
     responses.add(responses.GET, f"{API}/keys/scopes", json=fixture("scopes"))
-    responses.add(responses.POST, f"{API}/keys", json=ws_fixture("key_created"))
+    responses.add(responses.POST, f"{API}/keys", json=created("payer", scopes=["billing"]))
 
     result = run("keys", "create", "payer", "--scope", "billing", "--json")
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["key"] == "sk_test_fixture_key_not_a_secret_0000000000"
     assert "Warning: this key holds the 'billing' scope" in result.stderr
+    assert "no per-key budgets" not in result.stderr  # the row carried pod_visibility: the server is P235
 
 
 @responses.activate
 def test_create_with_billing_scope_on_a_server_without_the_scopes_route_still_warns(home, monkeypatch):
     session(monkeypatch)
     responses.add(responses.GET, f"{API}/keys/scopes", status=404, json={"detail": "Not Found"})
-    responses.add(responses.POST, f"{API}/keys", json=ws_fixture("key_created"))
+    responses.add(responses.POST, f"{API}/keys", json=created("payer", scopes=["billing"]))
 
     result = run("keys", "create", "payer", "--scope", "billing")
 
@@ -555,6 +585,17 @@ def test_sdk_api_keys_create_defaults_and_validation():
     with pytest.raises(ValueError, match="at least one scope"):
         lium.api_keys.create("bad", [])
     assert len(calls_to("/keys", "POST")) == 2  # the refused calls never went out
+
+
+def test_sdk_key_material_stays_out_of_repr_and_to_dict():
+    """A traceback, a log line or `--json` that shows an ApiKeyInfo must not show the secret the row carried."""
+    from lium.sdk.api_keys import _key
+
+    key = _key(fixture("keys")[0])
+
+    assert key.key == "sk_test_fixture_agent1_not_a_secret_0000000000"
+    assert "sk_test" not in repr(key) and "sk_test" not in str(key)
+    assert "key" not in key.to_dict() and key.to_dict()["pods_count"] == 1
 
 
 @responses.activate
