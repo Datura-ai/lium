@@ -186,10 +186,10 @@ class WorkspacesClient:
         return [key.raw for key in self._lium.api_keys.list(workspace_id)]
 
     def create_key(self, name: str, workspace_id: str) -> Dict[str, Any]:
-        """``POST /keys`` in the named workspace: the key is bound to it for good (DAH-2986).
+        """``POST /keys`` in the named workspace: the key is bound to it for good.
 
         Goes through :meth:`ApiKeysClient.create`, so the key gets ``read``, ``rent`` and ``manage`` —
-        never ``billing`` — like every key minted without named scopes.
+        never ``billing`` — like every key minted without named scopes; pod visibility is left to the server's default.
         """
         return self._lium.api_keys.create(name, workspace_id=workspace_id).raw
 

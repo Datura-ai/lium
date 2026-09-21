@@ -329,7 +329,7 @@ _HINTS_BY_CODE: Dict[str, str] = {
                          "fixed with 'lium topup' or 'lium fund', a pending verification on https://lium.io",
     "insufficient_balance": "Add funds with 'lium topup' or 'lium fund', or pick a cheaper node "
                             "('lium ls --sort price_total')",
-    # a 402 from the rent path: the key's own budget, not the account's balance (lium-platform P235)
+    # a 402 from the rent path: the key's own budget, not the account's balance
     "budget_exceeded": "This API key is over its budget: 'lium keys show <name>' shows the figures; "
                        "raise or clear it with 'lium keys budget <name>' (a signed-in session) or use another key",
     "missing_scope": "This API key lacks the scope the command needs: 'lium keys scopes' explains each one; "

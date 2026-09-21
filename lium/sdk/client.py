@@ -702,7 +702,7 @@ class Lium:
         if resp.status_code == 401:
             raise LiumAuthError(f"Invalid API key ({key})" if key else "Invalid API key", **context)
         if resp.status_code == 402:
-            # the key's daily or total budget is reached (lium-platform P235, error.code
+            # the key's daily or total budget is reached (error.code
             # API_KEY_BUDGET_EXCEEDED): a money refusal like a 403 for balance, so the same exit family
             raise budget_error(_response_error_message(resp), key=key, data=_error_data(resp), **context)
         if resp.status_code == 403:
@@ -1804,7 +1804,7 @@ class Lium:
 
         Args:
             api_key_id: Only the pods rented through this API key (``GET /pods?api_key_id=…``,
-                lium-platform P235). A server without the filter ignores the parameter and lists
+                server support pending). A server without the filter ignores the parameter and lists
                 every pod the caller can see.
 
         Returns:
@@ -1851,7 +1851,7 @@ class Lium:
                 cluster_id=d.get("cluster_id"),
                 cluster_node_index=d.get("cluster_node_index"),
                 cluster_overlay_ip=d.get("cluster_overlay_ip"),
-                # the key that rented the pod (lium-platform P235 names it `api_key_id`; the pod row's own
+                # the key that rented the pod (the server names it `api_key_id`; the pod row's own
                 # column is `created_by_api_key_id`); None for a session rent or an older server
                 api_key_id=d.get("api_key_id") or d.get("created_by_api_key_id"),
                 api_key_name=d.get("api_key_name"),
@@ -1871,7 +1871,7 @@ class Lium:
         Every pod the account was charged for in the period — removed pods included — with per-UTC-day
         rows; each pod's ``total`` is what the ledger debited. ``start_day`` / ``end_day`` are UTC billing
         days (``YYYY-MM-DD``), both inclusive and optional. ``api_key_id`` keeps only the pods rented
-        through that key (lium-platform P235; the rows then carry ``api_key_name``); a server without the
+        through that key (the rows then carry ``api_key_name``); a server without the
         filter ignores it. Returns the server's ``{"start_day", "end_day", "total", "pods": [...]}``.
         A key needs the ``read`` scope.
         """

@@ -41,7 +41,7 @@ class ScheduleRemovalAction:
             try:
                 lium.schedule_termination(pod, termination_time=termination_time)
             except LiumBudgetExceededError:
-                # the key's budget refused the new duration (402, lium-platform#630): it is the key, not this pod,
+                # the key's budget refused the new duration (402): it is the key, not this pod,
                 # that is over — every pod after it would be refused alike, and the reader needs the server's
                 # sentence (the window hit, the figures), which handle_errors prints as it does for `up`
                 raise

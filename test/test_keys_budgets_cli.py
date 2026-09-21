@@ -1,6 +1,6 @@
 """`lium keys create --scope/--daily-budget/--max-budget/--pod-visibility`, `lium keys show`, `lium keys scopes`,
 `lium ps --key`, `lium billing history --key`, and the SDK behind them (`Lium.api_keys`, `Lium.ps(api_key_id=…)`,
-`Lium.billing_statement`, `LiumBudgetExceededError`, `LiumScopeError`), `lium keys budget` — lium-platform#630, not released.
+`Lium.billing_statement`, `LiumBudgetExceededError`, `LiumScopeError`), `lium keys budget` — server support pending.
 
 HTTP is answered from test/fixtures/api_keys (and the workspaces fixtures for `/users/me`, `/workspaces`, `/pods`) with
 `responses`, so the real SDK request path runs: what is asserted is the request the CLI sends and what it prints.
@@ -70,10 +70,15 @@ def query_of(call) -> dict:
 
 
 def created(name="ci", **fields):
-    """A `POST /keys` answer from a lium-platform#630 server: the DAH-2944 row plus the P235 fields, no budget."""
+    """A `POST /keys` answer from a server with per-key budgets: the older row plus the budget fields, no budget."""
     return {**ws_fixture("key_created"), "name": name, "daily_budget_usd": None, "monthly_budget_usd": None,
             "max_budget_usd": None, "spent_today_usd": 0.0, "spent_month_usd": 0.0, "spent_total_usd": 0.0,
             "pod_visibility": "own", "pods_count": 0, **fields}
+
+
+def scopes_route():
+    """A server with per-key budgets has `GET /keys/scopes`; `keys create` with a cap probes it before minting."""
+    responses.add(responses.GET, f"{API}/keys/scopes", json=fixture("scopes"))
 
 
 def no_refusals_route():
@@ -82,7 +87,7 @@ def no_refusals_route():
 
 
 def pods_rented_by_agent():
-    """`GET /pods` rows: the workspaces fixture's pod, rented through agent-1 (`api_key_id` as P235 names it)."""
+    """`GET /pods` rows: the workspaces fixture's pod, rented through agent-1 (`api_key_id` as the server names it)."""
     rows = ws_fixture("pods_research")
     rows[0]["api_key_id"] = AGENT_KEY
     rows[0]["api_key_name"] = "agent-1"
@@ -100,37 +105,132 @@ def test_create_without_scope_sends_read_rent_manage_and_never_billing(home, mon
     assert result.exit_code == 0, result.output
     body = json.loads(calls_to("/keys", "POST")[0].request.body)
     assert body["scopes"] == list(DEFAULT_SCOPES) and "billing" not in body["scopes"]
-    assert body == {"name": "ci", "scopes": ["read", "rent", "manage"], "pod_visibility": "own"}
-    assert not calls_to("/keys/scopes")  # no warning to print, so the scopes route is not read
+    assert body == {"name": "ci", "scopes": ["read", "rent", "manage"]}  # no pod_visibility: the server's default decides
+    assert not calls_to("/keys/scopes")  # no warning to print and no cap asked, so the scopes route is not read
     assert "Warning" not in result.output
 
 
+@pytest.mark.parametrize("args", [["--daily-budget", "20", "--max-budget", "200"], ["--pod-visibility", "own"], ["--monthly-budget", "50"]])
 @responses.activate
-def test_create_on_a_server_before_budgets_says_the_budget_and_visibility_were_not_recorded(home, monkeypatch):
-    """Today's server (dtos/api_key.py on main) ignores fields it does not know: the key is minted with no budget and
-    sees the whole account. The row it answers has no `pod_visibility`; the CLI says so instead of printing a cap
-    that does not exist. The key is still printed and exit is 0: it is real."""
+def test_create_with_a_cap_on_a_server_without_the_scopes_route_is_refused_before_anything_is_minted(home, monkeypatch, args):
+    """Today's lium.io has no per-key budgets: it would mint the key and drop the fields it does not know. The
+    probe (`GET /keys/scopes`, which every server with budgets has) fails first, so nothing is created."""
     session(monkeypatch)
-    responses.add(responses.POST, f"{API}/keys", json=ws_fixture("key_created"))  # the DAH-2944 row
+    responses.add(responses.GET, f"{API}/keys/scopes", status=401, json={"detail": "Not authenticated"})  # lium.io today
 
-    result = run("keys", "create", "ci", "--daily-budget", "20", "--max-budget", "200")
+    result = run("keys", "create", "ci", *args, "--json")
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
+    error = json.loads(result.stderr)["error"]
+    assert error["code"] == "invalid_arguments"
+    assert error["message"].startswith("This server does not support key budgets or pod visibility yet (no GET /keys/scopes): create the key without ")
+    assert f"--{args[0].lstrip('-')}" in error["message"] and "or upgrade the server" in error["message"]
+    assert "--allow-unbudgeted" in error["hint"]
+    assert not calls_to("/keys", "POST")  # nothing minted
+    assert "lium-platform" not in result.output + result.stderr and "DAH-" not in result.output + result.stderr
+
+
+def key_row_without_budgets(**fields):
+    """A server that knows pod visibility but not budgets (an intermediate release): `POST /keys` echoes
+    `pod_visibility` and drops the budget fields."""
+    return {**ws_fixture("key_created"), "pod_visibility": "own", "pods_count": 0, **fields}
+
+
+@responses.activate
+def test_create_with_a_budget_the_server_did_not_record_revokes_the_key_and_refuses(home, monkeypatch):
+    """The scopes route exists but the server dropped `daily_budget_usd`: the key was minted UNCAPPED. Handing it
+    over as "capped at $20/day" is the one thing that must not happen — it is revoked and the command fails."""
+    session(monkeypatch)
+    scopes_route()
+    responses.add(responses.POST, f"{API}/keys", json=key_row_without_budgets())
+    responses.add(responses.DELETE, f"{API}/keys/{ws_fixture('key_created')['id']}", status=204)
+
+    result = run("keys", "create", "ci", "--daily-budget", "20", "--pod-visibility", "own", "--save", "--json")
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
+    envelope = json.loads(result.stderr)
+    assert envelope["error"]["code"] == "invalid_arguments"
+    assert envelope["error"]["message"] == (
+        "This server does not support key budgets or pod visibility yet: --daily-budget $20.00 was not recorded — "
+        "the key 'ci' was minted uncapped and has been revoked. Create the key without --daily-budget, or upgrade the server"
+    )
+    assert envelope["data"] == {"unrecorded": ["daily_budget_usd"], "key_id": ws_fixture("key_created")["id"]}
+    revoke = calls_to(f"/keys/{ws_fixture('key_created')['id']}", "DELETE")
+    assert len(revoke) == 1 and revoke[0].request.headers["Authorization"] == f"Bearer {SESSION}"
+    assert "sk_test_fixture" not in result.stdout  # the secret of a revoked key is not printed
+    assert "sk_test_fixture_key_not_a_secret" not in (home / ".lium" / "config.ini").read_text()  # --save did not run
+
+
+@responses.activate
+def test_create_with_a_visibility_the_server_echoed_differently_is_refused_too(home, monkeypatch):
+    """The server knows the field but its operator's default won (echo `account` for a requested `own`): the key
+    would see every pod of the account — refused like a dropped budget."""
+    session(monkeypatch)
+    scopes_route()
+    responses.add(responses.POST, f"{API}/keys", json=created("ci", pod_visibility="account"))
+    responses.add(responses.DELETE, f"{API}/keys/{ws_fixture('key_created')['id']}", status=204)
+
+    result = run("keys", "create", "ci", "--pod-visibility", "own")
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
+    assert "--pod-visibility own was not recorded" in " ".join(result.output.split())
+    assert len(calls_to(f"/keys/{ws_fixture('key_created')['id']}", "DELETE")) == 1
+
+
+@responses.activate
+def test_create_names_the_key_when_the_revoke_itself_fails(home, monkeypatch):
+    session(monkeypatch)
+    scopes_route()
+    responses.add(responses.POST, f"{API}/keys", json=key_row_without_budgets())
+    responses.add(responses.DELETE, f"{API}/keys/{ws_fixture('key_created')['id']}", status=500, json={"detail": "boom"})
+
+    result = run("keys", "create", "ci", "--max-budget", "200")
+    text = " ".join(result.output.split())
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
+    assert "--max-budget $200.00 was not recorded" in text
+    assert f"the key 'ci' ({ws_fixture('key_created')['id']}) was minted uncapped and could NOT be revoked" in text
+    assert "revoke it in the dashboard" in text
+
+
+@responses.activate
+def test_create_allow_unbudgeted_keeps_the_key_and_warns_instead(home, monkeypatch):
+    """--allow-unbudgeted: no probe, no revoke; the key is printed and saved, and what was dropped is said once."""
+    session(monkeypatch)
+    responses.add(responses.POST, f"{API}/keys", json=key_row_without_budgets())
+
+    result = run("keys", "create", "ci", "--daily-budget", "20", "--max-budget", "200", "--allow-unbudgeted", "--save")
     text = " ".join(result.output.split())
 
     assert result.exit_code == 0, result.output
     assert "sk_test_fixture_key_not_a_secret_0000000000" in text
-    assert ("Warning: this server has no per-key budgets or pod visibility yet (lium-platform#630, not released): "
-            "--daily-budget $20.00 and --max-budget $200.00 were not recorded — the key has no budget, and it sees every "
-            "pod of the account") in text
+    assert ("Warning: this server does not support key budgets or pod visibility yet: --daily-budget $20.00 and "
+            "--max-budget $200.00 were not recorded — the key has no such cap") in text
     assert "Budget:" not in text  # nothing to show as set
+    assert not calls_to("/keys/scopes") and not calls_to(f"/keys/{ws_fixture('key_created')['id']}", "DELETE")
+    assert "sk_test_fixture_key_not_a_secret_0000000000" in (home / ".lium" / "config.ini").read_text()
 
-    machine = run("keys", "create", "ci", "--json")
+    machine = run("keys", "create", "ci", "--daily-budget", "20", "--allow-unbudgeted", "--json")
     assert machine.exit_code == 0 and json.loads(machine.stdout)["key"]
-    assert "Warning: this server has no per-key budgets" in machine.stderr and "the key sees every pod" in machine.stderr
+    assert "Warning: this server does not support key budgets" in machine.stderr
+
+
+@responses.activate
+def test_create_without_a_cap_on_an_older_server_needs_no_probe_and_no_flag(home, monkeypatch):
+    session(monkeypatch)
+    responses.add(responses.POST, f"{API}/keys", json=ws_fixture("key_created"))  # the older row
+
+    result = run("keys", "create", "ci")
+
+    assert result.exit_code == 0, result.output
+    assert "sk_test_fixture_key_not_a_secret_0000000000" in result.output and "Warning" not in result.output
+    assert not calls_to("/keys/scopes")
 
 
 @responses.activate
 def test_create_sends_the_named_scopes_and_budgets_as_numbers(home, monkeypatch):
     session(monkeypatch)
+    scopes_route()
     responses.add(responses.POST, f"{API}/keys", json=fixture("key_created_budget"))
 
     result = run(
@@ -139,27 +239,30 @@ def test_create_sends_the_named_scopes_and_budgets_as_numbers(home, monkeypatch)
     )
 
     assert result.exit_code == 0, result.output
+    assert [c.request.method for c in responses.calls if "/keys" in c.request.url] == ["GET", "POST"]  # probe, then mint
     body = json.loads(calls_to("/keys", "POST")[0].request.body)
     assert body["scopes"] == ["read", "rent"]  # the repeated --scope rent is sent once
     assert body["daily_budget_usd"] == 20.0 and isinstance(body["daily_budget_usd"], float)
     assert body["monthly_budget_usd"] == 300.0 and isinstance(body["monthly_budget_usd"], float)
     assert body["max_budget_usd"] == 2000.0 and isinstance(body["max_budget_usd"], float)
     assert body["pod_visibility"] == "own"
+    assert "Warning" not in result.output
     assert "sk_test_fixture_key_not_a_secret_0000000000" in result.output
     text = " ".join(result.output.split())
-    assert "$0.00/$20.00 today · $0.00/$300.00 month · $0.00/$200.00 total" in text  # the row as the server answered it
+    assert "$0.00/$20.00 today · $0.00/$300.00 month · $0.00/$2,000.00 total" in text  # the row as the server answered it
 
 
 @responses.activate
 def test_create_with_only_a_monthly_budget_sends_that_one_field(home, monkeypatch):
     session(monkeypatch)
+    scopes_route()
     responses.add(responses.POST, f"{API}/keys", json=created("m", monthly_budget_usd=300.0))
 
     result = run("keys", "create", "m", "--monthly-budget", "300")
 
     assert result.exit_code == 0, result.output
     body = json.loads(calls_to("/keys", "POST")[0].request.body)
-    assert body == {"name": "m", "scopes": ["read", "rent", "manage"], "pod_visibility": "own", "monthly_budget_usd": 300.0}
+    assert body == {"name": "m", "scopes": ["read", "rent", "manage"], "monthly_budget_usd": 300.0}
     assert "Budget: $0.00/$300.00 month" in " ".join(result.output.split())
 
 
@@ -184,7 +287,7 @@ def test_create_with_billing_scope_prints_the_servers_warning_before_the_post(ho
 @pytest.mark.parametrize("other", ["rent", "manage", "read"])
 def test_create_refuses_billing_with_any_other_scope_before_any_request(home, other):
     """Conductor 12:11Z: `billing` is "and nothing else". The server answers 422 to billing + rent/manage
-    (lium-platform#630, not released); the CLI says the same before the request, so no warning is printed
+    once it enforces the rule; the CLI says the same before the request, so no warning is printed
     for a key that is never minted and the scopes route is not read."""
     with responses.RequestsMock() as mocked:
         result = run("keys", "create", "payer", "--scope", "billing", "--scope", other, "--json")
@@ -194,6 +297,7 @@ def test_create_refuses_billing_with_any_other_scope_before_any_request(home, ot
         assert error["code"] == "invalid_arguments"
         assert error["message"] == BILLING_ALONE
         assert "billing with read, rent or manage is refused" in error["message"]
+        assert "lium-platform" not in error["message"] and "DAH-" not in error["message"]
         assert "Warning" not in result.stderr
         assert len(mocked.calls) == 0
 
@@ -278,7 +382,7 @@ def test_list_shows_scopes_budget_and_pod_count_per_key(home, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "API keys of Research (2 total)" in text
-    assert "agent-1 read,rent $4.80/$20.00 today · $60.10/$300.00 month · $37.25/$200.00 total 1" in text
+    assert "agent-1 read,rent $4.80/$20.00 today · $60.10/$300.00 month · $37.25/$2,000.00 total 1" in text
     assert "ops read,rent,manage — 0" in text  # no budget → —; the server's pods_count → 0
     assert not calls_to("/pods")  # the count is the row's `pods_count`, not a second read
     assert "sk_test_fixture" not in result.output  # the rows carry the key material; the table never prints it
@@ -304,7 +408,7 @@ def test_list_json_carries_the_budget_fields_and_never_the_secret(home, monkeypa
 @responses.activate
 def test_list_on_a_server_before_budgets_shows_dashes_for_budget_and_pods(home, monkeypatch):
     session(monkeypatch)
-    responses.add(responses.GET, f"{API}/keys", json=[ws_fixture("key_created")])  # the DAH-2944 row: no budget, no pods_count
+    responses.add(responses.GET, f"{API}/keys", json=[ws_fixture("key_created")])  # the older row: no budget, no pods_count
 
     result = run("keys", "list")
     text = " ".join(result.output.split())
@@ -326,7 +430,7 @@ def test_show_prints_what_the_key_can_do_from_the_scopes_route(home, monkeypatch
 
     assert result.exit_code == 0, result.output
     assert f"agent-1 ({AGENT_KEY})" in text
-    assert "Budget $4.80/$20.00 today · $60.10/$300.00 month · $37.25/$200.00 total" in text
+    assert "Budget $4.80/$20.00 today · $60.10/$300.00 month · $37.25/$2,000.00 total" in text
     # the ledger's newest row (the fixture lists them out of order), counted for the UTC day
     assert "Refused 3 today — last: pod extend $8.40, daily budget $20.00 reached" in text
     refusals = calls_to(f"/keys/{AGENT_KEY}/refusals", "GET")
@@ -391,7 +495,7 @@ def test_show_with_no_refusals_says_none_and_without_the_route_says_the_server_h
     assert none.exit_code == 0 and "Refused none" in " ".join(none.output.split())
     text = " ".join(older.output.split())
     assert older.exit_code == 0, older.output
-    assert "Refused — (this server has no refusal ledger; lium-platform#630, not released)" in text
+    assert "Refused — (this server has no refusal ledger)" in text
     machine = run("keys", "show", "agent-1", "--json")
     assert json.loads(machine.stdout)["refusals"] is None and json.loads(machine.stdout)["refusals_today"] is None
 
@@ -465,8 +569,9 @@ def test_scopes_on_a_server_without_the_route_is_not_found_whatever_the_old_rout
     assert result.exit_code == EXIT_API_ERROR
     error = json.loads(result.stderr)["error"]
     assert error["code"] == "not_found"
-    assert error["message"] == "This server has no GET /keys/scopes yet (lium-platform#630, not released): scope descriptions are unavailable"
-    assert "read, rent and manage" in error["hint"] and "lium-platform#630" in error["hint"]
+    assert error["message"] == "This server has no GET /keys/scopes yet: scope descriptions are unavailable"
+    assert "read, rent and manage" in error["hint"] and "need a newer Lium server" in error["hint"]
+    assert "lium-platform" not in result.stderr and "DAH-" not in result.stderr
 
 
 # ------------------------------------------------------------------------------------------------- ps --key
@@ -482,6 +587,40 @@ def test_ps_key_with_an_id_filters_server_side_without_a_session(home):
     rows = json.loads(result.stdout)
     assert rows[0]["api_key_id"] == AGENT_KEY and rows[0]["api_key_name"] == "agent-1"
     assert not calls_to("/keys")  # an id needs no lookup
+    assert result.stderr == "" or "cannot filter" not in result.stderr
+
+
+@responses.activate
+def test_ps_key_keeps_only_the_keys_pods_when_the_server_stamps_them_but_did_not_filter(home):
+    rows = pods_rented_by_agent()
+    other = json.loads(json.dumps(rows[0]))
+    other.update({"id": "11111111-2222-4333-8444-555555555555", "pod_name": "other", "api_key_id": OPS_KEY, "api_key_name": "ops"})
+    responses.add(responses.GET, f"{API}/pods", json=[*rows, other])
+    me()
+
+    result = run("ps", "--key", AGENT_KEY, "--format", "json")
+
+    assert result.exit_code == 0, result.output
+    assert [r["api_key_name"] for r in json.loads(result.stdout)] == ["agent-1"]
+
+
+@responses.activate
+def test_ps_key_on_a_server_that_cannot_filter_says_so_and_never_labels_the_account_as_one_key(home):
+    """Today's lium.io ignores `api_key_id` and stamps no pod: every pod comes back. Showing them under "rented
+    through key agent-1" would be a lie; the CLI shows them as the account's and says the server cannot filter."""
+    responses.add(responses.GET, f"{API}/pods", json=ws_fixture("pods_research"))  # no api_key_id on any row
+    me()
+
+    human = run("ps", "--key", AGENT_KEY)
+    text = " ".join(human.output.split())
+    assert human.exit_code == 0, human.output
+    assert "This server cannot filter by API key (its rows carry no api_key_id): showing every pod of the account, not one key's" in text
+    assert "rented through key" not in text
+    assert "trainer" in text  # the account's pod, shown as such
+
+    machine = run("ps", "--key", AGENT_KEY, "--format", "json")
+    assert machine.exit_code == 0 and len(json.loads(machine.stdout)) == 1
+    assert "cannot filter by API key" in machine.stderr
 
 
 @responses.activate
@@ -542,6 +681,43 @@ def test_billing_history_key_and_days_reach_the_statement_route(home):
     assert "trainer 1×H100 agent-1 13.5 h $32.40 2026-09-20 18:00 running" in text
     assert "eval 1×RTX 4090 agent-1 10.0 h $4.85 2026-09-19 10:00 2026-09-19 20:00" in text
     assert "Total $37.25" in text
+    assert "cannot filter" not in text
+
+
+@responses.activate
+def test_billing_history_key_on_a_server_that_cannot_filter_shows_the_accounts_figures_as_such(home):
+    """Today's lium.io ignores `api_key_id`: the statement is the whole account's, so it is headed as the
+    account's — never "through key …" — and the CLI says the server could not filter (stderr under JSON)."""
+    unstamped = fixture("statement")
+    for pod in unstamped["pods"]:
+        pod.pop("api_key_id", None)
+        pod.pop("api_key_name", None)
+    responses.add(responses.GET, f"{API}/billing/statement", json=unstamped)
+    me()
+
+    human = run("billing", "history", "--key", AGENT_KEY)
+    text = " ".join(human.output.split())
+    assert human.exit_code == 0, human.output
+    assert "This server cannot filter by API key (its rows carry no api_key_id): showing every charge of the account, not one key's" in text
+    assert "Charges: 2 pods" in text and "through key" not in text and "Total $37.25" in text
+
+    machine = run("billing", "history", "--key", AGENT_KEY, "--format", "json")
+    assert machine.exit_code == 0 and json.loads(machine.stdout)["total"] == unstamped["total"]
+    assert "cannot filter by API key" in machine.stderr
+
+
+@responses.activate
+def test_billing_history_key_keeps_only_the_keys_pods_and_their_total_when_the_server_stamps_but_did_not_filter(home):
+    mixed = fixture("statement")
+    mixed["pods"][1].update({"api_key_id": OPS_KEY, "api_key_name": "ops"})
+    responses.add(responses.GET, f"{API}/billing/statement", json=mixed)
+    me()
+
+    result = run("billing", "history", "--key", AGENT_KEY, "--format", "json")
+
+    assert result.exit_code == 0, result.output
+    statement = json.loads(result.stdout)
+    assert [p["api_key_name"] for p in statement["pods"]] == ["agent-1"] and statement["total"] == 32.4
 
 
 @responses.activate
@@ -764,9 +940,8 @@ def test_sdk_api_keys_create_defaults_and_validation():
     default = lium.api_keys.create("plain", workspace_id=RESEARCH)
 
     first, second = (json.loads(c.request.body) for c in calls_to("/keys", "POST"))
-    assert first == {"name": "agent-1", "scopes": ["read", "rent"], "pod_visibility": "own",
-                     "daily_budget_usd": 20.0, "max_budget_usd": 200.0}
-    assert second == {"name": "plain", "scopes": ["read", "rent", "manage"], "pod_visibility": "own"}
+    assert first == {"name": "agent-1", "scopes": ["read", "rent"], "daily_budget_usd": 20.0, "max_budget_usd": 200.0}
+    assert second == {"name": "plain", "scopes": ["read", "rent", "manage"]}  # no pod_visibility unless named
     assert key.key == "sk_test_fixture_key_not_a_secret_0000000000" and key.daily_budget_usd == 20.0
     assert default.matches("AGENT-1") and "key" not in key.to_dict()
     with pytest.raises(ValueError, match="at least \\$1"):
@@ -785,8 +960,10 @@ def test_sdk_api_keys_create_defaults_and_validation():
 
     lium.api_keys.create("payer", ["billing"], monthly_budget_usd=300, workspace_id=RESEARCH)
     assert json.loads(calls_to("/keys", "POST")[2].request.body) == {
-        "name": "payer", "scopes": ["billing"], "pod_visibility": "own", "monthly_budget_usd": 300.0,
+        "name": "payer", "scopes": ["billing"], "monthly_budget_usd": 300.0,
     }
+    lium.api_keys.create("seer", pod_visibility="account", workspace_id=RESEARCH)
+    assert json.loads(calls_to("/keys", "POST")[3].request.body)["pod_visibility"] == "account"
 
 
 def test_sdk_key_material_stays_out_of_repr_and_to_dict():
@@ -874,7 +1051,7 @@ def test_budget_sets_one_budget_and_leaves_the_other_alone(home, monkeypatch):
     assert json.loads(patch.request.body) == {"daily_budget_usd": 50.0}  # max_budget_usd is not named, so not sent
     assert patch.request.headers["Authorization"] == f"Bearer {SESSION}"
     assert patch.request.headers["X-Lium-Workspace-Id"] == RESEARCH
-    assert "Budget of 'agent-1' is now $4.80/$50.00 today · $60.10/$300.00 month · $37.25/$200.00 total" in " ".join(result.output.split())
+    assert "Budget of 'agent-1' is now $4.80/$50.00 today · $60.10/$300.00 month · $37.25/$2,000.00 total" in " ".join(result.output.split())
 
 
 @responses.activate
@@ -898,7 +1075,7 @@ def test_budget_sets_and_clears_the_monthly_window(home, monkeypatch):
 def test_budget_clears_a_budget_with_null_and_prints_the_row_as_json(home, monkeypatch):
     session(monkeypatch)
     responses.add(responses.GET, f"{API}/keys", json=fixture("keys"))
-    responses.add(responses.PATCH, f"{API}/keys/{AGENT_KEY}", json=patched_agent(max_budget_usd=None))
+    responses.add(responses.PATCH, f"{API}/keys/{AGENT_KEY}", json=patched_agent(max_budget_usd=None, daily_budget_usd=25.0))
 
     result = run("keys", "budget", AGENT_KEY, "--no-max-budget", "--daily-budget", "25", "--json")
 
@@ -932,6 +1109,75 @@ def test_budget_below_a_dollar_is_a_usage_error(home):
         result = run("keys", "budget", "agent-1", "--max-budget", "0.5")
         assert result.exit_code == 2 and "x>=1.0" in result.output
         assert len(mocked.calls) == 0
+
+
+@responses.activate
+def test_budget_on_a_server_without_the_patch_route_says_so(home, monkeypatch):
+    """Today's lium.io has `/keys/{id}` for GET/PUT/DELETE but no PATCH: 405. Not a generic API error — the
+    plain sentence the other key commands print for a server before per-key budgets."""
+    session(monkeypatch)
+    responses.add(responses.GET, f"{API}/keys", json=fixture("keys"))
+    responses.add(responses.PATCH, f"{API}/keys/{AGENT_KEY}", status=405, json={"detail": "Method Not Allowed"})
+
+    result = run("keys", "budget", "agent-1", "--daily-budget", "50", "--json")
+
+    assert result.exit_code == EXIT_API_ERROR, result.output
+    error = json.loads(result.stderr)["error"]
+    assert error["code"] == "not_found"
+    assert error["message"] == ("This server does not support key budgets or pod visibility yet (no PATCH /keys/{id}): "
+                                "the budget of 'agent-1' was not changed; upgrade the server")
+
+
+@responses.activate
+def test_budget_with_a_window_the_server_did_not_record_is_refused(home, monkeypatch):
+    """A server that knows daily and max but not monthly echoes the row without `monthly_budget_usd`: the
+    caller must not believe a monthly cap exists."""
+    session(monkeypatch)
+    responses.add(responses.GET, f"{API}/keys", json=fixture("keys"))
+    row = {k: v for k, v in fixture("keys")[0].items() if k not in ("monthly_budget_usd", "spent_month_usd")}
+    responses.add(responses.PATCH, f"{API}/keys/{AGENT_KEY}", json=row)
+
+    result = run("keys", "budget", "agent-1", "--monthly-budget", "600", "--json")
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
+    envelope = json.loads(result.stderr)
+    assert envelope["error"]["message"].startswith(
+        "This server does not know this budget window yet: --monthly-budget $600.00 was not recorded"
+    )
+    assert envelope["data"] == {"unrecorded": ["monthly_budget_usd"]}
+
+
+def test_refusals_sort_and_count_on_the_parsed_stamp_whatever_its_form():
+    from lium.sdk.api_keys import parse_stamp
+    from lium.cli.keys.command import _refused_today, _refusals
+
+    class Keys:
+        def refusals(self, key_id, workspace_id):
+            from lium.sdk.api_keys import _refusal
+            return sorted(
+                (_refusal(r) for r in rows),
+                key=lambda r: parse_stamp(r.at) or parse_stamp("0001-01-01T00:00:00+00:00"), reverse=True,
+            )
+
+    rows = [
+        {"created_at": "2026-09-21T01:00:00Z", "window": "daily", "route": "rent"},          # 01:00 UTC
+        {"created_at": "2026-09-21T03:30:00+02:00", "window": "daily", "route": "topup"},    # 01:30 UTC
+        {"created_at": "2026-09-20T23:59:00", "window": "max", "route": "rent"},             # naive = UTC, yesterday
+        {"created_at": "2026-09-21T02:00:00-05:00", "window": "daily", "route": "extend"},   # 07:00 UTC, newest
+        {"created_at": "garbage", "window": "daily", "route": "rent"},
+    ]
+    lium = type("L", (), {"api_keys": Keys()})()
+    refusals = _refusals(lium, "k", "w")
+
+    assert [r.route for r in refusals] == ["extend", "topup", "rent", "rent", "rent"]
+    assert refusals[-1].at == "garbage"  # unreadable last
+    import lium.cli.keys.command as command
+    original = command._today
+    command._today = lambda: "2026-09-21"
+    try:
+        assert _refused_today(refusals) == 3  # the naive one is yesterday, the unreadable one does not count
+    finally:
+        command._today = original
 
 
 @responses.activate

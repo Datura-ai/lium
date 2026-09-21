@@ -2,7 +2,7 @@
 
 import json
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import click
 from rich.markup import escape
@@ -11,23 +11,27 @@ from rich.text import Text
 
 from lium.cli import ui
 from lium.cli.settings import config as settings
-from lium.cli.utils import CliFailure, EXIT_CONFIGURATION_ERROR, format_date, handle_errors
+from lium.cli.utils import CliFailure, EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, format_date, handle_errors
 from lium.cli.workspaces.command import require_session, section_for, target_workspace, workspace_client
 from lium.sdk import ApiKeyInfo, ApiKeyRefusal, ApiKeyScope, Lium
 from lium.sdk.api_keys import (
     BILLING_SCOPE,
+    BUDGET_FIELDS,
     BUDGET_MIN_USD,
     DEFAULT_SCOPES,
+    NO_BUDGETS,
     POD_VISIBILITIES,
     UNSET,
     check_budget_order,
     check_scopes,
+    parse_stamp,
+    unrecorded,
 )
 from lium.sdk.exceptions import LiumError, LiumNotFoundError
 
 # The scopes the option accepts. The server's list (`lium keys scopes`) is the source of what each one does; this
 # is only what the CLI lets you type. `billing` (the money routes: card payments, credit transfers, crypto
-# payments) is never in the default set — lium-platform#630, not released.
+# payments) is never in the default set; a server before per-key budgets knows the first three only.
 SCOPE_CHOICES = (*DEFAULT_SCOPES, BILLING_SCOPE)
 
 
@@ -39,7 +43,7 @@ def budget_cell(key: ApiKeyInfo) -> str:
     """`today/day · month/monthly · total/max`: spent over budget for each window the key has; `—` for a key
     with none.
 
-    A server before P235 sends no budget fields at all, so every key reads `—` there.
+    A server before per-key budgets sends no budget fields at all, so every key reads `—` there.
     """
     parts: List[str] = []
     if key.daily_budget_usd is not None:
@@ -52,7 +56,7 @@ def budget_cell(key: ApiKeyInfo) -> str:
 
 
 def _pods_cell(key: ApiKeyInfo) -> str:
-    """Active pods the key created, as the server counts them (`pods_count`); `—` from a server before P235."""
+    """Active pods the key created, as the server counts them (`pods_count`); `—` from a server before per-key budgets."""
     return "—" if key.pods_count is None else str(key.pods_count)
 
 
@@ -108,7 +112,7 @@ def keys_list_command(workspace: Optional[str], json_output: bool):
 
     Columns: Name, Scopes, Budget (spent/budget for the day, the month and in total, when the key has one), Pods (active
     pods the key created), Created, Last used, ID. Budgets and the Pods count come from a server with per-key
-    budgets (lium-platform#630, not released); older servers show `—`.
+    budgets (not on lium.io yet); older servers show `—`.
     """
     lium = workspace_client()
     require_session(lium)
@@ -144,20 +148,27 @@ def keys_list_command(workspace: Optional[str], json_output: bool):
 @click.option(
     "--daily-budget", type=BUDGET_RANGE, metavar="USD",
     help="Most USD the pods this key creates may be billed on one UTC day; at it the key's pods are stopped and "
-         "new rentals through the key are refused. At least $1, whole cents (lium-platform#630, not released)",
+         "new rentals through the key are refused. At least $1, whole cents (needs a server with per-key budgets; "
+         "not on lium.io yet)",
 )
 @click.option(
     "--monthly-budget", type=BUDGET_RANGE, metavar="USD",
-    help="The same over one UTC calendar month (lium-platform#630, not released)",
+    help="The same over one UTC calendar month (needs a server with per-key budgets; not on lium.io yet)",
 )
 @click.option(
     "--max-budget", type=BUDGET_RANGE, metavar="USD",
-    help="The same over the key's lifetime (lium-platform#630, not released)",
+    help="The same over the key's lifetime (needs a server with per-key budgets; not on lium.io yet)",
 )
 @click.option(
-    "--pod-visibility", type=click.Choice(POD_VISIBILITIES), default="own", show_default=True,
+    "--pod-visibility", type=click.Choice(POD_VISIBILITIES), default=None,
     help="own = only the pods this key creates exist for it; account = every pod of the account, within the "
-         "key's scopes (lium-platform#630, not released)",
+         "key's scopes. Not passed: the server's own default decides (needs a server with pod visibility; "
+         "not on lium.io yet)",
+)
+@click.option(
+    "--allow-unbudgeted", is_flag=True,
+    help="Keep the key even when the server did not record a budget or visibility asked for (a warning instead "
+         "of a refusal)",
 )
 @click.option("--workspace", "-w", default=None, help="Workspace name or id the key is bound to (default: current)")
 @click.option("--save", is_flag=True, help="Keep the key in ~/.lium/config.ini for `--workspace <name>`")
@@ -169,7 +180,8 @@ def keys_create_command(
     daily_budget: Optional[float],
     monthly_budget: Optional[float],
     max_budget: Optional[float],
-    pod_visibility: str,
+    pod_visibility: Optional[str],
+    allow_unbudgeted: bool,
     workspace: Optional[str],
     save: bool,
     json_output: bool,
@@ -178,10 +190,12 @@ def keys_create_command(
 
     Without --scope the key gets read, rent and manage. `--scope billing` gives the money routes (card
     payments, credit transfers, crypto top-ups) and nothing else: it is never added on its own, it prints the
-    server's warning first, and it cannot be combined with another scope (refused here with the server's
-    422 message). Budgets are USD per window — day, month, lifetime; at one, the server stops the key's pods
-    and refuses a rent, a pod extend or a top-up through it with `API_KEY_BUDGET_EXCEEDED` (exit 6), naming
-    the window hit. `lium keys budget` changes them later.
+    server's warning first, and it cannot be combined with another scope (refused here, before any request).
+    Budgets are USD per window — day, month, lifetime; at one, the server stops the key's pods and refuses a
+    rent, a pod extend or a top-up through it with `API_KEY_BUDGET_EXCEEDED` (exit 6), naming the window hit.
+    `lium keys budget` changes them later. A server without per-key budgets (lium.io today) cannot record a
+    budget or a pod visibility: the CLI then refuses to create the key (exit 2; a key the server minted
+    uncapped is revoked) unless --allow-unbudgeted is passed.
 
     \b
     Examples:
@@ -196,8 +210,16 @@ def keys_create_command(
         check_budget_order(daily_budget, monthly_budget, max_budget)
     except ValueError as exc:
         raise CliFailure("invalid_arguments", str(exc), EXIT_CONFIGURATION_ERROR) from exc
+    asked = {
+        "daily_budget_usd": daily_budget,
+        "monthly_budget_usd": monthly_budget,
+        "max_budget_usd": max_budget,
+        "pod_visibility": pod_visibility,
+    }
     lium = workspace_client()
     require_session(lium)
+    if any(value is not None for value in asked.values()) and not allow_unbudgeted:
+        _require_budget_support(lium, asked)
     target = target_workspace(lium, workspace)
     # a name config.ini cannot hold, or a section already holding another same-named workspace's key, is refused before minting
     section = section_for(target) if save else None
@@ -212,10 +234,14 @@ def keys_create_command(
         pod_visibility=pod_visibility,
         workspace_id=target.id,
     )
+    missing = unrecorded(key, asked)
+    if missing and not allow_unbudgeted:
+        _refuse_unrecorded(lium, key, asked, missing, target.id)
     if section:
         settings.set_in_section(section, "id", target.id)
         settings.set_in_section(section, "api_key", key.key or "")
-    _warn_unrecorded(key, {"daily-budget": daily_budget, "monthly-budget": monthly_budget, "max-budget": max_budget}, json_output)
+    if missing:
+        _warn_unrecorded(asked, missing, json_output)
     if json_output:
         click.echo(json.dumps({**key.raw, "workspace_name": target.name}, indent=2))
         return
@@ -228,19 +254,66 @@ def keys_create_command(
     )
 
 
-def _warn_unrecorded(key: ApiKeyInfo, budgets: Dict[str, Optional[float]], json_output: bool) -> None:
-    """A server before lium-platform#630 accepts `POST /keys` and drops the budget and pod-visibility fields it
-    does not know (its request model ignores extra fields): the key exists with NO budget and sees every pod
-    of the account. The row it answers has no `pod_visibility`, so that is the tell; say it, once, rather than
-    let a renter trust a cap that was never set. The key is still printed: it is real."""
-    if key.pod_visibility is not None:
-        return
-    asked = [f"--{name} {_usd(value)}" for name, value in budgets.items() if value is not None]
-    verb = "were" if len(asked) > 1 else "was"
+def _flags(asked: Dict[str, Any], fields: List[str]) -> List[str]:
+    """`--daily-budget $20.00`, `--pod-visibility own` — the flags behind the fields named, as the user typed them."""
+    words = []
+    for field_name in fields:
+        value = asked[field_name]
+        words.append(f"{_flag(field_name)} {_usd(value) if field_name in BUDGET_FIELDS else value}")
+    return words
+
+
+def _flag(field_name: str) -> str:
+    return "--" + field_name.removesuffix("_usd").replace("_", "-")
+
+
+def _without(fields: List[str]) -> str:
+    return " and ".join(_flag(field_name) for field_name in fields)
+
+
+def _require_budget_support(lium: Lium, asked: Dict[str, Any]) -> None:
+    """Before minting a key with a budget or a pod visibility: a server without `GET /keys/scopes` has none of
+    them (lium.io on 21 Sep 2026) and would mint the key uncapped — refuse first, so nothing is created."""
+    try:
+        lium.api_keys.scopes_payload()
+    except LiumNotFoundError as exc:
+        wanted = [field_name for field_name, value in asked.items() if value is not None]
+        raise CliFailure(
+            "invalid_arguments",
+            f"{NO_BUDGETS} (no GET /keys/scopes): create the key without {_without(wanted)}, or upgrade the server",
+            EXIT_CONFIGURATION_ERROR,
+            hint="Pass --allow-unbudgeted to mint the key anyway, with no cap and the server's default pod visibility",
+        ) from exc
+
+
+def _refuse_unrecorded(lium: Lium, key: ApiKeyInfo, asked: Dict[str, Any], missing: List[str], workspace_id: str) -> None:
+    """The server minted the key but recorded none of `missing` (its request model dropped the fields it does
+    not know): a key that exists with NO cap is exactly what the caller must not be handed believing it is
+    capped — revoke it and refuse (exit 2). When the revoke itself fails the key is named so it can be
+    revoked by hand."""
+    verb = "were" if len(missing) > 1 else "was"
+    what = f"{' and '.join(_flags(asked, missing))} {verb} not recorded"
+    try:
+        lium.api_keys.revoke(key.id, workspace_id)
+        outcome = f"the key '{key.name}' was minted uncapped and has been revoked"
+    except LiumError as exc:
+        outcome = f"the key '{key.name}' ({key.id}) was minted uncapped and could NOT be revoked ({exc}); revoke it in the dashboard"
+    raise CliFailure(
+        "invalid_arguments",
+        f"{NO_BUDGETS}: {what} — {outcome}. Create the key without {_without(missing)}, or upgrade the server",
+        EXIT_CONFIGURATION_ERROR,
+        data={"unrecorded": missing, "key_id": key.id},
+        hint="Pass --allow-unbudgeted to keep such a key, with a warning instead of this refusal",
+    )
+
+
+def _warn_unrecorded(asked: Dict[str, Any], missing: List[str], json_output: bool) -> None:
+    """--allow-unbudgeted: the key is kept and printed, and what the server did not record is said once, so
+    nobody trusts a cap that was never set. Under --json the line goes to stderr."""
+    verb = "were" if len(missing) > 1 else "was"
     line = (
-        "Warning: this server has no per-key budgets or pod visibility yet (lium-platform#630, not released): "
-        + (f"{' and '.join(asked)} {verb} not recorded — the key has no budget, and it " if asked else "the key ")
-        + "sees every pod of the account"
+        f"Warning: {NO_BUDGETS[0].lower()}{NO_BUDGETS[1:]}: {' and '.join(_flags(asked, missing))} {verb} not recorded — "
+        "the key has no such cap; it sees the pods the server's default allows"
     )
     if json_output:
         click.echo(line, err=True)
@@ -277,7 +350,8 @@ def keys_show_command(key: str, workspace: Optional[str], json_output: bool):
 
     "What this key can do" is the server's list for the scopes the key holds (`GET /keys/scopes`); the
     refusals are the server's ledger (`GET /keys/{id}/refusals`: when, which window, what was asked). Both
-    lium-platform#630, not released: an older server lists the scope names alone and has no refusal ledger.
+    Both need a newer Lium server (not on lium.io yet): an older server lists the scope names alone and has no
+    refusal ledger.
 
     \b
     Examples:
@@ -322,7 +396,7 @@ def keys_show_command(key: str, workspace: Optional[str], json_output: bool):
 
 def _refusals(lium: Lium, key_id: str, workspace_id: str) -> Optional[List[ApiKeyRefusal]]:
     """The key's refusal ledger, newest first; `None` on a server without `GET /keys/{id}/refusals` (404,
-    lium-platform#630, not released) — shown as "no refusal ledger on this server", not as "none"."""
+    server support pending) — shown as "no refusal ledger on this server", not as "none"."""
     try:
         return lium.api_keys.refusals(key_id, workspace_id)
     except LiumNotFoundError as exc:
@@ -331,19 +405,22 @@ def _refusals(lium: Lium, key_id: str, workspace_id: str) -> Optional[List[ApiKe
 
 
 def _today() -> str:
-    """The UTC day the budgets are counted in, as the ledger's timestamps start (`YYYY-MM-DD`)."""
+    """The UTC day the budgets are counted in (`YYYY-MM-DD`)."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def _refused_today(refusals: List[ApiKeyRefusal]) -> int:
+    """Rows whose stamp falls on the current UTC day — the stamp parsed and normalised to UTC first, so a `Z`,
+    an offset or a naive stamp count alike; an unreadable stamp does not count."""
     day = _today()
-    return sum(1 for r in refusals if (r.at or "").startswith(day))
+    stamps = (parse_stamp(r.at) for r in refusals)
+    return sum(1 for stamp in stamps if stamp is not None and stamp.strftime("%Y-%m-%d") == day)
 
 
 def _refused_cell(refusals: Optional[List[ApiKeyRefusal]], today: Optional[int]) -> str:
     """`3 today — last: rent $4.20, daily budget $20.00 reached` from the ledger's newest row."""
     if refusals is None:
-        return "— (this server has no refusal ledger; lium-platform#630, not released)"
+        return "— (this server has no refusal ledger)"
     if not refusals:
         return "none"
     last = refusals[0]
@@ -360,7 +437,7 @@ def _refused_cell(refusals: Optional[List[ApiKeyRefusal]], today: Optional[int])
 def keys_scopes_command(json_output: bool):
     """Every API-key scope and pod-visibility value with what it allows, in the server's words (`GET /keys/scopes`).
 
-    Needs a server with the route (lium-platform#630, not released); older servers answer `not_found`. No
+    Needs a server with the route (not on lium.io yet); older servers answer `not_found`. No
     session is needed: the table is static text, sent to any caller (the configured key goes along unchecked).
 
     \b
@@ -415,10 +492,12 @@ def keys_budget_command(
     workspace: Optional[str],
     json_output: bool,
 ):
-    """Set or clear a key's budgets — day, month, lifetime (`PATCH /keys/{id}`, lium-platform#630, not released).
+    """Set or clear a key's budgets — day, month, lifetime (`PATCH /keys/{id}`; needs a server with per-key
+    budgets, not on lium.io yet — an older server has no such route and the CLI says so).
 
-    A budget not named is left as it is; those named must keep daily ≤ monthly ≤ max. Scopes and pod
-    visibility cannot be changed after creation. Needs `lium workspaces login`: a key cannot lift its own budget.
+    A budget not named is left as it is; those named must keep daily ≤ monthly ≤ max; a budget the server did
+    not record (a window it does not know) is refused, exit 2. Scopes and pod visibility cannot be changed after
+    creation. Needs `lium workspaces login`: a key cannot lift its own budget.
 
     \b
     Examples:
@@ -448,14 +527,42 @@ def keys_budget_command(
     require_session(lium)
     target = target_workspace(lium, workspace)
     found = lium.api_keys.resolve(key, target.id)
-    updated = lium.api_keys.update(
-        found.id,
-        daily_budget_usd=wanted["daily"],
-        monthly_budget_usd=wanted["monthly"],
-        max_budget_usd=wanted["max"],
-        workspace_id=target.id,
-    )
+    try:
+        updated = lium.api_keys.update(
+            found.id,
+            daily_budget_usd=wanted["daily"],
+            monthly_budget_usd=wanted["monthly"],
+            max_budget_usd=wanted["max"],
+            workspace_id=target.id,
+        )
+    except LiumError as exc:
+        if _no_patch_route(exc):
+            raise CliFailure(
+                "not_found",
+                f"{NO_BUDGETS} (no PATCH /keys/{{id}}): the budget of '{found.name}' was not changed; upgrade the server",
+                EXIT_API_ERROR,
+                hint="`lium keys show` on such a server shows no budget row to change",
+            ) from exc
+        raise
+    set_fields = {
+        field_name: value for field_name, value in zip(BUDGET_FIELDS, wanted.values(), strict=True) if value not in (None, UNSET)
+    }
+    missing = unrecorded(updated, set_fields)
+    if missing:
+        verb = "were" if len(missing) > 1 else "was"
+        raise CliFailure(
+            "invalid_arguments",
+            f"This server does not know this budget window yet: {' and '.join(_flags(set_fields, missing))} {verb} not "
+            f"recorded — the budget of '{updated.name}' reads {budget_cell(updated)}; upgrade the server",
+            EXIT_CONFIGURATION_ERROR,
+            data={"unrecorded": missing},
+        )
     if json_output:
         click.echo(json.dumps(updated.to_dict(), indent=2))
         return
     ui.success(f"Budget of '{escape(updated.name)}' is now {budget_cell(updated)}")
+
+
+def _no_patch_route(exc: LiumError) -> bool:
+    """A server before per-key budgets has no `PATCH /keys/{id}`: 405 (the path exists for GET/PUT/DELETE) or 404."""
+    return isinstance(exc, LiumNotFoundError) or str(exc).startswith("API error 405")

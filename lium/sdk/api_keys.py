@@ -1,5 +1,5 @@
-"""API keys: scopes, budgets and pod visibility (lium-platform DAH-2944 scopes; P235 budgets and visibility,
-lium-platform#630, not released).
+"""API keys: scopes, budgets and pod visibility (budgets, the ``billing`` scope, pod visibility and the refusal
+ledger need a newer Lium server than lium.io runs on 21 Sep 2026 — server support pending).
 
 Every ``/keys`` route is session-only on the server (``utils/auth.py``: ``authenticate``, a browser JWT): a key
 cannot list, mint or reshape keys, so these calls need ``Lium.workspaces.login`` or LIUM_SESSION_TOKEN and raise
@@ -9,6 +9,7 @@ cannot list, mint or reshape keys, so these calls need ``Lium.workspaces.login``
 and never its own copy.
 """
 
+from datetime import datetime, timezone
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 
@@ -20,28 +21,28 @@ if TYPE_CHECKING:  # pragma: no cover
 
 SCOPES_ROUTE = "/keys/scopes"
 # What a key gets when the caller names no scope: everything but ``billing``. The list is always sent, so a
-# server whose own default for an omitted ``scopes`` is wider (DAH-2944: "every scope") cannot hand a new key
+# server whose own default for an omitted ``scopes`` is wider ("every scope" before scopes existed) cannot hand a new key
 # the money routes (owner, 21 Sep 2026: the elevated key is off by default).
 DEFAULT_SCOPES = ("read", "rent", "manage")
 BILLING_SCOPE = "billing"
-# Conductor 21 Sep 2026 12:11Z: `billing` is "and nothing else" — a key that moves money holds no other scope;
-# the server answers 422 to billing + rent/manage/read (lium-platform#630, not released). Checked here first, so the
-# refusal costs no request and reads the same from the CLI and the SDK.
+# Ruling of 21 Sep 2026: `billing` is "and nothing else" — a key that moves money holds no other scope. Checked
+# here, before any request, so the refusal reads the same from the CLI and the SDK; a server that enforces the
+# rule answers 422 to the same body (server support pending — today's servers accept the mix).
 BILLING_ALONE = (
     "The 'billing' scope stands alone: a key that moves money holds no other scope — make it a key of its own "
-    "(billing with read, rent or manage is refused; lium-platform#630, not released)"
+    "(billing with read, rent or manage is refused)"
 )
 BUDGET_FIELDS = ("daily_budget_usd", "monthly_budget_usd", "max_budget_usd")
 REFUSALS_ROUTE = "/keys/{id}/refusals"
 POD_VISIBILITIES = ("own", "account")
-BUDGET_EXCEEDED_CODE = "API_KEY_BUDGET_EXCEEDED"
-# dtos/api_key.py BUDGET_MIN_USD: below $1 a budget stops every pod on its first accrual, so the server refuses it
+# the server's floor: below $1 a budget stops every pod on its first accrual, so the server refuses it
 BUDGET_MIN_USD = 1.0
-NO_SCOPES_ROUTE = "This server has no GET /keys/scopes yet (lium-platform#630, not released): scope descriptions are unavailable"
+NO_SCOPES_ROUTE = "This server has no GET /keys/scopes yet: scope descriptions are unavailable"
 NO_SCOPES_ROUTE_HINT = (
     "The scopes on this server are read, rent and manage (`lium keys create --scope`); `billing`, budgets and pod "
-    "visibility arrive with lium-platform#630"
+    "visibility need a newer Lium server"
 )
+NO_BUDGETS = "This server does not support key budgets or pod visibility yet"
 
 
 class _Unset:
@@ -64,6 +65,33 @@ def _int(value: Any) -> Optional[int]:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def parse_stamp(value: Any) -> Optional[datetime]:
+    """An ISO-8601 stamp as an aware UTC datetime (``Z``, an offset, or naive-as-UTC alike); None when unreadable."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def unrecorded(key: ApiKeyInfo, asked: Dict[str, Any]) -> List[str]:
+    """The fields of ``asked`` (``daily_budget_usd`` …, ``pod_visibility``) the server did not record on ``key``:
+    absent from its row, or echoed with another value. A server before per-key budgets ignores fields its request
+    model does not know and answers the row without them — so a caller that asked for a cap must not trust the
+    key until this list is empty. Compared per field, since a server may know pod visibility and not budgets."""
+    missing = []
+    for field_name, wanted in asked.items():
+        if wanted is None:
+            continue
+        got = key.raw.get(field_name)
+        same = (_usd(got) == float(wanted)) if field_name in BUDGET_FIELDS else (got == wanted)
+        if field_name not in key.raw or not same:
+            missing.append(field_name)
+    return missing
 
 
 def _key(d: Dict[str, Any]) -> ApiKeyInfo:
@@ -104,8 +132,8 @@ def _scope(d: Dict[str, Any]) -> ApiKeyScope:
 
 
 def _refusal(d: Dict[str, Any]) -> ApiKeyRefusal:
-    """A refusal row as the ledger names it; the field names follow the spec of 21 Sep 2026 (`api_key_budget_refused`:
-    key id, window hit, amount asked, route) with the timestamp under `created_at` / `at` / `refused_at`."""
+    """A refusal row as the ledger names it (`api_key_budget_refused`: key id, window hit, amount asked, route) with
+    the timestamp under `created_at` / `at` / `refused_at` (server support pending; names read tolerantly)."""
     at = d.get("created_at") or d.get("at") or d.get("refused_at")
     window = d.get("window")
     route = d.get("route")
@@ -169,11 +197,11 @@ class ApiKeysClient:
     # ------------------------------------------------------------------ scopes (no credential needed)
     def scopes_payload(self) -> Dict[str, Any]:
         """The body of ``GET /keys/scopes`` as the server sent it, read once per client:
-        ``{"scopes": [...], "pod_visibility": [...], "money_routes": [...]}`` (lium-platform#630).
+        ``{"scopes": [...], "pod_visibility": [...], "money_routes": [...]}``.
 
-        A server before P235 has no such route: the path falls into its session-only ``GET /keys/{id}`` and
-        answers 401 (lium.io on 21 Sep 2026), or 404 once that route is gone. On lium-platform#630 the route
-        takes no credential at all, so neither answer can mean a bad key — both become one
+        A server before per-key budgets has no such route: the path falls into its session-only ``GET /keys/{id}``
+        and answers 401 (lium.io on 21 Sep 2026), or 404 once that route is gone. On a server that has the route
+        it takes no credential at all, so neither answer can mean a bad key — both become one
         :class:`LiumNotFoundError` that names the missing route. A server that answers a bare list is read
         as the ``scopes`` list alone.
         """
@@ -215,13 +243,20 @@ class ApiKeysClient:
         return _key(self._lium.workspaces._session_request("GET", f"/keys/{key_id}", workspace_id).json())
 
     def refusals(self, key_id: str, workspace_id: Optional[str] = None) -> List[ApiKeyRefusal]:
-        """The requests this key's budget refused, newest first (``GET /keys/{id}/refusals``, lium-platform#630,
-        not released — the ledger's ``api_key_budget_refused`` rows). A server without the route answers 404
-        (:class:`LiumNotFoundError`); a body of ``{"refusals": [...]}`` or a bare list is read alike."""
+        """The requests this key's budget refused, newest first (``GET /keys/{id}/refusals`` — the ledger's
+        ``api_key_budget_refused`` rows; server support pending). A server without the route answers 404
+        (:class:`LiumNotFoundError`); a body of ``{"refusals": [...]}`` or a bare list is read alike. Rows are
+        ordered on the parsed stamp, so ``Z``, offset and naive stamps sort together; unreadable ones go last."""
         data = self._lium.workspaces._session_request("GET", REFUSALS_ROUTE.format(id=key_id), workspace_id).json()
         rows = data.get("refusals") if isinstance(data, dict) else data
         refusals = [_refusal(row) for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
-        return sorted(refusals, key=lambda r: r.at or "", reverse=True)
+        floor = datetime.min.replace(tzinfo=timezone.utc)
+        return sorted(refusals, key=lambda r: parse_stamp(r.at) or floor, reverse=True)
+
+    def revoke(self, key_id: str, workspace_id: Optional[str] = None) -> None:
+        """Revoke a key (``DELETE /keys/{id}``): it stops working at once. Used by ``lium keys create`` to take
+        back a key the server minted without the cap that was asked for."""
+        self._lium.workspaces._session_request("DELETE", f"/keys/{key_id}", workspace_id)
 
     def resolve(self, name_or_id: str, workspace_id: Optional[str] = None) -> ApiKeyInfo:
         """A key by name (case-insensitive) or id among the workspace's keys.
@@ -245,7 +280,7 @@ class ApiKeysClient:
         daily_budget_usd: Optional[float] = None,
         monthly_budget_usd: Optional[float] = None,
         max_budget_usd: Optional[float] = None,
-        pod_visibility: str = "own",
+        pod_visibility: Optional[str] = None,
         workspace_id: Optional[str] = None,
     ) -> ApiKeyInfo:
         """Mint a key (``POST /keys``); the secret is in the returned ``key`` this once.
@@ -254,17 +289,19 @@ class ApiKeysClient:
         ``billing`` — the money routes — is on a key only when named, and then alone (:data:`BILLING_ALONE`).
         The three budgets (``daily_budget_usd`` per UTC day, ``monthly_budget_usd`` per UTC month,
         ``max_budget_usd`` for the key's lifetime) are sent as numbers (USD ≥ 1, whole cents) only when given,
-        daily ≤ monthly ≤ max; ``pod_visibility`` is ``own`` (the key sees only the pods it creates) or
-        ``account``. A server before P235 ignores the budget and visibility fields and answers 422 to a
-        ``billing`` scope.
+        daily ≤ monthly ≤ max. ``pod_visibility`` (``own``: the key sees only the pods it creates; ``account``:
+        every pod of the account) is sent only when given — left ``None``, the server's own default decides,
+        which its operator may switch. A server before per-key budgets ignores the budget and visibility fields
+        and answers the row without them: :func:`unrecorded` tells, and the CLI refuses such a key.
         """
-        if pod_visibility not in POD_VISIBILITIES:
+        if pod_visibility is not None and pod_visibility not in POD_VISIBILITIES:
             raise ValueError(f"pod_visibility must be one of {', '.join(POD_VISIBILITIES)}, not {pod_visibility!r}")
         body: Dict[str, Any] = {
             "name": name,
             "scopes": check_scopes(list(scopes) if scopes is not None else list(DEFAULT_SCOPES)),
-            "pod_visibility": pod_visibility,
         }
+        if pod_visibility is not None:
+            body["pod_visibility"] = pod_visibility
         amounts = [
             budget_amount(field_name, value)
             for field_name, value in zip(BUDGET_FIELDS, (daily_budget_usd, monthly_budget_usd, max_budget_usd), strict=True)
@@ -284,7 +321,7 @@ class ApiKeysClient:
         max_budget_usd: Optional[float] = UNSET,
         workspace_id: Optional[str] = None,
     ) -> ApiKeyInfo:
-        """Set or clear a key's budgets (``PATCH /keys/{id}``, lium-platform#630).
+        """Set or clear a key's budgets (``PATCH /keys/{id}``; server support pending).
 
         A budget given as a number is set, as ``None`` is cleared, left out (:data:`UNSET`) is kept as it is;
         naming none is a ``ValueError`` here (the server would answer 400). The budgets named here must keep
@@ -310,11 +347,13 @@ __all__ = [
     "BUDGET_FIELDS",
     "REFUSALS_ROUTE",
     "POD_VISIBILITIES",
-    "BUDGET_EXCEEDED_CODE",
     "BUDGET_MIN_USD",
     "NO_SCOPES_ROUTE",
+    "NO_BUDGETS",
     "UNSET",
     "budget_amount",
     "check_scopes",
     "check_budget_order",
+    "parse_stamp",
+    "unrecorded",
 ]

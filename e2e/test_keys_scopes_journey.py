@@ -1,10 +1,10 @@
-"""API-key scopes, per-key pod and charge filters (P235), through the CLI against the live API, with the e2e account's
+"""API-key scopes, per-key pod and charge filters, through the CLI against the live API, with the e2e account's
 API key only: `lium keys scopes` needs no credential, `lium ps --key <id>` and `lium billing history --key <id>` take
 an id without a session. The session-only commands (`keys create/list/show/budget`) need `lium workspaces login`, which
 the e2e account does not have — they are driven by test/test_keys_budgets_cli.py on recorded bodies.
 
-On a server before lium-platform#630 the scopes route is `not_found` and the per-key filter is ignored: those cases
-skip and say so, so the suite is green on main today and proves the feature the day the platform PR ships.
+On a server without per-key budgets the scopes route is `not_found` and the per-key filter is ignored: those cases
+skip and say so, so the suite is green on main today and proves the feature the day the server ships it.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def test_billing_history_json_is_the_ledger_statement(session: Session):
 def test_keys_scopes_are_the_servers_four_scopes_with_billing_off_by_default(session: Session):
     payload = scopes_payload(session)
     if payload is None:
-        pytest.skip("this server has no GET /keys/scopes yet (lium-platform#630, not released)")
+        pytest.skip("this server has no GET /keys/scopes yet (per-key budgets are not released)")
     rows = {row["scope"]: row for row in payload["scopes"]}
     assert set(rows) == {"read", "rent", "manage", "billing"}, list(rows)
     assert rows["billing"]["default"] is False and all(rows[s]["default"] for s in ("read", "rent", "manage"))
@@ -49,9 +49,14 @@ def test_keys_scopes_are_the_servers_four_scopes_with_billing_off_by_default(ses
 
 
 def test_ps_and_billing_history_filter_by_key_id_server_side(session: Session):
-    pods = session.lium("ps", "--key", NOBODYS_KEY, "--format", "json", check=True).json()
-    charges = session.lium("billing", "history", "--key", NOBODYS_KEY, "--format", "json", check=True).json()
+    ps = session.lium("ps", "--key", NOBODYS_KEY, "--format", "json", check=True)
+    history = session.lium("billing", "history", "--key", NOBODYS_KEY, "--format", "json", check=True)
+    pods, charges = ps.json(), history.json()
     assert isinstance(pods, list) and isinstance(charges.get("pods"), list)
     if scopes_payload(session) is None:
-        pytest.skip("this server ignores api_key_id (lium-platform#630, not released): the lists are the account's")
+        # the account's lists come back whole, and the CLI says so rather than label them one key's
+        for result, rows in ((ps, pods), (history, charges["pods"])):
+            assert not rows or "cannot filter by API key" in result.err, result
+        pytest.skip("this server ignores api_key_id (per-key budgets are not released): the lists are the account's")
     assert pods == [] and charges["pods"] == [] and charges["total"] == 0, (pods, charges)
+    assert "cannot filter" not in ps.err + history.err

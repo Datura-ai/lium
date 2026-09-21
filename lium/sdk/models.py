@@ -180,7 +180,7 @@ class PodInfo(_Serializable):
     cluster_node_index: Optional[int] = None
     cluster_overlay_ip: Optional[str] = None
 
-    # The API key that rented the pod (lium-platform P235: `api_key_id` / `api_key_name` on the /pods
+    # The API key that rented the pod (`api_key_id` / `api_key_name` on the /pods
     # row); None for a pod rented from the browser or listed by a server without the fields.
     api_key_id: Optional[str] = None
     api_key_name: Optional[str] = None
@@ -510,7 +510,7 @@ class WorkspaceMember:
 
 @dataclass
 class ApiKeyScope:
-    """One row of ``GET /keys/scopes`` (lium-platform P235): what a scope lets a key do, in the server's words.
+    """One row of ``GET /keys/scopes``: what a scope lets a key do, in the server's words.
 
     ``description`` is the one sentence next to the picker's checkbox, ``can`` the "what this key can do"
     lines, ``route_families`` the routes it opens, ``default`` whether a key made without naming scopes gets it.
@@ -526,13 +526,13 @@ class ApiKeyScope:
 
 @dataclass
 class ApiKeyInfo:
-    """An API key row as ``GET /keys`` / ``POST /keys`` describe it (lium-platform DAH-2944, P235).
+    """An API key row as ``GET /keys`` / ``POST /keys`` describe it.
 
     The budget fields are USD, one per window — ``daily_budget_usd`` (a UTC day), ``monthly_budget_usd`` (a
     UTC calendar month), ``max_budget_usd`` (the key's lifetime); ``spent_today_usd`` / ``spent_month_usd`` /
     ``spent_total_usd`` are what the key's pods were billed in each; a budget is ``None`` when the key has none. ``pod_visibility`` is ``own``
     (the key lists only the pods it rented) or ``account`` (every pod of the account); ``None`` from a server
-    before P235. ``key`` is the secret when the server sent it (``POST /keys`` always; the list rows on servers
+    before per-key budgets. ``key`` is the secret when the server sent it (``POST /keys`` always; the list rows on servers
     that echo it): kept out of ``repr`` and of :meth:`to_dict`, so it is printed only where ``create`` prints it
     once. ``raw`` is the server's row, for fields this class does not name.
     """
@@ -550,7 +550,7 @@ class ApiKeyInfo:
     spent_month_usd: Optional[float] = None
     spent_total_usd: Optional[float] = None
     pod_visibility: Optional[str] = None
-    # active pods the key created, as the server counts them; None from a server before P235
+    # active pods the key created, as the server counts them; None from a server before per-key budgets
     pods_count: Optional[int] = None
     key: Optional[str] = field(default=None, repr=False)
     raw: Dict[str, Any] = field(default_factory=dict, repr=False)
@@ -573,7 +573,7 @@ class ApiKeyInfo:
 
 @dataclass
 class ApiKeyRefusal:
-    """One row of ``GET /keys/{id}/refusals`` (lium-platform#630, not released): a request the key's budget
+    """One row of ``GET /keys/{id}/refusals`` (server support pending): a request the key's budget
     refused — when, which window was hit (``daily`` / ``monthly`` / ``max``), the route asked, the USD asked
     for, and the budget and spend at the time. ``raw`` is the server's row."""
 

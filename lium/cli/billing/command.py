@@ -10,7 +10,7 @@ from rich.table import Table
 from rich.text import Text
 
 from lium.cli import ui
-from lium.cli.keys.resolve import key_id_for
+from lium.cli.keys.resolve import key_id_for, rented_through, say_unfiltered
 from lium.cli.utils import CliFailure, EXIT_CONFIGURATION_ERROR, ensure_config, handle_errors, resolve_output_format
 from lium.cli.workspaces.context import show_workspace
 from lium.sdk import Lium
@@ -81,8 +81,9 @@ def billing_command():
 @click.option("--to", "end_day", metavar="YYYY-MM-DD", help="Last UTC billing day to include (inclusive)")
 @click.option(
     "--key", "api_key", metavar="NAME|ID",
-    help="Only the pods rented through this API key (GET /billing/statement?api_key_id=…; lium-platform#630, "
-         "not released — an older server answers for every pod). A name needs `lium workspaces login`; an id does not",
+    help="Only the pods rented through this API key (GET /billing/statement?api_key_id=…; needs a server that stamps "
+         "charges with their key — not on lium.io yet; an older server answers for every pod and the CLI says so). "
+         "A name needs `lium workspaces login`; an id does not",
 )
 @click.option(
     "--format", "output_format",
@@ -119,13 +120,24 @@ def billing_history_command(
         return lium.billing_statement(start_day=start_day, end_day=end_day, api_key_id=api_key_id)
 
     statement = fetch() if output_format == "json" else ui.load("Loading the statement", fetch)
+    scope = ""
+    if api_key_id:
+        # a server before per-key charges ignores `api_key_id` and stamps no pod: the statement is then the
+        # whole account's — say so, and never head it "through key …"; a server that stamps them filtered (or
+        # is filtered here) and the total is the kept pods'
+        kept, could_filter = rented_through(statement.get("pods") or [], api_key_id, lambda p: p.get("api_key_id"))
+        if could_filter:
+            scope = f" through key {escape(api_key)}"
+            if len(kept) != len(statement.get("pods") or []):
+                statement = {**statement, "pods": kept, "total": sum(float(p.get("total") or 0) for p in kept)}
+        else:
+            say_unfiltered("charge", output_format == "json")
     if output_format == "json":
         click.echo(json.dumps(statement, indent=2, ensure_ascii=False))
         return
 
     pods = statement.get("pods") or []
     period = " to ".join(p for p in (statement.get("start_day"), statement.get("end_day")) if p) or "all time"
-    scope = f" through key {escape(api_key)}" if api_key else ""
     if not pods:
         ui.warning(f"No charges{scope} ({period})")
         show_workspace(lium)
