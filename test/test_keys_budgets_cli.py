@@ -955,6 +955,31 @@ def test_a_402_without_an_error_body_is_still_a_budget_error_with_no_figures(hom
     assert "Budget exceeded: Payment Required" in result.output
 
 
+@responses.activate
+def test_a_402_card_decline_is_not_a_budget_refusal(home):
+    """Mikhail r4066607806: Stripe add-card already answers 402 with a card code. That is not a key budget."""
+    from lium.sdk import LiumError
+
+    responses.add(
+        responses.GET,
+        f"{API}/pods",
+        status=402,
+        json={"error": {"code": "card_declined", "message": "Your card was declined"}},
+    )
+    lium = Lium(Config(api_key="k", session_token=SESSION))
+
+    with pytest.raises(LiumError) as raised:
+        lium.ps()
+
+    assert not isinstance(raised.value, LiumBudgetExceededError)
+    assert raised.value.code == "card_declined"
+    result = run("ps", "--format", "json")
+    assert result.exit_code == EXIT_API_ERROR
+    envelope = json.loads(result.stderr)
+    assert envelope["error"]["code"] == "card_declined"
+    assert "Budget exceeded" not in result.output + result.stderr
+
+
 def test_a_403_naming_the_missing_scope_is_a_scope_error():
     error = permission_error("API key 'agent-1' does not have the 'manage' scope", key="sk_…", request_id="r1")
 

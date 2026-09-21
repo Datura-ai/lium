@@ -701,9 +701,9 @@ class Lium:
         # alone does not say which one to fix.
         if resp.status_code == 401:
             raise LiumAuthError(f"Invalid API key ({key})" if key else "Invalid API key", **context)
-        if resp.status_code == 402:
+        if resp.status_code == 402 and context.get("code") in (None, "API_KEY_BUDGET_EXCEEDED"):
             # the key's daily or total budget is reached (error.code
-            # API_KEY_BUDGET_EXCEEDED): a money refusal like a 403 for balance, so the same exit family
+            # API_KEY_BUDGET_EXCEEDED). A 402 for a Stripe card decline is not this.
             raise budget_error(_response_error_message(resp), key=key, data=_error_data(resp), **context)
         if resp.status_code == 403:
             raise permission_error(_response_error_message(resp), key=key, **context)
