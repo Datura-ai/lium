@@ -11,7 +11,7 @@ and never its own copy.
 
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 
-from .exceptions import LiumError
+from .exceptions import LiumAuthError, LiumError, LiumNotFoundError
 from .models import ApiKeyInfo, ApiKeyScope
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -27,6 +27,11 @@ POD_VISIBILITIES = ("own", "account")
 BUDGET_EXCEEDED_CODE = "API_KEY_BUDGET_EXCEEDED"
 # dtos/api_key.py BUDGET_MIN_USD: below $1 a budget stops every pod on its first accrual, so the server refuses it
 BUDGET_MIN_USD = 1.0
+NO_SCOPES_ROUTE = "This server has no GET /keys/scopes yet (lium-platform#630, not released): scope descriptions are unavailable"
+NO_SCOPES_ROUTE_HINT = (
+    "The scopes on this server are read, rent and manage (`lium keys create --scope`); `billing`, budgets and pod "
+    "visibility arrive with lium-platform#630"
+)
 
 
 class _Unset:
@@ -114,11 +119,17 @@ class ApiKeysClient:
         """The body of ``GET /keys/scopes`` as the server sent it, read once per client:
         ``{"scopes": [...], "pod_visibility": [...], "money_routes": [...]}`` (lium-platform#630).
 
-        A server before P235 has no such route and answers 404 (:class:`LiumNotFoundError`); a server that
-        answers a bare list is read as the ``scopes`` list alone.
+        A server before P235 has no such route: the path falls into its session-only ``GET /keys/{id}`` and
+        answers 401 (lium.io on 21 Sep 2026), or 404 once that route is gone. On lium-platform#630 the route
+        takes no credential at all, so neither answer can mean a bad key — both become one
+        :class:`LiumNotFoundError` that names the missing route. A server that answers a bare list is read
+        as the ``scopes`` list alone.
         """
         if self._scopes_payload is None:
-            data = self._lium.workspaces._read(SCOPES_ROUTE).json()
+            try:
+                data = self._lium.workspaces._read(SCOPES_ROUTE).json()
+            except (LiumAuthError, LiumNotFoundError) as exc:
+                raise LiumNotFoundError(NO_SCOPES_ROUTE, hint=NO_SCOPES_ROUTE_HINT, request_id=exc.request_id) from exc
             if isinstance(data, list):
                 data = {"scopes": data}
             self._scopes_payload = data if isinstance(data, dict) else {}
@@ -232,6 +243,7 @@ __all__ = [
     "POD_VISIBILITIES",
     "BUDGET_EXCEEDED_CODE",
     "BUDGET_MIN_USD",
+    "NO_SCOPES_ROUTE",
     "UNSET",
     "budget_amount",
 ]

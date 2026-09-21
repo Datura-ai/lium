@@ -347,14 +347,25 @@ def test_scopes_lists_every_scope_in_the_servers_words(home):
     assert all(c.request.headers.get("X-API-KEY") == "sk_test_default" for c in calls_to("/keys/scopes"))
 
 
+@pytest.mark.parametrize(
+    "status, body",
+    [
+        # lium.io on 21 Sep 2026: the path falls into the session-only GET /keys/{id} → 401 unauthorized
+        (401, {"error": {"code": "unauthorized", "message": "Not authenticated", "hint": "", "request_id": "req-401"}, "message": "Not authenticated"}),
+        (404, {"detail": "Not Found"}),
+    ],
+)
 @responses.activate
-def test_scopes_on_a_server_without_the_route_is_not_found(home):
-    responses.add(responses.GET, f"{API}/keys/scopes", status=404, json={"detail": "Not Found"})
+def test_scopes_on_a_server_without_the_route_is_not_found_whatever_the_old_route_answered(home, status, body):
+    responses.add(responses.GET, f"{API}/keys/scopes", status=status, json=body)
 
     result = run("keys", "scopes", "--json")
 
     assert result.exit_code == EXIT_API_ERROR
-    assert json.loads(result.stderr)["error"]["code"] == "not_found"
+    error = json.loads(result.stderr)["error"]
+    assert error["code"] == "not_found"
+    assert error["message"] == "This server has no GET /keys/scopes yet (lium-platform#630, not released): scope descriptions are unavailable"
+    assert "read, rent and manage" in error["hint"] and "lium-platform#630" in error["hint"]
 
 
 # ------------------------------------------------------------------------------------------------- ps --key
@@ -638,9 +649,9 @@ def test_sdk_key_routes_need_a_session_and_scopes_do_not():
     assert len(lium.api_keys.scopes()) == 4
     assert lium.api_keys.pod_visibilities() == {v["value"]: v["description"] for v in fixture("scopes")["pod_visibility"]}
     assert len(calls_to("/keys/scopes")) == 1  # read once per client
-    responses.replace(responses.GET, f"{API}/keys/scopes", status=404, json={"detail": "Not Found"})
-    with pytest.raises(LiumNotFoundError):
-        Lium(Config(api_key="k")).api_keys.scopes()  # a server before P235
+    responses.replace(responses.GET, f"{API}/keys/scopes", status=401, json={"detail": "Not authenticated"})
+    with pytest.raises(LiumNotFoundError, match="no GET /keys/scopes yet"):
+        Lium(Config(api_key="k")).api_keys.scopes()  # a server before P235: its GET /keys/{id} caught the path
     from lium.sdk import LiumSessionError
 
     for call in (
