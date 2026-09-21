@@ -1,7 +1,7 @@
 """The ⚡↓ mark in ``lium ls`` and the three power-limit fields on ``ExecutorInfo``.
 
 The backend judges whether a provider set a GPU's power limit under the card's default
-(``gpu_power_limited`` on ``GET /executors``, lium-platform#627) and the portal shows a
+(``gpu_power_limited`` on ``GET /executors``, lium-platform#632) and the portal shows a
 "Reduced power limit" badge for it. The CLI shows the same verdict as a mark after the node's
 Id, explains it under the table, and carries it in ``--format json``. Held here: only an
 explicit ``true`` marks a node; ``false``, ``null`` and a backend without the field show nothing
