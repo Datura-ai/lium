@@ -102,14 +102,12 @@ jobs:
         echo "version $version"
         echo "version=$version" >> "$GITHUB_OUTPUT"
 
-    # docker-container builder: the one that can export its layer cache (the default `docker` driver cannot)
+    # Release builds do not import or export GHA cache: a default-branch layer is mutable and
+    # must not enter a published CLI bundle. CI workflows still cache.
     - uses: docker/setup-buildx-action@v3
 
-    # Layers cached in the GitHub Actions cache, one scope per asset (amd64 and arm64 layers differ). Dockerfile.build
-    # installs the dependencies from the lockfile before it copies the source, so a push that changes only code
-    # reuses the apt, libssl, uv and dependency layers; the source copy, the project install and PyInstaller rerun.
-    # `ignore-error`: a cache export the cache service refuses (429, timeout) must not fail a build that produced
-    # the image — release-assets needs this job. `load` puts the image in the engine for the extract and the report.
+    # Dockerfile.build installs lockfile dependencies before COPY . . `load` puts the image
+    # in the engine for the extract and the report.
     - name: Build Linux bundle in Docker
       uses: docker/build-push-action@v6
       with:
@@ -119,8 +117,6 @@ jobs:
         build-args: LIUM_VERSION=${{ steps.version.outputs.version }}
         tags: lium-build:${{ github.sha }}-${{ matrix.asset_name }}
         load: true
-        cache-from: type=gha,scope=linux-bundle-${{ matrix.asset_name }}
-        cache-to: type=gha,scope=linux-bundle-${{ matrix.asset_name }},ignore-error=true
 
     - name: Extract the bundle from the image
       run: |
