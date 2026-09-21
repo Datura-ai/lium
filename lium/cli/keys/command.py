@@ -19,7 +19,6 @@ from lium.sdk.api_keys import (
     BUDGET_FIELDS,
     BUDGET_MIN_USD,
     DEFAULT_SCOPES,
-    NO_BUDGETS,
     POD_VISIBILITIES,
     UNSET,
     check_budget_order,
@@ -194,8 +193,9 @@ def keys_create_command(
     Budgets are USD per window — day, month, lifetime; at one, the server stops the key's pods and refuses a
     rent, a pod extend or a top-up through it with `API_KEY_BUDGET_EXCEEDED` (exit 6), naming the window hit.
     `lium keys budget` changes them later. A server without per-key budgets (lium.io today) cannot record a
-    budget or a pod visibility: the CLI then refuses to create the key (exit 2; a key the server minted
-    uncapped is revoked) unless --allow-unbudgeted is passed.
+    budget, and one without pod visibility cannot record that: the CLI then refuses to create the key (exit 2;
+    a key the server minted uncapped is revoked) unless --allow-unbudgeted is passed — each checked on its own,
+    so a server that knows pod visibility but not budgets takes --pod-visibility.
 
     \b
     Examples:
@@ -218,8 +218,9 @@ def keys_create_command(
     }
     lium = workspace_client()
     require_session(lium)
-    if any(value is not None for value in asked.values()) and not allow_unbudgeted:
-        _require_budget_support(lium, asked)
+    budgets_asked = [field_name for field_name in BUDGET_FIELDS if asked[field_name] is not None]
+    if budgets_asked and not allow_unbudgeted:
+        _require_budget_support(lium, budgets_asked)
     target = target_workspace(lium, workspace)
     # a name config.ini cannot hold, or a section already holding another same-named workspace's key, is refused before minting
     section = section_for(target) if save else None
@@ -234,12 +235,20 @@ def keys_create_command(
         pod_visibility=pod_visibility,
         workspace_id=target.id,
     )
-    missing = unrecorded(key, asked)
-    if missing and not allow_unbudgeted:
-        _refuse_unrecorded(lium, key, asked, missing, target.id)
-    if section:
-        settings.set_in_section(section, "id", target.id)
-        settings.set_in_section(section, "api_key", key.key or "")
+    try:
+        missing = unrecorded(key, asked)
+        if missing and not allow_unbudgeted:
+            _refuse_unrecorded(lium, key, asked, missing, target.id)
+        if section:
+            settings.set_in_section(section, "id", target.id)
+            settings.set_in_section(section, "api_key", key.key or "")
+    except CliFailure:
+        raise
+    except BaseException:
+        # the key exists on the server whatever happened here (a crash, Ctrl-C): name it, so it is not an
+        # uncapped key nobody knows of
+        click.echo(f"Note: key '{key.name}' ({key.id}) was minted; check it in the dashboard", err=True)
+        raise
     if missing:
         _warn_unrecorded(asked, missing, json_output)
     if json_output:
@@ -271,18 +280,28 @@ def _without(fields: List[str]) -> str:
     return " and ".join(_flag(field_name) for field_name in fields)
 
 
-def _require_budget_support(lium: Lium, asked: Dict[str, Any]) -> None:
-    """Before minting a key with a budget or a pod visibility: a server without `GET /keys/scopes` has none of
-    them (lium.io on 21 Sep 2026) and would mint the key uncapped — refuse first, so nothing is created."""
+def _unsupported(fields: List[str]) -> str:
+    """The true sentence for what the server lacks: budgets, pod visibility, or both — per capability, since a
+    server may know pod visibility (an intermediate release) and not budgets."""
+    budgets = any(field_name in BUDGET_FIELDS for field_name in fields)
+    visibility = "pod_visibility" in fields
+    what = "key budgets or pod visibility" if budgets and visibility else "pod visibility" if visibility else "key budgets"
+    return f"This server does not support {what} yet"
+
+
+def _require_budget_support(lium: Lium, budgets_asked: List[str]) -> None:
+    """Before minting a key with a budget: a server without `GET /keys/scopes` has no budgets (lium.io on
+    21 Sep 2026) and would mint the key uncapped — refuse first, so nothing is created. Pod visibility is not
+    gated here: a server may record it without having the route, and the create echo tells."""
     try:
         lium.api_keys.scopes_payload()
     except LiumNotFoundError as exc:
-        wanted = [field_name for field_name, value in asked.items() if value is not None]
         raise CliFailure(
             "invalid_arguments",
-            f"{NO_BUDGETS} (no GET /keys/scopes): create the key without {_without(wanted)}, or upgrade the server",
+            f"{_unsupported(budgets_asked)} (no GET /keys/scopes): create the key without {_without(budgets_asked)}, "
+            "or upgrade the server",
             EXIT_CONFIGURATION_ERROR,
-            hint="Pass --allow-unbudgeted to mint the key anyway, with no cap and the server's default pod visibility",
+            hint="Pass --allow-unbudgeted to mint the key anyway, with no cap",
         ) from exc
 
 
@@ -300,7 +319,7 @@ def _refuse_unrecorded(lium: Lium, key: ApiKeyInfo, asked: Dict[str, Any], missi
         outcome = f"the key '{key.name}' ({key.id}) was minted uncapped and could NOT be revoked ({exc}); revoke it in the dashboard"
     raise CliFailure(
         "invalid_arguments",
-        f"{NO_BUDGETS}: {what} — {outcome}. Create the key without {_without(missing)}, or upgrade the server",
+        f"{_unsupported(missing)}: {what} — {outcome}. Create the key without {_without(missing)}, or upgrade the server",
         EXIT_CONFIGURATION_ERROR,
         data={"unrecorded": missing, "key_id": key.id},
         hint="Pass --allow-unbudgeted to keep such a key, with a warning instead of this refusal",
@@ -311,8 +330,9 @@ def _warn_unrecorded(asked: Dict[str, Any], missing: List[str], json_output: boo
     """--allow-unbudgeted: the key is kept and printed, and what the server did not record is said once, so
     nobody trusts a cap that was never set. Under --json the line goes to stderr."""
     verb = "were" if len(missing) > 1 else "was"
+    head = _unsupported(missing)
     line = (
-        f"Warning: {NO_BUDGETS[0].lower()}{NO_BUDGETS[1:]}: {' and '.join(_flags(asked, missing))} {verb} not recorded — "
+        f"Warning: {head[0].lower()}{head[1:]}: {' and '.join(_flags(asked, missing))} {verb} not recorded — "
         "the key has no such cap; it sees the pods the server's default allows"
     )
     if json_output:
@@ -539,7 +559,7 @@ def keys_budget_command(
         if _no_patch_route(exc):
             raise CliFailure(
                 "not_found",
-                f"{NO_BUDGETS} (no PATCH /keys/{{id}}): the budget of '{found.name}' was not changed; upgrade the server",
+                f"This server does not support key budgets yet (no PATCH /keys/{{id}}): the budget of '{found.name}' was not changed; upgrade the server",
                 EXIT_API_ERROR,
                 hint="`lium keys show` on such a server shows no budget row to change",
             ) from exc

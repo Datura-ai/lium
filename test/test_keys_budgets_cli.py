@@ -110,11 +110,12 @@ def test_create_without_scope_sends_read_rent_manage_and_never_billing(home, mon
     assert "Warning" not in result.output
 
 
-@pytest.mark.parametrize("args", [["--daily-budget", "20", "--max-budget", "200"], ["--pod-visibility", "own"], ["--monthly-budget", "50"]])
+@pytest.mark.parametrize("args", [["--daily-budget", "20", "--max-budget", "200"], ["--monthly-budget", "50"], ["--daily-budget", "20", "--pod-visibility", "own"]])
 @responses.activate
-def test_create_with_a_cap_on_a_server_without_the_scopes_route_is_refused_before_anything_is_minted(home, monkeypatch, args):
+def test_create_with_a_budget_on_a_server_without_the_scopes_route_is_refused_before_anything_is_minted(home, monkeypatch, args):
     """Today's lium.io has no per-key budgets: it would mint the key and drop the fields it does not know. The
-    probe (`GET /keys/scopes`, which every server with budgets has) fails first, so nothing is created."""
+    probe (`GET /keys/scopes`, which every server with budgets has) fails first, so nothing is created. The
+    sentence names budgets only — pod visibility is not the probe's business."""
     session(monkeypatch)
     responses.add(responses.GET, f"{API}/keys/scopes", status=401, json={"detail": "Not authenticated"})  # lium.io today
 
@@ -123,11 +124,45 @@ def test_create_with_a_cap_on_a_server_without_the_scopes_route_is_refused_befor
     assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
     error = json.loads(result.stderr)["error"]
     assert error["code"] == "invalid_arguments"
-    assert error["message"].startswith("This server does not support key budgets or pod visibility yet (no GET /keys/scopes): create the key without ")
+    assert error["message"].startswith("This server does not support key budgets yet (no GET /keys/scopes): create the key without ")
     assert f"--{args[0].lstrip('-')}" in error["message"] and "or upgrade the server" in error["message"]
+    assert "--pod-visibility" not in error["message"] and "visibility" not in error["hint"]
     assert "--allow-unbudgeted" in error["hint"]
     assert not calls_to("/keys", "POST")  # nothing minted
     assert "lium-platform" not in result.output + result.stderr and "DAH-" not in result.output + result.stderr
+
+
+@responses.activate
+def test_create_with_only_a_visibility_needs_no_scopes_route_and_is_minted_when_the_server_echoes_it(home, monkeypatch):
+    """The server shape that ships first records `pod_visibility` on `POST /keys` and has NO `GET /keys/scopes`:
+    `--pod-visibility own` must reach it — no probe, the create echo is the tell — with no flag and no warning."""
+    session(monkeypatch)
+    responses.add(responses.GET, f"{API}/keys/scopes", status=401, json={"detail": "Not authenticated"})
+    responses.add(responses.POST, f"{API}/keys", json=key_row_without_budgets(pod_visibility="own"))
+
+    result = run("keys", "create", "ci", "--pod-visibility", "own")
+
+    assert result.exit_code == 0, result.output
+    assert not calls_to("/keys/scopes")
+    assert json.loads(calls_to("/keys", "POST")[0].request.body)["pod_visibility"] == "own"
+    assert "sk_test_fixture_key_not_a_secret_0000000000" in result.output and "Warning" not in result.output
+
+
+@responses.activate
+def test_create_with_only_a_visibility_on_a_server_without_the_field_is_refused_with_a_true_sentence(home, monkeypatch):
+    """Today's lium.io: no scopes route and no `pod_visibility` on the row. The key is minted, found uncapped in
+    that one respect, revoked, and the sentence says pod visibility — not budgets, which were never asked."""
+    session(monkeypatch)
+    responses.add(responses.POST, f"{API}/keys", json=ws_fixture("key_created"))  # the older row: no pod_visibility
+    responses.add(responses.DELETE, f"{API}/keys/{ws_fixture('key_created')['id']}", status=204)
+
+    result = run("keys", "create", "ci", "--pod-visibility", "own", "--json")
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
+    error = json.loads(result.stderr)["error"]
+    assert error["message"].startswith("This server does not support pod visibility yet: --pod-visibility own was not recorded — the key 'ci' was minted uncapped and has been revoked.")
+    assert "budget" not in error["message"]
+    assert not calls_to("/keys/scopes") and len(calls_to(f"/keys/{ws_fixture('key_created')['id']}", "DELETE")) == 1
 
 
 def key_row_without_budgets(**fields):
@@ -151,7 +186,7 @@ def test_create_with_a_budget_the_server_did_not_record_revokes_the_key_and_refu
     envelope = json.loads(result.stderr)
     assert envelope["error"]["code"] == "invalid_arguments"
     assert envelope["error"]["message"] == (
-        "This server does not support key budgets or pod visibility yet: --daily-budget $20.00 was not recorded — "
+        "This server does not support key budgets yet: --daily-budget $20.00 was not recorded — "
         "the key 'ci' was minted uncapped and has been revoked. Create the key without --daily-budget, or upgrade the server"
     )
     assert envelope["data"] == {"unrecorded": ["daily_budget_usd"], "key_id": ws_fixture("key_created")["id"]}
@@ -194,6 +229,22 @@ def test_create_names_the_key_when_the_revoke_itself_fails(home, monkeypatch):
 
 
 @responses.activate
+def test_a_crash_after_the_mint_names_the_key_before_the_traceback(home, monkeypatch):
+    """Between `POST /keys` and the echo check / revoke / save, whatever dies must not leave an uncapped key nobody
+    knows of: the key's name and id go to stderr before the exception carries on."""
+    session(monkeypatch)
+    scopes_route()
+    responses.add(responses.POST, f"{API}/keys", json=created("ci", daily_budget_usd=20.0))
+    import lium.cli.keys.command as command
+    monkeypatch.setattr(command, "unrecorded", lambda key, asked: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    result = run("keys", "create", "ci", "--daily-budget", "20")
+
+    assert result.exit_code != 0
+    assert f"Note: key 'ci' ({ws_fixture('key_created')['id']}) was minted; check it in the dashboard" in result.output
+
+
+@responses.activate
 def test_create_allow_unbudgeted_keeps_the_key_and_warns_instead(home, monkeypatch):
     """--allow-unbudgeted: no probe, no revoke; the key is printed and saved, and what was dropped is said once."""
     session(monkeypatch)
@@ -204,7 +255,7 @@ def test_create_allow_unbudgeted_keeps_the_key_and_warns_instead(home, monkeypat
 
     assert result.exit_code == 0, result.output
     assert "sk_test_fixture_key_not_a_secret_0000000000" in text
-    assert ("Warning: this server does not support key budgets or pod visibility yet: --daily-budget $20.00 and "
+    assert ("Warning: this server does not support key budgets yet: --daily-budget $20.00 and "
             "--max-budget $200.00 were not recorded — the key has no such cap") in text
     assert "Budget:" not in text  # nothing to show as set
     assert not calls_to("/keys/scopes") and not calls_to(f"/keys/{ws_fixture('key_created')['id']}", "DELETE")
@@ -1124,7 +1175,7 @@ def test_budget_on_a_server_without_the_patch_route_says_so(home, monkeypatch):
     assert result.exit_code == EXIT_API_ERROR, result.output
     error = json.loads(result.stderr)["error"]
     assert error["code"] == "not_found"
-    assert error["message"] == ("This server does not support key budgets or pod visibility yet (no PATCH /keys/{id}): "
+    assert error["message"] == ("This server does not support key budgets yet (no PATCH /keys/{id}): "
                                 "the budget of 'agent-1' was not changed; upgrade the server")
 
 

@@ -42,7 +42,6 @@ NO_SCOPES_ROUTE_HINT = (
     "The scopes on this server are read, rent and manage (`lium keys create --scope`); `billing`, budgets and pod "
     "visibility need a newer Lium server"
 )
-NO_BUDGETS = "This server does not support key budgets or pod visibility yet"
 
 
 class _Unset:
@@ -349,7 +348,6 @@ __all__ = [
     "POD_VISIBILITIES",
     "BUDGET_MIN_USD",
     "NO_SCOPES_ROUTE",
-    "NO_BUDGETS",
     "UNSET",
     "budget_amount",
     "check_scopes",
