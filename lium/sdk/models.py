@@ -180,6 +180,11 @@ class PodInfo(_Serializable):
     cluster_node_index: Optional[int] = None
     cluster_overlay_ip: Optional[str] = None
 
+    # The API key that rented the pod (lium-platform P235: `api_key_id` / `api_key_name` on the /pods
+    # row); None for a pod rented from the browser or listed by a server without the fields.
+    api_key_id: Optional[str] = None
+    api_key_name: Optional[str] = None
+
     def eta_hint(self) -> Optional[str]:
         """One line for a pod that is still starting, e.g. ``est. ready in ~18 s (phase: pulling image)``.
 
@@ -501,6 +506,55 @@ class WorkspaceMember:
     role: str
     is_billing_owner: bool
     joined_at: Optional[str] = None
+
+
+@dataclass
+class ApiKeyScope:
+    """One row of ``GET /keys/scopes`` (lium-platform P235): what a scope lets a key do, in the server's words."""
+
+    scope: str
+    description: str
+    route_families: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ApiKeyInfo:
+    """An API key row as ``GET /keys`` / ``POST /keys`` describe it (lium-platform DAH-2944, P235).
+
+    The budget fields are USD; ``spent_today_usd`` / ``spent_total_usd`` are what the key's pods were
+    billed today (UTC) and ever; a budget is ``None`` when the key has none. ``pod_visibility`` is ``own``
+    (the key lists only the pods it rented) or ``account`` (every pod of the account); ``None`` from a server
+    before P235. ``key`` is the secret, filled only by ``create`` and never by a listing. ``raw`` is the
+    server's row, for fields this class does not name.
+    """
+
+    id: str
+    name: str
+    scopes: List[str] = field(default_factory=list)
+    created_at: Optional[str] = None
+    last_used: Optional[str] = None
+    workspace_id: Optional[str] = None
+    daily_budget_usd: Optional[float] = None
+    max_budget_usd: Optional[float] = None
+    spent_today_usd: Optional[float] = None
+    spent_total_usd: Optional[float] = None
+    pod_visibility: Optional[str] = None
+    key: Optional[str] = None
+    raw: Dict[str, Any] = field(default_factory=dict, repr=False)
+
+    def matches(self, name_or_id: str) -> bool:
+        """Whether ``name_or_id`` names this key: its id, or its name (case-insensitive)."""
+        return name_or_id == self.id or name_or_id.lower() == self.name.lower()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """The server's row without the key material, plus the normalised fields — what ``--json`` prints."""
+        data = {k: v for k, v in self.raw.items() if k != "key"}
+        for name in (
+            "id", "name", "scopes", "created_at", "last_used", "workspace_id", "daily_budget_usd",
+            "max_budget_usd", "spent_today_usd", "spent_total_usd", "pod_visibility",
+        ):
+            data[name] = getattr(self, name)
+        return data
 
 
 __all__ = [

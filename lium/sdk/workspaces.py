@@ -182,11 +182,16 @@ class WorkspacesClient:
 
     # ------------------------------------------------------------------ API keys (session)
     def list_keys(self, workspace_id: str) -> List[Dict[str, Any]]:
-        return self._session_request("GET", "/keys", workspace_id).json()
+        """The server's key rows for the workspace; :attr:`Lium.api_keys` returns them typed."""
+        return [key.raw for key in self._lium.api_keys.list(workspace_id)]
 
     def create_key(self, name: str, workspace_id: str) -> Dict[str, Any]:
-        """``POST /keys`` in the named workspace: the key is bound to it for good (DAH-2986)."""
-        return self._session_request("POST", "/keys", workspace_id, json={"name": name}).json()
+        """``POST /keys`` in the named workspace: the key is bound to it for good (DAH-2986).
+
+        Goes through :meth:`ApiKeysClient.create`, so the key gets ``read``, ``rent`` and ``manage`` —
+        never ``billing`` — like every key minted without named scopes.
+        """
+        return self._lium.api_keys.create(name, workspace_id=workspace_id).raw
 
 
 __all__ = ["WorkspacesClient", "WORKSPACE_HEADER", "NOT_ENABLED", "NEEDS_SESSION"]

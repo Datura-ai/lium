@@ -15,7 +15,7 @@ mirrors it and a unit test keeps the two in step.
 | 3 | `EXIT_API_ERROR` | The API refused or failed the call (5xx, 404 on a resource, rate limit, any other non-2xx). |
 | 4 | `EXIT_SSH_ERROR` | ssh could not connect, the pod has no SSH endpoint yet, or no ssh client is installed. |
 | 5 | `EXIT_POD_NOT_FOUND` | The pod, cluster or fabric named on the command line does not exist (`lium clusters rm`: also a cluster the API answered 404 for). |
-| 6 | `EXIT_PERMISSION_DENIED` | The account is not allowed to do this: unverified account, insufficient balance (403). |
+| 6 | `EXIT_PERMISSION_DENIED` | The account is not allowed to do this: unverified account, insufficient balance, an API key without the scope (403); an API key over its budget (402). |
 
 `lium exec` exits with the remote command's own exit status, so `lium exec pod
 "cmd" && next` behaves like `cmd && next` would on the pod. Usage errors caught
@@ -100,6 +100,8 @@ Codes raised by the shared error handler (any command can produce them) when the
 | `input_required` | 2 | A value would have been prompted for and no terminal can answer (`ui.prompt`, DAH-2883). | Pass it as an option. |
 | `permission_denied` | 6 | The API answered 403. | `lium balance`; verification on https://lium.io. |
 | `insufficient_balance` | 6 | 403 whose `error.code` is `insufficient_balance` (the platform's structured error body, lium-platform#210), or, from an older server, whose message says "Insufficient balance"; the SDK raises `LiumInsufficientBalanceError` with `required`/`available` parsed from the message when the server stated them. | `lium topup` or `lium fund`, or a cheaper node (`lium ls --sort price_total`). |
+| `budget_exceeded` | 6 | 402 from the rent path: the API key's daily or total budget (`lium keys create --daily-budget / --max-budget`) is reached, so a new rental through that key is refused while its pods keep running (lium-platform P235, not released; the server's own `error.code` is `API_KEY_BUDGET_EXCEEDED` and is the code you get when it sends one). The SDK raises `LiumBudgetExceededError` with `window`, `budget_usd` and `spent_usd` when the server stated them; the envelope's `data` repeats them. | `lium keys show <name>` shows the figures; raise the budget on https://lium.io/api-keys or rent with another key. |
+| `missing_scope` | 6 | 403 whose message says the API key "does not have the '<scope>' scope": the key lacks `read`, `rent`, `manage` or `billing` for this route; the SDK raises `LiumScopeError` with `scope` set, and the envelope's `data.scope` names it. | `lium keys scopes` explains each scope; `lium keys create <name> --scope <scope>` mints a key that holds it. |
 | `pod_not_found` | 5 | The pod named on the command line matched nothing. | `lium ps`. |
 | `not_found` | 3 | The API returned 404 for a resource other than the target pod. | List it again and retry. |
 | `rate_limited` | 3 | The API returned 429. | Wait and retry with back-off. |
