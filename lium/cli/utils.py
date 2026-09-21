@@ -611,8 +611,10 @@ def handle_errors(func):
         except LiumError as e:
             code, exit_code = _classify_sdk_error(e)
             # the API's own code, hint and request_id when it sent them (DAH-3057); the
-            # class-derived code and the default hint otherwise
-            fail(e.code or code, str(e), exit_code, _api_error_data(e), e.hint,
+            # class-derived code and the default hint otherwise — a server code this table does not
+            # know (API_KEY_BUDGET_EXCEEDED) still gets its class's hint, not the exit family's
+            hint = e.hint or _HINTS_BY_CODE.get(e.code or "") or default_hint(code, exit_code)
+            fail(e.code or code, str(e), exit_code, _api_error_data(e), hint,
                  request_id=e.request_id, prefix="Error: ")
         except Exception as e:
             # a bug, not a usage or API error: the only branch crash reporting sees (DAH-2057)

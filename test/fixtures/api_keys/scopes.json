@@ -1,0 +1,22 @@
+[
+  {
+    "scope": "read",
+    "description": "List pods, nodes, templates, the balance and the audit log; changes nothing.",
+    "route_families": ["GET /pods", "GET /executors", "GET /templates", "GET /users/me", "GET /account/audit", "GET /billing/statement"]
+  },
+  {
+    "scope": "rent",
+    "description": "Rent nodes and manage the pods this key rented (reboot, edit, remove).",
+    "route_families": ["POST /executors/{id}/rent", "POST /executors/rent-by-spec", "POST|PUT|DELETE /pods/{id}"]
+  },
+  {
+    "scope": "manage",
+    "description": "Manage every pod of the account, templates, SSH keys, volumes and backups.",
+    "route_families": ["POST|PUT|DELETE /pods/*", "POST|PUT|DELETE /templates", "POST|DELETE /ssh-keys", "POST|DELETE /volumes", "POST|DELETE /backup-configs"]
+  },
+  {
+    "scope": "billing",
+    "description": "Move money: card payments, credit transfers and crypto top-ups through the API. Never on a key by default; give it only to a key you would trust with your card.",
+    "route_families": ["POST /stripe/*", "POST /balance/transfer", "POST /tmc-pay/*", "POST /tao/*"]
+  }
+]
