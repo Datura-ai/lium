@@ -82,14 +82,16 @@ def _maybe_gi_from_big_number(n: Any) -> str:
     return str(round(v / (1024 * 1024)))
 
 
-# The Id cell's mark for a node whose GPU power limit the provider set under the card's default
-# (the backend's `gpu_power_limited`, the portal's "Reduced power limit" badge). On the Id cell,
-# after `(DinD)`: Config is already full at `8×RTXPRO6000D` and a marker there would be cut off.
-POWER_LIMITED_MARK = "⚡↓"
-# The legend, printed under the table with the other tips.
+# The Id cell's mark for a node whose GPU power limit sits under the card's default (the backend's
+# `gpu_power_limited`, the portal's "Reduced power limit" badge). On the Id cell, after `(DinD)`:
+# Config is already full at `8×RTXPRO6000D` and a marker there would be cut off. Two one-cell glyphs
+# (`↓` U+2193, `W`), like `★` and `~`: `⚡` (U+26A1) is East-Asian-Width W, so Rich pads it to two
+# cells while a text-presentation font draws one and every later column of the row shifts.
+POWER_LIMITED_MARK = "↓W"
+# The legend, printed under the table with the other tips — only when a row carries the mark.
 POWER_LIMITED_FOOTNOTE = (
-    f"{POWER_LIMITED_MARK} = reduced GPU power limit: the provider set it below the card's default, "
-    "so expect somewhat lower peak performance (--format json: gpu_power_limited, gpu_power_limit_w)"
+    f"{POWER_LIMITED_MARK} = reduced GPU power limit: set below the card's default, so expect somewhat "
+    "lower peak performance (--format json: gpu_power_limited, gpu_power_limit_w)"
 )
 
 
@@ -241,14 +243,16 @@ def format_header(executor_count: int, pareto_count: int, show_pareto: bool) -> 
         return f"Nodes  ({executor_count} shown)"
 
 
-def format_tip() -> str:
-    """Format tip message."""
-    return (
+def format_tip(power_limited_rows: bool = False) -> str:
+    """Format tip message; the ``↓W`` legend only when a row in the table carries the mark."""
+    tip = (
         f"Tip: {console.get_styled('lium up <index>', 'success')} {console.get_styled('# e.g. lium up 1', 'dim')}\n"
         f"{console.get_styled('default order: cheapest $/GPU·h first; --sort picks another key', 'dim')}\n"
-        f"{console.get_styled('★ = no other node beats it: a 10% faster download wins outright, else better on price and specs (VRAM, RAM, disk, PCIe, memory bandwidth, TFLOPS, upload, US location)', 'dim')}\n"
-        f"{console.get_styled(POWER_LIMITED_FOOTNOTE, 'dim')}"
+        f"{console.get_styled('★ = no other node beats it: a 10% faster download wins outright, else better on price and specs (VRAM, RAM, disk, PCIe, memory bandwidth, TFLOPS, upload, US location)', 'dim')}"
     )
+    if power_limited_rows:
+        tip += f"\n{console.get_styled(POWER_LIMITED_FOOTNOTE, 'dim')}"
+    return tip
 
 
 def compact_executor(exe: ExecutorInfo, is_pareto: bool, index: int) -> Dict[str, Any]:
@@ -283,7 +287,7 @@ def compact_executor(exe: ExecutorInfo, is_pareto: bool, index: int) -> Dict[str
         "p2p": exe.p2p,
         "interconnect": exe.interconnect,
         "machine_name": getattr(exe, "machine_name", None),
-        # the ⚡↓ mark as a field: true / false / null (unknown), and the watts behind it
+        # the ↓W mark as a field: true / false / null (unknown), and the watts behind it
         "gpu_power_limited": getattr(exe, "gpu_power_limited", None),
         "gpu_power_limit_w": getattr(exe, "gpu_power_limit_w", None),
         "gpu_power_limit_default_w": getattr(exe, "gpu_power_limit_default_w", None),
@@ -392,6 +396,6 @@ def build_executors_table(
         table.add_row(*(cells[h] for h in headers))
 
     header = format_header(len(sorted_executors), pareto_count, show_pareto)
-    tip = format_tip()
+    tip = format_tip(power_limited_rows=any(power_limited(exe) for exe in sorted_executors))
 
     return table, sorted_executors, header, tip

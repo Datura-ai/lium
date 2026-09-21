@@ -1,11 +1,11 @@
-"""The ⚡↓ mark in ``lium ls`` and the three power-limit fields on ``ExecutorInfo``.
+"""The ↓W mark in ``lium ls`` and the three power-limit fields on ``ExecutorInfo``.
 
-The backend judges whether a provider set a GPU's power limit under the card's default
-(``gpu_power_limited`` on ``GET /executors``, lium-platform#632) and the portal shows a
+The backend judges whether a GPU's power limit is set under the card's default
+(``gpu_power_limited`` on ``GET /executors``, not released yet) and the portal shows a
 "Reduced power limit" badge for it. The CLI shows the same verdict as a mark after the node's
-Id, explains it under the table, and carries it in ``--format json``. Held here: only an
-explicit ``true`` marks a node; ``false``, ``null`` and a backend without the field show nothing
-and never read as "limited".
+Id, explains it under the table when a row carries it, and carries it in ``--format json``.
+Held here: only an explicit ``true`` marks a node; ``false``, ``null`` and a backend without
+the field show nothing — no mark, no legend — and never read as "limited".
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from rich.console import Console
 from lium.cli.cli import cli
 from lium.cli.ls import command as ls_command_module
 from lium.cli.ls import display
-from lium.cli.ls.display import POWER_LIMITED_MARK, compact_executor, power_limited
+from lium.cli.ls.display import POWER_LIMITED_FOOTNOTE, POWER_LIMITED_MARK, compact_executor, power_limited
 from lium.sdk import Config, ExecutorInfo, Lium
 
 
@@ -130,11 +130,31 @@ def test_an_executor_object_without_the_attribute_is_not_marked():
 
 
 def test_the_legend_explains_the_mark_and_names_the_json_field():
-    tip = display.format_tip()
+    tip = display.format_tip(power_limited_rows=True)
 
     assert f"{POWER_LIMITED_MARK} = reduced GPU power limit" in tip
     assert "below the card's default" in tip
     assert "gpu_power_limited" in tip
+
+
+def test_the_legend_is_printed_only_when_a_row_carries_the_mark():
+    # today's backend sends no such field, so every `lium ls` would otherwise gain a line for a mark never shown
+    limited = _map(_executor_dict("limited", **LIMITED))
+    stock = _map(_executor_dict("stock", **STOCK))
+
+    *_, tip_with = display.build_executors_table([limited, stock], show_pareto=False, width=200)
+    *_, tip_without = display.build_executors_table([stock, _map(_executor_dict("old"))], show_pareto=False, width=200)
+
+    assert POWER_LIMITED_FOOTNOTE in tip_with
+    assert POWER_LIMITED_FOOTNOTE not in tip_without and POWER_LIMITED_MARK not in tip_without
+    assert display.format_tip() == tip_without  # the default is the legend-less tip the other tables print
+
+
+def test_the_mark_is_one_terminal_cell_per_glyph():
+    # `⚡` is East-Asian-Width W (Rich pads two cells, many fonts draw one): every glyph here is one cell
+    from rich.cells import cell_len
+
+    assert all(cell_len(glyph) == 1 for glyph in POWER_LIMITED_MARK)
 
 
 # -- lium ls end to end --------------------------------------------------------------------------------
@@ -166,6 +186,13 @@ def test_lium_ls_marks_the_limited_node_and_prints_the_legend(monkeypatch):
 
     assert output.count(POWER_LIMITED_MARK) == 2  # the one marked row and the legend line
     assert f"{POWER_LIMITED_MARK} = reduced GPU power limit" in output
+
+
+def test_lium_ls_against_todays_backend_shows_neither_mark_nor_legend(monkeypatch):
+    # rows without the field (the platform has not shipped it) and a stock-power row: nothing changes
+    output = _run_ls(monkeypatch, [_executor_dict("old"), _executor_dict("stock", **STOCK)])
+
+    assert POWER_LIMITED_MARK not in output
 
 
 def test_lium_ls_json_carries_the_verdict_and_the_watts(monkeypatch):

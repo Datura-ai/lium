@@ -500,7 +500,7 @@ One object per node, sorted as the table is; the names are stable and pinned by 
 | `tier` | `secure` or `spot` (reclaimable) |
 | `link`, `nvlink`, `p2p` | the Link column (`NV18` = NVLink with 18 links per GPU, `PCIe/SYS` = the worst PCIe class), `true` when every GPU pair is on NVLink, `true` when every pair passed the P2P check; `null` until the node's validator has reported its topology |
 | `interconnect` | the validator's topology object: pair and link counts, `pcie_class`, `p2p`; on the listing it has no `matrix` (the GPU x GPU table is in `lium describe <pod>`) |
-| `gpu_power_limited`, `gpu_power_limit_w`, `gpu_power_limit_default_w` | the table's ⚡↓ mark as a field: `true` when the provider set a GPU's power limit under 95 % of the card's default (expect somewhat lower peak performance), `false` at stock power, `null` when the platform cannot say; the most reduced GPU's current and default limit in watts (lium-platform#632, not released — `null` until it is deployed) |
+| `gpu_power_limited`, `gpu_power_limit_w`, `gpu_power_limit_default_w` | the table's ↓W mark as a field: `true` when a GPU's power limit is set under 95 % of the card's default (expect somewhat lower peak performance), `false` at stock power, `null` when the platform cannot say; the most reduced GPU's current and default limit in watts (not released: `null` until the platform ships the field) |
 
 The listing asks for `GET /executors?view=summary`, about 1 KB per node instead of about 8.6 KB. `link`, `nvlink`, `p2p` and `interconnect` need lium-platform#522 deployed; until then the summary view carries neither key and the four fields are `null`. `Lium.ls(view="full")` returns the whole validator scrape in `ExecutorInfo.specs`.
 
