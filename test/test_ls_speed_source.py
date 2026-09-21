@@ -1,10 +1,11 @@
-"""``lium ls`` tells a measured speed from the node's own report.
+"""``lium ls`` tells a checked or averaged speed from a single speed-test sample.
 
 The Download / Upload columns show the backend's effective figure — the first one it trusts out of a
-VerifyX average, a speed-test average and the node's own scrape (``specs.network.*_speed``). Two nodes
-listing "300" could be one the validator measured at 300 Mbps and one that merely says so. ``~300`` now
-marks the second kind, the tip explains the mark, ``--format json`` carries it as ``download_source`` /
-``upload_source``, and ``--sort download`` orders by the figure the column shows (it read the raw scrape).
+VerifyX average, a speed-test average, one VerifyX download and the node's latest speed-test sample
+(``specs.network.*_speed``). Two nodes listing "300" could be one averaged at 300 Mbps over many cycles
+and one with a single sample. ``~300`` now marks the second kind, the tip explains the mark,
+``--format json`` carries it as ``download_source`` / ``upload_source``, and ``--sort download`` orders
+by the figure the column shows (it read the raw sample).
 """
 
 from __future__ import annotations
@@ -71,8 +72,8 @@ def test_an_effective_figure_that_differs_from_the_scrape_is_measured():
     assert display.network_speed(exe, "download") == (2400.1, display.MEASURED)
 
 
-def test_an_effective_figure_equal_to_the_scrape_is_the_node_s_own_report():
-    # the backend's chain fell through every measurement to `specs.network.download_speed`
+def test_an_effective_figure_equal_to_the_sample_is_a_single_sample():
+    # the backend's chain fell through to `specs.network.download_speed`, or an average has one sample so far
     exe = _map(_executor_dict("plain", raw_download=300.0, effective_download=300.0))
 
     assert display.network_speed(exe, "download") == (300.0, display.REPORTED)
@@ -84,8 +85,8 @@ def test_a_measured_figure_needs_no_scrape_to_compare_against():
     assert display.network_speed(exe, "download") == (1500.0, display.MEASURED)
 
 
-def test_no_effective_figure_falls_back_to_the_scrape_and_says_so():
-    # an API that predates `effective_*_speed_mbps`: the raw figure is shown, marked as the node's own
+def test_no_effective_figure_falls_back_to_the_sample_and_says_so():
+    # an API that predates `effective_*_speed_mbps`: the raw sample is shown, marked as such
     exe = _map(_executor_dict("old-api", raw_download=300.0, effective_download=None))
 
     assert display.network_speed(exe, "download") == (300.0, display.REPORTED)
@@ -117,7 +118,7 @@ def test_upload_reads_the_same_way():
 # -- the table -------------------------------------------------------------------------------------------
 
 
-def test_the_table_prefixes_the_node_s_own_figure_and_not_a_measured_one():
+def test_the_table_prefixes_a_single_sample_and_not_a_checked_figure():
     measured = _map(_executor_dict("measured", raw_download=300.0, effective_download=2400.1, raw_upload=480.0, effective_upload=1200.5))
     reported = _map(_executor_dict("reported", raw_download=300.0, effective_download=300.0, raw_upload=480.0, effective_upload=480.0))
 
@@ -149,7 +150,7 @@ def test_a_slow_reported_node_keeps_the_warning_colour(monkeypatch):
 
 def test_the_tip_explains_the_mark():
     assert display.REPORTED_FOOTNOTE in display.format_tip()
-    assert "node's own figure" in display.REPORTED_FOOTNOTE
+    assert "single speed-test sample" in display.REPORTED_FOOTNOTE
 
 
 def test_the_help_text_explains_the_mark():
@@ -157,7 +158,7 @@ def test_the_help_text_explains_the_mark():
 
     assert result.exit_code == 0, result.output
     assert '"~"' in result.output
-    assert "node's own report" in result.output
+    assert "single speed-test" in result.output
 
 
 # -- json ------------------------------------------------------------------------------------------------

@@ -97,23 +97,25 @@ def _float(x: Any) -> Optional[float]:
     return float(x) if x > 0 else None
 
 
-# Where a speed figure comes from: MEASURED = one of the validator's checks (VerifyX or speed-test
-# average); REPORTED = only the node's own scrape (`specs.network.*_speed`), nothing measured yet.
+# Where a speed figure comes from: MEASURED = a figure the platform checked or averaged (a VerifyX
+# download, or an average of the node's speed tests over the validator's cycles); REPORTED = a single
+# speed-test sample from the node (`specs.network.*_speed`), nothing checked or averaged yet.
 MEASURED = "measured"
 REPORTED = "reported"
 # The table's `~` legend, printed under the table with the other tips.
-REPORTED_FOOTNOTE = "~ = the node's own figure; the validator has not measured this node's speed yet"
+REPORTED_FOOTNOTE = "~ = a single speed-test sample from the node; no averaged or VerifyX-checked figure yet"
 
 
 def network_speed(executor: ExecutorInfo, direction: str) -> tuple[Optional[float], Optional[str]]:
     """The Mbps figure `lium ls` shows for ``direction`` (``"download"`` / ``"upload"``) and its source.
 
     The backend's ``effective_*_speed_mbps`` is the first figure it trusts: a VerifyX average, then a
-    speed-test average, then the node's own scrape (``specs.network.*_speed``). The listing carries the
-    effective figure and the raw one, not the intermediates, so the source is read off the two: an
-    effective figure that equals the raw one is the scrape falling through; one that differs came from
-    a measurement. No effective figure (an API that predates it) falls back to the raw one, marked
-    REPORTED. Returns ``(None, None)`` when there is no figure at all.
+    speed-test average, then a single VerifyX download, then the node's latest speed-test sample
+    (``specs.network.*_speed``). The listing carries the effective figure and that sample, not the
+    intermediates, so the source is read off the two: an effective figure that equals the sample is the
+    chain falling through to it (or an average with one sample so far); one that differs was checked or
+    averaged. No effective figure (an API that predates it) falls back to the sample, marked REPORTED.
+    Returns ``(None, None)`` when there is no figure at all.
     """
     effective = _float(getattr(executor, f"effective_{direction}_speed_mbps", None))
     raw = _float(((executor.specs or {}).get("network") or {}).get(f"{direction}_speed"))
@@ -123,7 +125,7 @@ def network_speed(executor: ExecutorInfo, direction: str) -> tuple[Optional[floa
 
 
 def _speed_cell(value: Optional[float], source: Optional[str]) -> str:
-    """``~300`` when the figure is the node's own, ``300`` when measured, ``—`` when unknown."""
+    """``~300`` when the figure is a single sample from the node, ``300`` when checked or averaged, ``—`` when unknown."""
     if value is None:
         return "—"
     figure = str(int(value))

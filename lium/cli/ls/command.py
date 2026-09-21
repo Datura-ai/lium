@@ -103,10 +103,10 @@ def ls_command(
     18 links, PCIe/SYS = PCIe only, worst class shown); it is "—" until the node's
     validator reports it.
 
-    Download and Upload (Mbps) are the rates the validator measured on the node
-    (the figure the platform lists and gates on). A "~" in front marks a node the
-    validator has not measured yet: the number is the node's own report. --sort
-    download / --sort upload order by the figure shown.
+    Download and Upload (Mbps) are the platform's figures for the node: a VerifyX
+    download or an average over the validator's cycles when it has one. A "~" in
+    front marks a node with no such figure yet: the number is a single speed-test
+    sample from the node. --sort download / --sort upload order by the figure shown.
 
     \b
     Examples:
