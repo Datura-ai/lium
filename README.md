@@ -130,12 +130,45 @@ lium = Lium()
 rented = lium.rent(gpu_type="A100", min_cpus=32, name="demo")
 print(f"{rented.executor.huid} at ${rented.price_per_hour:.2f}/h")
 ready = lium.wait_ready(rented.pod, timeout=600)   # None only if still starting after 600 s
-print(lium.exec(ready, command="nvidia-smi")["stdout"])
+print(lium.exec(ready, command="nvidia-smi", timeout=60)["stdout"])
 lium.down(ready)
 ```
 
 `wait_ready()` raises `PodStartError` — with `.pod`, `.status`, `.history` and `.cause` (what the backend recorded, e.g. `Container creation failed due to ... (failure_step: ssh_connect)`) — when the pod reaches `FAILED`/`CREATION_FAILED`/`STOPPED`/`BROKEN` or disappears from the pod list, so a dead pod is not mistaken for a slow one. Pass `on_poll=lambda pod, status, elapsed: ...` to be told about every poll. `lium up` is bounded by `--timeout SECONDS` (default 900) for the whole rent, prints `waiting for <pod>… <STATUS> (<n> s)` while it waits, and exits 1 naming the pod when the budget runs out; `--ready-timeout` caps only the wait.
 
+A long job goes on a pod the caller keeps: `detach=True` starts it in the background and returns at once, and the pod stays up until you remove it. `lium.ls()` lists the nodes when you want to name one; `up(wait=True)` rents it and returns the ready pod.
+
+```python
+node = lium.ls(gpu_type="A100")[0]
+pod = lium.up(executor_id=node.id, name="train", wait=True)
+job = lium.exec(pod, command="python train.py", detach=True)   # {"pid", "log_path", "command"}
+for gpu in lium.gpu_stats(pod):                                  # parsed nvidia-smi
+    print(gpu.index, gpu.utilization_pct, gpu.memory_pct)
+print(pod.to_dict())                                             # JSON-ready
+# later: lium.down(pod)
+```
+
+For work that must not outlive the code using it, `rental()` rents a named node for a `with` block and removes the pod on the way out, whatever happened inside — so run the work to completion inside the block (a detached job started here would be killed with the pod). `rent()` above is the other way in: it picks the node by spec and hands you a pod you own.
+
+```python
+with lium.rental(executor_id=node.id, name="eval") as pod:
+    result = lium.exec(pod, command="python eval.py", timeout=1800)
+    print(result["stdout"])
+```
+
+`lium.pod_by_name("job")` finds a pod by name, huid or id.
+
+A server or a training run should outlive the call that starts it. `run_background()` starts it detached with a PID file, an exit-code file and a log on the pod (plus the process's boot id and start time in a `.id` file, so `status()` and `kill()` never take a PID reused after a pod restart for the job; a job without that file reads `gone` and is not signalled), and the returned `Job` knows how to wait for it:
+
+```python
+job = lium.run_background(pod, "vllm serve Qwen/Qwen3-8B --port 8000", name="vllm")
+job.wait_for_port(8000, timeout=900)   # raises at once, with the log tail, if vllm dies first
+print(job.logs(tail=20))
+# later, from another process or agent turn:
+job = lium.job(pod, "vllm")            # re-attach by name; job.status(), job.kill()
+```
+
+`lium.wait_for_port(pod, 8000)` probes a port without a job (a template that serves on start), and `lium.wait_ready(pod, ready_port=8000)` waits for RUNNING and the port together.
 Multi-node clusters — N whole nodes on one InfiniBand/RoCE fabric, rented as one order, each with a private overlay address:
 
 ```python
@@ -190,7 +223,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium spend [--format json]` - Hourly burn, estimated spend per pod, balance and runway
 - `lium describe <POD>` - Full manifest of one pod: ports, GPU, template, billing, last lifecycle event (why it is REBOOT_FAILED/BROKEN) and the node's disk health (add `--json` for machine-readable output). A deleted pod can still be described by its id: you get the events the backend kept for it and the reason it went away.
 - `lium ssh <POD>` - SSH into a pod
-- `lium exec <POD> <COMMAND>` - Execute command on pod (`--json` for stdout/stderr/exit_code)
+- `lium exec <POD> <COMMAND>` - Execute command on pod (`--json` for stdout/stderr/exit_code; `-d/--detach` starts it in the background and returns immediately)
 - `lium logs <POD>` - Stream a pod's container logs
 - `lium port-forward <POD> <PORT>` - Forward a local port to a pod port
 - `lium scp <POD> <LOCAL_FILE> [REMOTE_PATH]` - Copy files to pods (add `-d` to download from pods)
@@ -365,6 +398,11 @@ lium up --gpu H200 --count 8 --verify-gpus --strict-gpus  # ...and remove the po
 # Execute commands
 lium exec my-pod "nvidia-smi"
 lium exec my-pod "python train.py"
+
+# Start a long job in the background and return immediately (prints PID and log path)
+lium exec my-pod -d "python train.py"                      # log: /workspace/logs/exec-<timestamp>-<id>.log
+lium exec my-pod -d --log /workspace/train.log --script train.sh
+lium exec my-pod "tail -n 200 /workspace/train.log"        # exec returns output when the command exits, so read a bounded slice
 
 # Copy files to and from pods
 lium scp my-pod ./script.py                    # Copy to /root/script.py

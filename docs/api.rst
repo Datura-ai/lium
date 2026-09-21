@@ -18,6 +18,8 @@ Core Objects
    ClusterOffer
    Cluster
    Template
+   GpuStats
+   Job
    VolumeInfo
    BackupConfig
    BackupLog
@@ -32,6 +34,10 @@ Modules
    :show-inheritance:
 
 .. automodule:: lium.sdk.decorators
+   :members:
+   :undoc-members:
+
+.. automodule:: lium.sdk.jobs
    :members:
    :undoc-members:
 
