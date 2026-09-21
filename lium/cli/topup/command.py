@@ -10,9 +10,9 @@ import json
 
 import click
 
-from lium.sdk import Lium, LiumCardTopUpError, LiumError
+from lium.sdk import Lium, LiumCardTopUpError, LiumChargeOutcomeUnknownError, LiumError
 from lium.cli import ui
-from lium.cli.utils import EXIT_API_ERROR, CliFailure, handle_errors
+from lium.cli.utils import EXIT_API_ERROR, EXIT_PERMISSION_DENIED, CliFailure, handle_errors
 
 # What to do next when the server's 402 carried no hint (an older server); the current server
 # sends one naming the Billing page (lium-platform errors/codes.py) and that one wins.
@@ -122,7 +122,7 @@ def create_command(amount: float, currency: str, network: str, json_output: bool
 @click.option(
     "--idempotency-key", default=None, metavar="KEY",
     help="Repeat the command with the same key and amount within 24 h and the first charge is "
-         "returned instead of a second one being made",
+         "returned instead of a second one being made; omitted, one is made and printed",
 )
 @click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON")
 @handle_errors
@@ -140,6 +140,13 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     card on; a decline fails with CARD_DECLINED and the bank's reason. Nothing is charged
     in either case.
 
+    The request is sent once, always with an idempotency key. If the answer is lost (a
+    timeout, a 5xx) the charge may still have gone through: the command exits 6 with
+    charge_outcome_unknown and the key — check `lium balance` before trying again; a repeat
+    with `--idempotency-key <key>` returns the same charge instead of making a second one.
+    "Payment accepted" (exit 0) means the platform took the charge and the balance updates
+    within a minute.
+
     \b
     Examples:
       lium topup card -a 50
@@ -153,6 +160,8 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
         )
     except LiumCardTopUpError as e:
         raise card_topup_failure(e)
+    except LiumChargeOutcomeUnknownError as e:
+        raise charge_outcome_unknown_failure(e)
 
     # Best effort: the charge is done, so a balance read that fails must not turn the command
     # into a failure a caller would retry (and charge again).
@@ -170,13 +179,33 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
                                            f"····{card['last4']}" if card.get("last4") else ""] if part)
     amount_usd = result.get("amount_usd", amount)
     if result.get("status") == "processing":
-        ui.warning(f"Charging ${amount_usd:,.2f} to {card_text} — the card network has not settled it yet")
+        # the platform took the charge but its outcome is not settled (or Stripe's answer to it was lost);
+        # the webhook settles the balance — a success, never a prompt to run the command again
+        ui.success(f"Payment accepted; your balance updates within a minute (${amount_usd:,.2f} to {card_text}).")
     else:
         ui.success(f"Charged ${amount_usd:,.2f} to {card_text}")
-    ui.info(f"Payment intent:  {result.get('payment_intent_id', '')}")
+    if result.get("payment_intent_id"):
+        ui.info(f"Payment intent:  {result['payment_intent_id']}")
+    if result.get("idempotency_key"):
+        ui.info(f"Idempotency key: {result['idempotency_key']}")
     if balance is not None:
         ui.info(f"Balance:         ${balance:,.2f}")
     ui.dim("The credit lands within seconds of Stripe's confirmation; 'lium balance' shows it.")
+
+
+def charge_outcome_unknown_failure(error: LiumChargeOutcomeUnknownError) -> CliFailure:
+    """The answer to the charge was lost (timeout, dropped connection, 5xx): Stripe charges before it
+    answers, so the charge may have gone through. Exit 6 — the code scripts already treat as "stop,
+    a person must look" — never 3 or 1, whose hints say to run the command again. The key that
+    makes a repeat safe is in the message and in ``data``."""
+    return CliFailure(
+        "charge_outcome_unknown",
+        "The charge may have gone through. Check your balance with `lium balance` before trying again.",
+        EXIT_PERMISSION_DENIED,
+        data={"idempotency_key": error.idempotency_key, **({"request_id": error.request_id} if error.request_id else {})},
+        hint=f"Run 'lium balance'; to repeat safely, 'lium topup card --idempotency-key {error.idempotency_key}' "
+             "with the same amount returns the same charge instead of a second one",
+    )
 
 
 def card_topup_failure(error: LiumCardTopUpError) -> CliFailure:

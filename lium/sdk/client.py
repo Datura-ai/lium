@@ -35,6 +35,7 @@ from .exceptions import (
     ClusterNotListedError,
     LiumAuthError,
     LiumCardTopUpError,
+    LiumChargeOutcomeUnknownError,
     LiumError,
     LiumHostKeyError,
     LiumNotFoundError,
@@ -4381,28 +4382,51 @@ class Lium:
         scope (or be a browser session); today's ``read`` / ``rent`` / ``manage`` keys are
         refused with :class:`LiumPermissionError`.
 
+        Every call carries an idempotency key — yours, or a fresh ``uuid4`` when you pass
+        none — so the request is posted once and a repeat with the same key returns the
+        first charge instead of making a second one. The key used is in the result (and on
+        :class:`LiumChargeOutcomeUnknownError`) as ``idempotency_key``.
+
         Args:
-            amount_usd: At least $10, the card form's minimum.
+            amount_usd: At least $10, the card form's minimum; at most $999,999.99.
             payment_method_id: A saved card's ``pm_…`` id; omitted, the default card (or the
                 only saved one).
             idempotency_key: Repeat the call with the same key and amount within 24 h and
-                the first charge is returned instead of a second one being made.
+                the first charge is returned instead of a second one being made. Omitted:
+                the SDK makes one.
 
         Returns:
-            ``{"status": "succeeded", "payment_intent_id", "amount_usd", "card": {"brand", "last4"}}``
-            (``status`` is ``"processing"`` in the rare case the card network has not settled yet).
+            ``{"status": "succeeded", "payment_intent_id", "transaction_id", "idempotency_key",
+            "amount_usd", "card": {"brand", "last4"}}``. ``status`` is ``"processing"`` (HTTP 202)
+            when the outcome is not known yet — the card network has not settled, or the
+            platform's own call to Stripe timed out after the charge; ``payment_intent_id`` is
+            then ``None``. Either way the balance settles by webhook within a minute; do not
+            repeat the call without the same key.
 
         Raises:
             LiumCardTopUpError: the bank wants a confirmation (``CARD_AUTHENTICATION_REQUIRED``,
                 see ``dashboard_url``), declined the card (``CARD_DECLINED``), or no card is
                 saved / none is the default. Nothing was charged.
+            LiumChargeOutcomeUnknownError: the answer was lost (timeout, dropped connection,
+                5xx) after the charge was posted — it may have gone through. Check the balance
+                before trying again; ``idempotency_key`` on the error repeats it safely.
         """
-        payload: Dict[str, Any] = {"amount_usd": amount_usd}
+        key = idempotency_key or uuid.uuid4().hex
+        payload: Dict[str, Any] = {"amount_usd": amount_usd, "idempotency_key": key}
         if payment_method_id:
             payload["payment_method_id"] = payment_method_id
-        if idempotency_key:
-            payload["idempotency_key"] = idempotency_key
-        return self._request("POST", "/payments/topup", json=payload).json()
+        try:
+            return self._request("POST", "/payments/topup", json=payload).json()
+        except (requests.RequestException, LiumServerError) as exc:
+            # Stripe charges before it answers: a lost answer is not "nothing happened"
+            raise LiumChargeOutcomeUnknownError(
+                "The charge may have gone through: the API did not answer after the top-up was posted. "
+                "Check the balance before trying again; a repeat with the same idempotency_key returns "
+                "the same charge instead of making a second one.",
+                idempotency_key=key,
+                code="charge_outcome_unknown",
+                request_id=getattr(exc, "request_id", None),
+            ) from exc
 
     def volumes(self) -> List[VolumeInfo]:
         """List all volumes for the current user.

@@ -1,11 +1,12 @@
 """P235: `lium topup card` and `Lium.topup_card` — a card top-up with no browser.
 
 The route is lium-platform's `POST /payments/topup` (#633, behind `API_CARD_TOPUP_ENABLED`). The
-SDK tests record its answers with `responses`: the 200, the three 402s a caller must act on
-(`CARD_AUTHENTICATION_REQUIRED`, `CARD_DECLINED`, `NO_SAVED_CARD`), a 402 of another code, and
-the 403 a key without the `billing` scope gets. The CLI tests fake the SDK: what is printed,
-the exit codes, and that a failed balance read after a successful charge is not a failure (a
-caller would retry it — and charge twice).
+SDK tests record its answers with `responses`: the 200, the 202 `processing`, the three 402s a
+caller must act on (`CARD_AUTHENTICATION_REQUIRED`, `CARD_DECLINED`, `NO_SAVED_CARD`), a 402 of
+another code, the 403 a key without the `billing` scope gets, and the lost answer (timeout, 5xx)
+that must never read as "nothing happened". The CLI tests fake the SDK: what is printed, the
+exit codes, and that a failed balance read after a successful charge is not a failure (a caller
+would retry it — and charge twice).
 """
 
 import json
@@ -17,7 +18,14 @@ from click.testing import CliRunner
 from lium.cli.cli import cli
 from lium.cli.topup import command as topup_module
 from lium.cli.utils import EXIT_API_ERROR, EXIT_PERMISSION_DENIED
-from lium.sdk import Config, Lium, LiumCardTopUpError, LiumError, LiumPermissionError
+from lium.sdk import (
+    Config,
+    Lium,
+    LiumCardTopUpError,
+    LiumChargeOutcomeUnknownError,
+    LiumError,
+    LiumPermissionError,
+)
 
 BASE = "https://lium.io/api"
 TOPUP = f"{BASE}/payments/topup"
@@ -26,9 +34,14 @@ BILLING = "https://lium.io/billing"
 CHARGED = {
     "status": "succeeded",
     "payment_intent_id": "pi_3Test",
+    "transaction_id": "0c7e301f-9826-4258-a13d-d82f98fd1339",
+    "idempotency_key": "nightly-1",
     "amount_usd": 50.0,
     "card": {"brand": "visa", "last4": "4242"},
 }
+PROCESSING = {**CHARGED, "status": "processing", "payment_intent_id": None}
+# the platform's 403 for a key without the scope: utils/auth.py require_api_key_scope, classified `forbidden`
+# by errors/codes.py
 
 
 def _error_body(status_code, detail, hint=""):
@@ -74,6 +87,10 @@ NO_SAVED_CARD = _error_body(
         "dashboard_url": BILLING,
     },
 )
+# the platform's 403 for a key without the scope: `require_api_key_scope` (utils/auth.py), which
+# errors/codes.py classifies as `forbidden`
+SCOPE_MISSING_MESSAGE = "API key 'agent' does not have the 'billing' scope"
+SCOPE_MISSING = _error_body(403, {"code": "forbidden", "message": SCOPE_MISSING_MESSAGE})
 
 
 @pytest.fixture
@@ -97,13 +114,29 @@ def test_topup_card_posts_the_body_and_returns_the_charge(client):
 
 
 @responses.activate
-def test_topup_card_omits_the_optional_fields_it_was_not_given(client):
-    """The server picks the default card and makes a fresh charge: no `null`s that a strict body validator refuses."""
+def test_topup_card_always_sends_an_idempotency_key_and_omits_the_card_it_was_not_given(client):
+    """No key from the caller: the SDK makes one, so a lost answer can be repeated as a replay and never as a
+    second charge. The server picks the default card: no `null`s that a strict body validator refuses."""
     responses.post(TOPUP, json=CHARGED)
 
     client.topup_card(50)
 
-    assert json.loads(responses.calls[0].request.body) == {"amount_usd": 50}
+    body = json.loads(responses.calls[0].request.body)
+    assert set(body) == {"amount_usd", "idempotency_key"}
+    assert body["amount_usd"] == 50
+    assert len(body["idempotency_key"]) == 32 and int(body["idempotency_key"], 16) >= 0
+
+
+@responses.activate
+def test_a_202_processing_is_returned_not_raised(client):
+    """The platform took the charge and its outcome is pending (Stripe's answer to it was lost, or the network has
+    not settled): the balance settles by webhook, so this is an answer, not an error."""
+    responses.post(TOPUP, json=PROCESSING, status=202)
+
+    result = client.topup_card(50, idempotency_key="nightly-1")
+
+    assert result == PROCESSING
+    assert len(responses.calls) == 1
 
 
 @responses.activate
@@ -165,33 +198,43 @@ def test_a_402_of_another_code_stays_a_plain_lium_error(client):
 
 @responses.activate
 def test_a_key_without_the_billing_scope_is_a_permission_error(client):
-    responses.post(
-        TOPUP,
-        status=403,
-        json=_error_body(
-            403,
-            {
-                "code": "api_key_scope_missing",
-                "message": "API key 'agent' does not have the 'billing' scope required for this action",
-            },
-        ),
-    )
+    responses.post(TOPUP, status=403, json=SCOPE_MISSING)
 
     with pytest.raises(LiumPermissionError) as raised:
         client.topup_card(50)
 
-    assert "'billing' scope" in str(raised.value)
+    assert raised.value.code == "forbidden"
+    assert SCOPE_MISSING_MESSAGE in str(raised.value)
 
 
 @responses.activate
-def test_a_server_error_is_not_repeated(client):
-    """A lost or failed POST may have charged the card server-side: the SDK sends it exactly once."""
-    responses.post(TOPUP, status=502, json={"detail": "Stripe is unavailable, please retry"})
+def test_a_server_error_is_sent_once_and_is_an_unknown_outcome_carrying_the_key(client):
+    """A 5xx after the POST may follow a charge Stripe already made: the SDK sends it exactly once and says the
+    outcome is unknown — never "nothing happened" — with the key that makes a repeat a replay."""
+    responses.post(TOPUP, status=502, json={"detail": "Stripe refused the request"})
 
-    with pytest.raises(LiumError):
+    with pytest.raises(LiumChargeOutcomeUnknownError) as raised:
+        client.topup_card(50, idempotency_key="nightly-1")
+
+    assert len(responses.calls) == 1
+    assert raised.value.idempotency_key == "nightly-1"
+    assert raised.value.code == "charge_outcome_unknown"
+    assert "may have gone through" in str(raised.value)
+
+
+@responses.activate
+def test_a_read_timeout_is_an_unknown_outcome_carrying_the_generated_key(client):
+    import requests
+
+    responses.post(TOPUP, body=requests.exceptions.ReadTimeout("Read timed out"))
+
+    with pytest.raises(LiumChargeOutcomeUnknownError) as raised:
         client.topup_card(50)
 
     assert len(responses.calls) == 1
+    sent = json.loads(responses.calls[0].request.body)["idempotency_key"]
+    assert raised.value.idempotency_key == sent and len(sent) == 32
+    assert raised.value.__cause__.__class__ is requests.exceptions.ReadTimeout
 
 
 # -- CLI
@@ -255,6 +298,7 @@ def test_card_charges_and_prints_the_card_and_the_balance(fake_lium):
     assert result.exit_code == 0, result.output
     assert "Charged $50.00 to Visa ····4242" in result.output
     assert "pi_3Test" in result.output
+    assert "Idempotency key: nightly-1" in result.output
     assert "Balance:         $61.25" in result.output
     assert "'lium balance' shows it" in _text(result)
     assert fake_lium.calls == [(50.0, None, None)]
@@ -275,13 +319,52 @@ def test_card_json_is_the_servers_answer_plus_the_balance(fake_lium):
     assert result.stderr == ""
 
 
-def test_card_processing_is_a_warning_not_a_failure(fake_lium):
-    fake_lium.charge = {**CHARGED, "status": "processing"}
+def test_card_processing_is_payment_accepted_exit_0(fake_lium):
+    """The platform answered 202: the charge is in, the balance follows by webhook. A success — a warning or a
+    non-zero exit would invite a second run and a second charge."""
+    fake_lium.charge = PROCESSING
 
-    result = _run("-a", "50")
+    human = _run("-a", "50")
+    assert human.exit_code == 0, human.output
+    assert "Payment accepted; your balance updates within a minute" in _text(human)
+    assert "Payment intent:" not in human.output  # none yet
+    assert "Idempotency key: nightly-1" in human.output
 
-    assert result.exit_code == 0, result.output
-    assert "has not settled it yet" in result.output
+    machine = _run("-a", "50", "--json")
+    assert machine.exit_code == 0, machine.output
+    assert json.loads(machine.stdout) == {**PROCESSING, "balance": 61.25}
+
+
+def test_a_lost_answer_says_the_charge_may_have_gone_through_and_exits_6(fake_lium):
+    """A timeout or 5xx after the charge was posted: not exit 3 ("retry in a minute") nor exit 1 ("re-run with
+    LIUM_DEBUG=1") — both read as "run it again", and a second run is a second charge."""
+    fake_lium.charge = LiumChargeOutcomeUnknownError(
+        "The charge may have gone through: the API did not answer after the top-up was posted.",
+        idempotency_key="8d5b4f1c0e2a4c7f9a3b6d1e2f4a5b6c",
+        code="charge_outcome_unknown",
+    )
+
+    human = _run("-a", "50")
+    assert human.exit_code == EXIT_PERMISSION_DENIED, human.output
+    text = _text(human)
+    assert "The charge may have gone through. Check your balance with `lium balance` before trying again." in text
+    assert "--idempotency-key 8d5b4f1c0e2a4c7f9a3b6d1e2f4a5b6c" in text
+    for retry_wording in ("Re-run with LIUM_DEBUG", "retry in a minute", "re-run", "Retry"):
+        assert retry_wording not in text
+    assert "Charged" not in human.output
+
+    machine = _run("-a", "50", "--json")
+    assert machine.exit_code == EXIT_PERMISSION_DENIED, machine.output
+    assert machine.stdout == ""
+    payload = json.loads(machine.stderr)
+    assert payload["error"]["code"] == "charge_outcome_unknown"
+    assert payload["error"]["exit_code"] == EXIT_PERMISSION_DENIED
+    assert payload["error"]["message"] == (
+        "The charge may have gone through. Check your balance with `lium balance` before trying again."
+    )
+    assert payload["data"] == {"idempotency_key": "8d5b4f1c0e2a4c7f9a3b6d1e2f4a5b6c"}
+    assert "--idempotency-key 8d5b4f1c0e2a4c7f9a3b6d1e2f4a5b6c" in payload["error"]["hint"]
+    assert fake_lium.calls == [(50.0, None, None)]
 
 
 def test_a_failed_balance_read_after_the_charge_is_not_a_failure(fake_lium):
@@ -356,17 +439,15 @@ def test_an_older_server_without_a_hint_gets_the_clis_own(fake_lium):
 
 
 def test_a_key_without_the_billing_scope_exits_6(fake_lium):
-    fake_lium.charge = LiumPermissionError(
-        "Permission denied: API key 'agent' does not have the 'billing' scope required for this action",
-        code="api_key_scope_missing",
-    )
+    # what the SDK raises for SCOPE_MISSING (test_a_key_without_the_billing_scope_is_a_permission_error)
+    fake_lium.charge = LiumPermissionError(f"Permission denied: {SCOPE_MISSING_MESSAGE}", code="forbidden")
 
     result = _run("-a", "50", "--json")
 
     assert result.exit_code == EXIT_PERMISSION_DENIED
     payload = json.loads(result.stderr)
-    assert payload["error"]["code"] == "api_key_scope_missing"
-    assert "'billing' scope" in payload["error"]["message"]
+    assert payload["error"]["code"] == "forbidden"
+    assert SCOPE_MISSING_MESSAGE in payload["error"]["message"]
     assert fake_lium.calls == [(50.0, None, None)]
 
 

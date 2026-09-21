@@ -237,7 +237,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium templates [SEARCH] [--arch hopper|blackwell] [--format json]` - List Docker templates with the CUDA build and the GPU generations it runs on
 - `lium fund` - Fund account with TAO from Bittensor wallet
 - `lium topup create -a <USD> -c <COIN> -n <NETWORK>` - Top up with a stablecoin (`lium topup currencies` lists them)
-- `lium topup card -a <USD> [--card <pm_id>]` - Charge a card saved on the account, with no browser; the API key needs the `billing` scope (not released: the platform switch is off)
+- `lium topup card -a <USD> [--card <pm_id>]` - Charge a card saved on the account, with no browser; the API key needs the `billing` scope (not released: the platform switch is off). Sent once with an idempotency key; a lost answer exits 6 ("the charge may have gone through") rather than asking for a retry
 - `lium ssh-keys list|sync` - SSH public keys registered on the account
 
 `ls`, `ps`, `spend`, `templates`, `balance` and `describe` all accept `--format json` (and `--json`); `rm` accepts `--format json`; `up` accepts `--json`. All of them print a JSON error envelope on stderr when the command fails, so the same flag works across commands in scripts.
