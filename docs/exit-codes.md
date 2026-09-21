@@ -15,7 +15,7 @@ mirrors it and a unit test keeps the two in step.
 | 3 | `EXIT_API_ERROR` | The API refused or failed the call (5xx, 404 on a resource, rate limit, any other non-2xx). |
 | 4 | `EXIT_SSH_ERROR` | ssh could not connect, the pod has no SSH endpoint yet, or no ssh client is installed. |
 | 5 | `EXIT_POD_NOT_FOUND` | The pod, cluster or fabric named on the command line does not exist (`lium clusters rm`: also a cluster the API answered 404 for). |
-| 6 | `EXIT_PERMISSION_DENIED` | The account is not allowed to do this: unverified account, insufficient balance (403). Also `topup card` when the answer to the charge was lost (`charge_outcome_unknown`): a person must check the balance before the command runs again, so it is not 3 or 1, whose hints say to retry. |
+| 6 | `EXIT_PERMISSION_DENIED` | The account is not allowed to do this: unverified account, insufficient balance (403). Overloaded by `topup card` for "outcome unknown": the answer to the charge was lost (`charge_outcome_unknown`) or the platform answered 202 still-confirming (`charge_pending`) — a person must check the balance before the command runs again, so it is not 3 or 1, whose hints say to retry. A script branching on the exit code alone cannot tell these from a 403; `error.code` in the JSON envelope does. |
 
 `lium exec` exits with the remote command's own exit status, so `lium exec pod
 "cmd" && next` behaves like `cmd && next` would on the pod. Usage errors caught
@@ -121,8 +121,10 @@ API refused the charge and the balance did not move; `data` carries `dashboard_u
 `decline_code` and the `payment_intent_id`) and raises `charge_outcome_unknown` (6: a timeout or
 5xx after the charge was posted — it may have gone through; the message says to check `lium
 balance` before trying again, `data.idempotency_key` is the key a repeat must carry to get the
-same charge back instead of a second one; a 202 `processing` answer is exit 0, "Payment
-accepted"); `init` raises `api_unreachable` (3, the
+same charge back instead of a second one) and `charge_pending` (6 too: the platform answered 202
+`processing` — the outcome is not known, the charge may never have happened; `data` is the server's
+answer, `status: processing` and the key included, and a repeat with the key shows the charge's
+status without making a second one); `init` raises `api_unreachable` (3, the
 key passed with `--api-key` was not checked) and `empty_api_key` (2), and its `invalid_api_key` hint says
 nothing was saved. They follow the same envelope
 and use the exit code of their family from the table above. Where re-running

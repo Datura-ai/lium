@@ -121,7 +121,7 @@ def create_command(amount: float, currency: str, network: str, json_output: bool
 )
 @click.option(
     "--idempotency-key", default=None, metavar="KEY",
-    help="Repeat the command with the same key and amount within 24 h and the first charge is "
+    help="Repeat the command with the same key and amount and the first charge (or its status) is "
          "returned instead of a second one being made; omitted, one is made and printed",
 )
 @click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON")
@@ -144,8 +144,9 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     timeout, a 5xx) the charge may still have gone through: the command exits 6 with
     charge_outcome_unknown and the key — check `lium balance` before trying again; a repeat
     with `--idempotency-key <key>` returns the same charge instead of making a second one.
-    "Payment accepted" (exit 0) means the platform took the charge and the balance updates
-    within a minute.
+    A 202 from the platform ("Payment submitted; the charge is still being confirmed") means
+    the same: the outcome is not known yet — exit 6 with charge_pending and the key; a
+    repeat with the key shows the charge's status, it never makes a second one.
 
     \b
     Examples:
@@ -163,6 +164,11 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     except LiumChargeOutcomeUnknownError as e:
         raise charge_outcome_unknown_failure(e)
 
+    if result.get("status") == "processing":
+        # the platform's 202: the outcome is not known — Stripe's answer to the charge was lost, the charge is
+        # still processing, or the webhook has not credited it yet. Not a success, not "run it again".
+        raise charge_pending_failure(result)
+
     # Best effort: the charge is done, so a balance read that fails must not turn the command
     # into a failure a caller would retry (and charge again).
     try:
@@ -178,12 +184,7 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     card_text = " ".join(part for part in [(card.get("brand") or "card").capitalize(),
                                            f"····{card['last4']}" if card.get("last4") else ""] if part)
     amount_usd = result.get("amount_usd", amount)
-    if result.get("status") == "processing":
-        # the platform took the charge but its outcome is not settled (or Stripe's answer to it was lost);
-        # the webhook settles the balance — a success, never a prompt to run the command again
-        ui.success(f"Payment accepted; your balance updates within a minute (${amount_usd:,.2f} to {card_text}).")
-    else:
-        ui.success(f"Charged ${amount_usd:,.2f} to {card_text}")
+    ui.success(f"Charged ${amount_usd:,.2f} to {card_text}")
     if result.get("payment_intent_id"):
         ui.info(f"Payment intent:  {result['payment_intent_id']}")
     if result.get("idempotency_key"):
@@ -191,6 +192,26 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     if balance is not None:
         ui.info(f"Balance:         ${balance:,.2f}")
     ui.dim("The credit lands within seconds of Stripe's confirmation; 'lium balance' shows it.")
+
+
+def charge_pending_failure(result: dict) -> CliFailure:
+    """The platform's 202 ``processing``: the outcome is not known (Stripe's answer to the charge call was
+    lost, or the webhook has not settled the row). The same exit 6 as a lost answer — "stop, a person
+    must look" — with the key that makes a repeat safe; the repeat returns the same charge's status
+    (``succeeded`` once credited, ``processing`` until then) and never makes a second charge. The server's
+    answer, ``status: processing`` included, is in ``data``."""
+    key = result.get("idempotency_key")
+    data = {name: result[name] for name in ("status", "idempotency_key", "transaction_id", "payment_intent_id",
+                                            "amount_usd", "card") if name in result}
+    return CliFailure(
+        "charge_pending",
+        "Payment submitted; the charge is still being confirmed. Check `lium balance` in a minute — if nothing "
+        f"arrived, re-run with `--idempotency-key {key}` to see its status.",
+        EXIT_PERMISSION_DENIED,
+        data=data,
+        hint=f"Run 'lium balance' in a minute; 'lium topup card --idempotency-key {key}' with the same amount "
+             "returns this charge's status and never makes a second one",
+    )
 
 
 def charge_outcome_unknown_failure(error: LiumChargeOutcomeUnknownError) -> CliFailure:

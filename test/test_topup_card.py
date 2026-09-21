@@ -319,20 +319,30 @@ def test_card_json_is_the_servers_answer_plus_the_balance(fake_lium):
     assert result.stderr == ""
 
 
-def test_card_processing_is_payment_accepted_exit_0(fake_lium):
-    """The platform answered 202: the charge is in, the balance follows by webhook. A success — a warning or a
-    non-zero exit would invite a second run and a second charge."""
+def test_card_processing_is_payment_submitted_still_confirming_exit_6(fake_lium):
+    """The platform answered 202: the outcome is NOT known (Stripe's answer was lost, or the webhook has not
+    credited yet) — the charge may never have happened. Not "Payment accepted" and not exit 0 (the r2 review):
+    the outcome-unknown exit, the key, and the repeat that shows the status without a second charge."""
     fake_lium.charge = PROCESSING
 
     human = _run("-a", "50")
-    assert human.exit_code == 0, human.output
-    assert "Payment accepted; your balance updates within a minute" in _text(human)
-    assert "Payment intent:" not in human.output  # none yet
-    assert "Idempotency key: nightly-1" in human.output
+    assert human.exit_code == EXIT_PERMISSION_DENIED, human.output
+    text = _text(human)
+    assert (
+        "Payment submitted; the charge is still being confirmed. Check `lium balance` in a minute — if nothing "
+        "arrived, re-run with `--idempotency-key nightly-1` to see its status." in text
+    )
+    for wording in ("Payment accepted", "Charged", "retry", "Retry"):
+        assert wording not in text
 
     machine = _run("-a", "50", "--json")
-    assert machine.exit_code == 0, machine.output
-    assert json.loads(machine.stdout) == {**PROCESSING, "balance": 61.25}
+    assert machine.exit_code == EXIT_PERMISSION_DENIED, machine.output
+    assert machine.stdout == ""
+    payload = json.loads(machine.stderr)
+    assert (payload["error"]["code"], payload["error"]["exit_code"]) == ("charge_pending", EXIT_PERMISSION_DENIED)
+    assert payload["data"] == PROCESSING  # status: processing, the key, the row
+    assert "--idempotency-key nightly-1" in payload["error"]["hint"]
+    assert fake_lium.calls == [(50.0, None, None)]
 
 
 def test_a_lost_answer_says_the_charge_may_have_gone_through_and_exits_6(fake_lium):

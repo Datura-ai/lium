@@ -4392,16 +4392,18 @@ class Lium:
             payment_method_id: A saved card's ``pm_…`` id; omitted, the default card (or the
                 only saved one).
             idempotency_key: Repeat the call with the same key and amount within 24 h and
-                the first charge is returned instead of a second one being made. Omitted:
-                the SDK makes one.
+                the first charge (or its status, while it is still ``processing``) is returned
+                instead of a second one being made. Omitted: the SDK makes one.
 
         Returns:
             ``{"status": "succeeded", "payment_intent_id", "transaction_id", "idempotency_key",
             "amount_usd", "card": {"brand", "last4"}}``. ``status`` is ``"processing"`` (HTTP 202)
-            when the outcome is not known yet — the card network has not settled, or the
-            platform's own call to Stripe timed out after the charge; ``payment_intent_id`` is
-            then ``None``. Either way the balance settles by webhook within a minute; do not
-            repeat the call without the same key.
+            when the outcome is not known yet — the platform's own call to Stripe timed out
+            after the charge (``payment_intent_id`` is then ``None``; the charge may never have
+            happened), the card network has not settled, or the webhook has not credited the
+            row. Treat it as unknown, not as success: the balance settles by webhook when the
+            charge is real; a repeat with the same key returns the same transaction and its
+            current status, never a second charge. Do not repeat the call without the key.
 
         Raises:
             LiumCardTopUpError: the bank wants a confirmation (``CARD_AUTHENTICATION_REQUIRED``,
