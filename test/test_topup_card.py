@@ -12,6 +12,7 @@ would retry it — and charge twice).
 import json
 
 import pytest
+import requests
 import responses
 from click.testing import CliRunner
 
@@ -415,6 +416,23 @@ def test_a_failed_balance_read_after_the_charge_is_not_a_failure(fake_lium):
     machine = _run("-a", "50", "--json")
     assert machine.exit_code == 0, machine.output
     assert json.loads(machine.stdout)["balance"] is None
+
+
+def test_a_read_timeout_on_balance_after_the_charge_is_not_a_failure(fake_lium):
+    """`balance()` re-raises requests.ReadTimeout after its retries; that is not a LiumError."""
+    fake_lium.balance_value = requests.ReadTimeout("HTTPSConnectionPool(host='lium.io'): Read timed out.")
+
+    human = _run("-a", "50")
+    assert human.exit_code == 0, human.output
+    assert "Charged $50.00" in human.output
+    assert "Idempotency key: nightly-1" in human.output
+    assert "Balance:" not in human.output
+
+    machine = _run("-a", "50", "--json")
+    assert machine.exit_code == 0, machine.output
+    payload = json.loads(machine.stdout)
+    assert payload["balance"] is None
+    assert payload["idempotency_key"] == "nightly-1"
 
 
 def test_authentication_required_names_the_billing_page_and_exits_3(fake_lium):

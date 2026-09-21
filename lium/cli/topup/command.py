@@ -171,10 +171,11 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
         raise charge_pending_failure(result)
 
     # Best effort: the charge is done, so a balance read that fails must not turn the command
-    # into a failure a caller would retry (and charge again).
+    # into a failure a caller would retry (and charge again). `balance()` re-raises a raw
+    # `requests.RequestException` after its retries (not a LiumError), so this is Exception.
     try:
         balance = client.balance()
-    except LiumError:
+    except Exception:
         balance = None
 
     if json_output:
