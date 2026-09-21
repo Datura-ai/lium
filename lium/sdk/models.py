@@ -528,8 +528,9 @@ class ApiKeyScope:
 class ApiKeyInfo:
     """An API key row as ``GET /keys`` / ``POST /keys`` describe it (lium-platform DAH-2944, P235).
 
-    The budget fields are USD; ``spent_today_usd`` / ``spent_total_usd`` are what the key's pods were
-    billed today (UTC) and ever; a budget is ``None`` when the key has none. ``pod_visibility`` is ``own``
+    The budget fields are USD, one per window — ``daily_budget_usd`` (a UTC day), ``monthly_budget_usd`` (a
+    UTC calendar month), ``max_budget_usd`` (the key's lifetime); ``spent_today_usd`` / ``spent_month_usd`` /
+    ``spent_total_usd`` are what the key's pods were billed in each; a budget is ``None`` when the key has none. ``pod_visibility`` is ``own``
     (the key lists only the pods it rented) or ``account`` (every pod of the account); ``None`` from a server
     before P235. ``key`` is the secret when the server sent it (``POST /keys`` always; the list rows on servers
     that echo it): kept out of ``repr`` and of :meth:`to_dict`, so it is printed only where ``create`` prints it
@@ -543,8 +544,10 @@ class ApiKeyInfo:
     last_used: Optional[str] = None
     workspace_id: Optional[str] = None
     daily_budget_usd: Optional[float] = None
+    monthly_budget_usd: Optional[float] = None
     max_budget_usd: Optional[float] = None
     spent_today_usd: Optional[float] = None
+    spent_month_usd: Optional[float] = None
     spent_total_usd: Optional[float] = None
     pod_visibility: Optional[str] = None
     # active pods the key created, as the server counts them; None from a server before P235
@@ -561,10 +564,26 @@ class ApiKeyInfo:
         data = {k: v for k, v in self.raw.items() if k != "key"}
         for name in (
             "id", "name", "scopes", "created_at", "last_used", "workspace_id", "daily_budget_usd",
-            "max_budget_usd", "spent_today_usd", "spent_total_usd", "pod_visibility", "pods_count",
+            "monthly_budget_usd", "max_budget_usd", "spent_today_usd", "spent_month_usd", "spent_total_usd",
+            "pod_visibility", "pods_count",
         ):
             data[name] = getattr(self, name)
         return data
+
+
+@dataclass
+class ApiKeyRefusal:
+    """One row of ``GET /keys/{id}/refusals`` (lium-platform#630, not released): a request the key's budget
+    refused — when, which window was hit (``daily`` / ``monthly`` / ``max``), the route asked, the USD asked
+    for, and the budget and spend at the time. ``raw`` is the server's row."""
+
+    at: Optional[str] = None
+    window: Optional[str] = None
+    route: Optional[str] = None
+    amount_usd: Optional[float] = None
+    budget_usd: Optional[float] = None
+    spent_usd: Optional[float] = None
+    raw: Dict[str, Any] = field(default_factory=dict, repr=False)
 
 
 __all__ = [
@@ -579,4 +598,7 @@ __all__ = [
     "GpuStats",
     "WorkspaceInfo",
     "WorkspaceMember",
+    "ApiKeyScope",
+    "ApiKeyInfo",
+    "ApiKeyRefusal",
 ]

@@ -14,8 +14,10 @@
   "workspace_id": "9d8c7b6a-5f4e-4d3c-8b2a-190807060504",
   "created_by_user_id": "2f1c8a3e-6d4b-4a1f-9c2e-0b7d5e6f8a91",
   "daily_budget_usd": 20.0,
+  "monthly_budget_usd": 300.0,
   "max_budget_usd": 200.0,
   "spent_today_usd": 0.0,
+  "spent_month_usd": 0.0,
   "spent_total_usd": 0.0,
   "pod_visibility": "own",
   "pods_count": 0

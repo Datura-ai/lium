@@ -380,14 +380,22 @@ def _missing_scope(detail: Optional[str], code: Optional[str]) -> Optional[str]:
 
 
 def budget_error(detail: str, key: Optional[str] = None, **context: Optional[str]) -> LiumBudgetExceededError:
-    """The exception for a 402: the key's budget refused a new rental (``API_KEY_BUDGET_EXCEEDED``).
+    """The exception for a 402: the key's budget refused the request (``API_KEY_BUDGET_EXCEEDED``).
 
-    The message is the server's own sentence plus the key it refused; ``budget_usd``, ``spent_usd`` and
-    ``window`` come from the numbers in ``context`` when the error body carried them (``_error_context``
-    passes only code/hint/request_id; the caller adds the body's ``data`` fields).
+    One mapping for every route the budget guards — rent, a pod's schedule/extend, `fund`, `topup` and `topup
+    card` all come through :meth:`Lium._request`, so they surface the same sentence. The message is the
+    server's own, plus the key it refused; it names the window hit (daily / monthly / max) — when the server's
+    sentence does not and the body's ``window`` does, the window is appended so the reader knows which budget
+    to raise. ``budget_usd``, ``spent_usd`` and ``window`` come from ``context`` when the error body carried
+    them (``_error_context`` passes only code/hint/request_id; the caller adds the body's ``data`` fields).
     """
     data = context.pop("data", None) or {}
-    message = f"Budget exceeded: {detail}" + (f" ({key})" if key else "")
+    window = data.get("window")
+    window = window if isinstance(window, str) and window else None
+    # the server says "lifetime budget" for the `max` window
+    words = {"max": ("max", "lifetime", "total")}.get((window or "").lower(), (window or "",))
+    named = window and any(word in detail.lower() for word in words)
+    message = f"Budget exceeded: {detail}" + ("" if not window or named else f" ({window} budget)") + (f" ({key})" if key else "")
 
     def usd(value: Any) -> Optional[float]:
         try:
@@ -395,13 +403,12 @@ def budget_error(detail: str, key: Optional[str] = None, **context: Optional[str
         except (TypeError, ValueError):
             return None
 
-    window = data.get("window")
     key_id = data.get("api_key_id")
     return LiumBudgetExceededError(
         message,
         budget_usd=usd(data.get("budget_usd")),
         spent_usd=usd(data.get("spent_usd")),
-        window=window if isinstance(window, str) and window else None,
+        window=window,
         api_key_id=str(key_id) if key_id else None,
         **context,
     )

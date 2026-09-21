@@ -331,7 +331,7 @@ _HINTS_BY_CODE: Dict[str, str] = {
                             "('lium ls --sort price_total')",
     # a 402 from the rent path: the key's own budget, not the account's balance (lium-platform P235)
     "budget_exceeded": "This API key is over its budget: 'lium keys show <name>' shows the figures; "
-                       "raise or clear it with 'lium keys budget <name>' (a signed-in session) or rent with another key",
+                       "raise or clear it with 'lium keys budget <name>' (a signed-in session) or use another key",
     "missing_scope": "This API key lacks the scope the command needs: 'lium keys scopes' explains each one; "
                      "mint a key that holds it with 'lium keys create <name> --scope <scope>'",
     "pod_not_found": "Run 'lium ps' to list pods; a name, huid, id or 1-based index is accepted",

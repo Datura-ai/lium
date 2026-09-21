@@ -167,11 +167,13 @@ class LiumScopeError(LiumPermissionError):
 
 
 class LiumBudgetExceededError(LiumPermissionError):
-    """The API key's budget refused a new rental (402, ``error.code`` ``API_KEY_BUDGET_EXCEEDED``).
+    """The API key's budget refused the request (402, ``error.code`` ``API_KEY_BUDGET_EXCEEDED``).
 
-    A per-key daily or total budget (``lium keys create --daily-budget / --max-budget``, ``lium keys budget``)
-    is reached: the billing tick stops the key's pods and a new rent through that key is refused (lium-platform#630).
-    ``budget_usd``, ``spent_usd``, ``window`` (``daily`` or ``max``) and ``api_key_id`` are filled when the
+    A per-key daily, monthly or lifetime budget (``lium keys create --daily-budget / --monthly-budget /
+    --max-budget``, ``lium keys budget``) is reached: the billing tick stops the key's pods, and a rent, a pod
+    extend / schedule change or a key-initiated top-up (``lium fund``, ``lium topup``, ``lium topup card``)
+    through that key is refused with this one error (lium-platform#630). The message names the window hit.
+    ``budget_usd``, ``spent_usd``, ``window`` (``daily``, ``monthly`` or ``max``) and ``api_key_id`` are filled when the
     server's error body carried them, else ``None``. A :class:`LiumPermissionError` handler keeps working; this
     class is for callers that want the numbers.
     """

@@ -22,6 +22,7 @@ from .exceptions import (
 from .jobs import Job
 from .models import (
     ApiKeyInfo,
+    ApiKeyRefusal,
     ApiKeyScope,
     BackupConfig,
     BackupLog,
@@ -47,6 +48,7 @@ __all__ = [
     "ApiKeysClient",
     "ApiKeyInfo",
     "ApiKeyScope",
+    "ApiKeyRefusal",
     "WorkspacesClient",
     "WorkspaceInfo",
     "WorkspaceMember",

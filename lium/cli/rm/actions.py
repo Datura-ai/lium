@@ -1,7 +1,7 @@
 from typing import List
 
 from lium.cli.actions import ActionResult
-from lium.sdk import Lium, PodInfo
+from lium.sdk import Lium, LiumBudgetExceededError, PodInfo
 from lium.cli import ui
 
 
@@ -40,6 +40,11 @@ class ScheduleRemovalAction:
         for pod in pods:
             try:
                 lium.schedule_termination(pod, termination_time=termination_time)
+            except LiumBudgetExceededError:
+                # the key's budget refused the new duration (402, lium-platform#630): it is the key, not this pod,
+                # that is over — every pod after it would be refused alike, and the reader needs the server's
+                # sentence (the window hit, the figures), which handle_errors prints as it does for `up`
+                raise
             except Exception as e:
                 ui.debug(f"Failed to schedule {pod.huid}: {e}")
                 failed_huids.append(pod.huid)
