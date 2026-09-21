@@ -236,7 +236,7 @@ def test_on_a_terminal_rm_all_still_asks_and_no_means_no(monkeypatch):
     monkeypatch.setattr(rm_module, "Lium", _RecordingLium)
     monkeypatch.setattr(interactive, "stdin_is_terminal", lambda: True)
     questions: list[str] = []
-    monkeypatch.setattr(ui.Confirm, "ask", lambda message, default=False: questions.append(message) or False)
+    monkeypatch.setattr(ui.Confirm, "ask", lambda message, default=False, **_: questions.append(message) or False)
 
     result = CliRunner().invoke(cli, ["rm", "--all"])
 
@@ -310,6 +310,6 @@ def test_rerun_line_carries_every_rm_option():
 
     assert line == "lium rm train --all --in 45m --at 2030-01-01T00:00 --name-only --format json --yes"
     for param in rm_module.rm_command.params:
-        if param.name in ("targets", "yes"):
-            continue
+        if param.name in ("targets", "yes") or param.hidden:
+            continue  # `--json` is the hidden alias of `--format json` (lium#252): the line carries the documented spelling
         assert param.opts[0] in line, f"{param.name} ({param.opts[0]}) is not carried by rerun_with_yes"
