@@ -759,6 +759,10 @@ class Lium:
         if not isinstance(nvlink, bool):
             nvlink = (interconnect or {}).get("nvlink")
             nvlink = nvlink if isinstance(nvlink, bool) else None
+        # The backend's power-limit verdict and its watts; anything but a JSON boolean / number is unknown,
+        # so a backend that predates the fields (or sends null) reads as "cannot say", never as "limited".
+        gpu_power_limited = executor_dict.get("gpu_power_limited")
+        gpu_power_limited = gpu_power_limited if isinstance(gpu_power_limited, bool) else None
 
         return ExecutorInfo(
             id=executor_dict.get("id", ""),
@@ -781,6 +785,9 @@ class Lium:
             available_gpu_count=_int_or_none(executor_dict, "available_gpu_count"),
             interconnect=interconnect,
             nvlink=nvlink,
+            gpu_power_limited=gpu_power_limited,
+            gpu_power_limit_w=_int_or_none(executor_dict, "gpu_power_limit_w"),
+            gpu_power_limit_default_w=_int_or_none(executor_dict, "gpu_power_limit_default_w"),
         )
 
     def list_ssh_keys(self) -> List[SSHKey]:

@@ -82,6 +82,22 @@ def _maybe_gi_from_big_number(n: Any) -> str:
     return str(round(v / (1024 * 1024)))
 
 
+# The Id cell's mark for a node whose GPU power limit the provider set under the card's default
+# (the backend's `gpu_power_limited`, the portal's "Reduced power limit" badge). On the Id cell,
+# after `(DinD)`: Config is already full at `8×RTXPRO6000D` and a marker there would be cut off.
+POWER_LIMITED_MARK = "⚡↓"
+# The legend, printed under the table with the other tips.
+POWER_LIMITED_FOOTNOTE = (
+    f"{POWER_LIMITED_MARK} = reduced GPU power limit: the provider set it below the card's default, "
+    "so expect somewhat lower peak performance (--format json: gpu_power_limited, gpu_power_limit_w)"
+)
+
+
+def power_limited(exe: ExecutorInfo) -> bool:
+    """Only the backend's explicit ``True`` marks a node: ``False`` is stock power, ``None`` unknown."""
+    return getattr(exe, "gpu_power_limited", None) is True
+
+
 def _link_display(exe: ExecutorInfo) -> str:
     """Interconnect cell: NV# in success, PCIe/<class> in warning, dash when the node has not reported it."""
     link = exe.link
@@ -230,7 +246,8 @@ def format_tip() -> str:
     return (
         f"Tip: {console.get_styled('lium up <index>', 'success')} {console.get_styled('# e.g. lium up 1', 'dim')}\n"
         f"{console.get_styled('default order: cheapest $/GPU·h first; --sort picks another key', 'dim')}\n"
-        f"{console.get_styled('★ = no other node beats it: a 10% faster download wins outright, else better on price and specs (VRAM, RAM, disk, PCIe, memory bandwidth, TFLOPS, upload, US location)', 'dim')}"
+        f"{console.get_styled('★ = no other node beats it: a 10% faster download wins outright, else better on price and specs (VRAM, RAM, disk, PCIe, memory bandwidth, TFLOPS, upload, US location)', 'dim')}\n"
+        f"{console.get_styled(POWER_LIMITED_FOOTNOTE, 'dim')}"
     )
 
 
@@ -266,6 +283,10 @@ def compact_executor(exe: ExecutorInfo, is_pareto: bool, index: int) -> Dict[str
         "p2p": exe.p2p,
         "interconnect": exe.interconnect,
         "machine_name": getattr(exe, "machine_name", None),
+        # the ⚡↓ mark as a field: true / false / null (unknown), and the watts behind it
+        "gpu_power_limited": getattr(exe, "gpu_power_limited", None),
+        "gpu_power_limit_w": getattr(exe, "gpu_power_limit_w", None),
+        "gpu_power_limit_default_w": getattr(exe, "gpu_power_limit_default_w", None),
     }
 
 
@@ -338,6 +359,8 @@ def build_executors_table(
         huid = _mid_ellipsize(exe.huid)
         huid += " (DinD)" if exe.docker_in_docker else ""
         huid_display = f"{console.get_styled('★', 'success')} {console.get_styled(huid, 'id')}" if is_pareto else f"  {console.get_styled(huid, 'id')}"
+        if power_limited(exe):
+            huid_display += f" {console.get_styled(POWER_LIMITED_MARK, 'warning')}"
 
         # Style download speed in yellow when below 100 Mbps
         dl_val = _intish(s["Download"])

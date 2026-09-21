@@ -103,6 +103,12 @@ def ls_command(
     18 links, PCIe/SYS = PCIe only, worst class shown); it is "—" until the node's
     validator reports it.
 
+    ⚡↓ after a node's Id means a reduced GPU power limit: the provider set it below
+    the card's default, so expect somewhat lower peak performance than the same GPU
+    at full power. --format json carries it as gpu_power_limited (true / false /
+    null when the platform cannot say) with gpu_power_limit_w and
+    gpu_power_limit_default_w in watts.
+
     \b
     Examples:
       lium ls --gpu H100 --count 8
