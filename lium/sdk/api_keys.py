@@ -9,6 +9,7 @@ cannot list, mint or reshape keys, so these calls need ``Lium.workspaces.login``
 and never its own copy.
 """
 
+import math
 from datetime import datetime, timezone
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
@@ -181,7 +182,7 @@ def budget_amount(name: str, value: Optional[float]) -> Optional[float]:
         amount = float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{name} must be a number of USD, not {value!r}") from exc
-    if amount != amount or amount < BUDGET_MIN_USD:  # NaN or below the server's floor
+    if math.isnan(amount) or amount < BUDGET_MIN_USD:  # below the server's floor
         raise ValueError(f"{name} must be at least ${BUDGET_MIN_USD:.0f} ({value} given); leave it out for no budget")
     if round(amount, 2) != amount:
         raise ValueError(f"{name} is billed in cents: {value} has more than two decimals")
