@@ -139,7 +139,7 @@ def _render(
 @click.option("--wide", is_flag=True, help="Always show every column, including ports")
 @click.option(
     "--key", "api_key", metavar="NAME|ID",
-    help="Only the pods rented through this API key (server-side, GET /pods?api_key_id=…; lium-platform P235, "
+    help="Only the pods rented through this API key (server-side, GET /pods?api_key_id=…; lium-platform#630, "
          "not released — an older server lists every pod). A name needs `lium workspaces login`; an id does not",
 )
 @handle_errors

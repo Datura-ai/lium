@@ -169,10 +169,11 @@ class LiumScopeError(LiumPermissionError):
 class LiumBudgetExceededError(LiumPermissionError):
     """The API key's budget refused a new rental (402, ``error.code`` ``API_KEY_BUDGET_EXCEEDED``).
 
-    A per-key daily or total budget (``lium keys create --daily-budget / --max-budget``) is reached:
-    running pods keep running, a new rent through that key is refused. ``budget_usd``, ``spent_usd`` and
-    ``window`` (``daily`` or ``max``) are filled when the server's error body carried them, else ``None``.
-    A :class:`LiumPermissionError` handler keeps working; this class is for callers that want the numbers.
+    A per-key daily or total budget (``lium keys create --daily-budget / --max-budget``, ``lium keys budget``)
+    is reached: the billing tick stops the key's pods and a new rent through that key is refused (lium-platform#630).
+    ``budget_usd``, ``spent_usd``, ``window`` (``daily`` or ``max``) and ``api_key_id`` are filled when the
+    server's error body carried them, else ``None``. A :class:`LiumPermissionError` handler keeps working; this
+    class is for callers that want the numbers.
     """
 
     def __init__(
@@ -182,6 +183,7 @@ class LiumBudgetExceededError(LiumPermissionError):
         budget_usd: float | None = None,
         spent_usd: float | None = None,
         window: str | None = None,
+        api_key_id: str | None = None,
         code: str | None = None,
         hint: str | None = None,
         request_id: str | None = None,
@@ -190,6 +192,7 @@ class LiumBudgetExceededError(LiumPermissionError):
         self.budget_usd = budget_usd
         self.spent_usd = spent_usd
         self.window = window
+        self.api_key_id = api_key_id
 
 
 __all__ = [

@@ -1,11 +1,12 @@
-"""API keys: scopes, budgets and pod visibility (lium-platform DAH-2944 scopes; P235 budgets and visibility).
+"""API keys: scopes, budgets and pod visibility (lium-platform DAH-2944 scopes; P235 budgets and visibility,
+lium-platform#630, not released).
 
 Every ``/keys`` route is session-only on the server (``utils/auth.py``: ``authenticate``, a browser JWT): a key
 cannot list, mint or reshape keys, so these calls need ``Lium.workspaces.login`` or LIUM_SESSION_TOKEN and raise
-:class:`LiumSessionError` without one. ``GET /keys/scopes`` is the one read that also answers a key.
+:class:`LiumSessionError` without one. ``GET /keys/scopes`` is static text and needs no credential at all.
 
-``scopes()`` is the single source of the "what this key can do" words: the CLI prints the server's
-descriptions and never its own copy.
+``scopes()`` is the single source of the "what this key can do" words: the CLI prints the server's sentences
+and never its own copy.
 """
 
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
@@ -17,18 +18,35 @@ if TYPE_CHECKING:  # pragma: no cover
     from .client import Lium
 
 SCOPES_ROUTE = "/keys/scopes"
-# What a key gets when the caller names no scope: everything but ``billing``. The server's own default for an
-# omitted ``scopes`` is "every scope" (DAH-2944), which would hand a new key the money routes once ``billing``
-# exists — so the list is always sent (owner, 21 Sep 2026: the elevated key is off by default).
+# What a key gets when the caller names no scope: everything but ``billing``. The list is always sent, so a
+# server whose own default for an omitted ``scopes`` is wider (DAH-2944: "every scope") cannot hand a new key
+# the money routes (owner, 21 Sep 2026: the elevated key is off by default).
 DEFAULT_SCOPES = ("read", "rent", "manage")
 BILLING_SCOPE = "billing"
 POD_VISIBILITIES = ("own", "account")
 BUDGET_EXCEEDED_CODE = "API_KEY_BUDGET_EXCEEDED"
+# dtos/api_key.py BUDGET_MIN_USD: below $1 a budget stops every pod on its first accrual, so the server refuses it
+BUDGET_MIN_USD = 1.0
+
+
+class _Unset:
+    def __repr__(self) -> str:  # pragma: no cover - repr only
+        return "UNSET"
+
+
+UNSET: Any = _Unset()  # "leave this budget as it is" on update(); None means "clear it"
 
 
 def _usd(value: Any) -> Optional[float]:
     try:
         return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _int(value: Any) -> Optional[int]:
+    try:
+        return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
 
@@ -48,52 +66,84 @@ def _key(d: Dict[str, Any]) -> ApiKeyInfo:
         spent_today_usd=_usd(d.get("spent_today_usd")),
         spent_total_usd=_usd(d.get("spent_total_usd")),
         pod_visibility=visibility if isinstance(visibility, str) and visibility else None,
+        pods_count=_int(d.get("pods_count")),
         key=d.get("key") if isinstance(d.get("key"), str) else None,
         raw=dict(d),
     )
 
 
 def _scope(d: Dict[str, Any]) -> ApiKeyScope:
-    families = d.get("route_families")
+    def strings(value: Any) -> List[str]:
+        return [str(item) for item in value] if isinstance(value, list) else []
+
     return ApiKeyScope(
         scope=str(d.get("scope", "")),
         description=str(d.get("description", "")),
-        route_families=[str(f) for f in families] if isinstance(families, list) else [],
+        title=str(d.get("title", "")),
+        can=strings(d.get("can")),
+        route_families=strings(d.get("route_families")),
+        default=bool(d.get("default", False)),
     )
 
 
-def _budget(name: str, value: Optional[float]) -> Optional[float]:
-    """A budget as the number the API takes: a positive USD amount, or None for no budget."""
+def budget_amount(name: str, value: Optional[float]) -> Optional[float]:
+    """A budget as the number the API takes: USD ≥ $1 in whole cents, or None for no budget.
+
+    Raises ``ValueError`` (the CLI's ``value_error``, exit 2) before any request for anything else.
+    """
     if value is None:
         return None
     try:
         amount = float(value)
     except (TypeError, ValueError):
         raise ValueError(f"{name} must be a number of USD, not {value!r}")
-    if amount <= 0:
-        raise ValueError(f"{name} must be more than $0 ({amount} given); leave it out for no budget")
+    if amount != amount or amount < BUDGET_MIN_USD:  # NaN or below the server's floor
+        raise ValueError(f"{name} must be at least ${BUDGET_MIN_USD:.0f} ({value} given); leave it out for no budget")
+    if round(amount, 2) != amount:
+        raise ValueError(f"{name} is billed in cents: {value} has more than two decimals")
     return amount
 
 
 class ApiKeysClient:
     def __init__(self, lium: "Lium"):
         self._lium = lium
+        self._scopes_payload: Optional[Dict[str, Any]] = None
 
-    # ------------------------------------------------------------------ scopes (key or session)
-    def scopes(self) -> List[ApiKeyScope]:
-        """Every scope the server knows, with its description and route families (``GET /keys/scopes``).
+    # ------------------------------------------------------------------ scopes (no credential needed)
+    def scopes_payload(self) -> Dict[str, Any]:
+        """The body of ``GET /keys/scopes`` as the server sent it, read once per client:
+        ``{"scopes": [...], "pod_visibility": [...], "money_routes": [...]}`` (lium-platform#630).
 
-        Reads with the session when there is one, else with the key. A server before P235 has no such
-        route and answers 404 (:class:`LiumNotFoundError`).
+        A server before P235 has no such route and answers 404 (:class:`LiumNotFoundError`); a server that
+        answers a bare list is read as the ``scopes`` list alone.
         """
-        response = self._lium.workspaces._read(SCOPES_ROUTE)
-        data = response.json()
-        rows = data.get("scopes") if isinstance(data, dict) else data
-        return [_scope(row) for row in rows] if isinstance(rows, list) else []
+        if self._scopes_payload is None:
+            data = self._lium.workspaces._read(SCOPES_ROUTE).json()
+            if isinstance(data, list):
+                data = {"scopes": data}
+            self._scopes_payload = data if isinstance(data, dict) else {}
+        return self._scopes_payload
+
+    def scopes(self) -> List[ApiKeyScope]:
+        """Every scope the server knows: its sentence, what a key holding it can do, the routes it opens,
+        and whether a key made without naming scopes gets it."""
+        rows = self.scopes_payload().get("scopes")
+        return [_scope(row) for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    def pod_visibilities(self) -> Dict[str, str]:
+        """``{"own": <sentence>, "account": <sentence>}`` — the server's words for each pod-visibility value."""
+        rows = self.scopes_payload().get("pod_visibility")
+        if not isinstance(rows, list):
+            return {}
+        return {
+            str(row["value"]): str(row.get("description", ""))
+            for row in rows
+            if isinstance(row, dict) and row.get("value")
+        }
 
     # ------------------------------------------------------------------ reads (session)
     def list(self, workspace_id: Optional[str] = None) -> List[ApiKeyInfo]:
-        """The keys of a workspace (``GET /keys``, ``X-Lium-Workspace-Id`` when given) — never the secrets."""
+        """The keys of a workspace (``GET /keys``, ``X-Lium-Workspace-Id`` when given)."""
         rows = self._lium.workspaces._session_request("GET", "/keys", workspace_id).json()
         return [_key(row) for row in rows] if isinstance(rows, list) else []
 
@@ -129,8 +179,9 @@ class ApiKeysClient:
 
         ``scopes`` defaults to :data:`DEFAULT_SCOPES` (``read``, ``rent``, ``manage``) and is always sent, so
         ``billing`` — the money routes — is on a key only when named. ``daily_budget_usd`` / ``max_budget_usd``
-        are sent as numbers (USD, > 0) only when given; ``pod_visibility`` is ``own`` (the key lists only the
-        pods it rents) or ``account``. A server before P235 ignores the budget and visibility fields.
+        are sent as numbers (USD ≥ 1, whole cents) only when given; ``pod_visibility`` is ``own`` (the key
+        sees only the pods it creates) or ``account``. A server before P235 ignores the budget and visibility
+        fields and answers 422 to a ``billing`` scope.
         """
         if pod_visibility not in POD_VISIBILITIES:
             raise ValueError(f"pod_visibility must be one of {', '.join(POD_VISIBILITIES)}, not {pod_visibility!r}")
@@ -141,13 +192,36 @@ class ApiKeysClient:
         }
         if not body["scopes"]:
             raise ValueError("a key needs at least one scope")
-        daily = _budget("daily_budget_usd", daily_budget_usd)
-        maximum = _budget("max_budget_usd", max_budget_usd)
+        daily = budget_amount("daily_budget_usd", daily_budget_usd)
+        maximum = budget_amount("max_budget_usd", max_budget_usd)
         if daily is not None:
             body["daily_budget_usd"] = daily
         if maximum is not None:
             body["max_budget_usd"] = maximum
         return _key(self._lium.workspaces._session_request("POST", "/keys", workspace_id, json=body).json())
+
+    def update(
+        self,
+        key_id: str,
+        *,
+        daily_budget_usd: Optional[float] = UNSET,
+        max_budget_usd: Optional[float] = UNSET,
+        workspace_id: Optional[str] = None,
+    ) -> ApiKeyInfo:
+        """Set or clear a key's budgets (``PATCH /keys/{id}``, lium-platform#630).
+
+        A budget given as a number is set, as ``None`` is cleared, left out (:data:`UNSET`) is kept as it is;
+        naming neither is a ``ValueError`` here (the server would answer 400). Scopes and pod visibility are
+        fixed at creation and cannot be changed.
+        """
+        body: Dict[str, Any] = {}
+        for field_name, value in (("daily_budget_usd", daily_budget_usd), ("max_budget_usd", max_budget_usd)):
+            if value is UNSET:
+                continue
+            body[field_name] = budget_amount(field_name, value)
+        if not body:
+            raise ValueError("name a budget to set or clear: daily_budget_usd and/or max_budget_usd")
+        return _key(self._lium.workspaces._session_request("PATCH", f"/keys/{key_id}", workspace_id, json=body).json())
 
 
 __all__ = [
@@ -157,4 +231,7 @@ __all__ = [
     "BILLING_SCOPE",
     "POD_VISIBILITIES",
     "BUDGET_EXCEEDED_CODE",
+    "BUDGET_MIN_USD",
+    "UNSET",
+    "budget_amount",
 ]

@@ -13,12 +13,12 @@ from lium.cli.settings import config as settings
 from lium.cli.utils import CliFailure, EXIT_CONFIGURATION_ERROR, format_date, handle_errors
 from lium.cli.workspaces.command import require_session, section_for, target_workspace, workspace_client
 from lium.sdk import ApiKeyInfo, ApiKeyScope, Lium
-from lium.sdk.api_keys import BILLING_SCOPE, DEFAULT_SCOPES, POD_VISIBILITIES
+from lium.sdk.api_keys import BILLING_SCOPE, BUDGET_MIN_USD, DEFAULT_SCOPES, POD_VISIBILITIES, UNSET
 from lium.sdk.exceptions import LiumError
 
 # The scopes the option accepts. The server's list (`lium keys scopes`) is the source of what each one does; this
 # is only what the CLI lets you type. `billing` (the money routes: card payments, credit transfers, crypto
-# payments) is never in the default set — lium-platform P235, not released.
+# payments) is never in the default set — lium-platform#630, not released.
 SCOPE_CHOICES = (*DEFAULT_SCOPES, BILLING_SCOPE)
 
 
@@ -39,33 +39,36 @@ def budget_cell(key: ApiKeyInfo) -> str:
     return " · ".join(parts) or "—"
 
 
-def _pods_by_key(lium: Lium) -> Optional[Dict[str, int]]:
-    """Active pods per API key id, from one `GET /pods` with the account's key; None when that read fails
-    (a key without `read`, an older server) — the column then shows `—` rather than a wrong zero."""
-    try:
-        pods = lium.ps()
-    except Exception as exc:  # noqa: BLE001 - the count is decoration; the key rows are still worth showing
-        ui.notice_debug(f"pod count unavailable: {exc}")
-        return None
-    counts: Dict[str, int] = {}
-    for pod in pods:
-        if pod.api_key_id:
-            counts[pod.api_key_id] = counts.get(pod.api_key_id, 0) + 1
-    return counts
+def _pods_cell(key: ApiKeyInfo) -> str:
+    """Active pods the key created, as the server counts them (`pods_count`); `—` from a server before P235."""
+    return "—" if key.pods_count is None else str(key.pods_count)
 
 
 def _scopes_by_name(lium: Lium) -> Dict[str, ApiKeyScope]:
-    return {scope.scope: scope for scope in lium.api_keys.scopes()}
+    """The server's scope table; empty on a server without `GET /keys/scopes` (the names are then shown alone)."""
+    try:
+        return {scope.scope: scope for scope in lium.api_keys.scopes()}
+    except LiumError as exc:
+        ui.notice_debug(f"scopes unavailable: {exc}")
+        return {}
 
 
 def _can_do_lines(key: ApiKeyInfo, scopes: Dict[str, ApiKeyScope]) -> List[str]:
-    """"What this key can do": the server's description for each scope the key holds, in the key's order;
-    a scope the server does not describe is named alone."""
+    """"What this key can do": the server's `can` lines (its one-sentence description when it sent none) for
+    each scope the key holds, in the key's order; a scope the server does not describe is named alone."""
     lines = []
     for name in key.scopes:
         scope = scopes.get(name)
-        lines.append(f"{name}: {scope.description}" if scope and scope.description else name)
+        if scope and scope.can:
+            lines.extend(f"{name}: {line}" for line in scope.can)
+        elif scope and scope.description:
+            lines.append(f"{name}: {scope.description}")
+        else:
+            lines.append(name)
     return lines
+
+
+BUDGET_RANGE = click.FloatRange(min=BUDGET_MIN_USD)
 
 
 @click.group("keys", invoke_without_command=True)
@@ -92,8 +95,8 @@ def keys_list_command(workspace: Optional[str], json_output: bool):
     """List the API keys of a workspace (owners and admins); a key's secret is printed once, by `keys create`.
 
     Columns: Name, Scopes, Budget (spent/budget for the day and in total, when the key has one), Pods (active
-    pods rented through the key, counted from `lium ps`), Created, Last used, ID. Budgets and the Pods count
-    need a server with per-key budgets (lium-platform P235, not released); older servers show `—`.
+    pods the key created), Created, Last used, ID. Budgets and the Pods count come from a server with per-key
+    budgets (lium-platform#630, not released); older servers show `—`.
     """
     lium = workspace_client()
     require_session(lium)
@@ -102,7 +105,6 @@ def keys_list_command(workspace: Optional[str], json_output: bool):
     if json_output:
         click.echo(json.dumps([key.to_dict() for key in keys], indent=2))
         return
-    pods = _pods_by_key(lium) if keys else {}
     table = Table(show_header=True, header_style="dim", box=None, pad_edge=False, expand=True, padding=(0, 1))
     for column in ("Name", "Scopes", "Budget", "Pods", "Created", "Last used", "ID"):
         table.add_column(column, overflow="fold")
@@ -111,7 +113,7 @@ def keys_list_command(workspace: Optional[str], json_output: bool):
             Text(key.name),
             ",".join(key.scopes) or "—",
             budget_cell(key),
-            "—" if pods is None else str(pods.get(key.id, 0)),
+            _pods_cell(key),
             format_date(key.created_at) if key.created_at else "—",
             format_date(key.last_used) if key.last_used else "—",
             key.id,
@@ -128,19 +130,18 @@ def keys_list_command(workspace: Optional[str], json_output: bool):
          "`lium keys scopes` says what each one allows.",
 )
 @click.option(
-    "--daily-budget", type=click.FloatRange(min=0, min_open=True), metavar="USD",
-    help="Refuse new rentals through this key once its pods were billed this much in a UTC day "
-         "(lium-platform P235, not released)",
+    "--daily-budget", type=BUDGET_RANGE, metavar="USD",
+    help="Most USD the pods this key creates may be billed on one UTC day; at it the key's pods are stopped and "
+         "new rentals through the key are refused. At least $1, whole cents (lium-platform#630, not released)",
 )
 @click.option(
-    "--max-budget", type=click.FloatRange(min=0, min_open=True), metavar="USD",
-    help="Refuse new rentals through this key once its pods were billed this much in total "
-         "(lium-platform P235, not released)",
+    "--max-budget", type=BUDGET_RANGE, metavar="USD",
+    help="The same over the key's lifetime (lium-platform#630, not released)",
 )
 @click.option(
     "--pod-visibility", type=click.Choice(POD_VISIBILITIES), default="own", show_default=True,
-    help="Which pods the key lists and manages: own = only the pods it rented; account = every pod of the "
-         "account (lium-platform P235, not released)",
+    help="own = only the pods this key creates exist for it; account = every pod of the account, within the "
+         "key's scopes (lium-platform#630, not released)",
 )
 @click.option("--workspace", "-w", default=None, help="Workspace name or id the key is bound to (default: current)")
 @click.option("--save", is_flag=True, help="Keep the key in ~/.lium/config.ini for `--workspace <name>`")
@@ -159,9 +160,9 @@ def keys_create_command(
     """Create an API key bound to a workspace; the key is printed once.
 
     Without --scope the key gets read, rent and manage. `--scope billing` adds the money routes (card
-    payments, credit transfers, crypto payments) and prints the server's warning first; it is never
-    added on its own. Budgets are USD; when one is reached, a rent through the key is refused with
-    `budget_exceeded` (exit 6) while the running pods keep running.
+    payments, credit transfers, crypto top-ups) and prints the server's warning first; it is never
+    added on its own. Budgets are USD; at one, the server stops the key's pods and refuses new rentals
+    through it with the code `API_KEY_BUDGET_EXCEEDED` (exit 6). `lium keys budget` changes them later.
 
     \b
     Examples:
@@ -200,7 +201,8 @@ def keys_create_command(
         return
     ui.success(f"Key '{escape(name)}' created in {escape(target.name)}")
     ui.print(Text(key.key or ""))
-    ui.dim(f"Scopes: {', '.join(key.scopes) or ', '.join(chosen)}" + (f"  ·  Budget: {budget_cell(key)}" if budget_cell(key) != "—" else ""))
+    budget = budget_cell(key)
+    ui.dim(f"Scopes: {', '.join(key.scopes) or ', '.join(chosen)}" + (f"  ·  Budget: {budget}" if budget != "—" else ""))
     ui.dim(
         f"Saved for `lium --workspace {escape(target.name)} …`" if save else "Not saved; add --save to use it with --workspace"
     )
@@ -210,12 +212,8 @@ def _warn_billing(lium: Lium, json_output: bool) -> None:
     """One line before minting a key that holds `billing`: the server's own description of the scope (the
     words come from `GET /keys/scopes`, not from here). On a server without that route the line names the
     scope and says the description is unavailable. Under --json the line goes to stderr."""
-    try:
-        description = _scopes_by_name(lium).get(BILLING_SCOPE)
-        text = description.description if description and description.description else ""
-    except LiumError as exc:
-        ui.notice_debug(f"scopes unavailable: {exc}")
-        text = ""
+    description = _scopes_by_name(lium).get(BILLING_SCOPE)
+    text = description.description if description and description.description else ""
     line = f"Warning: this key holds the '{BILLING_SCOPE}' scope — " + (
         text or "the server did not describe it (no GET /keys/scopes); it is the elevated, money-moving scope"
     )
@@ -231,10 +229,10 @@ def _warn_billing(lium: Lium, json_output: bool) -> None:
 @click.option("--json", "json_output", is_flag=True, help="Machine-readable output (the row plus `can_do` and `pods`)")
 @handle_errors
 def keys_show_command(key: str, workspace: Optional[str], json_output: bool):
-    """One key by name or id: its scopes with the server's description of each, budget, visibility and pods.
+    """One key by name or id: what it can do, its budget and spend, its pod visibility and pod count.
 
-    "What this key can do" is read from the server (`GET /keys/scopes`, lium-platform P235, not released);
-    on an older server the scope names are listed alone.
+    "What this key can do" is the server's list for the scopes the key holds (`GET /keys/scopes`,
+    lium-platform#630, not released); on an older server the scope names are listed alone.
 
     \b
     Examples:
@@ -245,24 +243,19 @@ def keys_show_command(key: str, workspace: Optional[str], json_output: bool):
     require_session(lium)
     target = target_workspace(lium, workspace)
     found = lium.api_keys.resolve(key, target.id)
-    try:
-        scopes = _scopes_by_name(lium)
-    except LiumError as exc:
-        ui.notice_debug(f"scopes unavailable: {exc}")
-        scopes = {}
-    can_do = _can_do_lines(found, scopes)
-    pods = _pods_by_key(lium)
-    pod_count = None if pods is None else pods.get(found.id, 0)
+    can_do = _can_do_lines(found, _scopes_by_name(lium))
     if json_output:
-        click.echo(json.dumps({**found.to_dict(), "can_do": can_do, "pods": pod_count}, indent=2))
+        click.echo(json.dumps({**found.to_dict(), "can_do": can_do}, indent=2))
         return
+    visibility = found.pod_visibility or "—"
+    described = lium.api_keys.pod_visibilities().get(found.pod_visibility or "") if found.pod_visibility else None
     ui.info(f"{escape(found.name)}  ({found.id})")
     rows = [
         ("Workspace", target.name),
         ("Scopes", ", ".join(found.scopes) or "—"),
         ("Budget", budget_cell(found)),
-        ("Pod visibility", found.pod_visibility or "—"),
-        ("Active pods", "—" if pod_count is None else str(pod_count)),
+        ("Pod visibility", f"{visibility} — {described}" if described else visibility),
+        ("Active pods", _pods_cell(found)),
         ("Created", format_date(found.created_at) if found.created_at else "—"),
         ("Last used", format_date(found.last_used) if found.last_used else "—"),
     ]
@@ -275,36 +268,99 @@ def keys_show_command(key: str, workspace: Optional[str], json_output: bool):
     ui.print(Text("What this key can do:", style="bold"))
     for line in can_do or ["— (no scopes)"]:
         ui.print(Text(f"  • {line}"))
-    if pod_count:
-        ui.dim(f"lium ps --key {found.name} lists its pods; lium billing history --key {found.name} its charges")
+    ui.dim(f"lium ps --key {escape(found.name)} lists its pods; lium billing history --key {escape(found.name)} its charges")
 
 
 @keys_command.command("scopes")
-@click.option("--json", "json_output", is_flag=True, help="Machine-readable output (the server's rows)")
+@click.option("--json", "json_output", is_flag=True, help="Machine-readable output (the server's body: scopes, pod_visibility, money_routes)")
 @handle_errors
 def keys_scopes_command(json_output: bool):
-    """Every API-key scope with what it allows, in the server's words (`GET /keys/scopes`).
+    """Every API-key scope and pod-visibility value with what it allows, in the server's words (`GET /keys/scopes`).
 
-    Needs a server with the route (lium-platform P235, not released); older servers answer `not_found`.
+    Needs a server with the route (lium-platform#630, not released); older servers answer `not_found`. No
+    session or key is checked: the table is static text.
 
     \b
     Examples:
       lium keys scopes
-      lium keys scopes --json | jq '.[].scope'
+      lium keys scopes --json | jq '.scopes[].scope'
     """
     lium = workspace_client()
     scopes = lium.api_keys.scopes()
+    visibilities = lium.api_keys.pod_visibilities()
     if json_output:
-        click.echo(json.dumps(
-            [{"scope": s.scope, "description": s.description, "route_families": s.route_families} for s in scopes],
-            indent=2,
-        ))
+        # the server's body as it came: `scopes`, `pod_visibility`, `money_routes`
+        click.echo(json.dumps(lium.api_keys.scopes_payload(), indent=2))
         return
     table = Table(show_header=True, header_style="dim", box=None, pad_edge=False, expand=True, padding=(0, 1))
-    for column in ("Scope", "What it allows", "Routes"):
+    for column in ("Scope", "Default", "What it allows", "Routes"):
         table.add_column(column, overflow="fold")
     for scope in scopes:
-        table.add_row(Text(scope.scope), Text(scope.description or "—"), ", ".join(scope.route_families) or "—")
+        allows = scope.description or "—"
+        if scope.can:
+            allows += "\n" + "\n".join(f"• {line}" for line in scope.can)
+        table.add_row(Text(scope.scope), "yes" if scope.default else "no", Text(allows), ", ".join(scope.route_families) or "—")
     ui.info(f"API key scopes  ({len(scopes)} total)")
     ui.print(table)
-    ui.dim(f"A key made without --scope gets {', '.join(DEFAULT_SCOPES)}; {BILLING_SCOPE} only when asked for")
+    if visibilities:
+        ui.print(Text("Pod visibility (--pod-visibility):", style="bold"))
+        for value, text in visibilities.items():
+            ui.print(Text(f"  {value}: {text}"))
+    defaults = [s.scope for s in scopes if s.default] or list(DEFAULT_SCOPES)
+    ui.dim(f"A key made without --scope gets {', '.join(defaults)}; {BILLING_SCOPE} only when asked for")
+
+
+@keys_command.command("budget")
+@click.argument("key")
+@click.option("--daily-budget", type=BUDGET_RANGE, metavar="USD", help="Set the per-UTC-day budget (at least $1, whole cents)")
+@click.option("--max-budget", type=BUDGET_RANGE, metavar="USD", help="Set the lifetime budget (at least $1, whole cents)")
+@click.option("--no-daily-budget", is_flag=True, help="Clear the per-day budget")
+@click.option("--no-max-budget", is_flag=True, help="Clear the lifetime budget")
+@click.option("--workspace", "-w", default=None, help="Workspace name or id (default: the current one)")
+@click.option("--json", "json_output", is_flag=True, help="Machine-readable output (the key's row after the change)")
+@handle_errors
+def keys_budget_command(
+    key: str,
+    daily_budget: Optional[float],
+    max_budget: Optional[float],
+    no_daily_budget: bool,
+    no_max_budget: bool,
+    workspace: Optional[str],
+    json_output: bool,
+):
+    """Set or clear a key's budgets (`PATCH /keys/{id}`, lium-platform#630, not released).
+
+    A budget not named is left as it is; scopes and pod visibility cannot be changed after creation. Needs
+    `lium workspaces login`: a key cannot lift its own budget.
+
+    \b
+    Examples:
+      lium keys budget agent-1 --daily-budget 50
+      lium keys budget agent-1 --no-max-budget
+    """
+    if (daily_budget is not None and no_daily_budget) or (max_budget is not None and no_max_budget):
+        raise CliFailure("invalid_arguments", "Set a budget or clear it, not both", EXIT_CONFIGURATION_ERROR)
+    daily = None if no_daily_budget else (daily_budget if daily_budget is not None else UNSET)
+    maximum = None if no_max_budget else (max_budget if max_budget is not None else UNSET)
+    if daily is UNSET and maximum is UNSET:
+        raise CliFailure(
+            "invalid_arguments",
+            "Name what to change: --daily-budget / --no-daily-budget, --max-budget / --no-max-budget",
+            EXIT_CONFIGURATION_ERROR,
+        )
+    if daily not in (None, UNSET) and maximum not in (None, UNSET) and maximum < daily:
+        raise CliFailure(
+            "invalid_arguments",
+            f"--max-budget ({_usd(maximum)}) is below --daily-budget ({_usd(daily)}); "
+            "the total budget cannot be smaller than one day's",
+            EXIT_CONFIGURATION_ERROR,
+        )
+    lium = workspace_client()
+    require_session(lium)
+    target = target_workspace(lium, workspace)
+    found = lium.api_keys.resolve(key, target.id)
+    updated = lium.api_keys.update(found.id, daily_budget_usd=daily, max_budget_usd=maximum, workspace_id=target.id)
+    if json_output:
+        click.echo(json.dumps(updated.to_dict(), indent=2))
+        return
+    ui.success(f"Budget of '{escape(updated.name)}' is now {budget_cell(updated)}")

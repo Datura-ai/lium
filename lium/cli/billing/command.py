@@ -81,7 +81,7 @@ def billing_command():
 @click.option("--to", "end_day", metavar="YYYY-MM-DD", help="Last UTC billing day to include (inclusive)")
 @click.option(
     "--key", "api_key", metavar="NAME|ID",
-    help="Only the pods rented through this API key (GET /billing/statement?api_key_id=…; lium-platform P235, "
+    help="Only the pods rented through this API key (GET /billing/statement?api_key_id=…; lium-platform#630, "
          "not released — an older server answers for every pod). A name needs `lium workspaces login`; an id does not",
 )
 @click.option(

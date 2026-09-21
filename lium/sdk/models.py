@@ -510,11 +510,18 @@ class WorkspaceMember:
 
 @dataclass
 class ApiKeyScope:
-    """One row of ``GET /keys/scopes`` (lium-platform P235): what a scope lets a key do, in the server's words."""
+    """One row of ``GET /keys/scopes`` (lium-platform P235): what a scope lets a key do, in the server's words.
+
+    ``description`` is the one sentence next to the picker's checkbox, ``can`` the "what this key can do"
+    lines, ``route_families`` the routes it opens, ``default`` whether a key made without naming scopes gets it.
+    """
 
     scope: str
     description: str
+    title: str = ""
+    can: List[str] = field(default_factory=list)
     route_families: List[str] = field(default_factory=list)
+    default: bool = False
 
 
 @dataclass
@@ -539,6 +546,8 @@ class ApiKeyInfo:
     spent_today_usd: Optional[float] = None
     spent_total_usd: Optional[float] = None
     pod_visibility: Optional[str] = None
+    # active pods the key created, as the server counts them; None from a server before P235
+    pods_count: Optional[int] = None
     key: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict, repr=False)
 
@@ -551,7 +560,7 @@ class ApiKeyInfo:
         data = {k: v for k, v in self.raw.items() if k != "key"}
         for name in (
             "id", "name", "scopes", "created_at", "last_used", "workspace_id", "daily_budget_usd",
-            "max_budget_usd", "spent_today_usd", "spent_total_usd", "pod_visibility",
+            "max_budget_usd", "spent_today_usd", "spent_total_usd", "pod_visibility", "pods_count",
         ):
             data[name] = getattr(self, name)
         return data

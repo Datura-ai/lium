@@ -396,29 +396,38 @@ def budget_error(detail: str, key: Optional[str] = None, **context: Optional[str
             return None
 
     window = data.get("window")
+    key_id = data.get("api_key_id")
     return LiumBudgetExceededError(
         message,
         budget_usd=usd(data.get("budget_usd")),
         spent_usd=usd(data.get("spent_usd")),
         window=window if isinstance(window, str) and window else None,
+        api_key_id=str(key_id) if key_id else None,
         **context,
     )
 
 
 def _error_data(response: requests.Response) -> Dict[str, Any]:
-    """The error body's structured fields beyond code/message/hint/request_id (``error.data`` when the server
-    nests them, else the envelope's other keys) — a budget refusal names its window and the two USD figures."""
+    """The structured fields of an error body beyond code/message/hint/request_id.
+
+    The platform's envelope (``core/exception_handlers.py error_response``) keeps ``HTTPException.detail`` as
+    the top-level ``message`` (``detail`` on older servers): a budget refusal's ``window``, ``budget_usd``,
+    ``spent_usd`` and ``api_key_id`` live there. ``error.data`` is read first should a server nest them.
+    """
     try:
         payload = response.json()
     except Exception:
         return {}
-    error = payload.get("error") if isinstance(payload, dict) else None
-    if not isinstance(error, dict):
+    if not isinstance(payload, dict):
         return {}
-    nested = error.get("data")
+    error = payload.get("error")
+    nested = error.get("data") if isinstance(error, dict) else None
     if isinstance(nested, dict):
         return nested
-    return {k: v for k, v in error.items() if k not in ("code", "message", "hint", "request_id")}
+    for key in ("message", "detail"):
+        if isinstance(payload.get(key), dict):
+            return payload[key]
+    return {}
 
 
 def __getattr__(name: str) -> Any:
