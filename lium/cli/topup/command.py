@@ -127,7 +127,8 @@ def create_command(amount: float, currency: str, network: str, json_output: bool
 @click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON")
 @handle_errors
 def card_command(amount: float, payment_method_id: str | None, idempotency_key: str | None, json_output: bool):
-    """Charge a saved card and top up the balance, with no browser (lium-platform#633, not released).
+    """Charge a saved card and top up the balance, with no browser (not released: the platform
+    switch is off).
 
     The card must already be saved on the account (a card top-up on the Billing page saves it).
     The charge is made straight away; the balance is credited by Stripe's confirmation, usually

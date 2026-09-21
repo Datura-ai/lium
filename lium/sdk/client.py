@@ -4372,7 +4372,7 @@ class Lium:
         idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Top up the balance from a saved card, with no browser (``POST /payments/topup``;
-        lium-platform#633, not released — behind a switch the team turns on).
+        not released — behind a platform switch the team turns on).
 
         The card must already be saved on the account (a card top-up on the Billing page
         saves it). The charge is made off-session; the balance is credited by the same
