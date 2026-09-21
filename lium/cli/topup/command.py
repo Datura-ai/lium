@@ -13,7 +13,13 @@ from rich.markup import escape
 
 from lium.sdk import Lium, LiumCardTopUpError, LiumChargeOutcomeUnknownError, LiumError
 from lium.cli import ui
-from lium.cli.utils import EXIT_API_ERROR, EXIT_PERMISSION_DENIED, CliFailure, handle_errors
+from lium.cli.utils import (
+    EXIT_API_ERROR,
+    EXIT_CONFIGURATION_ERROR,
+    EXIT_PERMISSION_DENIED,
+    CliFailure,
+    handle_errors,
+)
 
 # What to do next when the server's 402 carried no hint (an older server); the current server
 # sends one naming the Billing page (lium-platform errors/codes.py) and that one wins.
@@ -125,16 +131,21 @@ def create_command(amount: float, currency: str, network: str, json_output: bool
     help="Repeat the command with the same key and amount and the first charge (or its status) is "
          "returned instead of a second one being made; omitted, one is made and printed",
 )
+@click.option("--yes", "-y", is_flag=True, help="Charge without asking first (required with --json)")
 @click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON")
 @handle_errors
-def card_command(amount: float, payment_method_id: str | None, idempotency_key: str | None, json_output: bool):
+def card_command(amount: float, payment_method_id: str | None, idempotency_key: str | None, yes: bool,
+                 json_output: bool):
     """Charge a saved card and top up the balance, with no browser (not released: the platform
     switch is off).
 
     The card must already be saved on the account (a card top-up on the Billing page saves it).
-    The charge is made straight away; the balance is credited by Stripe's confirmation, usually
-    within seconds, so the balance printed here may not include it yet. The API key must hold
-    the `billing` scope: today's read / rent / manage keys are refused.
+    The command asks before charging; `--yes` skips the question, and `--json` needs it, as
+    `lium fund` does: behind a pipe nobody can answer, so it fails with confirmation_required
+    before anything is sent. The charge is made straight away; the balance is credited by
+    Stripe's confirmation, usually within seconds, so the balance printed here may not include
+    it yet. The API key must hold the `billing` scope: today's read / rent / manage keys are
+    refused.
 
     A bank that wants a one-time confirmation (3-D Secure) cannot get one through this path:
     the command fails with CARD_AUTHENTICATION_REQUIRED and the Billing page to confirm the
@@ -152,9 +163,24 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     \b
     Examples:
       lium topup card -a 50
-      lium topup card -a 50 --card pm_1Abc... --json
+      lium topup card -a 50 --card pm_1Abc... --yes --json
       lium topup card -a 50 --idempotency-key nightly-2026-09-21
     """
+    if not yes:
+        # Real money leaves a card here, so the gate is `lium fund`'s: ask, and under --json refuse
+        # rather than prompt — a script reading stdout cannot answer, and an unanswered default
+        # would either charge unasked or exit 0 having charged nothing.
+        target = f"card {payment_method_id}" if payment_method_id else "the default saved card"
+        if json_output:
+            raise CliFailure(
+                "confirmation_required",
+                f"Confirmation required: this charges ${amount:,.2f} to {target}. Pass --yes with --json.",
+                EXIT_CONFIGURATION_ERROR,
+            )
+        if not ui.confirm(f"Charge ${amount:,.2f} to {target}? The charge is made straight away.", default=False):
+            ui.info("Nothing charged.")
+            return
+
     client = Lium()
     try:
         result = client.topup_card(

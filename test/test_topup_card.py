@@ -5,8 +5,9 @@ SDK tests record its answers with `responses`: the 200, the 202 `processing`, th
 caller must act on (`CARD_AUTHENTICATION_REQUIRED`, `CARD_DECLINED`, `NO_SAVED_CARD`), a 402 of
 another code, the 403 a key without the `billing` scope gets, and the lost answer (timeout, 5xx)
 that must never read as "nothing happened". The CLI tests fake the SDK: what is printed, the
-exit codes, and that a failed balance read after a successful charge is not a failure (a caller
-would retry it — and charge twice).
+exit codes, that a failed balance read after a successful charge is not a failure (a caller
+would retry it — and charge twice), and the confirmation gate `lium fund` has: a question before
+the charge, `--yes` to skip it, a refusal under `--json` without it.
 """
 
 import json
@@ -18,7 +19,7 @@ from click.testing import CliRunner
 
 from lium.cli.cli import cli
 from lium.cli.topup import command as topup_module
-from lium.cli.utils import EXIT_API_ERROR, EXIT_PERMISSION_DENIED
+from lium.cli.utils import EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, EXIT_PERMISSION_DENIED
 from lium.sdk import (
     Config,
     Lium,
@@ -299,13 +300,56 @@ def fake_lium(monkeypatch):
     return fake
 
 
-def _run(*args):
-    return CliRunner().invoke(cli, ["topup", "card", *args])
+def _run(*args, yes=True, input=None):
+    # `--yes` by default: these tests are about the charge, not the question in front of it
+    return CliRunner().invoke(cli, ["topup", "card", *args, *(["--yes"] if yes else [])], input=input)
 
 
 def _text(result):
     # Rich wraps the human rendering at the runner's 80 columns; one line for the assertions
     return " ".join(result.output.split())
+
+
+def test_card_asks_before_charging_and_a_no_charges_nothing(fake_lium, monkeypatch):
+    """The same gate as `lium fund`: a person at a terminal is asked; 'n' leaves the card alone."""
+    monkeypatch.setattr(topup_module.ui, "is_interactive", lambda: True)
+
+    declined = _run("-a", "50", yes=False, input="n\n")
+    assert declined.exit_code == 0, declined.output
+    assert "Charge $50.00 to the default saved card?" in _text(declined)
+    assert "Nothing charged." in declined.output
+    assert "Charged" not in declined.output
+    assert fake_lium.calls == []
+
+    accepted = _run("-a", "50", "--card", "pm_1Card", yes=False, input="y\n")
+    assert accepted.exit_code == 0, accepted.output
+    assert "Charge $50.00 to card pm_1Card?" in _text(accepted)
+    assert "Charged $50.00 to Visa ····4242" in accepted.output
+    assert fake_lium.calls == [(50.0, "pm_1Card", None)]
+
+
+def test_card_without_a_terminal_or_yes_fails_before_anything_is_sent(fake_lium):
+    """Behind a pipe nobody can answer: confirmation_required (exit 2), and no request was made."""
+    result = _run("-a", "50", yes=False)
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
+    assert "confirmation_required" in result.output or "Confirmation required" in result.output
+    assert "re-run with --yes" in _text(result)
+    assert fake_lium.calls == []
+
+
+def test_card_json_without_yes_is_refused_not_prompted(fake_lium, monkeypatch):
+    """`--json` never prompts, even at a terminal: the envelope names --yes and no charge is made."""
+    monkeypatch.setattr(topup_module.ui, "is_interactive", lambda: True)
+
+    result = _run("-a", "50", "--json", yes=False, input="y\n")
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
+    assert result.stdout == ""
+    payload = json.loads(result.stderr)
+    assert payload["error"]["code"] == "confirmation_required"
+    assert "Pass --yes with --json" in payload["error"]["message"]
+    assert fake_lium.calls == []
 
 
 def test_card_charges_and_prints_the_card_and_the_balance(fake_lium):
