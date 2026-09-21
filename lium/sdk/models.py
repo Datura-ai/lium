@@ -477,7 +477,7 @@ class GpuStats(_Serializable):
 
 @dataclass
 class WorkspaceInfo:
-    """A workspace as the API describes it (lium-platform DAH-2975 / DAH-3030)."""
+    """A workspace as the API describes it."""
 
     id: str
     name: str
