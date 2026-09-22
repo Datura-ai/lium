@@ -33,6 +33,18 @@ GitHub, owner `Datura-ai`, repository `lium`, workflow `release.yml` (or the stu
 PyPI then accepts an upload only from a job of that file that ran inside `pypi`. The `release` environment stays: it
 gates the GitHub release assets job in `release.yml`.
 
+**Order — it matters.** (1) Create the environment with its reviewer and the two policies, as above, **before the
+workflow change merges**: a workflow that names an environment that does not exist makes GitHub create it with no
+protection, and the first release would publish with no click. (2) Register the `pypi` publisher on pypi.org.
+(3) Merge. (4) Proof release, approved by the reviewer. (5) **Delete the old publisher** on pypi.org — today's
+`Datura-ai/lium · release.yml · (no environment)`. Until it is gone nothing fails closed: a publisher with no
+environment accepts a token minted in any environment, so with no `pypi` publisher the upload goes through the old
+binding, and a branch whose edited `release.yml` drops the environment, run by hand, still uploads — any of the 7
+accounts with write access can do that today. (6) Apply the tag ruleset below. The publish job checks step (1)
+itself: it reads `repos/$R/environments/pypi` back and stops with `environment pypi has no required reviewer` when
+no required reviewer is set (an unauthenticated read for a public repository; the job holds `actions: read` for it).
+It cannot check step (5) — pypi.org's side is the owner's click.
+
 ## 2. Tag ruleset (admin, once)
 
 ```bash
@@ -53,7 +65,8 @@ create vX.Y.Z` by such a person fails the same way, because it creates the tag.
 
 | Path an attacker with write access could take today | Stopped by |
 |---|---|
-| push a branch whose `release.yml` publishes without an environment, then run it with `workflow_dispatch` | the PyPI publisher bound to environment `pypi` (the token is minted only inside that environment) + the environment's branch policy (the branch cannot enter it) |
+| push a branch whose `release.yml` publishes without an environment, then run it with `workflow_dispatch` | the PyPI publisher bound to environment `pypi` (the token is minted only inside that environment) + the environment's branch policy (the branch cannot enter it) — **only once the old, environment-less publisher is deleted on pypi.org** (order step 5); until then this path is open |
+| merge this change before the `pypi` environment exists, so GitHub creates it unprotected | the publish job's first step, which reads the environment's rules and stops when no required reviewer is set |
 | create a release on a tag of their own commit | the tag ruleset (only the bypass list creates `v*`), then the reviewer's approval |
 | re-point an existing `v*` tag at another commit and re-run | the ruleset's `update` rule |
 | a PyPI API token in a GitHub secret or on a laptop | none exists for these packages; trusted publishing is the only upload path |

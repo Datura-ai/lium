@@ -11,10 +11,25 @@ jobs:
     # environment; its required reviewer approves the run (RELEASING.md "Who can publish")
     environment: pypi
     permissions:
+      actions: read     # the environment read below
       contents: read
       id-token: write
 
     steps:
+    # Same guard as release.yml: a missing environment is auto-created unprotected, so check its rules before
+    # anything is built. It cannot prove pypi.org's side (RELEASING.md "Who can publish").
+    - name: Environment pypi must have a required reviewer
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        reviewers="$(gh api "repos/$GITHUB_REPOSITORY/environments/pypi" \
+          --jq '[.protection_rules[] | select(.type == "required_reviewers") | .reviewers[].reviewer.login] | join(" ")')"
+        echo "required reviewers on environment pypi: ${reviewers:-none}"
+        if [[ " $reviewers " != *" surcyf123 "* ]]; then
+          echo "environment pypi has no required reviewer surcyf123 — admin step pending; nothing published" >&2
+          exit 1
+        fi
+
     - uses: actions/checkout@v4
 
     - name: Set up Python
@@ -23,11 +38,14 @@ jobs:
         python-version: '3.10'
 
     - name: Install build dependencies
-      run: pip install build
+      run: pip install build twine
 
     - name: Build stub package
       working-directory: stubs/lium
       run: python -m build --sdist --wheel --outdir dist/
+
+    - name: Check the distributions' metadata
+      run: twine check --strict stubs/lium/dist/*
 
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1

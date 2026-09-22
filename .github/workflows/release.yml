@@ -330,6 +330,8 @@ jobs:
   # The only path to PyPI. pypi.org's trusted publisher for `lium.io` names this repository, this file and the
   # `pypi` environment, so the upload token exists only inside this job, and only after the environment's
   # required reviewer approves the run (RELEASING.md "Who can publish"). No PyPI token is stored anywhere.
+  # The `if` keeps a manual run out (a dispatch never publishes); the tag's shape is enforced by build-python
+  # (next_version.py + the built-version check), which this job needs — `startsWith` alone is case-insensitive.
   approve-and-publish:
     if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v')
     needs: build-python
@@ -338,10 +340,31 @@ jobs:
       name: pypi
       url: https://pypi.org/project/lium.io/
     permissions:
+      actions: read     # the environment read below (GitHub: "Actions" repository permission, read)
       contents: read
       id-token: write
+    env:
+      PYPI_REQUIRED_REVIEWER: surcyf123
 
     steps:
+    # A workflow that names an environment that does not exist makes GitHub create it with NO protection, so
+    # reaching this step proves nothing by itself. Read the environment's rules back and stop unless a required
+    # reviewer is set and the owner is one of them: a run that got here without a click cannot upload.
+    # What this cannot prove: that pypi.org's old, environment-less publisher is gone (until it is, an edited copy
+    # of this file on a branch, run by hand, still uploads — RELEASING.md "Who can publish", step 5).
+    - name: Environment pypi must have a required reviewer
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        reviewers="$(gh api "repos/$GITHUB_REPOSITORY/environments/pypi" \
+          --jq '[.protection_rules[] | select(.type == "required_reviewers") | .reviewers[].reviewer.login] | join(" ")')"
+        echo "required reviewers on environment pypi: ${reviewers:-none}"
+        if [[ " $reviewers " != *" $PYPI_REQUIRED_REVIEWER "* ]]; then
+          echo "environment pypi has no required reviewer $PYPI_REQUIRED_REVIEWER — admin step pending" >&2
+          echo "(RELEASING.md 'Who can publish', step 1); nothing published" >&2
+          exit 1
+        fi
+
     - name: Download artifact
       uses: actions/download-artifact@v4
       with:

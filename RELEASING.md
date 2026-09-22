@@ -36,6 +36,14 @@ two checks. The same environment covers the two stub publishers, `release-deprec
 `release-lium-alias.yml` (`lium`): they exist to hold those two names on PyPI so `pip install lium` cannot resolve to a
 stranger's package, and they run by hand.
 
+All of that is true once the admin steps have run **in this order**: (1) create the `pypi` environment with the owner
+as required reviewer — before the workflow change merges, because a missing environment is created unprotected on
+first use; (2) register the `pypi` publisher on pypi.org; (3) merge; (4) proof release, approved; (5) delete the old,
+environment-less publisher on pypi.org; (6) apply the tag ruleset. Step (5) is the one that closes the door: until
+then any account with write access can still publish through a hand-run, edited copy of the workflow. The publish
+job refuses to run in an unprotected `pypi` environment (it reads the environment's rules back first), but it cannot
+see pypi.org's publisher list.
+
 What a release looks like after this: `gh release create vX.Y.Z --prerelease …` → the build jobs run → the run pauses at
 **approve-and-publish** and GitHub e-mails the reviewer → Actions → the run → **Review deployments** → **Approve and
 deploy** → the wheel and sdist go up with PEP 740 attestations (each file's page on pypi.org shows a *Provenance* link;
