@@ -3453,7 +3453,7 @@ class Lium:
             if not grant["success"]:
                 # `flock -w 30` gives up silently (exit 1) when another cp holds the lock
                 detail = grant["stderr"].strip() or f"exit {grant.get('exit_code')} (another copy may hold {self.TRANSFER_KEY_LOCK})"
-                raise LiumError(f"Could not authorise the transfer key on pod {dst_pod.name or dst_pod.huid}: {detail}")
+                raise LiumError(f"Could not authorize the transfer key on pod {dst_pod.name or dst_pod.huid}: {detail}")
             authorized = True
 
             # The source pod must verify the destination the way this client does: the grant above went
@@ -3501,7 +3501,7 @@ class Lium:
                     dst_pod,
                     revoke,
                     consequence=(
-                        f"the transfer key '{marker}' is still authorised on pod "
+                        f"the transfer key '{marker}' is still authorized on pod "
                         f"{dst_pod.name or dst_pod.huid}; revoke it with: "
                         f"lium exec {dst_pod.huid} {shlex.quote(revoke)}"
                     ),
