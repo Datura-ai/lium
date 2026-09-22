@@ -370,7 +370,7 @@ def keys_show_command(key: str, workspace: Optional[str], json_output: bool):
     last requests its budget refused.
 
     "What this key can do" is the server's list for the scopes the key holds (`GET /keys/scopes`); the
-    refusals are the server's ledger (`GET /keys/{id}/refusals`: when, which window, what was asked). Both
+    refusals are the server's ledger (`GET /keys/{id}/refusals`: when, which window, what was asked).
     Both need a newer Lium server (not on lium.io yet): an older server lists the scope names alone and has no
     refusal ledger.
 
