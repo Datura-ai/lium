@@ -1334,8 +1334,12 @@ class Lium:
             template_id: Template to run. Omitted: the node's recommended image.
                 Mutually exclusive with ``dockerfile_content``.
             dockerfile_content: Build the image from this Dockerfile instead (see :meth:`up`).
-            min_vram_gb, min_cpus, min_ram_gb, min_disk_gb, min_download_mbps, min_ports:
-                Floors on the host; a host that does not report the figure does not qualify.
+            min_cpus, min_ram_gb, min_disk_gb: Minimum resources for the pod with
+                server-side selection, scaled to the requested GPU count; RAM excludes
+                the host reserve. The older-backend fallback checks whole-node figures.
+            min_vram_gb: Minimum VRAM per GPU.
+            min_download_mbps, min_ports: Minimum node download speed and available
+                port count. A node missing any required measurement does not qualify.
             max_price_per_gpu_hour: Ceiling on ``price_per_gpu``.
             country: ISO country code.
             docker_in_docker: Require a sysbox host.
@@ -1640,7 +1644,7 @@ class Lium:
 
         Args:
             gpu_type: Optional GPU filter such as ``"A100"`` or ``"H200"``.
-            gpu_count: Exact GPU count to match (defaults to 8, pass ``None`` to disable).
+            gpu_count: Exact GPU count to match. Omitted or ``None`` means no count filter.
             lat: Optional latitude for geospatial filtering. Must be used together with ``lon`` and ``max_distance_miles``.
             lon: Optional longitude for geospatial filtering. Must be used together with ``lat`` and ``max_distance_miles``.
             max_distance_miles: Optional radius (in miles) for geospatial filtering. Must be used together with ``lat`` and ``lon``.
@@ -2887,7 +2891,7 @@ class Lium:
         env: Optional[Dict[str, str]] = None,
         pty: bool = True,
     ) -> Generator[Dict[str, str], None, int]:
-        """Execute a shell command and stream incremental output.
+        r"""Execute a shell command and stream incremental output.
 
         Args:
             pod: Pod to target.
