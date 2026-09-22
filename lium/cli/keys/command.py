@@ -548,6 +548,20 @@ def keys_budget_command(
     require_session(lium)
     target = target_workspace(lium, workspace)
     found = lium.api_keys.resolve(key, target.id)
+    # the windows not named keep the key's current budget, so the order is checked on the state PATCH would
+    # leave (`--monthly-budget 5` on a key with a $50 daily budget), not only on the flags of this call
+    effective = {
+        name: getattr(found, field_name) if value is UNSET else value
+        for (name, value), field_name in zip(wanted.items(), BUDGET_FIELDS, strict=True)
+    }
+    try:
+        check_budget_order(effective["daily"], effective["monthly"], effective["max"])
+    except ValueError as exc:
+        raise CliFailure(
+            "invalid_arguments",
+            f"{exc} — the budget of '{found.name}' reads {budget_cell(found)}; name the other window too, or clear it",
+            EXIT_CONFIGURATION_ERROR,
+        ) from exc
     try:
         updated = lium.api_keys.update(
             found.id,

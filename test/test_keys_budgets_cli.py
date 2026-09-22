@@ -818,8 +818,11 @@ def test_billing_history_key_on_a_server_that_cannot_filter_shows_the_accounts_f
     assert "Charges: 2 pods" in text and "through key" not in text and "Total $37.25" in text
 
     machine = run("billing", "history", "--key", AGENT_KEY, "--format", "json")
-    assert machine.exit_code == 0 and json.loads(machine.stdout)["total"] == unstamped["total"]
+    statement = json.loads(machine.stdout)
+    assert machine.exit_code == 0 and statement["total"] == unstamped["total"]
     assert "cannot filter by API key" in machine.stderr
+    # the body says so too: `| jq` never sees stderr
+    assert statement["api_key_filter"] == {"api_key_id": AGENT_KEY, "applied": False}
 
 
 @responses.activate
@@ -841,6 +844,18 @@ def test_billing_history_key_with_only_browser_rentals_is_no_charges_through_the
     statement = json.loads(machine.stdout)
     assert machine.exit_code == 0 and statement["pods"] == [] and statement["total"] == 0
     assert "cannot filter" not in machine.stderr
+    assert statement["api_key_filter"] == {"api_key_id": AGENT_KEY, "applied": True}
+
+
+@responses.activate
+def test_billing_history_json_without_key_carries_no_filter_marker(home):
+    responses.add(responses.GET, f"{API}/billing/statement", json=fixture("statement"))
+    me()
+
+    result = run("billing", "history", "--format", "json")
+
+    assert result.exit_code == 0, result.output
+    assert "api_key_filter" not in json.loads(result.stdout)
 
 
 @responses.activate
@@ -1264,6 +1279,39 @@ def test_budget_refuses_a_contradiction_before_any_request(home, args, wording):
         error = json.loads(result.stderr)["error"]
         assert error["code"] == "invalid_arguments" and wording in error["message"]
         assert len(mocked.calls) == 0
+
+
+@responses.activate
+def test_budget_checks_the_order_against_the_windows_not_named(home, monkeypatch):
+    """`--monthly-budget 5` on agent-1 (daily $20) would PATCH daily > monthly: refused after the key is read,
+    before the PATCH; clearing the daily window in the same call takes it out of the order."""
+    session(monkeypatch)
+    responses.add(responses.GET, f"{API}/keys", json=fixture("keys"))
+    responses.add(responses.PATCH, f"{API}/keys/{AGENT_KEY}", json=patched_agent(daily_budget_usd=None, monthly_budget_usd=5.0))
+
+    refused = run("keys", "budget", "agent-1", "--monthly-budget", "5", "--json")
+    assert refused.exit_code == EXIT_CONFIGURATION_ERROR, refused.output
+    error = json.loads(refused.stderr)["error"]
+    assert error["code"] == "invalid_arguments"
+    assert "the monthly budget ($5.00) is below the daily budget ($20.00)" in error["message"]
+    assert "reads $4.80/$20.00 today" in error["message"] and "clear it" in error["message"]
+    assert calls_to(f"/keys/{AGENT_KEY}", "PATCH") == []
+
+    cleared = run("keys", "budget", "agent-1", "--monthly-budget", "5", "--no-daily-budget", "--json")
+    assert cleared.exit_code == 0, cleared.output
+    assert json.loads(calls_to(f"/keys/{AGENT_KEY}", "PATCH")[0].request.body) == {"daily_budget_usd": None, "monthly_budget_usd": 5.0}
+
+
+@responses.activate
+def test_budget_on_a_key_without_budgets_checks_only_the_named_windows(home, monkeypatch):
+    session(monkeypatch)
+    responses.add(responses.GET, f"{API}/keys", json=fixture("keys"))
+    responses.add(responses.PATCH, f"{API}/keys/{OPS_KEY}", json={**fixture("keys")[1], "monthly_budget_usd": 5.0})
+
+    result = run("keys", "budget", "ops", "--monthly-budget", "5", "--json")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(calls_to(f"/keys/{OPS_KEY}", "PATCH")[0].request.body) == {"monthly_budget_usd": 5.0}
 
 
 def test_budget_below_a_dollar_is_a_usage_error(home):

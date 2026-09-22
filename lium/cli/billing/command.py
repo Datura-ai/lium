@@ -100,7 +100,9 @@ def billing_history_command(
 
     Every pod the account paid for in the period, removed pods included; a pod's Total is the sum of its
     per-day ledger rows — the figure the balance was debited, unlike `lium spend`'s estimate. The key needs
-    the `read` scope. `--format json` prints the server's statement: `total` and `pods`, each with its `days`.
+    the `read` scope. `--format json` prints the server's statement: `total` and `pods`, each with its `days`;
+    with `--key` also `api_key_filter` (`applied: false` when the server could not filter and the figures are
+    the whole account's).
 
     \b
     Examples:
@@ -132,6 +134,8 @@ def billing_history_command(
                 statement = {**statement, "pods": kept, "total": sum(float(p.get("total") or 0) for p in kept)}
         else:
             say_unfiltered("charge", output_format == "json")
+        # the body carries the marker too: a `--format json | jq '.total'` never sees the stderr line
+        statement = {**statement, "api_key_filter": {"api_key_id": api_key_id, "applied": could_filter}}
     if output_format == "json":
         click.echo(json.dumps(statement, indent=2, ensure_ascii=False))
         return
