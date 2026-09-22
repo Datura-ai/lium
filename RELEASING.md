@@ -23,3 +23,21 @@ seeded with `0.1.0`, so the next release must be `v0.1.0` or higher; delete the 
 fragments that have piled up in `changelog.d/` in the `0.1.0` release commit (`python scripts/changelog.py --version
 0.1.0`): they carry `### Added`, so whichever release first folds them is held to a minor bump — at `0.1.0` that costs
 nothing, at a later `0.1.1` it would demand `0.2.0`.
+
+## Who can publish
+
+Only `.github/workflows/release.yml` can upload `lium.io` to PyPI, and only from a run that the **`pypi` environment's
+required reviewer approved**. PyPI's trusted publisher for the project names this repository, that file and that
+environment, so the upload token is minted inside the approved job and nowhere else; there is no PyPI API token in the
+repository's secrets or on anyone's machine. Two more things gate a release: the `release-tags` ruleset lets only the
+bypass list create, move or delete a `v*` tag (`gh release create` creates the tag, so it is covered), and the
+environment's branch policy admits only `v*` tags and `main`. `.github/rulesets/README.md` has the admin commands and the
+two checks. The same environment covers the two stub publishers, `release-deprecate-lium-cli.yml` (`lium-cli`) and
+`release-lium-alias.yml` (`lium`): they exist to hold those two names on PyPI so `pip install lium` cannot resolve to a
+stranger's package, and they run by hand.
+
+What a release looks like after this: `gh release create vX.Y.Z --prerelease …` → the build jobs run → the run pauses at
+**approve-and-publish** and GitHub e-mails the reviewer → Actions → the run → **Review deployments** → **Approve and
+deploy** → the wheel and sdist go up with PEP 740 attestations (each file's page on pypi.org shows a *Provenance* link;
+`https://pypi.org/integrity/lium.io/X.Y.Z/<filename>/provenance` returns the signed statement) → the GitHub release
+assets job marks the release `latest`. A run nobody approves times out after 30 days and publishes nothing.

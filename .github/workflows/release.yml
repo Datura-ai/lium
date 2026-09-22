@@ -53,6 +53,10 @@ jobs:
     - name: Build package
       run: python -m build --sdist --wheel --outdir dist/
 
+    # PyPI refuses a distribution whose metadata it cannot render; find out here, before the publish job holds a reviewer
+    - name: Check the distributions' metadata
+      run: twine check --strict dist/*
+
     # a tag hatch-vcs cannot parse (v-less, extra suffix) would publish assets whose --version is not the release
     - name: Built version must equal the release tag
       if: github.event_name == 'release'
@@ -323,11 +327,16 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: gh release edit "$RELEASE_TAG" --prerelease=false --latest
 
+  # The only path to PyPI. pypi.org's trusted publisher for `lium.io` names this repository, this file and the
+  # `pypi` environment, so the upload token exists only inside this job, and only after the environment's
+  # required reviewer approves the run (RELEASING.md "Who can publish"). No PyPI token is stored anywhere.
   approve-and-publish:
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v')
     needs: build-python
     runs-on: ubuntu-latest
-    environment: release
+    environment:
+      name: pypi
+      url: https://pypi.org/project/lium.io/
     permissions:
       contents: read
       id-token: write
@@ -339,8 +348,11 @@ jobs:
         name: python-dist
         path: dist/
 
+    # attestations is the action's default; written out so a future edit cannot drop it unnoticed (PEP 740:
+    # PyPI shows a "Provenance" link per file, and `pypi.org/integrity/lium.io/<version>/<file>/provenance` holds it)
     - name: Publish package distributions to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
+        attestations: true
         verbose: true
         print-hash: true

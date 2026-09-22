@@ -7,7 +7,9 @@ jobs:
   build-and-publish:
     name: Build and publish lium alias stub
     runs-on: ubuntu-latest
-    environment: release
+    # same gate as release.yml's publish job: PyPI's (pending) trusted publisher names this file and the `pypi`
+    # environment; its required reviewer approves the run (RELEASING.md "Who can publish")
+    environment: pypi
     permissions:
       contents: read
       id-token: write
@@ -16,7 +18,7 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
 
@@ -30,6 +32,7 @@ jobs:
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
+        attestations: true
         packages-dir: stubs/lium/dist/
         verbose: true
         print-hash: true
