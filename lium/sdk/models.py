@@ -475,9 +475,10 @@ class GpuStats(_Serializable):
         return {"memory_pct": self.memory_pct}
 
 
+# Workspaces on the platform: lium-platform DAH-2975 / DAH-3030.
 @dataclass
 class WorkspaceInfo:
-    """A workspace as the API describes it (lium-platform DAH-2975 / DAH-3030)."""
+    """A workspace as the API describes it."""
 
     id: str
     name: str

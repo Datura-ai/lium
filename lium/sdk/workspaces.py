@@ -1,4 +1,6 @@
-"""Workspaces: teams with roles and a billing owner (lium-platform DAH-2975 / DAH-2986 / DAH-3030 / DAH-3031).
+# Workspaces on the platform: lium-platform DAH-2975 (teams and roles), DAH-2986 (a key bound to one workspace),
+# DAH-3030 (the workspace on the pod and on ``GET /users/me``), DAH-3031 (invitations by e-mail address).
+"""Workspaces: teams with roles and a billing owner.
 
 An API key acts in exactly one workspace and the server tells which on ``GET /users/me`` — that field
 is also how this client knows the server has workspaces at all. Reads of the workspace the key acts
@@ -162,7 +164,7 @@ class WorkspacesClient:
         return _info(self._session_request("POST", "/workspaces", json={"name": name}).json())
 
     def invite(self, workspace_id: str, email: str, role: str = "member") -> Dict[str, Any]:
-        """``POST /workspaces/{id}/invitations``: the address gets a link, an account or not (DAH-3031)."""
+        """``POST /workspaces/{id}/invitations``: the address gets a link, an account or not."""
         return self._session_request(
             "POST", f"/workspaces/{workspace_id}/invitations", json={"email": email, "role": role}
         ).json()
@@ -185,7 +187,7 @@ class WorkspacesClient:
         return self._session_request("GET", "/keys", workspace_id).json()
 
     def create_key(self, name: str, workspace_id: str) -> Dict[str, Any]:
-        """``POST /keys`` in the named workspace: the key is bound to it for good (DAH-2986)."""
+        """``POST /keys`` in the named workspace: the key is bound to it for good."""
         return self._session_request("POST", "/keys", workspace_id, json={"name": name}).json()
 
 

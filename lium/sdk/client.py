@@ -306,10 +306,11 @@ _REQUIRED_RE = re.compile(r"requires at least " + _USD, re.I)
 _AVAILABLE_RE = re.compile(r"balance is " + _USD, re.I)
 
 
+# The structured error body is the platform's DAH-3056 (lium-platform#210).
 def _response_error_code(response: requests.Response) -> Optional[str]:
     """The stable ``error.code`` of the platform's error body, when it sends one.
 
-    lium-platform#210 (DAH-3056) answers every 4xx/5xx with
+    Current servers answer every 4xx/5xx with
     ``{"error": {"code", "message", "hint", "request_id"}, ...}``; older servers
     send ``error`` as a string or not at all, and then this is ``None``.
     """
@@ -331,7 +332,7 @@ def permission_error(
 
     ``code`` is the platform's structured ``error.code`` when the response carried
     one (:func:`_response_error_code`); it decides. Without it the message text
-    decides, which is what every server before lium-platform#210 sends. ``key``
+    decides, which is all an older server sends. ``key``
     (the API key's fingerprint and source) is appended so the message says which
     key the server refused. ``code`` and ``context`` (:func:`_error_context`'s
     hint/request_id) are carried on the exception.
@@ -496,11 +497,12 @@ def _sftp_mkdir_p(sftp: Any, path: str) -> None:
 class Lium:
     """Clean Unix-style SDK for Lium."""
 
+    # A key is bound to one workspace: lium-platform DAH-2986.
     def __init__(self, config: Optional[Config] = None, source: str = "sdk", workspace: Optional[str] = None):
         """``workspace`` picks the API key saved for that workspace (``[workspace.<name>]`` in
         ~/.lium/config.ini, written by ``lium keys create --workspace … --save``); a key acts in exactly
-        one workspace, so choosing the workspace means choosing the key (lium-platform DAH-2986), and
-        ``ValueError`` is raised when none is saved for it rather than running as another key."""
+        one workspace, so choosing the workspace means choosing the key, and ``ValueError`` is raised
+        when none is saved for it, so the client always acts as a key of the workspace it was given."""
         self.config = config or Config.load(workspace=workspace)
         self.source = source
         self.headers = {
@@ -2097,7 +2099,7 @@ class Lium:
         """Remove every member pod of a cluster with one ``DELETE /clusters/{cluster_id}``.
 
         Returns one ``{"pod", "huid", "name", "node_rank", "success", "message", "error"}`` per
-        member, in the order the server reports them (``huid`` is the short name ``lium rm`` accepts). The server (lium-platform#411) finds the members by the
+        member, in the order the server reports them (``huid`` is the short name ``lium rm`` accepts). The server finds the members by the
         cluster id, checks ownership and API-key scope on every one of them before the first
         delete, then tears them down one by one; a member that failed is reported with ``success``
         false and its error text while the others are still removed, so nothing is left billing by
@@ -2491,14 +2493,15 @@ class Lium:
         finally:
             client.close()
 
+    # The shell-identifier check on env names: DAH-2894.
     @staticmethod
     def _env_exports(env: Dict[str, str]) -> str:
         """``export NAME=value`` statements for ``env``, shell-quoted so each value
         reaches the pod byte-for-byte (spaces, quotes, ``$``, newlines).
 
-        Names must be valid shell identifiers (DAH-2894); anything else raises
-        :class:`ValueError` here rather than failing with an opaque
-        ``export: not a valid identifier`` on the pod.
+        Names must be valid shell identifiers; anything else raises
+        :class:`ValueError` here, before the pod could answer with an opaque
+        ``export: not a valid identifier``.
         """
         exports = []
         for name, value in env.items():
@@ -4249,6 +4252,7 @@ class Lium:
         data = self._request("GET", "/users/me/events", params=params).json()
         return data if isinstance(data, list) else []
 
+    # The account audit log: lium-platform DAH-3245.
     def audit_log(
         self,
         *,
@@ -4261,7 +4265,7 @@ class Lium:
         cursor: Optional[str] = None,
         limit: int = 100,
     ) -> Dict[str, Any]:
-        """One page of the account audit log, newest first (``GET /account/audit``, lium-platform DAH-3245).
+        """One page of the account audit log, newest first (``GET /account/audit``).
 
         One entry per request that changed something on the account — a pod created, restarted or
         deleted, a key created or revoked, a login, a top-up requested, a setting or a workspace member
