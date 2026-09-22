@@ -1,0 +1,44 @@
+name: Publish Deprecated lium-sdk Stub
+
+# `lium-sdk` on PyPI is a redirect to `lium.io` (stubs/lium-sdk). Its last release, 0.3.0, was trusted-published
+# from the Datura-ai/lium-sdk repository, which no longer exists; this workflow is the replacement publisher.
+# The upload is PyPI trusted publishing from the `pypi` environment, whose required reviewer approves the run
+# (RELEASING.md "Who can publish"); no PyPI token is stored anywhere. Bump `version` in stubs/lium-sdk/pyproject.toml
+# before running: PyPI refuses a version it already has.
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    name: Build and publish lium-sdk deprecation stub
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install build dependencies
+      run: pip install build twine
+
+    - name: Build stub package
+      working-directory: stubs/lium-sdk
+      run: python -m build --sdist --wheel --outdir dist/
+
+    - name: Check the distributions' metadata
+      run: twine check --strict stubs/lium-sdk/dist/*
+
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        attestations: true
+        packages-dir: stubs/lium-sdk/dist/
+        verbose: true
+        print-hash: true
