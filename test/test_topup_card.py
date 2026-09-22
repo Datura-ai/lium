@@ -27,6 +27,7 @@ from lium.sdk import (
     LiumChargeOutcomeUnknownError,
     LiumError,
     LiumPermissionError,
+    LiumServerError,
 )
 
 BASE = "https://lium.io/api"
@@ -214,6 +215,31 @@ def test_a_402_of_another_code_stays_a_plain_lium_error(client):
 
 
 @responses.activate
+def test_a_key_at_its_budget_is_a_card_topup_error(client):
+    """`API_KEY_BUDGET_EXCEEDED` is this route's 402, not a bare `API error 402`."""
+    body = _error_body(
+        402,
+        {
+            "code": "API_KEY_BUDGET_EXCEEDED",
+            "message": "API key 'agent' is at its daily budget of $20.00 ($20.00 used); a $50.00 top-up "
+            "through it is refused.",
+            "window": "daily",
+            "budget_usd": 20.0,
+            "spent_usd": 20.0,
+        },
+        hint="Raise or clear the budget on the key.",
+    )
+    responses.post(TOPUP, status=402, json=body)
+
+    with pytest.raises(LiumCardTopUpError) as raised:
+        client.topup_card(50)
+
+    assert raised.value.code == "API_KEY_BUDGET_EXCEEDED"
+    assert "at its daily budget" in str(raised.value)
+    assert raised.value.hint == body["error"]["hint"]
+
+
+@responses.activate
 def test_a_key_without_the_billing_scope_is_a_permission_error(client):
     responses.post(TOPUP, status=403, json=SCOPE_MISSING)
 
@@ -237,6 +263,31 @@ def test_a_server_error_is_sent_once_and_is_an_unknown_outcome_carrying_the_key(
     assert raised.value.idempotency_key == "nightly-1"
     assert raised.value.code == "charge_outcome_unknown"
     assert "may have gone through" in str(raised.value)
+
+
+@responses.activate
+def test_a_502_before_the_card_is_touched_is_a_server_error_not_an_unknown_outcome(client):
+    """`STRIPE_UNAVAILABLE` is a retrieve/list failure: nothing was charged, so this is not exit 6."""
+    responses.post(
+        TOPUP,
+        status=502,
+        json=_error_body(502, {"code": "STRIPE_UNAVAILABLE", "message": "Stripe is unavailable; nothing was charged."}),
+    )
+
+    with pytest.raises(LiumServerError) as raised:
+        client.topup_card(50, idempotency_key="nightly-1")
+
+    assert raised.value.code == "STRIPE_UNAVAILABLE"
+    assert len(responses.calls) == 1
+
+
+def test_a_nan_amount_is_refused_before_any_request(client):
+    """`--amount nan` never leaves the process; it must not look like a lost charge."""
+    with pytest.raises(LiumError) as raised:
+        client.topup_card(float("nan"))
+
+    assert type(raised.value) is LiumError
+    assert "finite" in str(raised.value)
 
 
 @responses.activate
@@ -401,7 +452,7 @@ def test_card_processing_is_payment_submitted_still_confirming_exit_6(fake_lium)
     text = _text(human)
     assert (
         "Payment submitted; the charge is still being confirmed. Check `lium balance` in a minute — if nothing "
-        "arrived, re-run with `--idempotency-key nightly-1` to see its status." in text
+        "arrived, re-run with `--idempotency-key nightly-1` and the same amount ($50.00) to see its status." in text
     )
     for wording in ("Payment accepted", "Charged", "retry", "Retry"):
         assert wording not in text
@@ -536,6 +587,22 @@ def test_an_older_server_without_a_hint_gets_the_clis_own(fake_lium):
     assert payload["error"]["hint"] == topup_module._CARD_HINTS["NO_SAVED_CARD"]
 
 
+def test_a_budget_refusal_names_the_code_and_exits_3(fake_lium):
+    fake_lium.charge = LiumCardTopUpError(
+        "API key 'agent' is at its daily budget of $20.00 ($20.00 used); a $50.00 top-up through it is refused.",
+        code="API_KEY_BUDGET_EXCEEDED",
+        hint=topup_module._CARD_HINTS["API_KEY_BUDGET_EXCEEDED"],
+    )
+
+    result = _run("-a", "50", "--json")
+
+    assert result.exit_code == EXIT_API_ERROR
+    payload = json.loads(result.stderr)
+    assert payload["error"]["code"] == "API_KEY_BUDGET_EXCEEDED"
+    assert "daily budget" in payload["error"]["message"]
+    assert payload["error"]["hint"] == topup_module._CARD_HINTS["API_KEY_BUDGET_EXCEEDED"]
+
+
 def test_a_key_without_the_billing_scope_exits_6(fake_lium):
     # what the SDK raises for SCOPE_MISSING (test_a_key_without_the_billing_scope_is_a_permission_error)
     fake_lium.charge = LiumPermissionError(f"Permission denied: {SCOPE_MISSING_MESSAGE}", code="forbidden")
@@ -554,3 +621,11 @@ def test_amount_is_required():
 
     assert result.exit_code == 2
     assert "--amount" in result.output
+
+
+def test_a_nan_amount_is_refused_before_the_charge(fake_lium):
+    result = _run("-a", "nan")
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
+    assert "finite" in _text(result)
+    assert fake_lium.calls == []

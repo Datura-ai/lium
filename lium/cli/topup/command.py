@@ -7,6 +7,7 @@ provider confirms the transfer — the transfer itself happens outside Lium.
 """
 
 import json
+import math
 
 import click
 from rich.markup import escape
@@ -29,6 +30,8 @@ _CARD_HINTS = {
     "CARD_DECLINED": "Use another saved card (--card <pm_id>) or fix the card on the Billing page",
     "NO_SAVED_CARD": "Add a card, or top up once by card, on the Billing page; then retry",
     "NO_DEFAULT_CARD": "Pass --card <pm_id>, or set a default card on the Billing page",
+    "API_KEY_BUDGET_EXCEEDED": "Raise or clear the budget on this key, use another key, or top up from "
+                               "the Billing page",
 }
 
 
@@ -155,10 +158,11 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     The request is sent once, always with an idempotency key. If the answer is lost (a
     timeout, a 5xx) the charge may still have gone through: the command exits 6 with
     charge_outcome_unknown and the key — check `lium balance` before trying again; a repeat
-    with `--idempotency-key <key>` returns the same charge instead of making a second one.
-    A 202 from the platform ("Payment submitted; the charge is still being confirmed") means
-    the same: the outcome is not known yet — exit 6 with charge_pending and the key; a
-    repeat with the key shows the charge's status, it never makes a second one.
+    with `--idempotency-key <key>` and the same amount returns the same charge instead of
+    making a second one. The same key with a different amount is a new charge. A 202 from
+    the platform ("Payment submitted; the charge is still being confirmed") means the same:
+    the outcome is not known yet — exit 6 with charge_pending, the key and the amount; a
+    repeat with both shows the charge's status, it never makes a second one.
 
     \b
     Examples:
@@ -166,6 +170,15 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
       lium topup card -a 50 --card pm_1Abc... --yes --json
       lium topup card -a 50 --idempotency-key nightly-2026-09-21
     """
+    if not math.isfinite(amount):
+        # click's float type accepts nan/inf; those never reach the API, so they must not look like
+        # a lost charge (exit 6 / "may have gone through").
+        raise CliFailure(
+            "invalid_arguments",
+            "--amount must be a finite number of dollars (at least 10).",
+            EXIT_CONFIGURATION_ERROR,
+        )
+
     if not yes:
         # Real money leaves a card here, so the gate is `lium fund`'s: ask, and under --json refuse
         # rather than prompt — a script reading stdout cannot answer, and an unanswered default
@@ -229,16 +242,20 @@ def charge_pending_failure(result: dict) -> CliFailure:
     (``succeeded`` once credited, ``processing`` until then) and never makes a second charge. The server's
     answer, ``status: processing`` included, is in ``data``."""
     key = result.get("idempotency_key")
+    amount = result.get("amount_usd")
+    amount_text = (
+        f"${amount:,.2f}" if isinstance(amount, (int, float)) and math.isfinite(amount) else "the same amount"
+    )
     data = {name: result[name] for name in ("status", "idempotency_key", "transaction_id", "payment_intent_id",
                                             "amount_usd", "card") if name in result}
     return CliFailure(
         "charge_pending",
         "Payment submitted; the charge is still being confirmed. Check `lium balance` in a minute — if nothing "
-        f"arrived, re-run with `--idempotency-key {key}` to see its status.",
+        f"arrived, re-run with `--idempotency-key {key}` and the same amount ({amount_text}) to see its status.",
         EXIT_PERMISSION_DENIED,
         data=data,
         hint=f"Run 'lium balance' in a minute; 'lium topup card --idempotency-key {key}' with the same amount "
-             "returns this charge's status and never makes a second one",
+             "returns this charge's status and never makes a second one. A different amount is a new charge.",
     )
 
 

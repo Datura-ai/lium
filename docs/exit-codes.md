@@ -116,14 +116,17 @@ Commands add their own codes for the failures only they can have — for example
 `up` raises `node_selection_failed`, `template_failed`, `jupyter_install_failed`,
 `unreadable_dockerfile`; `exec` raises `unreadable_script`; `rm` raises
 `removal_failed`; `fund` raises `transfer_failed`; `topup card` passes on the platform's own
-`CARD_AUTHENTICATION_REQUIRED`, `CARD_DECLINED`, `NO_SAVED_CARD` and `NO_DEFAULT_CARD` (3: the
+`CARD_AUTHENTICATION_REQUIRED`, `CARD_DECLINED`, `NO_SAVED_CARD`, `NO_DEFAULT_CARD` and
+`API_KEY_BUDGET_EXCEEDED` (3: the
 API refused the charge and the balance did not move; `data` carries `dashboard_url`, the bank's
 `decline_code` and the `payment_intent_id`) and raises `charge_outcome_unknown` (6: a timeout or
 5xx after the charge was posted — it may have gone through; the message says to check `lium
-balance` before trying again, `data.idempotency_key` is the key a repeat must carry to get the
+balance` before trying again, `data.idempotency_key` is the key a repeat must carry with the
+same amount to get the
 same charge back instead of a second one) and `charge_pending` (6 too: the platform answered 202
 `processing` — the outcome is not known, the charge may never have happened; `data` is the server's
-answer, `status: processing` and the key included, and a repeat with the key shows the charge's
+answer, `status: processing`, the key and the amount included, and a repeat with the key and the
+same amount shows the charge's
 status without making a second one); `init` raises `api_unreachable` (3, the
 key passed with `--api-key` was not checked) and `empty_api_key` (2), and its `invalid_api_key` hint says
 nothing was saved. They follow the same envelope

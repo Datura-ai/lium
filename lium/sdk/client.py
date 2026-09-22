@@ -3,6 +3,7 @@
 import getpass
 import hashlib
 import ipaddress
+import math
 import os
 import posixpath
 import re
@@ -325,10 +326,21 @@ def _response_error_code(response: requests.Response) -> Optional[str]:
 
 
 # The 402 codes `POST /payments/topup` answers with (lium-platform services/api_card_topup.py); a 402 with any
-# other code (a spend cap, an older server) stays a plain LiumError.
+# other code (a spend cap, an older server) stays a plain LiumError. `API_KEY_BUDGET_EXCEEDED` is a key
+# budget refusal, not a card failure, but it is still a structured 402 from this route — without it the
+# message degrades to `API error 402: …`.
 CARD_TOPUP_ERROR_CODES = frozenset(
-    {"CARD_AUTHENTICATION_REQUIRED", "CARD_DECLINED", "NO_SAVED_CARD", "NO_DEFAULT_CARD"}
+    {
+        "CARD_AUTHENTICATION_REQUIRED",
+        "CARD_DECLINED",
+        "NO_SAVED_CARD",
+        "NO_DEFAULT_CARD",
+        "API_KEY_BUDGET_EXCEEDED",
+    }
 )
+# 502s from the same route that fire before Stripe is asked to charge (or that Stripe refused
+# before processing). A 5xx without one of these still means the charge may have gone through.
+CARD_TOPUP_NOT_CHARGED_CODES = frozenset({"STRIPE_UNAVAILABLE", "STRIPE_REFUSED"})
 
 
 def card_topup_error(response: requests.Response, **context: Optional[str]) -> LiumCardTopUpError:
@@ -4412,19 +4424,35 @@ class Lium:
             LiumChargeOutcomeUnknownError: the answer was lost (timeout, dropped connection,
                 5xx) after the charge was posted — it may have gone through. Check the balance
                 before trying again; ``idempotency_key`` on the error repeats it safely.
+                A 5xx whose code is ``STRIPE_UNAVAILABLE`` or ``STRIPE_REFUSED`` is a
+                :class:`LiumServerError` instead: nothing was charged.
         """
+        if not math.isfinite(amount_usd):
+            raise LiumError("amount_usd must be a finite number of dollars (at least 10).")
         key = idempotency_key or uuid.uuid4().hex
         payload: Dict[str, Any] = {"amount_usd": amount_usd, "idempotency_key": key}
         if payment_method_id:
             payload["payment_method_id"] = payment_method_id
         try:
             body = self._request("POST", "/payments/topup", json=payload).json()
-        except (requests.RequestException, LiumServerError) as exc:
-            # Stripe charges before it answers: a lost answer is not "nothing happened"
+        except LiumServerError as exc:
+            # retrieve/list 502s, or a Stripe refusal before processing: the card was not touched
+            if exc.code in CARD_TOPUP_NOT_CHARGED_CODES:
+                raise
             raise LiumChargeOutcomeUnknownError(
                 "The charge may have gone through: the API did not answer after the top-up was posted. "
-                "Check the balance before trying again; a repeat with the same idempotency_key returns "
-                "the same charge instead of making a second one.",
+                "Check the balance before trying again; a repeat with the same idempotency_key and "
+                "the same amount returns the same charge instead of making a second one.",
+                idempotency_key=key,
+                code="charge_outcome_unknown",
+                request_id=getattr(exc, "request_id", None),
+            ) from exc
+        except requests.RequestException as exc:
+            # Stripe charges before it answers: a lost answer after the POST is not "nothing happened"
+            raise LiumChargeOutcomeUnknownError(
+                "The charge may have gone through: the API did not answer after the top-up was posted. "
+                "Check the balance before trying again; a repeat with the same idempotency_key and "
+                "the same amount returns the same charge instead of making a second one.",
                 idempotency_key=key,
                 code="charge_outcome_unknown",
                 request_id=getattr(exc, "request_id", None),
