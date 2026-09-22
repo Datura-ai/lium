@@ -2,7 +2,7 @@
 check that it did."""
 
 import re
-from typing import Callable, Iterable, List, Optional, Tuple, TypeVar
+from typing import Any, Callable, Iterable, List, Tuple, TypeVar
 
 import click
 
@@ -21,6 +21,11 @@ NAME_NEEDS_SESSION = (
     "A key name is looked up on the session-only key list: run `lium workspaces login` "
     "(or set LIUM_SESSION_TOKEN), or pass the key id from `lium keys list`"
 )
+# What ``key_of`` returns for a row that carries no api-key field at all (a server before per-key pods), as
+# opposed to ``None`` for a row the server stamped ``null`` (a browser rental) — the two must not be confused:
+# prod already sends ``created_by_api_key_id: null``, so an account with no key-rented pods must read as
+# "the server filtered: nothing", not "the server cannot filter"
+UNSTAMPED = object()
 
 
 def key_id_for(lium: Lium, name_or_id: str) -> str:
@@ -35,19 +40,24 @@ def key_id_for(lium: Lium, name_or_id: str) -> str:
     return lium.api_keys.resolve(name_or_id, current.id if current else None).id
 
 
-def rented_through(rows: Iterable[Row], api_key_id: str, key_of: Callable[[Row], Optional[str]]) -> Tuple[List[Row], bool]:
+def rented_through(rows: Iterable[Row], api_key_id: str, key_of: Callable[[Row], Any]) -> Tuple[List[Row], bool]:
     """``(the rows rented through the key, whether the server could tell)``.
 
-    A server that stamps its rows with ``api_key_id`` filtered on the query (or is filtered here, should it
-    have ignored it); a server before per-key pods stamps nothing and answers the whole account — those rows
-    come back untouched with ``False``, so the caller says so instead of labelling the account's figures as
-    one key's. No rows at all is ``([], True)``: nothing to mislabel."""
+    ``key_of`` reads a row's api-key field: its value (``None`` when the server stamped ``null`` — a browser
+    rental), or ``UNSTAMPED`` when the row carries no such field. The check is on presence, never truthiness:
+    a ``null``, ``0`` or ``""`` stamp is a server that knows the field, and a whole account of ``null`` stamps
+    is a key that rented nothing — ``([], True)``. Only rows that all lack the field are a server before
+    per-key pods, which ignored the query and answered the whole account — those rows come back untouched
+    with ``False``, so the caller says so instead of labelling the account's figures as one key's. No rows at
+    all is ``([], True)``: nothing to mislabel."""
     rows = list(rows)
     if not rows:
         return [], True
-    if not any(key_of(row) for row in rows):
+    stamps = [key_of(row) for row in rows]
+    if all(stamp is UNSTAMPED for stamp in stamps):
         return rows, False
-    return [row for row in rows if key_of(row) == api_key_id], True
+    kept = [row for row, stamp in zip(rows, stamps) if stamp is not UNSTAMPED and stamp is not None and str(stamp) == api_key_id]
+    return kept, True
 
 
 def say_unfiltered(what: str, json_output: bool) -> None:

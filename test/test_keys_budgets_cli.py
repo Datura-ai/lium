@@ -655,11 +655,22 @@ def test_ps_key_keeps_only_the_keys_pods_when_the_server_stamps_them_but_did_not
     assert [r["api_key_name"] for r in json.loads(result.stdout)] == ["agent-1"]
 
 
+def pods_before_per_key():
+    """`GET /pods` rows from a server before per-key pods: neither `api_key_id` nor the row's own
+    `created_by_api_key_id` column on any row."""
+    rows = ws_fixture("pods_research")
+    for row in rows:
+        row.pop("api_key_id", None)
+        row.pop("created_by_api_key_id", None)
+    return rows
+
+
 @responses.activate
 def test_ps_key_on_a_server_that_cannot_filter_says_so_and_never_labels_the_account_as_one_key(home):
-    """Today's lium.io ignores `api_key_id` and stamps no pod: every pod comes back. Showing them under "rented
-    through key agent-1" would be a lie; the CLI shows them as the account's and says the server cannot filter."""
-    responses.add(responses.GET, f"{API}/pods", json=ws_fixture("pods_research"))  # no api_key_id on any row
+    """A server before per-key pods ignores `api_key_id` and stamps no pod (no field at all): every pod comes
+    back. Showing them under "rented through key agent-1" would be a lie; the CLI shows them as the account's
+    and says the server cannot filter."""
+    responses.add(responses.GET, f"{API}/pods", json=pods_before_per_key())
     me()
 
     human = run("ps", "--key", AGENT_KEY)
@@ -672,6 +683,60 @@ def test_ps_key_on_a_server_that_cannot_filter_says_so_and_never_labels_the_acco
     machine = run("ps", "--key", AGENT_KEY, "--format", "json")
     assert machine.exit_code == 0 and len(json.loads(machine.stdout)) == 1
     assert "cannot filter by API key" in machine.stderr
+
+
+@responses.activate
+def test_ps_key_on_prod_with_only_browser_rentals_lists_nothing_not_the_whole_account(home):
+    """Prod already sends `created_by_api_key_id: null` on a browser rental: the field is present, so the server
+    could filter and this key simply rented nothing. The check is on presence, not truthiness — reading the
+    nulls as "no key field" would list every pod of the account under the key (arhangel66, #273)."""
+    rows = ws_fixture("pods_research")
+    assert all(row["created_by_api_key_id"] is None for row in rows)  # the fixture is prod's shape
+    responses.add(responses.GET, f"{API}/pods", json=rows)
+    me()
+
+    machine = run("ps", "--key", AGENT_KEY, "--format", "json")
+    assert machine.exit_code == 0, machine.output
+    assert json.loads(machine.stdout) == []
+    assert "cannot filter" not in machine.stderr
+
+    human = run("ps", "--key", AGENT_KEY)
+    text = " ".join(human.output.split())
+    assert human.exit_code == 0, human.output
+    assert "cannot filter" not in text and "trainer" not in text
+
+
+def test_rented_through_reads_the_stamp_on_presence_not_truthiness():
+    """`0`, `""` and `null` are stamps from a server that knows the field; only a row without the field is
+    unstamped. All rows unstamped → the server cannot filter; anything else → it can, and only the key's
+    rows stay (a falsy id is never read as "no key")."""
+    from lium.cli.keys.resolve import UNSTAMPED, rented_through
+
+    stamps = lambda rows: rented_through(rows, AGENT_KEY, lambda r: r.get("api_key_id", UNSTAMPED))  # noqa: E731
+
+    assert stamps([{"api_key_id": None}, {"api_key_id": None}]) == ([], True)
+    assert stamps([{"api_key_id": 0}, {"api_key_id": ""}]) == ([], True)
+    assert stamps([{"api_key_id": None}, {"api_key_id": AGENT_KEY}]) == ([{"api_key_id": AGENT_KEY}], True)
+    assert stamps([{}, {"api_key_id": AGENT_KEY}]) == ([{"api_key_id": AGENT_KEY}], True)
+    assert stamps([{"pod_name": "a"}, {"pod_name": "b"}]) == ([{"pod_name": "a"}, {"pod_name": "b"}], False)
+    assert stamps([]) == ([], True)
+
+
+@responses.activate
+def test_sdk_ps_keeps_a_falsy_key_id_and_tells_a_null_stamp_from_no_field():
+    """`Lium.ps()` maps the row's key on presence: `created_by_api_key_id: 0` is the key "0" (stamped), `null`
+    is None but stamped, and a row without either field is None and unstamped — what `ps --key` filters on."""
+    rows = ws_fixture("pods_research")
+    zero = json.loads(json.dumps(rows[0]))
+    zero.update({"id": "11111111-2222-4333-8444-555555555555", "pod_name": "zero", "created_by_api_key_id": 0})
+    bare = json.loads(json.dumps(rows[0]))
+    bare.update({"id": "22222222-2222-4333-8444-555555555555", "pod_name": "bare"})
+    bare.pop("created_by_api_key_id")
+    responses.add(responses.GET, f"{API}/pods", json=[rows[0], zero, bare])
+
+    pods = Lium(Config(api_key="k")).ps()
+
+    assert [(p.api_key_id, p.api_key_stamped) for p in pods] == [(None, True), ("0", True), (None, False)]
 
 
 @responses.activate
@@ -755,6 +820,27 @@ def test_billing_history_key_on_a_server_that_cannot_filter_shows_the_accounts_f
     machine = run("billing", "history", "--key", AGENT_KEY, "--format", "json")
     assert machine.exit_code == 0 and json.loads(machine.stdout)["total"] == unstamped["total"]
     assert "cannot filter by API key" in machine.stderr
+
+
+@responses.activate
+def test_billing_history_key_with_only_browser_rentals_is_no_charges_through_the_key_not_the_accounts(home):
+    """`api_key_id: null` on every pod is a server that stamps (browser rentals): the key was charged nothing,
+    so the answer is "No charges through key …" and a JSON total of 0 — never the account's figures."""
+    nulls = fixture("statement")
+    for pod in nulls["pods"]:
+        pod.update({"api_key_id": None, "api_key_name": None})
+    responses.add(responses.GET, f"{API}/billing/statement", json=nulls)
+    me()
+
+    human = run("billing", "history", "--key", AGENT_KEY)
+    text = " ".join(human.output.split())
+    assert human.exit_code == 0, human.output
+    assert f"No charges through key {AGENT_KEY}" in text and "cannot filter" not in text and "$37.25" not in text
+
+    machine = run("billing", "history", "--key", AGENT_KEY, "--format", "json")
+    statement = json.loads(machine.stdout)
+    assert machine.exit_code == 0 and statement["pods"] == [] and statement["total"] == 0
+    assert "cannot filter" not in machine.stderr
 
 
 @responses.activate

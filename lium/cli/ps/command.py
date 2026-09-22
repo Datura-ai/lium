@@ -20,7 +20,7 @@ from lium.cli.utils import (
     resolve_output_format,
 )
 from lium.cli.workspaces.context import show_workspace
-from lium.cli.keys.resolve import key_id_for, rented_through, say_unfiltered
+from lium.cli.keys.resolve import UNSTAMPED, key_id_for, rented_through, say_unfiltered
 from . import display, selection
 from .actions import GetPodsAction
 
@@ -202,8 +202,9 @@ def ps_command(
         label = account
         if api_key_id:
             # a server before per-key pods ignores `api_key_id` and stamps no pod: say so once, and never
-            # label the account's pods as one key's
-            pods, could_filter = rented_through(pods, api_key_id, lambda p: p.api_key_id)
+            # label the account's pods as one key's (prod's `created_by_api_key_id: null` on every pod IS a
+            # stamp — a key that rented nothing lists nothing)
+            pods, could_filter = rented_through(pods, api_key_id, lambda p: p.api_key_id if p.api_key_stamped else UNSTAMPED)
             if could_filter:
                 label = f"{account}  ·  {through}" if account else through.capitalize()
             elif not unfiltered_said:

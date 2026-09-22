@@ -10,7 +10,7 @@ from rich.table import Table
 from rich.text import Text
 
 from lium.cli import ui
-from lium.cli.keys.resolve import key_id_for, rented_through, say_unfiltered
+from lium.cli.keys.resolve import UNSTAMPED, key_id_for, rented_through, say_unfiltered
 from lium.cli.utils import CliFailure, EXIT_CONFIGURATION_ERROR, ensure_config, handle_errors, resolve_output_format
 from lium.cli.workspaces.context import show_workspace
 from lium.sdk import Lium
@@ -125,7 +125,7 @@ def billing_history_command(
         # a server before per-key charges ignores `api_key_id` and stamps no pod: the statement is then the
         # whole account's — say so, and never head it "through key …"; a server that stamps them filtered (or
         # is filtered here) and the total is the kept pods'
-        kept, could_filter = rented_through(statement.get("pods") or [], api_key_id, lambda p: p.get("api_key_id"))
+        kept, could_filter = rented_through(statement.get("pods") or [], api_key_id, lambda p: p.get("api_key_id", UNSTAMPED))
         if could_filter:
             scope = f" through key {escape(api_key)}"
             if len(kept) != len(statement.get("pods") or []):

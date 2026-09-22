@@ -500,6 +500,16 @@ def _pod_gpu_count(row: Dict[str, Any]) -> Optional[int]:
     return _int_or_none(row, "gpu_count")
 
 
+def _pod_api_key_id(row: Dict[str, Any]) -> Optional[str]:
+    """The id of the key that rented the pod from a ``/pods`` row: ``api_key_id`` as the per-key-budgets server
+    names it, else the row's own ``created_by_api_key_id`` column. Read on presence, not truthiness — an id of
+    ``0`` or ``""`` is still a stamp; only ``null`` (a browser rental) or no field at all is None."""
+    key_id = row.get("api_key_id")
+    if key_id is None:
+        key_id = row.get("created_by_api_key_id")
+    return None if key_id is None else str(key_id)
+
+
 def _error_context(response: requests.Response) -> dict:
     """code/hint/request_id from the API's error envelope (``error: {...}``) and the
     ``X-Request-Id`` header, for the exception's attributes. Empty when absent (older servers)."""
@@ -1853,8 +1863,9 @@ class Lium:
                 cluster_overlay_ip=d.get("cluster_overlay_ip"),
                 # the key that rented the pod (the server names it `api_key_id`; the pod row's own
                 # column is `created_by_api_key_id`); None for a session rent or an older server
-                api_key_id=d.get("api_key_id") or d.get("created_by_api_key_id"),
+                api_key_id=_pod_api_key_id(d),
                 api_key_name=d.get("api_key_name"),
+                api_key_stamped="api_key_id" in d or "created_by_api_key_id" in d,
             ))
 
         return pods
