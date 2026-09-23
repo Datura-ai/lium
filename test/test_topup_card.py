@@ -215,8 +215,8 @@ def test_a_402_of_another_code_stays_a_plain_lium_error(client):
 
 
 @responses.activate
-def test_a_key_at_its_budget_is_a_card_topup_error(client):
-    """`API_KEY_BUDGET_EXCEEDED` is this route's 402, not a bare `API error 402`."""
+def test_a_key_at_its_budget_is_not_a_card_topup_error(client):
+    """A shared 402 `API_KEY_BUDGET_EXCEEDED` is a plain LiumError so the keys PR can own it."""
     body = _error_body(
         402,
         {
@@ -231,12 +231,12 @@ def test_a_key_at_its_budget_is_a_card_topup_error(client):
     )
     responses.post(TOPUP, status=402, json=body)
 
-    with pytest.raises(LiumCardTopUpError) as raised:
+    with pytest.raises(LiumError) as raised:
         client.topup_card(50)
 
+    assert type(raised.value) is LiumError
     assert raised.value.code == "API_KEY_BUDGET_EXCEEDED"
     assert "at its daily budget" in str(raised.value)
-    assert raised.value.hint == body["error"]["hint"]
 
 
 @responses.activate

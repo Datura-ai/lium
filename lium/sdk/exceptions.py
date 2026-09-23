@@ -151,9 +151,9 @@ class LiumCardTopUpError(LiumError):
 
     ``code`` says why: ``CARD_AUTHENTICATION_REQUIRED`` (the bank wants a one-time confirmation
     the API cannot show — top up once by card at ``dashboard_url``, then retry), ``CARD_DECLINED``
-    (``decline_code`` is the bank's reason), ``NO_SAVED_CARD``, ``NO_DEFAULT_CARD``, or
-    ``API_KEY_BUDGET_EXCEEDED`` (the key is at its budget; nothing was charged). The
-    message is the server's plain sentence; the balance did not change.
+    (``decline_code`` is the bank's reason), ``NO_SAVED_CARD``, or ``NO_DEFAULT_CARD``. A key
+    budget refusal is not this class. The message is the server's plain sentence; the balance
+    did not change.
     """
 
     def __init__(

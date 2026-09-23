@@ -326,16 +326,15 @@ def _response_error_code(response: requests.Response) -> Optional[str]:
 
 
 # The 402 codes `POST /payments/topup` answers with (lium-platform services/api_card_topup.py); a 402 with any
-# other code (a spend cap, an older server) stays a plain LiumError. `API_KEY_BUDGET_EXCEEDED` is a key
-# budget refusal, not a card failure, but it is still a structured 402 from this route — without it the
-# message degrades to `API error 402: …`.
+# other code (a spend cap, an older server, or a key budget refusal) stays a plain LiumError.
+# `API_KEY_BUDGET_EXCEEDED` is owned by the keys PR (LiumBudgetExceededError, exit 6): this helper is
+# shared, so a rent 402 must not become LiumCardTopUpError.
 CARD_TOPUP_ERROR_CODES = frozenset(
     {
         "CARD_AUTHENTICATION_REQUIRED",
         "CARD_DECLINED",
         "NO_SAVED_CARD",
         "NO_DEFAULT_CARD",
-        "API_KEY_BUDGET_EXCEEDED",
     }
 )
 # 502s from the same route that fire before Stripe is asked to charge (or that Stripe refused
