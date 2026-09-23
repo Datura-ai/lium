@@ -1135,10 +1135,52 @@ def test_rm_in_prints_scheduled_then_exits_6_when_one_pod_is_402(monkeypatch, ho
     payload = json.loads(result.stdout)
     assert [row["huid"] for row in payload["scheduled"]] == ["pod-b"]
     assert payload["failed"] == []
+    assert payload["budget_refused"] == ["pod-a"]
     envelope = json.loads(next(line for line in result.stderr.splitlines() if line.startswith("{")))
     assert "budget a" in envelope["error"]["message"]
     assert envelope["error"]["exit_code"] == EXIT_PERMISSION_DENIED
     assert envelope["data"]["window"] == "daily"
+
+
+def test_rm_in_table_mode_prints_failed_huids_before_exiting_6_on_a_402(monkeypatch, home):
+    """Mikhail r5291503004: in table mode the 402's exit must not hide a pod that failed for another reason."""
+    from types import SimpleNamespace
+
+    from click.testing import CliRunner
+
+    from lium.cli.cli import cli
+    from lium.cli.rm import command as rm_module
+
+    pods = [
+        SimpleNamespace(
+            id=f"id-{h}", huid=f"pod-{h}", name=f"pod-{h}",
+            executor=SimpleNamespace(price_per_hour=1.0), created_at="2026-09-23T10:00:00",
+        )
+        for h in "abc"
+    ]
+
+    class FakeLium:
+        workspaces = SimpleNamespace(current=lambda: None)
+        config = SimpleNamespace(workspace=None, workspace_id=None, workspace_explicit=False)
+
+        def __init__(self, *a, **k):
+            pass
+
+        def ps(self):
+            return pods
+
+        def schedule_termination(self, pod, termination_time=None):
+            if pod.huid == "pod-a":
+                raise LiumBudgetExceededError("budget a", window="daily")
+            if pod.huid == "pod-b":
+                raise RuntimeError("executor unreachable")
+
+    monkeypatch.setattr(rm_module, "Lium", FakeLium)
+    result = CliRunner().invoke(cli, ["rm", "pod-a,pod-b,pod-c", "--in", "2h", "--yes"])
+
+    assert result.exit_code == EXIT_PERMISSION_DENIED, result.output
+    assert "pod-c" in result.output
+    assert "Failed to schedule removal for pods: pod-b" in result.output
 
 
 @responses.activate

@@ -297,6 +297,7 @@ def rm_command(
         }
         if plan.termination_time:
             payload["termination_time"] = context["termination_time"]
+            payload["budget_refused"] = budget_huids
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
     elif removed_huids:
         # Say what happened: silence is indistinguishable from having done nothing.
@@ -309,6 +310,8 @@ def rm_command(
         # A 402 is the key's budget, not a generic failed huid. Print scheduled/failed
         # first so `rm a b --in 2h` still shows that b was rescheduled, then exit 6.
         # The refused pod is not retried — one refusal, no second charge.
+        if failed_huids and output_format != "json":
+            ui.error(f"Failed to schedule removal for pods: {', '.join(failed_huids)}")
         raise budget_errors[0]
     if failed_huids:
         if output_format == "json":
