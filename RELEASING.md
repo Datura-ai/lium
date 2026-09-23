@@ -27,10 +27,13 @@ nothing, at a later `0.1.1` it would demand `0.2.0`.
 ## Who can publish
 
 Only `.github/workflows/release.yml` can upload `lium.io` to PyPI, and only from a run that the **`pypi` environment's
-required reviewer approved**. Self-approval is blocked (`prevent_self_review: true`), a human reviewer approves each
-release, and the loop's account (`surcyf123`) must not be the approving reviewer. Today `surcyf123` is the only
-required reviewer, so at least one human must be a required reviewer on the `pypi` environment before any release can
-ship. PyPI's trusted publisher for the project names this repository, that file and that environment, so the upload
+required reviewer approved**. Self-approval is blocked (`prevent_self_review: true`), which only refuses the account
+that started the run: any other listed reviewer can approve. So the required reviewers are humans only, at least one,
+and never the loop's account (`surcyf123`, user id 114649324), which never approves a release; the publish job
+refuses to run while it is listed. Today (23 Sep 2026) `surcyf123` is the environment's only required reviewer, so no
+release ships until an admin replaces it with a human. The environment reads `can_admins_bypass: true`: a repository
+admin can deploy to `pypi` without approval; turning that off is an admin setting, and the owner decides. PyPI's
+trusted publisher for the project names this repository, that file and that environment, so the upload
 token is minted inside the approved job and nowhere else; there is no PyPI API token in the repository's secrets or on
 anyone's machine. Two more things gate a release: the `release-tags` ruleset lets only the bypass list create, move or
 delete a `v*` tag (`gh release create` creates the tag, so it is covered), and the
@@ -43,13 +46,14 @@ registered and anyone can register it; `lium-cli` is archived with no files (`ht
 `release-deprecate-lium-cli.yml` on 11 May 2026, `release-lium-alias.yml` (its only run) on 31 Mar 2026.
 
 All of that is true once the admin steps have run **in this order**: (1) create the `pypi` environment with
-self-approval blocked and at least one human as required reviewer — before the workflow change merges, because a
-missing environment is created unprotected on first use; (2) register the `pypi` publisher on pypi.org; (3) merge;
+self-approval blocked and humans only as required reviewers (at least one; not `surcyf123`) — before the workflow
+change merges, because a missing environment is created unprotected on first use; (2) register the `pypi` publisher on pypi.org; (3) merge;
 (4) proof release, approved by a human reviewer; (5) delete the old, environment-less publisher on pypi.org; (6) apply
 the tag ruleset. Step (5) is the one that closes the door: until
 then any account with write access can still publish through a hand-run, edited copy of the workflow. The publish
-job refuses to run in an unprotected `pypi` environment (it reads the environment's rules back first), but it cannot
-see pypi.org's publisher list.
+job reads the environment's rules back first and refuses to run unless there is at least one required reviewer, the
+loop's account is not one of them, every reviewer is a user (it cannot read team membership), and
+`prevent_self_review` is `true`; it cannot see pypi.org's publisher list.
 
 What a release looks like after this: `gh release create vX.Y.Z --prerelease …` → the build jobs run → the run pauses at
 **approve-and-publish** and GitHub e-mails the reviewer → Actions → the run → **Review deployments** → **Approve and
