@@ -2096,7 +2096,7 @@ class Lium:
         """Remove every member pod of a cluster with one ``DELETE /clusters/{cluster_id}``.
 
         Returns one ``{"pod", "huid", "name", "node_rank", "success", "message", "error"}`` per
-        member, in the order the server reports them (``huid`` is the short name ``lium rm`` accepts). The server (lium-platform#411) finds the members by the
+        member, in the order the server reports them (``huid`` is the short name ``lium rm`` accepts). The server finds the members by the
         cluster id, checks ownership and API-key scope on every one of them before the first
         delete, then tears them down one by one; a member that failed is reported with ``success``
         false and its error text while the others are still removed, so nothing is left billing by
