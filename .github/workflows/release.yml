@@ -355,7 +355,7 @@ jobs:
     # and a missing field counts as true). The guard cannot tell a human from another machine account; the admin
     # lists humans.
     # What this cannot prove: that pypi.org's old, environment-less publisher is gone (until it is, an edited copy
-    # of this file on a branch, run by hand, still uploads — RELEASING.md "Who can publish", step 5).
+    # of this file on a branch, run by hand, still uploads — RELEASING.md "Who can publish", step 3).
     - name: Environment pypi must require a reviewer other than the loop's account
       env:
         GH_TOKEN: ${{ github.token }}

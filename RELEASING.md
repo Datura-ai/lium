@@ -51,12 +51,16 @@ registered and anyone can register it; `lium-cli` is archived with no files (`ht
 `release-deprecate-lium-cli.yml` on 11 May 2026, `release-lium-alias.yml` (its only run) on 31 Mar 2026.
 
 All of that is true once the admin steps have run **in this order**: (1) create the `pypi` environment with
-self-approval blocked, admin bypass off (`"can_admins_bypass": false`) and humans only as required reviewers (at
-least one; not `surcyf123`) — before the workflow
-change merges, because a missing environment is created unprotected on first use; (2) register the `pypi` publisher on pypi.org; (3) merge;
-(4) proof release: a human creates the release and its tag, and a human reviewer approves it; (5) delete the old, environment-less publisher on pypi.org; (6) apply
-the tag ruleset. Step (5) is the one that closes the door: until
-then any account with write access can still publish through a hand-run, edited copy of the workflow. The publish
+self-approval blocked, admin bypass off (`"can_admins_bypass": false`) and its required reviewers — before the workflow
+change merges, because a missing environment is created unprotected on first use; (2) merge; (3) on pypi.org, **in
+the same sitting**, add the publisher `Datura-ai/lium` · `release.yml` · environment `pypi` and delete the old,
+environment-less `Datura-ai/lium` · `release.yml` publisher; (4) apply the tag ruleset. Step (3) is the one that
+closes the door: until the old publisher is gone any account with write access can still publish through a hand-run,
+edited copy of the workflow, so step (3) does not wait for a release. While `surcyf123` is the only required reviewer
+(today), step (3) runs right after the merge, and from then until a human replaces `surcyf123` as reviewer no release
+can publish: the publish job refuses every run. That pause is the intended cost. If a human reviewer other than
+`surcyf123` is set instead, step (3) runs as soon as that reviewer is set and the change is merged, and the first
+release after it shows the new publisher works. The publish
 job reads the environment's rules back first and refuses to run unless there is at least one required reviewer, the
 loop's account is not one of them, every reviewer is a user (it cannot read team membership),
 `prevent_self_review` is `true`, and `can_admins_bypass` is `false`; it cannot see pypi.org's publisher list.
