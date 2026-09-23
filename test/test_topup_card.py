@@ -624,20 +624,19 @@ def test_an_older_server_without_a_hint_gets_the_clis_own(fake_lium):
     assert payload["error"]["hint"] == topup_module._CARD_HINTS["NO_SAVED_CARD"]
 
 
-def test_a_budget_refusal_names_the_code_and_exits_3(fake_lium):
-    fake_lium.charge = LiumCardTopUpError(
+def test_a_budget_refusal_is_a_plain_lium_error(fake_lium):
+    # Since 0a36a61 a 402 API_KEY_BUDGET_EXCEEDED is a plain LiumError; the keys PR maps it.
+    fake_lium.charge = LiumError(
         "API key 'agent' is at its daily budget of $20.00 ($20.00 used); a $50.00 top-up through it is refused.",
         code="API_KEY_BUDGET_EXCEEDED",
-        hint=topup_module._CARD_HINTS["API_KEY_BUDGET_EXCEEDED"],
     )
 
     result = _run("-a", "50", "--json")
 
-    assert result.exit_code == EXIT_API_ERROR
     payload = json.loads(result.stderr)
     assert payload["error"]["code"] == "API_KEY_BUDGET_EXCEEDED"
     assert "daily budget" in payload["error"]["message"]
-    assert payload["error"]["hint"] == topup_module._CARD_HINTS["API_KEY_BUDGET_EXCEEDED"]
+    assert "API_KEY_BUDGET_EXCEEDED" not in topup_module._CARD_HINTS
 
 
 def test_a_key_without_the_billing_scope_exits_6(fake_lium):

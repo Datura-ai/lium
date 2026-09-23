@@ -30,8 +30,6 @@ _CARD_HINTS = {
     "CARD_DECLINED": "Use another saved card (--card <pm_id>) or fix the card on the Billing page",
     "NO_SAVED_CARD": "Add a card, or top up once by card, on the Billing page; then retry",
     "NO_DEFAULT_CARD": "Pass --card <pm_id>, or set a default card on the Billing page",
-    "API_KEY_BUDGET_EXCEEDED": "Raise or clear the budget on this key, use another key, or top up from "
-                               "the Billing page",
 }
 
 
@@ -131,8 +129,9 @@ def create_command(amount: float, currency: str, network: str, json_output: bool
 )
 @click.option(
     "--idempotency-key", default=None, metavar="KEY",
-    help="Repeat the command with the same key and amount and the first charge (or its status) is "
-         "returned instead of a second one being made; omitted, one is made and printed",
+    help="Use a new key for each top-up. A used key and the same amount return the first charge "
+         "(or its status) within 24 h instead of making a second one; after that, check "
+         "`lium balance` before repeating. Omitted, one is made and printed",
 )
 @click.option("--yes", "-y", is_flag=True, help="Charge without asking first (required with --json)")
 @click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON")
@@ -158,11 +157,12 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     The request is sent once, always with an idempotency key. If the answer is lost (a
     timeout, a 5xx) the charge may still have gone through: the command exits 6 with
     charge_outcome_unknown and the key — check `lium balance` before trying again; a repeat
-    with `--idempotency-key <key>` and the same amount returns the same charge instead of
-    making a second one. The same key with a different amount is a new charge. A 202 with
-    a payment_intent_id is success (exit 0): the platform took the charge. A 202 without
-    that id means the outcome is not known yet — exit 6 with charge_pending, the key and
-    the amount; a repeat with both shows the charge's status, it never makes a second one.
+    with `--idempotency-key <key>` and the same amount returns the same charge within 24 h
+    instead of making a second one; after that, check `lium balance` before repeating. The
+    same key with a different amount is a new charge. A 202 with a payment_intent_id is
+    success (exit 0): the platform took the charge. A 202 without that id means the
+    outcome is not known yet — exit 6 with charge_pending, the key and the amount; a
+    repeat with both shows the charge's status within 24 h.
 
     \b
     Examples:
@@ -261,7 +261,8 @@ def charge_pending_failure(result: dict) -> CliFailure:
         EXIT_PERMISSION_DENIED,
         data=data,
         hint=f"Run 'lium balance' in a minute; 'lium topup card --idempotency-key {key}' with the same amount "
-             "returns this charge's status and never makes a second one. A different amount is a new charge.",
+             "returns this charge's status within 24 h and does not make a second one. After that, check "
+             "`lium balance` before repeating. A different amount is a new charge.",
     )
 
 
@@ -275,8 +276,9 @@ def charge_outcome_unknown_failure(error: LiumChargeOutcomeUnknownError) -> CliF
         "The charge may have gone through. Check your balance with `lium balance` before trying again.",
         EXIT_PERMISSION_DENIED,
         data={"idempotency_key": error.idempotency_key, **({"request_id": error.request_id} if error.request_id else {})},
-        hint=f"Run 'lium balance'; to repeat safely, 'lium topup card --idempotency-key {error.idempotency_key}' "
-             "with the same amount returns the same charge instead of a second one",
+        hint=f"Run 'lium balance'; to repeat safely within 24 h, 'lium topup card --idempotency-key "
+             f"{error.idempotency_key}' with the same amount returns the same charge instead of a second one. "
+             "After that, check `lium balance` before repeating.",
     )
 
 
