@@ -1190,6 +1190,22 @@ def test_sdk_create_revokes_when_the_server_drops_a_budget():
     assert calls_to(f"/keys/{row['id']}", "DELETE")
 
 
+@responses.activate
+def test_sdk_create_keeps_an_unrecorded_key_when_allow_unrecorded():
+    """The CLI sets allow_unrecorded so --allow-unbudgeted can keep the key; SDK default still revokes."""
+    row = dict(fixture("key_created_budget"))
+    row.pop("daily_budget_usd")
+    responses.add(responses.POST, f"{API}/keys", json=row)
+    lium = Lium(Config(api_key="k", session_token=SESSION))
+
+    key = lium.api_keys.create(
+        "agent-1", daily_budget_usd=20, workspace_id=RESEARCH, allow_unrecorded=True
+    )
+
+    assert key.id == row["id"]
+    assert not calls_to(f"/keys/{row['id']}", "DELETE")
+
+
 def test_sdk_key_material_stays_out_of_repr_and_to_dict():
     """A traceback, a log line or `--json` that shows an ApiKeyInfo must not show the secret the row carried."""
     from lium.sdk.api_keys import _key

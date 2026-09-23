@@ -282,6 +282,7 @@ class ApiKeysClient:
         max_budget_usd: Optional[float] = None,
         pod_visibility: Optional[str] = None,
         workspace_id: Optional[str] = None,
+        allow_unrecorded: bool = False,
     ) -> ApiKeyInfo:
         """Mint a key (``POST /keys``); the secret is in the returned ``key`` this once.
 
@@ -292,7 +293,8 @@ class ApiKeysClient:
         daily ≤ monthly ≤ max. ``pod_visibility`` (``own``: the key sees only the pods it creates; ``account``:
         every pod of the account) is sent only when given — left ``None``, the server's own default decides,
         which its operator may switch. A server before per-key budgets ignores the budget and visibility fields
-        and answers the row without them: :func:`unrecorded` tells, and the CLI refuses such a key.
+        and answers the row without them: :func:`unrecorded` tells, and this method revokes the key unless
+        ``allow_unrecorded`` is true (the CLI sets that so ``--allow-unbudgeted`` can keep the key).
         """
         if pod_visibility is not None and pod_visibility not in POD_VISIBILITIES:
             raise ValueError(f"pod_visibility must be one of {', '.join(POD_VISIBILITIES)}, not {pod_visibility!r}")
@@ -313,7 +315,7 @@ class ApiKeysClient:
         key = _key(self._lium.workspaces._session_request("POST", "/keys", workspace_id, json=body).json())
         asked = {name: body[name] for name in (*BUDGET_FIELDS, "pod_visibility") if name in body}
         missing = unrecorded(key, asked)
-        if missing:
+        if missing and not allow_unrecorded:
             names = ", ".join(missing)
             try:
                 self.revoke(key.id, workspace_id)

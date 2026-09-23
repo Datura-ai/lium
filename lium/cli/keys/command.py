@@ -147,7 +147,7 @@ def keys_list_command(workspace: Optional[str], json_output: bool):
 )
 @click.option(
     "--daily-budget", type=BUDGET_RANGE, metavar="USD",
-    help="Most USD the pods this key creates may be billed on one UTC day; at it the key's pods are stopped and "
+    help="Most USD the pods this key creates may be billed on one UTC day; at it the key's pods are deleted (data outside a volume is lost) and "
          "new rentals through the key are refused. At least $1, whole cents (needs a server with per-key budgets; "
          "not on lium.io yet)",
 )
@@ -191,8 +191,9 @@ def keys_create_command(
     Without --scope the key gets read, rent and manage. `--scope billing` gives the money routes (card
     payments, credit transfers, crypto top-ups) and nothing else: it is never added on its own, it prints the
     server's warning first, and it cannot be combined with another scope (refused here, before any request).
-    Budgets are USD per window — day, month, lifetime; at one, the server stops the key's pods and refuses a
-    rent, a pod extend or a top-up through it with `API_KEY_BUDGET_EXCEEDED` (exit 6), naming the window hit.
+    Budgets are USD per window — day, month, lifetime; at one, the server deletes the key's pods (data
+    outside a volume is lost) and refuses a rent, a pod extend or a top-up through it with
+    `API_KEY_BUDGET_EXCEEDED` (exit 6), naming the window hit.
     `lium keys budget` changes them later. A server without per-key budgets (lium.io today) cannot record a
     budget, and one without pod visibility cannot record that: the CLI then refuses to create the key (exit 2;
     a key the server minted uncapped is revoked) unless --allow-unbudgeted is passed — each checked on its own,
@@ -235,6 +236,7 @@ def keys_create_command(
         max_budget_usd=max_budget,
         pod_visibility=pod_visibility,
         workspace_id=target.id,
+        allow_unrecorded=True,
     )
     try:
         missing = unrecorded(key, asked)
