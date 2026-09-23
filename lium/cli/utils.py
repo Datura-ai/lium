@@ -1032,11 +1032,16 @@ def get_pod_selection() -> Optional[Dict[str, Any]]:
 # a live master is a connection that pod accepted, so the pod is there. One file per account,
 # workspace and API server, since each sees different pods.
 POD_CACHE_TTL_SECONDS = 600
+# The file name derives from the API key through a key-derivation function. The key is random and
+# long, so a small iteration count keeps it unguessable and costs ~2 ms on each `lium exec`.
+_POD_CACHE_SALT = b"lium.pod_cache.v1"
+_POD_CACHE_ITERATIONS = 10_000
 
 
 def pod_cache_path(lium: Lium) -> Path:
     account = f"{lium.config.base_url}\0{lium.config.api_key}\0{getattr(lium.config, 'workspace_id', None) or ''}"
-    return Path.home() / ".lium" / "pod_cache" / f"{hashlib.sha256(account.encode()).hexdigest()[:16]}.json"
+    digest = hashlib.pbkdf2_hmac("sha256", account.encode(), _POD_CACHE_SALT, _POD_CACHE_ITERATIONS).hex()[:16]
+    return Path.home() / ".lium" / "pod_cache" / f"{digest}.json"
 
 
 def remember_pods(lium: Lium, pods: List[PodInfo], now: Optional[datetime] = None) -> None:
