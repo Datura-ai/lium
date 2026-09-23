@@ -3,6 +3,7 @@
 import getpass
 import hashlib
 import ipaddress
+import math
 import os
 import posixpath
 import re
@@ -35,6 +36,8 @@ from .exceptions import (
     ClusterNotListedError,
     LiumAuthError,
     LiumBudgetExceededError,
+    LiumCardTopUpError,
+    LiumChargeOutcomeUnknownError,
     LiumError,
     LiumHostKeyError,
     LiumNotFoundError,
@@ -325,6 +328,46 @@ def _response_error_code(response: requests.Response) -> Optional[str]:
     return code if isinstance(code, str) and code else None
 
 
+# The 402 codes `POST /payments/topup` answers with (lium-platform services/api_card_topup.py); a 402 with any
+# other code (a spend cap, an older server, or a key budget refusal) stays a plain LiumError.
+# `API_KEY_BUDGET_EXCEEDED` is owned by the keys PR (LiumBudgetExceededError, exit 6): this helper is
+# shared, so a rent 402 must not become LiumCardTopUpError.
+CARD_TOPUP_ERROR_CODES = frozenset(
+    {
+        "CARD_AUTHENTICATION_REQUIRED",
+        "CARD_DECLINED",
+        "NO_SAVED_CARD",
+        "NO_DEFAULT_CARD",
+    }
+)
+# 502s from the same route that fire before Stripe is asked to charge (or that Stripe refused
+# before processing). A 5xx without one of these still means the charge may have gone through.
+CARD_TOPUP_NOT_CHARGED_CODES = frozenset({"STRIPE_UNAVAILABLE", "STRIPE_REFUSED"})
+
+
+def card_topup_error(response: requests.Response, **context: Optional[str]) -> LiumCardTopUpError:
+    """The exception for a card top-up 402: the server's sentence as the message, and the fields
+    of its structured body (``status``, ``decline_code``, ``dashboard_url``, ``payment_intent_id``)."""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    detail = payload.get("message") if isinstance(payload, dict) else None
+    detail = detail if isinstance(detail, dict) else {}
+
+    def text(value: Any) -> Optional[str]:
+        return value if isinstance(value, str) and value else None
+
+    return LiumCardTopUpError(
+        _response_error_message(response),
+        status=text(detail.get("status")),
+        decline_code=text(detail.get("decline_code")),
+        dashboard_url=text(detail.get("dashboard_url")),
+        payment_intent_id=text(detail.get("payment_intent_id")),
+        **context,
+    )
+
+
 def permission_error(
     detail: str, code: Optional[str] = None, key: Optional[str] = None, **context: Optional[str]
 ) -> LiumPermissionError:
@@ -590,7 +633,7 @@ class Lium:
     def __init__(self, config: Optional[Config] = None, source: str = "sdk", workspace: Optional[str] = None):
         """``workspace`` picks the API key saved for that workspace (``[workspace.<name>]`` in
         ~/.lium/config.ini, written by ``lium keys create --workspace … --save``); a key acts in exactly
-        one workspace, so choosing the workspace means choosing the key (lium-platform DAH-2986), and
+        one workspace, so choosing the workspace means choosing the key, and
         ``ValueError`` is raised when none is saved for it rather than running as another key."""
         self.config = config or Config.load(workspace=workspace)
         self.source = source
@@ -721,6 +764,8 @@ class Lium:
             raise LiumNotFoundError(f"Resource not found: {_response_error_message(resp)}", **context)
         if resp.status_code == 429:
             raise LiumRateLimitError("Rate limit exceeded", **context)
+        if resp.status_code == 402 and context.get("code") in CARD_TOPUP_ERROR_CODES:
+            raise card_topup_error(resp, **context)
         if 500 <= resp.status_code < 600:
             raise LiumServerError(f"Server error: {resp.status_code}", **context)
         raise LiumError(f"API error {resp.status_code}: {_response_error_message(resp)}", **context)
@@ -2230,7 +2275,7 @@ class Lium:
         """Remove every member pod of a cluster with one ``DELETE /clusters/{cluster_id}``.
 
         Returns one ``{"pod", "huid", "name", "node_rank", "success", "message", "error"}`` per
-        member, in the order the server reports them (``huid`` is the short name ``lium rm`` accepts). The server (lium-platform#411) finds the members by the
+        member, in the order the server reports them (``huid`` is the short name ``lium rm`` accepts). The server finds the members by the
         cluster id, checks ownership and API-key scope on every one of them before the first
         delete, then tears them down one by one; a member that failed is reported with ``success``
         false and its error text while the others are still removed, so nothing is left billing by
@@ -3586,7 +3631,7 @@ class Lium:
             if not grant["success"]:
                 # `flock -w 30` gives up silently (exit 1) when another cp holds the lock
                 detail = grant["stderr"].strip() or f"exit {grant.get('exit_code')} (another copy may hold {self.TRANSFER_KEY_LOCK})"
-                raise LiumError(f"Could not authorise the transfer key on pod {dst_pod.name or dst_pod.huid}: {detail}")
+                raise LiumError(f"Could not authorize the transfer key on pod {dst_pod.name or dst_pod.huid}: {detail}")
             authorized = True
 
             # The source pod must verify the destination the way this client does: the grant above went
@@ -3634,7 +3679,7 @@ class Lium:
                     dst_pod,
                     revoke,
                     consequence=(
-                        f"the transfer key '{marker}' is still authorised on pod "
+                        f"the transfer key '{marker}' is still authorized on pod "
                         f"{dst_pod.name or dst_pod.huid}; revoke it with: "
                         f"lium exec {dst_pod.huid} {shlex.quote(revoke)}"
                     ),
@@ -4394,7 +4439,7 @@ class Lium:
         cursor: Optional[str] = None,
         limit: int = 100,
     ) -> Dict[str, Any]:
-        """One page of the account audit log, newest first (``GET /account/audit``, lium-platform DAH-3245).
+        """One page of the account audit log, newest first (``GET /account/audit``).
 
         One entry per request that changed something on the account — a pod created, restarted or
         deleted, a key created or revoked, a login, a top-up requested, a setting or a workspace member
@@ -4464,6 +4509,90 @@ class Lium:
             "crypto_network": crypto_network,
         }
         return self._request("POST", "/tmc-pay/create-invoice", json=payload).json()
+
+    def topup_card(
+        self,
+        amount_usd: float,
+        payment_method_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Top up the balance from a saved card, with no browser (``POST /payments/topup``;
+        not released — behind a platform switch the team turns on).
+
+        The card must already be saved on the account (a card top-up on the Billing page
+        saves it). The charge is made off-session; the balance is credited by the same
+        Stripe webhook that credits a Checkout top-up, usually within seconds, so
+        :meth:`balance` may lag this call briefly. The key must hold the ``billing``
+        scope (or be a browser session); today's ``read`` / ``rent`` / ``manage`` keys are
+        refused with :class:`LiumPermissionError`.
+
+        Every call carries an idempotency key — yours, or a fresh ``uuid4`` when you pass
+        none — so the request is posted once and a repeat with the same key returns the
+        first charge instead of making a second one. The key used is in the result (and on
+        :class:`LiumChargeOutcomeUnknownError`) as ``idempotency_key``.
+
+        Args:
+            amount_usd: At least $10, the card form's minimum; at most $999,999.99.
+            payment_method_id: A saved card's ``pm_…`` id; omitted, the default card (or the
+                only saved one).
+            idempotency_key: Repeat the call with the same key and amount within 24 h and
+                the first charge (or its status, while it is still ``processing``) is returned
+                instead of a second one being made. Omitted: the SDK makes one.
+
+        Returns:
+            ``{"status": "succeeded", "payment_intent_id", "transaction_id", "idempotency_key",
+            "amount_usd", "card": {"brand", "last4"}}``. ``status`` is ``"processing"`` (HTTP 202)
+            when Stripe has not finished confirming. A 202 that includes a ``payment_intent_id``
+            is a taken charge (the CLI treats it as success, exit 0). A 202 with
+            ``payment_intent_id`` ``None`` is unknown — the platform's own call to Stripe timed
+            out after the charge; the charge may never have happened. Treat that case as
+            unknown, not as success: the balance settles by webhook when the charge is real;
+            a repeat with the same key returns the same transaction and its current status,
+            never a second charge. Do not repeat the call without the key.
+
+        Raises:
+            LiumCardTopUpError: the bank wants a confirmation (``CARD_AUTHENTICATION_REQUIRED``,
+                see ``dashboard_url``), declined the card (``CARD_DECLINED``), or no card is
+                saved / none is the default. Nothing was charged.
+            LiumChargeOutcomeUnknownError: the answer was lost (timeout, dropped connection,
+                5xx) after the charge was posted — it may have gone through. Check the balance
+                before trying again; ``idempotency_key`` on the error repeats it safely.
+                A 5xx whose code is ``STRIPE_UNAVAILABLE`` or ``STRIPE_REFUSED`` is a
+                :class:`LiumServerError` instead: nothing was charged.
+        """
+        if not math.isfinite(amount_usd):
+            raise LiumError("amount_usd must be a finite number of dollars (at least 10).")
+        key = idempotency_key or uuid.uuid4().hex
+        payload: Dict[str, Any] = {"amount_usd": amount_usd, "idempotency_key": key}
+        if payment_method_id:
+            payload["payment_method_id"] = payment_method_id
+        try:
+            body = self._request("POST", "/payments/topup", json=payload).json()
+        except LiumServerError as exc:
+            # retrieve/list 502s, or a Stripe refusal before processing: the card was not touched
+            if exc.code in CARD_TOPUP_NOT_CHARGED_CODES:
+                raise
+            raise LiumChargeOutcomeUnknownError(
+                "The charge may have gone through: the API did not answer after the top-up was posted. "
+                "Check the balance before trying again; a repeat with the same idempotency_key and "
+                "the same amount returns the same charge instead of making a second one.",
+                idempotency_key=key,
+                code="charge_outcome_unknown",
+                request_id=getattr(exc, "request_id", None),
+            ) from exc
+        except requests.RequestException as exc:
+            # Stripe charges before it answers: a lost answer after the POST is not "nothing happened"
+            raise LiumChargeOutcomeUnknownError(
+                "The charge may have gone through: the API did not answer after the top-up was posted. "
+                "Check the balance before trying again; a repeat with the same idempotency_key and "
+                "the same amount returns the same charge instead of making a second one.",
+                idempotency_key=key,
+                code="charge_outcome_unknown",
+                request_id=getattr(exc, "request_id", None),
+            ) from exc
+        # the key the charge was made under, whether or not the server echoes it back
+        body.setdefault("idempotency_key", key)
+        return body
 
     def volumes(self) -> List[VolumeInfo]:
         """List all volumes for the current user.

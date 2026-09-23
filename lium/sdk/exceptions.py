@@ -198,6 +198,55 @@ class LiumBudgetExceededError(LiumPermissionError):
         self.api_key_id = api_key_id
 
 
+class LiumCardTopUpError(LiumError):
+    """A card top-up (``POST /payments/topup``, :meth:`Lium.topup_card`) did not charge (402).
+
+    ``code`` says why: ``CARD_AUTHENTICATION_REQUIRED`` (the bank wants a one-time confirmation
+    the API cannot show — top up once by card at ``dashboard_url``, then retry), ``CARD_DECLINED``
+    (``decline_code`` is the bank's reason), ``NO_SAVED_CARD``, or ``NO_DEFAULT_CARD``. A key
+    budget refusal is not this class. The message is the server's plain sentence; the balance
+    did not change.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        hint: str | None = None,
+        request_id: str | None = None,
+        status: str | None = None,
+        decline_code: str | None = None,
+        dashboard_url: str | None = None,
+        payment_intent_id: str | None = None,
+    ) -> None:
+        super().__init__(message, code=code, hint=hint, request_id=request_id)
+        self.status = status
+        self.decline_code = decline_code
+        self.dashboard_url = dashboard_url
+        self.payment_intent_id = payment_intent_id
+
+
+class LiumChargeOutcomeUnknownError(LiumError):
+    """A card top-up (:meth:`Lium.topup_card`) was posted and the answer was lost — a timeout, a
+    dropped connection, or a 5xx after the platform had already asked Stripe to charge. Stripe
+    charges the card before it answers, so the charge **may have gone through**: check the balance
+    (or the transactions) before trying again. A repeat with the same ``idempotency_key`` returns the
+    first charge instead of making a second one; the key is on the exception.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        idempotency_key: str,
+        code: str | None = None,
+        hint: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message, code=code, hint=hint, request_id=request_id)
+        self.idempotency_key = idempotency_key
+
 __all__ = [
     "LiumError",
     "LiumAuthError",
@@ -211,4 +260,6 @@ __all__ = [
     "LiumScopeError",
     "LiumBudgetExceededError",
     "RemoteExecutionError",
+    "LiumCardTopUpError",
+    "LiumChargeOutcomeUnknownError",
 ]

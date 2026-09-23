@@ -15,7 +15,7 @@ mirrors it and a unit test keeps the two in step.
 | 3 | `EXIT_API_ERROR` | The API refused or failed the call (5xx, 404 on a resource, rate limit, any other non-2xx). |
 | 4 | `EXIT_SSH_ERROR` | ssh could not connect, the pod has no SSH endpoint yet, or no ssh client is installed. |
 | 5 | `EXIT_POD_NOT_FOUND` | The pod, cluster or fabric named on the command line does not exist (`lium clusters rm`: also a cluster the API answered 404 for). |
-| 6 | `EXIT_PERMISSION_DENIED` | The account is not allowed to do this: unverified account, insufficient balance, an API key without the scope (403); an API key over its budget (402). |
+| 6 | `EXIT_PERMISSION_DENIED` | The account is not allowed to do this: unverified account, insufficient balance, an API key without the scope (403); an API key over its budget (402). Overloaded by `topup card` (not released yet) for "outcome unknown": the answer to the charge was lost (`charge_outcome_unknown`) or the platform answered 202 without a `payment_intent_id` (`charge_pending`) — a person must check the balance before the command runs again. A 202 with a `payment_intent_id` is success (exit 0). A script branching on the exit code alone cannot tell these from a 403; `error.code` in the JSON envelope does. |
 
 `lium exec` exits with the remote command's own exit status, so `lium exec pod
 "cmd" && next` behaves like `cmd && next` would on the pod. Usage errors caught
@@ -96,7 +96,7 @@ Codes raised by the shared error handler (any command can produce them) when the
 | `session_required` | 3 | A session-only command (`lium keys …`, the `lium workspaces` writes) ran without a session token, the token was refused (expired), or `lium workspaces login` was refused. | `lium workspaces login` (or set `LIUM_SESSION_TOKEN`); an API key cannot fix this. |
 | `value_error` | 2 | A value the command received was invalid (SDK `ValueError`). | Check the options. |
 | `invalid_arguments` | 2 | Options that contradict each other or a malformed value. | `lium <command> --help`. |
-| `confirmation_required` | 2 | A yes/no question could not be asked: no terminal can answer, or the terminal went away mid-prompt (`ui.confirm`, DAH-2883); `lium rm` without `--yes` when stdin is not a terminal, whatever the target (DAH-3332). | Re-run with `--yes`. |
+| `confirmation_required` | 2 | A yes/no question could not be asked: no terminal can answer, or the terminal went away mid-prompt (`ui.confirm`); `lium rm` without `--yes` when stdin is not a terminal, whatever the target; `lium topup card --json` (not released yet) without `--yes`, terminal or not. | Re-run with `--yes`. |
 | `input_required` | 2 | A value would have been prompted for and no terminal can answer (`ui.prompt`, DAH-2883). | Pass it as an option. |
 | `permission_denied` | 6 | The API answered 403. | `lium balance`; verification on https://lium.io. |
 | `insufficient_balance` | 6 | 403 whose `error.code` is `insufficient_balance` (the platform's structured error body, lium-platform#210), or, from an older server, whose message says "Insufficient balance"; the SDK raises `LiumInsufficientBalanceError` with `required`/`available` parsed from the message when the server stated them. | `lium topup` or `lium fund`, or a cheaper node (`lium ls --sort price_total`). |
@@ -117,7 +117,20 @@ Codes raised by the shared error handler (any command can produce them) when the
 Commands add their own codes for the failures only they can have — for example
 `up` raises `node_selection_failed`, `template_failed`, `jupyter_install_failed`,
 `unreadable_dockerfile`; `exec` raises `unreadable_script`; `rm` raises
-`removal_failed`; `fund` raises `transfer_failed`; `init` raises `api_unreachable` (3, the
+`removal_failed`; `fund` raises `transfer_failed`; `topup card` (not released yet) passes on the platform's own
+`CARD_AUTHENTICATION_REQUIRED`, `CARD_DECLINED`, `NO_SAVED_CARD` and
+`NO_DEFAULT_CARD` (3: the
+API refused the charge and the balance did not move; `data` carries `dashboard_url`, the bank's
+`decline_code` and the `payment_intent_id`) and raises `charge_outcome_unknown` (6: a timeout or
+5xx after the charge was posted — it may have gone through; the message says to check `lium
+balance` before trying again, `data.idempotency_key` is the key a repeat must carry with the
+same amount within 24 h to get the
+same charge back; after that, check `lium balance` before repeating) and `charge_pending` (6 too: a 202 `processing` with no `payment_intent_id` —
+the outcome is not known, the charge may never have happened; a 202 with a `payment_intent_id`
+is success, exit 0; `data` is the server's
+answer, `status: processing`, the key and the amount included, and a repeat with the key and the
+same amount within 24 h shows the charge's
+status without making a second one); `init` raises `api_unreachable` (3, the
 key passed with `--api-key` was not checked) and `empty_api_key` (2), and its `invalid_api_key` hint says
 nothing was saved. They follow the same envelope
 and use the exit code of their family from the table above. Where re-running
