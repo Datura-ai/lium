@@ -11,11 +11,12 @@ only reference them.
 
 ```bash
 R=Datura-ai/lium
-# create it, with the owner as the one required reviewer (GitHub user id 114649324 = surcyf123)
+# create it with self-approval blocked; required reviewers: GitHub user id 114649324 = surcyf123 (the loop's
+# account, which the publish job checks for) plus at least one human (`gh api users/<login> --jq .id`)
 gh api -X PUT "repos/$R/environments/pypi" \
   --input - <<'JSON'
 { "reviewers": [ { "type": "User", "id": 114649324 } ],
-  "prevent_self_review": false,
+  "prevent_self_review": true,
   "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true } }
 JSON
 # only these refs may enter the environment: release tags, and main for the two stub workflows
@@ -25,19 +26,26 @@ gh api -X POST "repos/$R/environments/pypi/deployment-branch-policies" -f name=m
 
 Check: `gh api "repos/$R/environments/pypi" --jq '.protection_rules[]|.type'` → `required_reviewers`, `branch_policy`;
 `gh api "repos/$R/environments/pypi/deployment-branch-policies" --jq '.branch_policies[]|.type+" "+.name'` → `tag v*`,
-`branch main`. A run that reaches a publish job now waits under Actions → the run → **Review deployments** until the
+`branch main`;
+`gh api "repos/$R/environments/pypi" --jq '.protection_rules[]|select(.type=="required_reviewers")|.prevent_self_review'`
+→ `true`. A run that reaches a publish job now waits under Actions → the run → **Review deployments** until a
 reviewer approves; a dispatch from any other branch is refused before the job starts.
+
+Self-approval is blocked (`prevent_self_review: true`): GitHub refuses an approval from the account that started the
+run. A human reviewer approves each release. The loop's account (`surcyf123`) must not be the approving reviewer on
+any run. Today `surcyf123` is the only required reviewer, so at least one human must be a required reviewer on the
+`pypi` environment before any release can ship: add their id to `reviewers` in the command above and re-run the `PUT`.
 
 On pypi.org the project's trusted publisher must name this environment: Manage → Publishing → Add a new publisher →
 GitHub, owner `Datura-ai`, repository `lium`, workflow `release.yml` (or the stub's filename), environment `pypi`.
 PyPI then accepts an upload only from a job of that file that ran inside `pypi`. The `release` environment stays: it
 gates the GitHub release assets job in `release.yml`.
 
-**Order — it matters.** (1) Create the environment with its reviewer and the two policies, as above, **before the
-workflow change merges**: a workflow that names an environment that does not exist makes GitHub create it with no
-protection, and the first release would publish with no click. (2) Register the `pypi` publisher on pypi.org.
-(3) Merge. (4) Proof release, approved by the reviewer. (5) **Delete the old publisher** on pypi.org — today's
-`Datura-ai/lium · release.yml · (no environment)`. Until it is gone nothing fails closed: a publisher with no
+**Order — it matters.** (1) Create the environment with its reviewers (at least one human), self-approval blocked and
+the two policies, as above, **before the workflow change merges**: a workflow that names an environment that does not
+exist makes GitHub create it with no protection, and the first release would publish with no click. (2) Register the
+`pypi` publisher on pypi.org. (3) Merge. (4) Proof release, approved by a human reviewer. (5) **Delete the old
+publisher** on pypi.org — today's `Datura-ai/lium · release.yml · (no environment)`. Until it is gone nothing fails closed: a publisher with no
 environment accepts a token minted in any environment, so with no `pypi` publisher the upload goes through the old
 binding, and a branch whose edited `release.yml` drops the environment, run by hand, still uploads — any of the 7
 accounts with write access can do that today. (6) Apply the tag ruleset below. The publish job checks step (1)

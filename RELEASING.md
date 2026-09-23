@@ -27,19 +27,26 @@ nothing, at a later `0.1.1` it would demand `0.2.0`.
 ## Who can publish
 
 Only `.github/workflows/release.yml` can upload `lium.io` to PyPI, and only from a run that the **`pypi` environment's
-required reviewer approved**. PyPI's trusted publisher for the project names this repository, that file and that
-environment, so the upload token is minted inside the approved job and nowhere else; there is no PyPI API token in the
-repository's secrets or on anyone's machine. Two more things gate a release: the `release-tags` ruleset lets only the
-bypass list create, move or delete a `v*` tag (`gh release create` creates the tag, so it is covered), and the
+required reviewer approved**. Self-approval is blocked (`prevent_self_review: true`), a human reviewer approves each
+release, and the loop's account (`surcyf123`) must not be the approving reviewer. Today `surcyf123` is the only
+required reviewer, so at least one human must be a required reviewer on the `pypi` environment before any release can
+ship. PyPI's trusted publisher for the project names this repository, that file and that environment, so the upload
+token is minted inside the approved job and nowhere else; there is no PyPI API token in the repository's secrets or on
+anyone's machine. Two more things gate a release: the `release-tags` ruleset lets only the bypass list create, move or
+delete a `v*` tag (`gh release create` creates the tag, so it is covered), and the
 environment's branch policy admits only `v*` tags and `main`. `.github/rulesets/README.md` has the admin commands and the
 two checks. The same environment covers the two stub publishers, `release-deprecate-lium-cli.yml` (`lium-cli`) and
-`release-lium-alias.yml` (`lium`): they exist to hold those two names on PyPI so `pip install lium` cannot resolve to a
-stranger's package, and they run by hand.
+`release-lium-alias.yml` (`lium`), which run by hand. Neither name is held on PyPI today (read 23 Sep 2026):
+`https://pypi.org/pypi/lium/json` returns 404 and `https://pypi.org/simple/lium/` returns 404, so `lium` is not
+registered and anyone can register it; `lium-cli` is archived with no files (`https://pypi.org/simple/lium-cli/` →
+`"project-status": {"status": "archived"}`, `"files": []`). The last run of each stub failed:
+`release-deprecate-lium-cli.yml` on 11 May 2026, `release-lium-alias.yml` (its only run) on 31 Mar 2026.
 
-All of that is true once the admin steps have run **in this order**: (1) create the `pypi` environment with the owner
-as required reviewer — before the workflow change merges, because a missing environment is created unprotected on
-first use; (2) register the `pypi` publisher on pypi.org; (3) merge; (4) proof release, approved; (5) delete the old,
-environment-less publisher on pypi.org; (6) apply the tag ruleset. Step (5) is the one that closes the door: until
+All of that is true once the admin steps have run **in this order**: (1) create the `pypi` environment with
+self-approval blocked and at least one human as required reviewer — before the workflow change merges, because a
+missing environment is created unprotected on first use; (2) register the `pypi` publisher on pypi.org; (3) merge;
+(4) proof release, approved by a human reviewer; (5) delete the old, environment-less publisher on pypi.org; (6) apply
+the tag ruleset. Step (5) is the one that closes the door: until
 then any account with write access can still publish through a hand-run, edited copy of the workflow. The publish
 job refuses to run in an unprotected `pypi` environment (it reads the environment's rules back first), but it cannot
 see pypi.org's publisher list.
