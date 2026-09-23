@@ -3,7 +3,14 @@
 A new connection to a distant node is several round trips before a command can start;
 the second command to the same pod must open only a channel on the connection it has.
 """
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import threading
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -313,3 +320,146 @@ def test_stream_exec_runs_on_the_kept_connection_with_the_pty_it_asked_for(monke
 
     assert world.connects == [pod.ssh_cmd]
     assert channels[0].pty and channels[0].command == "tail log" and channels[0].closed
+
+
+def _kept(lium):
+    [entry] = lium._ssh_pool.values()
+    return entry
+
+
+def test_a_connection_with_a_call_in_flight_is_kept_past_the_idle_limit(monkeypatch, world):
+    clock = [1000.0]
+    monkeypatch.setattr(_ssh_reuse, "monotonic", lambda: clock[0])
+    lium = _lium(monkeypatch, world)
+    pod = _pod()
+
+    with lium._remote_command(pod, "tail -f train.log"):      # a stream that outlives the idle limit
+        clock[0] += _ssh_reuse.IDLE_SECONDS + 60
+        assert lium.has_open_connection(pod)
+        assert lium.exec(pod, command="nvidia-smi")["stdout"] == "ran nvidia-smi"
+        assert world.connects == [pod.ssh_cmd] and world.clients[0].transport.active
+        assert _kept(lium).users == 1
+
+    clock[0] += _ssh_reuse.IDLE_SECONDS - 1                    # idle counts from the end of the last call
+    lium.exec(pod, command="a")
+    assert len(world.connects) == 1
+    clock[0] += _ssh_reuse.IDLE_SECONDS + 1
+    lium.exec(pod, command="b")
+    assert len(world.connects) == 2 and world.closes == 1
+
+
+def test_an_ssh_session_block_keeps_its_connection_past_the_idle_limit(monkeypatch, world):
+    clock = [1000.0]
+    monkeypatch.setattr(_ssh_reuse, "monotonic", lambda: clock[0])
+    lium = _lium(monkeypatch, world)
+    pod = _pod()
+
+    with lium.ssh_session(pod):
+        clock[0] += _ssh_reuse.IDLE_SECONDS * 3
+        lium.exec(pod, command="a")
+        assert world.connects == [pod.ssh_cmd] and world.closes == 0
+    assert _kept(lium).users == 0
+
+
+def test_every_call_gives_its_use_back_also_when_it_fails(monkeypatch, world, tmp_path):
+    lium = _lium(monkeypatch, world)
+    pod = _pod()
+    lium.exec(pod, command="first")
+    world.clients[0].transport.fail_after_send = True
+    with pytest.raises(EOFError):
+        lium.exec(pod, command="second")
+    lium.download(pod, remote="/workspace/a", local=str(tmp_path / "a"))
+    assert _kept(lium).users == 0
+
+
+def test_a_transfer_while_another_runs_gets_an_sftp_session_of_its_own(monkeypatch, world):
+    lium = _lium(monkeypatch, world)
+    pod = _pod()
+
+    with lium._sftp(pod) as first:
+        with lium._sftp(pod) as second:
+            assert second is not first
+        assert second.closed and not first.closed
+    with lium._sftp(pod) as again:
+        assert again is first
+    assert world.connects == [pod.ssh_cmd] and world.sftp_opens == 2
+
+
+# -- against a real sshd --------------------------------------------------------------------------
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import bench_warm_exec  # noqa: E402
+
+_no_sshd = bench_warm_exec.find_sshd() is None or shutil.which("ssh-keygen") is None
+
+
+@pytest.fixture
+def real_pod(monkeypatch):
+    try:
+        bench = bench_warm_exec.Bench(rtt_ms=0, api_ms=0)
+    except (RuntimeError, OSError, subprocess.CalledProcessError) as e:
+        pytest.skip(f"no local sshd: {e}")
+    monkeypatch.setenv("HOME", str(bench.home))
+    monkeypatch.delenv("LIUM_SSH_REUSE", raising=False)
+    lium = Lium(Config(api_key="test", ssh_key_path=bench.sshd.client_key))
+    pod = _pod(ssh_cmd=f"ssh {bench.sshd.user}@127.0.0.1 -p {bench.proxy.port}")
+    try:
+        yield lium, pod, bench
+    finally:
+        lium.close()
+        bench.close()
+
+
+@pytest.mark.skipif(_no_sshd, reason="needs sshd and ssh-keygen")
+def test_a_stream_longer_than_the_idle_limit_survives_a_call_made_during_it(monkeypatch, real_pod):
+    lium, pod, bench = real_pod
+    monkeypatch.setattr(_ssh_reuse, "IDLE_SECONDS", 1)
+    output, side = "", []
+
+    def call_from_another_thread():
+        side.append(lium.exec(pod, command="echo side")["stdout"])
+
+    for chunk in lium.stream_exec(pod, command="for i in 1 2 3 4; do echo tick$i; sleep 1; done", pty=False):
+        output += chunk["data"]
+        if "tick2" in output and not side:
+            side.append(lium.exec(pod, command="echo inline")["stdout"])   # the same thread, inside the loop
+            worker = threading.Thread(target=call_from_another_thread)
+            worker.start()
+            worker.join(30)
+
+    assert [f"tick{i}" in output for i in range(1, 5)] == [True] * 4
+    assert side == ["inline\n", "side\n"]
+    assert bench.proxy.connections == 1
+
+
+@pytest.mark.skipif(_no_sshd, reason="needs sshd and ssh-keygen")
+def test_concurrent_uploads_and_downloads_to_one_pod_arrive_whole(real_pod, tmp_path):
+    lium, pod, bench = real_pod
+    remote_dir = bench.workdir / "remote"
+    remote_dir.mkdir()
+    errors = []
+
+    def transfer(worker):
+        try:
+            for n in range(2):
+                data = os.urandom(2 * 1024 * 1024)
+                local = tmp_path / f"up-{worker}-{n}"
+                local.write_bytes(data)
+                remote = remote_dir / f"{worker}-{n}"
+                lium.upload(pod, local=str(local), remote=str(remote))
+                back = tmp_path / f"down-{worker}-{n}"
+                lium.download(pod, remote=str(remote), local=str(back))
+                assert hashlib.sha256(remote.read_bytes()).digest() == hashlib.sha256(data).digest()
+                assert hashlib.sha256(back.read_bytes()).digest() == hashlib.sha256(data).digest()
+        except Exception as e:  # noqa: BLE001 — reported by the assertion below
+            errors.append(repr(e))
+
+    workers = [threading.Thread(target=transfer, args=(w,)) for w in range(4)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(120)
+    assert not any(w.is_alive() for w in workers), "a transfer hung"
+    assert errors == []
+    assert len(list(remote_dir.iterdir())) == 8
+    assert bench.proxy.connections == 1

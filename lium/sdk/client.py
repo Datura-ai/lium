@@ -515,7 +515,6 @@ class Lium:
         self.workspaces = WorkspacesClient(self)
         self._ssh_sessions: Dict[str, paramiko.SSHClient] = {}  # pod id -> connection held by ssh_session()
         self._ssh_session_entries: Dict[str, PooledConnection] = {}  # pod id -> kept connection ssh_session() holds
-        self._ssh_session_sftp: Dict[str, Any] = {}  # pod id -> SFTP session on a held connection of its own
         # (pod id, ssh_cmd) -> connection kept between calls; a new ssh_cmd (reboot) never reuses the old one
         self._ssh_pool: Dict[Tuple[str, Optional[str]], PooledConnection] = {}
         self._ssh_pool_lock = threading.Lock()
@@ -2558,7 +2557,7 @@ class Lium:
             The active ``paramiko.SSHClient``.
         """
         if ssh_reuse_enabled() and self._held_session(pod) is None:
-            entry = self._pooled_connection(pod)
+            entry = self._pooled_connection(pod)   # in use until the block ends
             sessions = self.__dict__.setdefault("_ssh_sessions", {})
             entries = self.__dict__.setdefault("_ssh_session_entries", {})
             sessions[pod.id], entries[pod.id] = entry.client, entry
@@ -2566,7 +2565,8 @@ class Lium:
                 yield entry.client
             finally:
                 sessions.pop(pod.id, None)
-                entries.pop(pod.id, None)
+                current = entries.pop(pod.id, entry)   # a reconnect inside the block moved it
+                current.release()
             return
 
         with self.ssh_connection(pod, timeout) as client:
@@ -2575,35 +2575,44 @@ class Lium:
                 yield client
             finally:
                 self._ssh_sessions.pop(pod.id, None)
-                sftp = self.__dict__.get("_ssh_session_sftp", {}).pop(pod.id, None)
-                if sftp is not None:
-                    try:
-                        sftp.close()
-                    except Exception:  # noqa: BLE001 — the connection is closed right after
-                        pass
 
     def _held_session(self, pod: PodInfo) -> Optional["paramiko.SSHClient"]:
         return self.__dict__.get("_ssh_sessions", {}).get(pod.id)
 
     def _pooled_connection(self, pod: PodInfo) -> PooledConnection:
-        """The connection kept for ``pod``: the open one when it is still up and was used recently, else a new one."""
+        """The connection kept for ``pod``, marked in use: the open one when it is up and in use or
+        used recently, else a new one. The caller calls ``release()`` when its call ends."""
         pool = self.__dict__.setdefault("_ssh_pool", {})
         lock = self.__dict__.setdefault("_ssh_pool_lock", threading.Lock())
+        connecting = self.__dict__.setdefault("_ssh_connecting", {})
         key = (pod.id, getattr(pod, "ssh_cmd", None))
-        stale = None
-        with lock:
-            entry = pool.get(key)
-            if entry is not None and not entry.usable():
-                stale, entry = pool.pop(key), None
-        if stale is not None:
-            stale.close()
-        if entry is None:
-            fresh = PooledConnection.open(lambda: self.ssh_connection(pod))
+
+        def take_kept() -> Optional[PooledConnection]:
+            # checked and taken under one lock: an idle check never closes a connection being taken
             with lock:
-                entry = pool.setdefault(key, fresh)
-            if entry is not fresh:  # another thread connected to the same pod meanwhile
-                fresh.close()
-        entry.touch()
+                entry = pool.get(key)
+                if entry is not None and not entry.usable():
+                    stale, entry = pool.pop(key), None
+                else:
+                    stale = None
+                    if entry is not None:
+                        entry.acquire()
+            if stale is not None:
+                stale.close()
+            return entry
+
+        entry = take_kept()
+        if entry is not None:
+            return entry
+        with lock:
+            connect_lock = connecting.setdefault(key, threading.Lock())
+        with connect_lock:   # calls to one pod that start together share one new connection
+            entry = take_kept()
+            if entry is None:
+                entry = PooledConnection.open(lambda: self.ssh_connection(pod))
+                entry.acquire()
+                with lock:
+                    pool[key] = entry
         return entry
 
     def _drop_pooled(self, pod: Union[PodInfo, str], entry: Optional[PooledConnection] = None) -> None:
@@ -2653,45 +2662,72 @@ class Lium:
                 yield client.exec_command(command, **exec_kwargs)
             return
 
-        entry, channel = self._on_kept_connection(pod, entry or self._pooled_connection(pod), PooledConnection.open_channel)
-        if channel is None:
-            streams = entry.client.exec_command(command, **exec_kwargs)
-        else:
-            streams = start_command(channel, command, get_pty=bool(exec_kwargs.get("get_pty")))
+        entry = self._use(pod, entry)
+        entry, channel = self._on_kept_connection(pod, entry, PooledConnection.open_channel)
         try:
+            if channel is None:
+                streams = entry.client.exec_command(command, **exec_kwargs)
+            else:
+                streams = start_command(channel, command, get_pty=bool(exec_kwargs.get("get_pty")))
             yield streams
         finally:
             if channel is not None:
                 channel.close()
-            if not entry.alive():
-                self._drop_pooled(pod, entry)
+            self._done_with(pod, entry)
+
+    def _use(self, pod: PodInfo, session_entry: Optional[PooledConnection]) -> PooledConnection:
+        """The connection a call runs on, marked in use: the :meth:`ssh_session` one, else the kept one."""
+        if session_entry is None:
+            return self._pooled_connection(pod)
+        session_entry.acquire()
+        return session_entry
+
+    def _done_with(self, pod: PodInfo, entry: PooledConnection) -> None:
+        entry.release()
+        if not entry.alive():
+            self._drop_pooled(pod, entry)
 
     def _on_kept_connection(self, pod: PodInfo, entry: PooledConnection, open_on: Callable[[PooledConnection], Any]):
         """``(entry, open_on(entry))``; when that fails, the same on a new connection, once.
 
-        ``open_on`` opens a channel (or the SFTP session). When it cannot, the kept connection
+        ``open_on`` opens a channel (or an SFTP session). When it cannot, the kept connection
         died while idle and nothing reached the pod, so connecting again and sending once is safe.
+        The caller holds one use of ``entry`` and gets one use of the returned entry; when this
+        raises it holds none.
         """
         try:
             return entry, open_on(entry)
         except (paramiko.SSHException, EOFError, OSError):
+            entry.release()
             self._drop_pooled(pod, entry)
+            entries = self.__dict__.get("_ssh_session_entries", {})
+            in_session = entries.get(pod.id) is entry
             entry = self._pooled_connection(pod)
-            if pod.id in self.__dict__.get("_ssh_session_entries", {}):  # inside ssh_session(): the block moves over too
-                self._ssh_session_entries[pod.id] = entry
+            if in_session:  # inside ssh_session(): the block moves over too, with its own use
+                entry.acquire()
+                entries[pod.id] = entry
                 self._ssh_sessions[pod.id] = entry.client
+        except BaseException:
+            entry.release()
+            raise
+        try:
             return entry, open_on(entry)
+        except BaseException:
+            entry.release()
+            raise
 
     @contextmanager
     def _sftp(self, pod: PodInfo):
-        """An SFTP session on the pod's connection (see :meth:`_remote_command`), reused while that connection stays open."""
+        """An SFTP session on the pod's connection (see :meth:`_remote_command`): the kept one when no
+        other transfer is using it, else one of its own for this call."""
         entry = self.__dict__.get("_ssh_session_entries", {}).get(pod.id)
         held = self._held_session(pod)
         if held is not None and entry is None:
-            sessions = self.__dict__.setdefault("_ssh_session_sftp", {})
-            if pod.id not in sessions:
-                sessions[pod.id] = held.open_sftp()
-            yield sessions[pod.id]
+            sftp = held.open_sftp()
+            try:
+                yield sftp
+            finally:
+                sftp.close()
             return
         if entry is None and not ssh_reuse_enabled():
             with self.ssh_connection(pod) as client:
@@ -2702,12 +2738,13 @@ class Lium:
                     sftp.close()
             return
 
-        entry, sftp = self._on_kept_connection(pod, entry or self._pooled_connection(pod), PooledConnection.sftp)
+        entry = self._use(pod, entry)
+        entry, (sftp, shared) = self._on_kept_connection(pod, entry, PooledConnection.take_sftp)
         try:
             yield sftp
         finally:
-            if not entry.alive():
-                self._drop_pooled(pod, entry)
+            entry.give_back_sftp(sftp, shared)
+            self._done_with(pod, entry)
 
     def _prep_command(self, command: str, env: Optional[Dict[str, str]] = None) -> str:
         """Prefix ``command`` with the exports spelled out inline.

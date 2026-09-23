@@ -8,6 +8,7 @@ imported by the caller (``lium.sdk.client``); nothing here imports it.
 from __future__ import annotations
 
 import os
+import threading
 from contextlib import ExitStack
 from time import monotonic  # bound here: the idle clock is not the one a caller's timeout loop reads
 from typing import Any, Callable, ContextManager, Optional, Tuple
@@ -15,7 +16,8 @@ from typing import Any, Callable, ContextManager, Optional, Tuple
 REUSE_ENV = "LIUM_SSH_REUSE"
 # Sent while the connection sits idle, so a NAT or firewall on the way does not drop it.
 KEEPALIVE_SECONDS = 15
-# A connection idle longer than this is closed; the next call opens a new one.
+# A connection that no call has used for this long (counted from the end of the last call) is
+# closed; the next call opens a new one. A connection with a call in flight is kept.
 IDLE_SECONDS = 300
 # How long opening a channel on a kept connection may take before the connection is written off.
 CHANNEL_OPEN_TIMEOUT = 15
@@ -34,12 +36,20 @@ def paramiko_transport(client: Any) -> Any:
 
 
 class PooledConnection:
-    """One open connection (and its SFTP session, once asked for) held for later calls."""
+    """One open connection (and its SFTP session, once asked for) held for later calls.
+
+    ``users`` counts the calls running on it (a command, a stream, a transfer, an
+    :meth:`Lium.ssh_session` block); while it is above zero the connection is in use and
+    never idle. The idle clock starts when the last of them ends.
+    """
 
     def __init__(self, stack: ExitStack, client: Any):
         self._stack = stack
         self.client = client
         self._sftp: Any = None
+        self._sftp_lock = threading.Lock()   # paramiko's SFTPClient serves one caller at a time
+        self._users_lock = threading.Lock()
+        self.users = 0
         self.last_used = monotonic()
 
     @classmethod
@@ -61,10 +71,19 @@ class PooledConnection:
         return transport is None or bool(transport.is_active())
 
     def usable(self, now: Optional[float] = None) -> bool:
-        return self.alive() and (now or monotonic()) - self.last_used < IDLE_SECONDS
+        if not self.alive():
+            return False
+        with self._users_lock:
+            return self.users > 0 or (now or monotonic()) - self.last_used < IDLE_SECONDS
 
-    def touch(self) -> None:
-        self.last_used = monotonic()
+    def acquire(self) -> None:
+        with self._users_lock:
+            self.users += 1
+
+    def release(self) -> None:
+        with self._users_lock:
+            self.users = max(0, self.users - 1)
+            self.last_used = monotonic()
 
     def open_channel(self) -> Any:
         """A session channel on this connection, or None for a stand-in client without a transport.
@@ -79,10 +98,30 @@ class PooledConnection:
             raise EOFError("the kept SSH connection is closed")
         return transport.open_session(timeout=CHANNEL_OPEN_TIMEOUT)
 
-    def sftp(self) -> Any:
-        if self._sftp is None or getattr(getattr(self._sftp, "sock", None), "closed", False):
-            self._sftp = self.client.open_sftp()
-        return self._sftp
+    def take_sftp(self) -> Tuple[Any, bool]:
+        """``(sftp, shared)``: the kept SFTP session when no other call is using it, else one of its own.
+
+        Hand it back with :meth:`give_back_sftp`. Two transfers at once each get a session, so
+        neither waits for the other and no request of one lands in the other's.
+        """
+        if not self._sftp_lock.acquire(blocking=False):
+            return self.client.open_sftp(), False
+        try:
+            if self._sftp is None or getattr(getattr(self._sftp, "sock", None), "closed", False):
+                self._sftp = self.client.open_sftp()
+            return self._sftp, True
+        except BaseException:
+            self._sftp_lock.release()
+            raise
+
+    def give_back_sftp(self, sftp: Any, shared: bool) -> None:
+        if shared:
+            self._sftp_lock.release()
+            return
+        try:
+            sftp.close()
+        except Exception:  # noqa: BLE001 — a per-call session on a connection that may have died
+            pass
 
     def close(self) -> None:
         sftp, self._sftp = self._sftp, None
