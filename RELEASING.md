@@ -44,7 +44,9 @@ two checks. A human creates each release tag; the loop's account is not on the r
 creates, moves or deletes a release tag. Today (read 23 Sep 2026) no tag ruleset is applied to this repository, so any
 account with write access, the loop's account included, can create a `v*` tag until an admin applies
 `.github/rulesets/release-tags.json`. The same environment covers the two stub publishers, `release-deprecate-lium-cli.yml` (`lium-cli`) and
-`release-lium-alias.yml` (`lium`), which run by hand. Neither name is held on PyPI today (read 23 Sep 2026):
+`release-lium-alias.yml` (`lium`), which run by hand and publish only from `main`: a run on any other ref builds the
+package and uploads nothing. Each builds in a job with read-only access and uploads from a separate `publish` job in
+the `pypi` environment. Neither name is held on PyPI today (read 23 Sep 2026):
 `https://pypi.org/pypi/lium/json` returns 404 and `https://pypi.org/simple/lium/` returns 404, so `lium` is not
 registered and anyone can register it; `lium-cli` is archived with no files (`https://pypi.org/simple/lium-cli/` →
 `"project-status": {"status": "archived"}`, `"files": []`). The last run of each stub failed:
