@@ -57,7 +57,8 @@ self-approval blocked and the two policies, as above, **before the workflow chan
 environment that does not exist makes GitHub create it with no protection, and the first release would publish with
 no click. The environment and both policies exist today; what step (1) still needs is the reviewers `PUT` with human
 ids. (2) Register the
-`pypi` publisher on pypi.org. (3) Merge. (4) Proof release, approved by a human reviewer. (5) **Delete the old
+`pypi` publisher on pypi.org. (3) Merge. (4) Proof release: a human creates the release and its tag, and a human
+reviewer approves the publish job. (5) **Delete the old
 publisher** on pypi.org — today's `Datura-ai/lium · release.yml · (no environment)`. Until it is gone nothing fails closed: a publisher with no
 environment accepts a token minted in any environment, so with no `pypi` publisher the upload goes through the old
 binding, and a branch whose edited `release.yml` drops the environment, run by hand, still uploads — any of the 7
@@ -74,10 +75,14 @@ gh api "repos/$R/rulesets" --method POST --input .github/rulesets/release-tags.j
 ```
 
 `release-tags.json` targets `refs/tags/v*` with the rules `creation`, `update` and `deletion`; the bypass list is the
-release role, given as GitHub user ids (`gh api users/<login> --jq .id`): 114649324 (surcyf123, owner) and 4623096
-(arhangel66, who has created every release since v0.3.0). Add a person by appending
-`{ "actor_id": <id>, "actor_type": "User", "bypass_mode": "always" }`; remove one by deleting the line and re-applying
-with `gh api "repos/$R/rulesets/<id>" --method PUT --input .github/rulesets/release-tags.json`.
+release role, given as GitHub user ids (`gh api users/<login> --jq .id`): 4623096 (arhangel66, who has created every
+release since v0.3.0). A human creates each release tag; the loop's account (114649324, `surcyf123`) is not on the
+list and never creates, moves or deletes a release tag. Add a human by appending
+`{ "actor_id": <human-id>, "actor_type": "User", "bypass_mode": "always" }` (never 114649324); remove one by deleting
+the line and re-applying with `gh api "repos/$R/rulesets/<id>" --method PUT --input .github/rulesets/release-tags.json`.
+
+Today (read 23 Sep 2026) no tag ruleset is applied to this repository, so any account with write access, the loop's
+account included, can create a `v*` tag until an admin applies this file.
 
 Check: `gh api "repos/$R/rulesets?targets=tag" --jq '.[]|.name+" "+.enforcement'` → `release-tags active`.
 A `v*` tag pushed by anyone outside the bypass list is refused by GitHub before any workflow runs; a `gh release
@@ -91,6 +96,6 @@ create vX.Y.Z` by such a person fails the same way, because it creates the tag.
 | merge this change before the `pypi` environment exists, so GitHub creates it unprotected | the publish job's first step, which reads the environment's rules and stops when no required reviewer is set |
 | the loop's account approves a release someone else started (any one listed reviewer can approve) | humans only in the reviewers list; the publish job's first step stops while 114649324 is listed or a team is |
 | a repository admin deploys to `pypi` without approval | nothing while `can_admins_bypass` is `true` (today's value); turning it off is an admin setting |
-| create a release on a tag of their own commit | the tag ruleset (only the bypass list creates `v*`), then the reviewer's approval |
+| create a release on a tag of their own commit | the tag ruleset (only the bypass list, humans only, creates `v*`), then the reviewer's approval — **only once an admin applies it** (order step 6); today no tag ruleset exists |
 | re-point an existing `v*` tag at another commit and re-run | the ruleset's `update` rule |
 | a PyPI API token in a GitHub secret or on a laptop | none exists for these packages; trusted publishing is the only upload path |

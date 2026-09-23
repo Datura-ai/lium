@@ -35,10 +35,13 @@ release ships until an admin replaces it with a human. The environment reads `ca
 admin can deploy to `pypi` without approval; turning that off is an admin setting, and the owner decides. PyPI's
 trusted publisher for the project names this repository, that file and that environment, so the upload
 token is minted inside the approved job and nowhere else; there is no PyPI API token in the repository's secrets or on
-anyone's machine. Two more things gate a release: the `release-tags` ruleset lets only the bypass list create, move or
-delete a `v*` tag (`gh release create` creates the tag, so it is covered), and the
-environment's branch policy admits only `v*` tags and `main`. `.github/rulesets/README.md` has the admin commands and the
-two checks. The same environment covers the two stub publishers, `release-deprecate-lium-cli.yml` (`lium-cli`) and
+anyone's machine. Two more things gate a release: the `release-tags` ruleset lets only its bypass list, humans only,
+create, move or delete a `v*` tag (`gh release create` creates the tag, so it is covered), and the environment's
+branch policy admits only `v*` tags and `main`. `.github/rulesets/README.md` has the admin commands and the
+two checks. A human creates each release tag; the loop's account is not on the ruleset's bypass list and never
+creates, moves or deletes a release tag. Today (read 23 Sep 2026) no tag ruleset is applied to this repository, so any
+account with write access, the loop's account included, can create a `v*` tag until an admin applies
+`.github/rulesets/release-tags.json`. The same environment covers the two stub publishers, `release-deprecate-lium-cli.yml` (`lium-cli`) and
 `release-lium-alias.yml` (`lium`), which run by hand. Neither name is held on PyPI today (read 23 Sep 2026):
 `https://pypi.org/pypi/lium/json` returns 404 and `https://pypi.org/simple/lium/` returns 404, so `lium` is not
 registered and anyone can register it; `lium-cli` is archived with no files (`https://pypi.org/simple/lium-cli/` →
@@ -48,14 +51,15 @@ registered and anyone can register it; `lium-cli` is archived with no files (`ht
 All of that is true once the admin steps have run **in this order**: (1) create the `pypi` environment with
 self-approval blocked and humans only as required reviewers (at least one; not `surcyf123`) — before the workflow
 change merges, because a missing environment is created unprotected on first use; (2) register the `pypi` publisher on pypi.org; (3) merge;
-(4) proof release, approved by a human reviewer; (5) delete the old, environment-less publisher on pypi.org; (6) apply
+(4) proof release: a human creates the release and its tag, and a human reviewer approves it; (5) delete the old, environment-less publisher on pypi.org; (6) apply
 the tag ruleset. Step (5) is the one that closes the door: until
 then any account with write access can still publish through a hand-run, edited copy of the workflow. The publish
 job reads the environment's rules back first and refuses to run unless there is at least one required reviewer, the
 loop's account is not one of them, every reviewer is a user (it cannot read team membership), and
 `prevent_self_review` is `true`; it cannot see pypi.org's publisher list.
 
-What a release looks like after this: `gh release create vX.Y.Z --prerelease …` → the build jobs run → the run pauses at
+What a release looks like after this: a human on the ruleset's bypass list runs `gh release create vX.Y.Z
+--prerelease …` → the build jobs run → the run pauses at
 **approve-and-publish** and GitHub e-mails the reviewer → Actions → the run → **Review deployments** → **Approve and
 deploy** → the wheel and sdist go up with PEP 740 attestations (each file's page on pypi.org shows a *Provenance* link;
 `https://pypi.org/integrity/lium.io/X.Y.Z/<filename>/provenance` returns the signed statement) → the GitHub release
