@@ -565,6 +565,23 @@ def test_show_on_a_server_without_the_scopes_route_lists_the_scope_names_alone(h
 
 
 @responses.activate
+def test_show_table_on_a_server_without_the_scopes_route_still_exits_0(home, monkeypatch):
+    """A #634-shaped server echoes pod_visibility but has no GET /keys/scopes. Table-mode
+    keys show must not raise; it prints the value without the server's sentence."""
+    session(monkeypatch)
+    responses.add(responses.GET, f"{API}/keys", json=fixture("keys"))
+    responses.add(responses.GET, f"{API}/keys/scopes", status=404, json={"detail": "Not Found"})
+    no_refusals_route()
+
+    result = run("keys", "show", "ops")
+
+    assert result.exit_code == 0, result.output
+    text = " ".join(result.output.split())
+    assert "Pod visibility account" in text
+    assert "account —" not in text
+
+
+@responses.activate
 def test_show_an_unknown_or_ambiguous_name_is_refused(home, monkeypatch):
     session(monkeypatch)
     twins = fixture("keys")

@@ -393,7 +393,10 @@ def keys_show_command(key: str, workspace: Optional[str], json_output: bool):
         click.echo(json.dumps({**found.to_dict(), "can_do": can_do, "refusals": rows, "refusals_today": today}, indent=2))
         return
     visibility = found.pod_visibility or "—"
-    described = lium.api_keys.pod_visibilities().get(found.pod_visibility or "") if found.pod_visibility else None
+    try:
+        described = lium.api_keys.pod_visibilities().get(found.pod_visibility or "") if found.pod_visibility else None
+    except LiumError:
+        described = None
     ui.info(escape(f"{found.name}  ({found.id})"))
     rows = [
         ("Workspace", target.name),
