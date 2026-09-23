@@ -14,7 +14,7 @@ import pytest
 import responses
 
 from lium.cli.utils import EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, EXIT_PERMISSION_DENIED, _classify_sdk_error
-from lium.sdk import Config, Lium, LiumBudgetExceededError, LiumPermissionError, LiumScopeError
+from lium.sdk import Config, Lium, LiumBudgetExceededError, LiumError, LiumPermissionError, LiumScopeError
 from lium.sdk.api_keys import BILLING_ALONE, DEFAULT_SCOPES
 from lium.sdk.client import permission_error
 from lium.sdk.exceptions import LiumNotFoundError
@@ -1046,6 +1046,31 @@ def test_a_402_on_a_pods_schedule_change_is_not_swallowed_as_a_failed_huid(home)
     assert envelope["data"]["window"] == "max" and envelope["error"]["exit_code"] == EXIT_PERMISSION_DENIED
 
 
+def test_schedule_removal_collects_a_402_and_still_schedules_later_pods():
+    """The server refuses only that pod's extension; later pods must still be scheduled."""
+    from types import SimpleNamespace
+
+    from lium.cli.rm.actions import ScheduleRemovalAction
+
+    calls = []
+
+    class FakeLium:
+        def schedule_termination(self, pod, termination_time=None):
+            calls.append(pod.huid)
+            if pod.huid == "a":
+                raise LiumBudgetExceededError("budget a", window="daily")
+
+    with pytest.raises(LiumBudgetExceededError, match="budget a"):
+        ScheduleRemovalAction().execute(
+            {
+                "pods": [SimpleNamespace(huid="a"), SimpleNamespace(huid="b")],
+                "lium": FakeLium(),
+                "termination_time": "2h",
+            }
+        )
+    assert calls == ["a", "b"]
+
+
 @responses.activate
 def test_a_402_without_an_error_body_is_still_a_budget_error_with_no_figures(home):
     responses.add(responses.GET, f"{API}/pods", status=402, body="Payment Required")
@@ -1085,8 +1110,15 @@ def test_a_403_naming_the_missing_scope_is_a_scope_error():
     error = permission_error("API key 'agent-1' does not have the 'manage' scope", key="sk_…", request_id="r1")
 
     assert isinstance(error, LiumScopeError) and error.scope == "manage" and error.request_id == "r1"
+    assert error.code == "missing_scope"
     assert str(error) == "Permission denied: API key 'agent-1' does not have the 'manage' scope (sk_…)"
     assert _classify_sdk_error(error) == ("missing_scope", EXIT_PERMISSION_DENIED)
+    tagged = permission_error(
+        "API key 'agent-1' does not have the 'read' scope",
+        code="forbidden",
+        request_id="r2",
+    )
+    assert isinstance(tagged, LiumScopeError) and tagged.code == "missing_scope"
 
 
 def test_other_403s_are_still_plain_permission_errors():
@@ -1113,11 +1145,11 @@ def test_sdk_api_keys_create_defaults_and_validation():
     responses.add(responses.POST, f"{API}/keys", json=fixture("key_created_budget"))
     lium = Lium(Config(api_key="k", session_token=SESSION))
 
-    key = lium.api_keys.create("agent-1", ["read", "rent"], daily_budget_usd=20, max_budget_usd=200, workspace_id=RESEARCH)
+    key = lium.api_keys.create("agent-1", ["read", "rent"], daily_budget_usd=20, max_budget_usd=2000, workspace_id=RESEARCH)
     default = lium.api_keys.create("plain", workspace_id=RESEARCH)
 
     first, second = (json.loads(c.request.body) for c in calls_to("/keys", "POST"))
-    assert first == {"name": "agent-1", "scopes": ["read", "rent"], "daily_budget_usd": 20.0, "max_budget_usd": 200.0}
+    assert first == {"name": "agent-1", "scopes": ["read", "rent"], "daily_budget_usd": 20.0, "max_budget_usd": 2000.0}
     assert second == {"name": "plain", "scopes": ["read", "rent", "manage"]}  # no pod_visibility unless named
     assert key.key == "sk_test_fixture_key_not_a_secret_0000000000" and key.daily_budget_usd == 20.0
     assert default.matches("AGENT-1") and "key" not in key.to_dict()
@@ -1139,8 +1171,23 @@ def test_sdk_api_keys_create_defaults_and_validation():
     assert json.loads(calls_to("/keys", "POST")[2].request.body) == {
         "name": "payer", "scopes": ["billing"], "monthly_budget_usd": 300.0,
     }
-    lium.api_keys.create("seer", pod_visibility="account", workspace_id=RESEARCH)
-    assert json.loads(calls_to("/keys", "POST")[3].request.body)["pod_visibility"] == "account"
+    lium.api_keys.create("seer", pod_visibility="own", workspace_id=RESEARCH)
+    assert json.loads(calls_to("/keys", "POST")[3].request.body)["pod_visibility"] == "own"
+
+
+@responses.activate
+def test_sdk_create_revokes_when_the_server_drops_a_budget():
+    """A server that ignores daily_budget_usd must not hand SDK callers an uncapped key."""
+    row = dict(fixture("key_created_budget"))
+    row.pop("daily_budget_usd")
+    responses.add(responses.POST, f"{API}/keys", json=row)
+    responses.add(responses.DELETE, f"{API}/keys/{row['id']}", status=204)
+    lium = Lium(Config(api_key="k", session_token=SESSION))
+
+    with pytest.raises(LiumError, match="did not record daily_budget_usd"):
+        lium.api_keys.create("agent-1", daily_budget_usd=20, workspace_id=RESEARCH)
+
+    assert calls_to(f"/keys/{row['id']}", "DELETE")
 
 
 def test_sdk_key_material_stays_out_of_repr_and_to_dict():

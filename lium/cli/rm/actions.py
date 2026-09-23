@@ -36,18 +36,21 @@ class ScheduleRemovalAction:
         termination_time: str = ctx["termination_time"]
 
         failed_huids = []
+        budget_errors: List[LiumBudgetExceededError] = []
 
         for pod in pods:
             try:
                 lium.schedule_termination(pod, termination_time=termination_time)
-            except LiumBudgetExceededError:
-                # the key's budget refused the new duration (402): it is the key, not this pod,
-                # that is over — every pod after it would be refused alike, and the reader needs the server's
-                # sentence (the window hit, the figures), which handle_errors prints as it does for `up`
-                raise
+            except LiumBudgetExceededError as e:
+                # The server refuses only this pod's extension. Collect the 402 and keep
+                # scheduling the rest so `rm a b --in 2h` still sets b when a is refused.
+                budget_errors.append(e)
             except Exception as e:
                 ui.debug(f"Failed to schedule {pod.huid}: {e}")
                 failed_huids.append(pod.huid)
+
+        if budget_errors:
+            raise budget_errors[0]
 
         return ActionResult(
             ok=(len(failed_huids) == 0),

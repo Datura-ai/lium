@@ -344,7 +344,7 @@ def permission_error(
     if scope is not None:
         # the platform's wording (utils/auth.py require_api_key_scope): "API key '<name>' does not have the
         # '<scope>' scope" — the fix is a key with that scope, not funds, so the class says so
-        return LiumScopeError(message, scope=scope or None, code=code, **context)
+        return LiumScopeError(message, scope=scope or None, code="missing_scope", request_id=context.get("request_id"))
     if code is not None:
         insufficient = code == "insufficient_balance"
     else:

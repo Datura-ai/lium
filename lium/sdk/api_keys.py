@@ -310,7 +310,23 @@ class ApiKeysClient:
         for field_name, amount in zip(BUDGET_FIELDS, amounts, strict=True):
             if amount is not None:
                 body[field_name] = amount
-        return _key(self._lium.workspaces._session_request("POST", "/keys", workspace_id, json=body).json())
+        key = _key(self._lium.workspaces._session_request("POST", "/keys", workspace_id, json=body).json())
+        asked = {name: body[name] for name in (*BUDGET_FIELDS, "pod_visibility") if name in body}
+        missing = unrecorded(key, asked)
+        if missing:
+            names = ", ".join(missing)
+            try:
+                self.revoke(key.id, workspace_id)
+            except LiumError as exc:
+                raise LiumError(
+                    f"This server did not record {names} on the new key '{key.name}' ({key.id}); "
+                    f"revoke it in the dashboard ({exc}). Create without those fields, or upgrade the server."
+                ) from exc
+            raise LiumError(
+                f"This server did not record {names} on the new key; the key was revoked. "
+                "Create without those fields, or upgrade the server."
+            )
+        return key
 
     def update(
         self,
