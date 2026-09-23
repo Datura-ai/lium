@@ -58,7 +58,7 @@ class ExecutorInfo(_Serializable):
     # no count takes and is billed for exactly these.
     available_gpu_count: Optional[int] = None
 
-    # How the GPUs are wired to each other, as the validator's `nvidia-smi topo` run saw them:
+    # How the GPUs are wired to each other, as Lium's `nvidia-smi topo` check saw them:
     # {"gpu_count", "gpu_pairs", "nvlink", "nvlink_links", "nvlink_pairs", "nvlink_active_links",
     #  "pcie_class", "p2p", "p2p_pairs", "p2p_ok_pairs", "matrix"}. None = not reported for this node.
     interconnect: Optional[Dict] = None

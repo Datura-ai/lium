@@ -56,7 +56,7 @@ class PodStartError(LiumError):
         pod: The last ``PodInfo`` seen for it, or ``None`` if it was never listed.
         status: The last status seen (upper-cased), or ``None`` if never listed.
         history: Every distinct status observed while waiting, in order.
-        cause: The failure the backend recorded for the pod (the validator's
+        cause: The failure the backend recorded for the pod (the error
             headline, e.g. ``Container creation failed due to ... (failure_step:
             ssh_connect)``), or ``None`` when it recorded nothing readable.
     """

@@ -452,9 +452,8 @@ def _get_client_version() -> str:
 class AlphaQuote:
     """USD -> alpha quote from ``GET /balance/convert/alpha``.
 
-    ``netuid`` is the subnet the alpha must be transferred on (the same subnet the
-    pay-tao-api-v2 listener credits), so it — not a hardcoded constant — drives the
-    on-chain ``transfer_stake``.
+    ``netuid`` is the subnet the alpha transfer goes to. The API sets it, and the
+    transfer uses the value from the quote.
     """
 
     usd: Decimal           # echoes the API's ``original``
@@ -1649,7 +1648,7 @@ class Lium:
                 backward compatible, so a node with a higher driver CUDA version satisfies the requirement.
             min_cpus: Optional minimum CPU thread count (``specs.cpu.count``). Nodes that report fewer
                 CPUs, or none, are excluded.
-            nvlink: ``True`` keeps only nodes whose validator saw every GPU pair on NVLink
+            nvlink: ``True`` keeps only nodes where Lium's node checks saw every GPU pair on NVLink
                 (:attr:`ExecutorInfo.nvlink`). Nodes with no verdict yet are excluded — a renter who asks
                 for NVLink must not be handed a PCIe box. ``False``/``None`` do not filter.
             min_download_mbps: Minimum Download in Mbps, judged on
@@ -1657,7 +1656,7 @@ class Lium:
                 Download). Nodes with no figure are excluded.
             view: ``"summary"`` (default) asks the API for the fields a listing reads — price, GPU/CPU/RAM/disk
                 headline specs, location, tier, network; an API that does not know the parameter returns the
-                full row. ``"full"`` asks for the whole validator scrape in :attr:`ExecutorInfo.specs` (docker
+                full row. ``"full"`` asks for the whole node-check scrape in :attr:`ExecutorInfo.specs` (docker
                 info, verified ports, per-GPU telemetry, checksums).
 
         Returns:
@@ -3035,7 +3034,7 @@ class Lium:
     def pod_failure_cause(self, pod_id: str) -> Optional[str]:
         """What the backend recorded as the reason the pod failed or was closed, or ``None``.
 
-        The latest event carrying an ``error`` (a failed create or reboot: the validator's headline)
+        The latest event carrying an ``error`` (a failed create or reboot: the node's error headline)
         or a lifecycle ``reason``/``detail`` wins. Never raises — this is read on a failure path.
         """
         try:
@@ -3875,15 +3874,15 @@ class Lium:
         return app_id
 
     def add_wallet(self, bt_wallet: Any) -> tuple[str, str]:
-        """Link a Bittensor wallet with the user account.
+        """Link your wallet to the user account.
 
         Args:
             bt_wallet: Wallet object exposing ``coldkey``/``coldkeypub`` for signing.
 
         Returns:
             ``(app_id, customer_id)`` parsed from the ``/tao/create-transfer``
-            redirect — surfaced so the alpha funding flow can reuse the same single
-            round-trip for company-wallet lookup instead of issuing a second POST.
+            redirect. The alpha funding flow reuses them for the company-wallet
+            lookup, so it makes one POST.
 
         Raises:
             LiumError: If verification or wallet polling fails.
@@ -3921,11 +3920,10 @@ class Lium:
     def convert_alpha(self, usd: Any) -> AlphaQuote:
         """Quote ``usd`` (USD) -> alpha via ``GET /balance/convert/alpha``.
 
-        The response carries both the alpha amount to transfer (``converted``) and
-        the subnet ``netuid`` the transfer must happen on. Hard-fails (no fallback)
-        on a pay-API error: ``_request`` maps 503 -> ``LiumServerError`` (a
-        ``LiumError``), so a down subtensor / unavailable alpha price aborts the
-        fund before any on-chain call.
+        The response carries the alpha amount to transfer (``converted``) and the
+        subnet ``netuid`` the transfer goes to. A pay-API error raises: ``_request``
+        maps 503 -> ``LiumServerError`` (a ``LiumError``), so an unavailable alpha
+        price stops the funding before any transfer is sent.
         """
         pay_headers = {"X-API-KEY": _PAY_API_KEY}
         resp = self._request(
@@ -3943,11 +3941,11 @@ class Lium:
         )
 
     def company_wallet(self, app_id: str) -> str:
-        """Resolve the Lium destination coldkey via ``GET /wallet/company/?app_id=``.
+        """Resolve the Lium deposit address via ``GET /wallet/company/?app_id=``.
 
-        Returns the company ``wallet_hash`` (the SS58 the pay-tao-api-v2 listener
-        credits). Hard-fails (no fallback): a 404 (app has no wallet) maps to
-        ``LiumNotFoundError`` (a ``LiumError``), aborting before any on-chain call.
+        Returns the company ``wallet_hash``, the SS58 address Lium credits deposits
+        to. A 404 (app has no wallet) raises ``LiumNotFoundError`` (a ``LiumError``)
+        before any transfer is sent.
         """
         resp = self._request(
             "GET",
