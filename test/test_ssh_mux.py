@@ -1,4 +1,5 @@
 """`lium exec` keeps one OpenSSH connection per pod across runs, and skips the pod list when it is up (DAH-3797)."""
+import os
 import shutil
 import subprocess
 import sys
@@ -192,6 +193,36 @@ def test_exec_all_over_masters_reports_one_unreachable_pod_as_one_failed_entry(h
         {"stdout": "", "stderr": "", "exit_code": 0, "success": True, "pod": "pod-1"},
         {"pod": "pod-2", "error": "SSH to pod gone failed", "success": False},
     ]
+
+
+def test_a_socket_in_a_directory_open_to_others_is_never_used(home, monkeypatch):
+    ssh = _Ssh(live=True)
+    ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
+    path = ssh_mux.control_path(_pod())
+    path.touch()
+    assert ssh_mux.socket_is_ours(path)
+    os.chmod(path.parent, 0o755)
+    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
+
+    assert not ssh_mux.socket_is_ours(path)
+    assert not ssh_mux.has_live_master(_lium(home), _pod())
+    ssh_mux.stop(_lium(home), _pod())
+    assert ssh.calls == []                        # nothing was sent to that socket
+
+
+def test_starting_a_master_replaces_a_socket_left_at_its_path(home, monkeypatch):
+    ssh = _Ssh(live=False)
+    ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
+    path = ssh_mux.control_path(_pod())
+    path.write_text("planted")
+    os.chmod(path.parent, 0o777)
+    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
+
+    ssh_mux.exec_over_master(_lium(home), _pod(), command="true")
+
+    assert path.read_text() == ""                 # the fake master made a new one
+    assert oct(path.parent.stat().st_mode & 0o777) == "0o700"
+    assert [argv for argv, _ in ssh.calls if "check" in argv] == []   # the open directory was never trusted
 
 
 @pytest.mark.parametrize("operation", ["down", "reboot"])

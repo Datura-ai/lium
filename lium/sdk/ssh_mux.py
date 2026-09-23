@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -67,6 +68,23 @@ def ensure_socket_dir(directory: Path) -> None:
     os.chmod(directory, 0o700)
 
 
+def socket_is_ours(path: Path) -> bool:
+    """Whether ``path`` and its directory belong to this user and the directory is closed to others.
+
+    The OpenSSH mux client never checks who owns the master it talks to, so a socket another
+    local user planted (in the temp-dir fallback) would receive the commands and ``-e`` values.
+    """
+    try:
+        directory, sock = path.parent.lstat(), path.lstat()
+    except OSError:
+        return False
+    uid = os.getuid()
+    return (
+        stat.S_ISDIR(directory.st_mode) and directory.st_uid == uid and not directory.st_mode & 0o077
+        and sock.st_uid == uid
+    )
+
+
 def control_path(pod: PodInfo) -> Path:
     digest = hashlib.sha256(f"{pod.id}\0{pod.ssh_cmd}".encode()).hexdigest()[:24]
     return socket_dir() / digest
@@ -93,7 +111,7 @@ class ControlMaster:
         return [*self.base, *options, "--", self.destination, *([command] if command is not None else [])]
 
     def alive(self) -> bool:
-        if not self.path.exists():
+        if not socket_is_ours(self.path):
             return False
         check = subprocess.run(self._argv("-O", "check"), stdin=subprocess.DEVNULL,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
@@ -102,6 +120,10 @@ class ControlMaster:
     def start(self) -> None:
         """Connect and leave the master in the background. Raises when ssh cannot connect."""
         ensure_socket_dir(self.path.parent)
+        try:
+            self.path.unlink()   # a dead master's socket, or one that is not ours: ssh -M would refuse the path
+        except FileNotFoundError:
+            pass
         # stderr goes to a file: the backgrounded master keeps it open, and a pipe would never see EOF
         with tempfile.TemporaryFile() as err:
             started = subprocess.run(
@@ -142,7 +164,7 @@ class ControlMaster:
         }
 
     def stop(self) -> None:
-        if self.path.exists():
+        if socket_is_ours(self.path):
             subprocess.run(self._argv("-O", "exit"), stdin=subprocess.DEVNULL,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
 
