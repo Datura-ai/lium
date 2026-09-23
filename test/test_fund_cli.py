@@ -19,7 +19,7 @@ from lium.cli import balance as balance_module
 from lium.cli.cli import cli
 from lium.cli.fund import command as fund_module
 from lium.cli.utils import EXIT_CONFIGURATION_ERROR
-from lium.sdk import AlphaQuote, Config, Lium
+from lium.sdk import AlphaQuote, AlphaSubnet, AlphaSubnets, Config, Lium
 from lium.sdk.exceptions import LiumNotFoundError, LiumServerError
 
 
@@ -443,14 +443,19 @@ def _patch_common(
     company_error=None,
     hotkey_names=None,
     events=None,
+    accepted=((51, "Lium"), (64, "Chutes")),
+    record=None,
 ):
     """Patch bittensor + the SDK/registration seams; keep the real alpha actions.
 
     The fake ``Lium`` mirrors the new pay-API surface:
-      - ``convert_alpha(usd)`` -> ``AlphaQuote`` (USD->alpha; netuid served per call,
-        last value repeating, so Phase-B drift can be exercised).
+      - ``convert_alpha(usd, netuid=None)`` -> ``AlphaQuote`` (USD->alpha; netuid
+        served per call, last value repeating, so Phase-B drift can be exercised).
+      - ``alpha_subnets()`` -> ``AlphaSubnets`` built from ``accepted``.
       - ``company_wallet(app_id)`` -> the funding ``wallet_hash``.
       - ``_discover_app_id`` -> a fixed app id.
+    ``record`` (a dict) collects the netuid each quote asked for and every
+    ``alpha_subnets`` call, in order, under ``"calls"``.
     """
     monkeypatch.setitem(
         sys.modules, "bittensor", _make_bt(subtensor, valid_ss58, hotkey_names, events)
@@ -469,7 +474,19 @@ def _patch_common(
                 raise company_error
             return wallet_hash
 
-        def convert_alpha(self, usd):
+        def alpha_subnets(self):
+            if record is not None:
+                record.setdefault("calls", []).append("alpha_subnets")
+            return AlphaSubnets(
+                subnets=tuple(
+                    AlphaSubnet(netuid=n, name=name, symbol="a") for n, name in accepted
+                ),
+                primary=51,
+            )
+
+        def convert_alpha(self, usd, netuid=None):
+            if record is not None:
+                record.setdefault("calls", []).append(("convert_alpha", netuid))
             if convert_error is not None:
                 raise convert_error
             idx = self._convert_calls
@@ -930,6 +947,135 @@ def test_alpha_netuid_mismatch_aborts(monkeypatch):
     assert not sub.transfer_called
 
 
+def test_alpha_netuid_option_quotes_and_transfers_on_that_subnet(monkeypatch):
+    sub = FakeSubtensor([[_stake(netuid=64, stake=5.0)]], fee=0.01)
+    record = {}
+    _patch_common(monkeypatch, sub, convert_netuids=(64,), record=record)
+
+    result = CliRunner().invoke(
+        cli,
+        ["fund", "--alpha", "-k", HK, "-w", "default", "-a", "2", "--netuid", "64", "-y"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert record["calls"] == [
+        "alpha_subnets",
+        ("convert_alpha", 64),
+        ("convert_alpha", 64),
+    ]
+    kw = sub.transfer_kwargs
+    assert kw["origin_netuid"] == 64 and kw["destination_netuid"] == 64
+    assert kw["amount"].netuid == 64
+    assert "Free alpha (netuid 64, Chutes)" in result.output
+
+
+def test_alpha_without_netuid_keeps_the_primary_default(monkeypatch):
+    sub = FakeSubtensor([[_stake(stake=5.0)]], fee=0.01)
+    record = {}
+    _patch_common(monkeypatch, sub, record=record)
+
+    result = CliRunner().invoke(
+        cli, ["fund", "--alpha", "-k", HK, "-w", "default", "-a", "2", "-y"]
+    )
+
+    assert result.exit_code == 0, result.output
+    # No subnet list read, and both quotes leave the subnet to the pay API.
+    assert record["calls"] == [("convert_alpha", None), ("convert_alpha", None)]
+    assert sub.transfer_kwargs["origin_netuid"] == 51
+
+
+def test_alpha_netuid_shown_with_subnet_name_in_confirm(monkeypatch):
+    sub = FakeSubtensor([[_stake(netuid=64, stake=5.0)]], fee=0.01)
+    _patch_common(monkeypatch, sub, convert_netuids=(64,))
+    seen = {}
+    monkeypatch.setattr(
+        fund_module.ui, "confirm", lambda msg, **k: seen.__setitem__("msg", msg) or False
+    )
+
+    CliRunner().invoke(
+        cli, ["fund", "--alpha", "-k", HK, "-w", "default", "-a", "2", "--netuid", "64"]
+    )
+
+    assert "alpha (netuid 64, Chutes)" in seen["msg"]
+    assert not sub.transfer_called
+
+
+def test_alpha_netuid_not_accepted_aborts_before_unlock(monkeypatch):
+    sub = FakeSubtensor([[_stake(netuid=16, stake=5.0)]], fee=0.01)
+    events = []
+    record = {}
+    _patch_common(monkeypatch, sub, events=events, record=record)
+
+    result = CliRunner().invoke(
+        cli,
+        ["fund", "--alpha", "-k", HK, "-w", "default", "-a", "2", "--netuid", "16", "-y"],
+    )
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR
+    assert "subnet 16 is not accepted" in result.output
+    assert "51, 64" in result.output
+    assert "unlock_coldkey" not in events
+    assert record["calls"] == ["alpha_subnets"]
+    assert not sub.transfer_called
+
+
+def test_alpha_netuid_not_accepted_json_envelope(monkeypatch):
+    sub = FakeSubtensor([[_stake(netuid=16, stake=5.0)]], fee=0.01)
+    _patch_common(monkeypatch, sub)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "fund", "--alpha", "-k", HK, "-w", "default", "-a", "2",
+            "--netuid", "16", "-y", "--json",
+        ],
+    )
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR
+    envelope = json.loads(result.output.strip().splitlines()[-1])
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "netuid_not_accepted"
+    assert envelope["data"] == {"netuid": 16, "accepted": [51, 64]}
+    assert not sub.transfer_called
+
+
+def test_alpha_netuid_quote_on_other_subnet_aborts(monkeypatch):
+    # Asked for 64, the pay API quoted 51: never transfer on a subnet nobody chose.
+    sub = FakeSubtensor([[_stake(netuid=51, stake=5.0)]], fee=0.01)
+    _patch_common(monkeypatch, sub, convert_netuids=(51,))
+
+    result = CliRunner().invoke(
+        cli,
+        ["fund", "--alpha", "-k", HK, "-w", "default", "-a", "2", "--netuid", "64", "-y"],
+    )
+
+    assert result.exit_code != 0
+    assert "quoted netuid 51 for a netuid 64 request" in result.output
+    assert not sub.transfer_called
+
+
+def test_netuid_without_alpha_is_refused(monkeypatch):
+    sub = FakeSubtensor([[_stake(stake=5.0)]], fee=0.01)
+    _patch_common(monkeypatch, sub)
+
+    result = CliRunner().invoke(
+        cli, ["fund", "-w", "default", "-a", "2", "--netuid", "64", "-y", "--json"]
+    )
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR
+    assert '"netuid_needs_alpha"' in result.output
+    assert not sub.transfer_called
+
+
+def test_netuid_rejects_negative():
+    result = CliRunner().invoke(
+        cli, ["fund", "--alpha", "-k", HK, "-a", "2", "--netuid", "-1", "-y"]
+    )
+
+    assert result.exit_code == 2
+    assert "--netuid" in result.output
+
+
 def test_alpha_dest_from_company_wallet(monkeypatch):
     custom = "5DistinctCompanyWalletForThisTestCCCCCCCCCCCCCCCCCCC"
     sub = FakeSubtensor([[_stake(stake=5.0)]], fee=0.01)
@@ -1098,6 +1244,53 @@ def test_sdk_convert_alpha_parses_quote(monkeypatch):
     assert captured["method"] == "GET"
     assert captured["endpoint"] == "/balance/convert/alpha"
     assert captured["kwargs"]["params"] == {"amount": "10"}
+    assert captured["kwargs"]["base_url"] == lium.config.base_pay_url
+
+
+def test_sdk_convert_alpha_sends_netuid_when_given(monkeypatch):
+    lium = _sdk_lium()
+    captured = {}
+
+    def fake_request(method, endpoint, **kwargs):
+        captured["kwargs"] = kwargs
+        return _Resp({"original": "10", "converted": "0.5", "rate": "19.7", "netuid": 64})
+
+    monkeypatch.setattr(lium, "_request", fake_request)
+    quote = lium.convert_alpha("10", netuid=64)
+
+    assert quote.netuid == 64
+    assert captured["kwargs"]["params"] == {"amount": "10", "netuid": "64"}
+
+
+def test_sdk_alpha_subnets_parses_list(monkeypatch):
+    lium = _sdk_lium()
+    captured = {}
+
+    def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["kwargs"] = kwargs
+        return _Resp(
+            {
+                "netuids": [1, 64],
+                "subnets": [
+                    {"netuid": 1, "name": "Apex", "symbol": "α"},
+                    {"netuid": 64, "name": "Chutes", "symbol": "ش"},
+                ],
+                "primary": 51,
+            }
+        )
+
+    monkeypatch.setattr(lium, "_request", fake_request)
+    subnets = lium.alpha_subnets()
+
+    assert isinstance(subnets, AlphaSubnets)
+    assert subnets.netuids == (1, 64)
+    assert subnets.primary == 51
+    assert subnets.get(64) == AlphaSubnet(netuid=64, name="Chutes", symbol="ش")
+    assert subnets.get(51) is None
+    assert captured["method"] == "GET"
+    assert captured["endpoint"] == "/balance/alpha/subnets"
     assert captured["kwargs"]["base_url"] == lium.config.base_pay_url
 
 

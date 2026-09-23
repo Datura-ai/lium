@@ -506,6 +506,34 @@ class AlphaQuote:
     netuid: int            # the API's ``netuid`` — drives the transfer
 
 
+@dataclass(frozen=True)
+class AlphaSubnet:
+    """One subnet whose alpha Lium accepts as payment (``GET /balance/alpha/subnets``)."""
+
+    netuid: int
+    name: str
+    symbol: str
+
+
+@dataclass(frozen=True)
+class AlphaSubnets:
+    """The accepted-subnet set from ``GET /balance/alpha/subnets``.
+
+    ``primary`` is the subnet a quote without a ``netuid`` is made on; the set itself
+    follows pool liquidity on the pay API, so it changes without a CLI release.
+    """
+
+    subnets: tuple[AlphaSubnet, ...]
+    primary: int
+
+    @property
+    def netuids(self) -> tuple[int, ...]:
+        return tuple(s.netuid for s in self.subnets)
+
+    def get(self, netuid: int) -> Optional[AlphaSubnet]:
+        return next((s for s in self.subnets if s.netuid == netuid), None)
+
+
 # Main SDK Class
 def _remote_file_path(sftp: Any, local: str, remote: str) -> str:
     """Resolve an SFTP upload destination: a directory becomes ``<dir>/<basename(local)>``.
@@ -3963,22 +3991,50 @@ class Lium:
             time.sleep(2)
         raise LiumError("Failed to add wallet. Wallet not found after 5 attempts.")
 
-    def convert_alpha(self, usd: Any) -> AlphaQuote:
+    def alpha_subnets(self) -> AlphaSubnets:
+        """The subnets whose alpha Lium accepts as payment (``GET /balance/alpha/subnets``).
+
+        Hard-fails (no fallback): the pay API answers 503 while it has no accepted set,
+        which ``_request`` raises as ``LiumServerError``.
+        """
+        resp = self._request(
+            "GET",
+            "/balance/alpha/subnets",
+            base_url=self.config.base_pay_url,
+            headers={"X-API-KEY": _PAY_API_KEY},
+        ).json()
+        return AlphaSubnets(
+            subnets=tuple(
+                AlphaSubnet(
+                    netuid=int(s["netuid"]),
+                    name=str(s.get("name") or ""),
+                    symbol=str(s.get("symbol") or ""),
+                )
+                for s in resp["subnets"]
+            ),
+            primary=int(resp["primary"]),
+        )
+
+    def convert_alpha(self, usd: Any, netuid: Optional[int] = None) -> AlphaQuote:
         """Quote ``usd`` (USD) -> alpha via ``GET /balance/convert/alpha``.
 
         The response carries both the alpha amount to transfer (``converted``) and
-        the subnet ``netuid`` the transfer must happen on. Hard-fails (no fallback)
-        on a pay-API error: ``_request`` maps 503 -> ``LiumServerError`` (a
-        ``LiumError``), so a down subtensor / unavailable alpha price aborts the
-        fund before any on-chain call.
+        the subnet ``netuid`` the transfer must happen on. ``netuid`` picks one of
+        the accepted subnets (:meth:`alpha_subnets`); without it the pay API quotes
+        on its primary subnet. Hard-fails (no fallback) on a pay-API error:
+        ``_request`` maps 503 -> ``LiumServerError`` and a subnet that is not
+        accepted (400) to a ``LiumError``, so the fund aborts before any on-chain call.
         """
         pay_headers = {"X-API-KEY": _PAY_API_KEY}
+        params = {"amount": str(usd)}
+        if netuid is not None:
+            params["netuid"] = str(netuid)
         resp = self._request(
             "GET",
             "/balance/convert/alpha",
             base_url=self.config.base_pay_url,
             headers=pay_headers,
-            params={"amount": str(usd)},
+            params=params,
         ).json()
         return AlphaQuote(
             usd=Decimal(str(resp["original"])),
