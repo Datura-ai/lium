@@ -371,7 +371,7 @@ class Job:
     def kill(self, signal: str = "TERM") -> bool:
         """Send ``signal`` to the job's whole process group. Returns whether anything received it.
 
-        Nothing is signalled when the PID belongs to a different process (the pod
+        Nothing is signaled when the PID belongs to a different process (the pod
         restarted and that process took the number) or when the job has no
         ``.id`` file to check it against; the call returns ``False``.
         """

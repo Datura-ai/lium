@@ -4393,7 +4393,7 @@ class Lium:
 
         Every call carries an idempotency key — yours, or a fresh ``uuid4`` when you pass
         none — so the request is posted once and a repeat with the same key returns the
-        first charge instead of making a second one. The key used is in the result (and on
+        first charge, and the card is charged once. The key used is in the result (and on
         :class:`LiumChargeOutcomeUnknownError`) as ``idempotency_key``.
 
         Args:
@@ -4402,7 +4402,7 @@ class Lium:
                 only saved one).
             idempotency_key: Repeat the call with the same key and amount within 24 h and
                 the first charge (or its status, while it is still ``processing``) is returned
-                instead of a second one being made. Omitted: the SDK makes one.
+                and the card is charged once. Omitted: the SDK makes one.
 
         Returns:
             ``{"status": "succeeded", "payment_intent_id", "transaction_id", "idempotency_key",

@@ -180,7 +180,7 @@ class LiumChargeOutcomeUnknownError(LiumError):
     dropped connection, or a 5xx after the platform had already asked Stripe to charge. Stripe
     charges the card before it answers, so the charge **may have gone through**: check the balance
     (or the transactions) before trying again. A repeat with the same ``idempotency_key`` returns the
-    first charge instead of making a second one; the key is on the exception.
+    first charge, and the card is charged once; the key is on the exception.
     """
 
     def __init__(
