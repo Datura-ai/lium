@@ -151,7 +151,7 @@ def ps_command(
     \b
     The # column (and "index" in --format json) is the row number that rm, ssh,
     exec and scp accept in place of a pod huid. It stands for the pod shown on
-    that row of this listing, sorted or filtered as shown. It is honoured only in
+    that row of this listing, sorted or filtered as shown. It is honored only in
     this shell, for 10 minutes and while that pod is still listed; the huid is
     the stable identifier for scripts.
 
