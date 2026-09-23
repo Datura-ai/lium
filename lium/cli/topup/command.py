@@ -159,10 +159,10 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     timeout, a 5xx) the charge may still have gone through: the command exits 6 with
     charge_outcome_unknown and the key — check `lium balance` before trying again; a repeat
     with `--idempotency-key <key>` and the same amount returns the same charge instead of
-    making a second one. The same key with a different amount is a new charge. A 202 from
-    the platform ("Payment submitted; the charge is still being confirmed") means the same:
-    the outcome is not known yet — exit 6 with charge_pending, the key and the amount; a
-    repeat with both shows the charge's status, it never makes a second one.
+    making a second one. The same key with a different amount is a new charge. A 202 with
+    a payment_intent_id is success (exit 0): the platform took the charge. A 202 without
+    that id means the outcome is not known yet — exit 6 with charge_pending, the key and
+    the amount; a repeat with both shows the charge's status, it never makes a second one.
 
     \b
     Examples:
@@ -241,11 +241,12 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
 
 
 def charge_pending_failure(result: dict) -> CliFailure:
-    """The platform's 202 ``processing``: the outcome is not known (Stripe's answer to the charge call was
-    lost, or the webhook has not settled the row). The same exit 6 as a lost answer — "stop, a person
-    must look" — with the key that makes a repeat safe; the repeat returns the same charge's status
-    (``succeeded`` once credited, ``processing`` until then) and never makes a second charge. The server's
-    answer, ``status: processing`` included, is in ``data``."""
+    """A 202 ``processing`` reply with no ``payment_intent_id``: the outcome is not known (Stripe's
+    answer to the charge call was lost). A 202 that includes a ``payment_intent_id`` is success
+    (exit 0), not this path. The same exit 6 as a lost answer — "stop, a person must look" —
+    with the key that makes a repeat safe; the repeat returns the same charge's status
+    (``succeeded`` once credited, ``processing`` until then) and never makes a second charge. The
+    server's answer, ``status: processing`` included, is in ``data``."""
     key = result.get("idempotency_key")
     amount = result.get("amount_usd")
     amount_text = (

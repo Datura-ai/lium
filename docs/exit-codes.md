@@ -15,7 +15,7 @@ mirrors it and a unit test keeps the two in step.
 | 3 | `EXIT_API_ERROR` | The API refused or failed the call (5xx, 404 on a resource, rate limit, any other non-2xx). |
 | 4 | `EXIT_SSH_ERROR` | ssh could not connect, the pod has no SSH endpoint yet, or no ssh client is installed. |
 | 5 | `EXIT_POD_NOT_FOUND` | The pod, cluster or fabric named on the command line does not exist (`lium clusters rm`: also a cluster the API answered 404 for). |
-| 6 | `EXIT_PERMISSION_DENIED` | The account is not allowed to do this: unverified account, insufficient balance (403). Overloaded by `topup card` (not released yet) for "outcome unknown": the answer to the charge was lost (`charge_outcome_unknown`) or the platform answered 202 still-confirming (`charge_pending`) — a person must check the balance before the command runs again. A script branching on the exit code alone cannot tell these from a 403; `error.code` in the JSON envelope does. |
+| 6 | `EXIT_PERMISSION_DENIED` | The account is not allowed to do this: unverified account, insufficient balance (403). Overloaded by `topup card` (not released yet) for "outcome unknown": the answer to the charge was lost (`charge_outcome_unknown`) or the platform answered 202 without a `payment_intent_id` (`charge_pending`) — a person must check the balance before the command runs again. A 202 with a `payment_intent_id` is success (exit 0). A script branching on the exit code alone cannot tell these from a 403; `error.code` in the JSON envelope does. |
 
 `lium exec` exits with the remote command's own exit status, so `lium exec pod
 "cmd" && next` behaves like `cmd && next` would on the pod. Usage errors caught
@@ -123,8 +123,9 @@ API refused the charge and the balance did not move; `data` carries `dashboard_u
 5xx after the charge was posted — it may have gone through; the message says to check `lium
 balance` before trying again, `data.idempotency_key` is the key a repeat must carry with the
 same amount to get the
-same charge back) and `charge_pending` (6 too: the platform answered 202
-`processing` — the outcome is not known, the charge may never have happened; `data` is the server's
+same charge back) and `charge_pending` (6 too: a 202 `processing` with no `payment_intent_id` —
+the outcome is not known, the charge may never have happened; a 202 with a `payment_intent_id`
+is success, exit 0; `data` is the server's
 answer, `status: processing`, the key and the amount included, and a repeat with the key and the
 same amount shows the charge's
 status without making a second one); `init` raises `api_unreachable` (3, the

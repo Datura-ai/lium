@@ -4409,12 +4409,13 @@ class Lium:
         Returns:
             ``{"status": "succeeded", "payment_intent_id", "transaction_id", "idempotency_key",
             "amount_usd", "card": {"brand", "last4"}}``. ``status`` is ``"processing"`` (HTTP 202)
-            when the outcome is not known yet — the platform's own call to Stripe timed out
-            after the charge (``payment_intent_id`` is then ``None``; the charge may never have
-            happened), the card network has not settled, or the webhook has not credited the
-            row. Treat it as unknown, not as success: the balance settles by webhook when the
-            charge is real; a repeat with the same key returns the same transaction and its
-            current status, never a second charge. Do not repeat the call without the key.
+            when Stripe has not finished confirming. A 202 that includes a ``payment_intent_id``
+            is a taken charge (the CLI treats it as success, exit 0). A 202 with
+            ``payment_intent_id`` ``None`` is unknown — the platform's own call to Stripe timed
+            out after the charge; the charge may never have happened. Treat that case as
+            unknown, not as success: the balance settles by webhook when the charge is real;
+            a repeat with the same key returns the same transaction and its current status,
+            never a second charge. Do not repeat the call without the key.
 
         Raises:
             LiumCardTopUpError: the bank wants a confirmation (``CARD_AUTHENTICATION_REQUIRED``,

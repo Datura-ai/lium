@@ -462,9 +462,25 @@ def test_card_processing_with_payment_intent_is_success_exit_0(fake_lium):
     assert fake_lium.calls == [(50.0, None, None)]
 
 
+def test_help_and_sdk_docs_say_only_202_without_payment_intent_exits_6():
+    """The command help, charge_pending_failure, and Lium.topup_card must not say every 202
+    exits 6: only a 202 without payment_intent_id does (d65bebd)."""
+    help_text = " ".join((topup_module.card_command.__doc__ or "").split())
+    pending_doc = " ".join((topup_module.charge_pending_failure.__doc__ or "").split())
+    sdk_doc = " ".join((Lium.topup_card.__doc__ or "").split())
+    assert "A 202 with" in help_text and "exit 0" in help_text
+    assert "A 202 without" in help_text and "exit 6" in help_text
+    assert "no ``payment_intent_id``" in pending_doc
+    assert "exit 0), not this path" in pending_doc
+    assert "A 202 that includes a ``payment_intent_id``" in sdk_doc
+    assert "Treat that case as unknown" in sdk_doc
+    assert "Treat it as unknown" not in sdk_doc
+    assert "never a second charge" in sdk_doc
+
+
 def test_card_processing_is_payment_submitted_still_confirming_exit_6(fake_lium):
-    """The platform answered 202: the outcome is NOT known (Stripe's answer was lost, or the webhook has not
-    credited yet) — the charge may never have happened. Not "Payment accepted" and not exit 0 (the r2 review):
+    """A 202 without payment_intent_id: the outcome is NOT known (Stripe's answer was lost) —
+    the charge may never have happened. Not "Payment accepted" and not exit 0 (the r2 review):
     the outcome-unknown exit, the key, and the repeat that shows the status without a second charge."""
     fake_lium.charge = PROCESSING
 
