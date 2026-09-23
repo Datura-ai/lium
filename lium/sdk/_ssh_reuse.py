@@ -15,7 +15,7 @@ from typing import Any, Callable, ContextManager, Optional, Tuple
 REUSE_ENV = "LIUM_SSH_REUSE"
 # Sent while the connection sits idle, so a NAT or firewall on the way does not drop it.
 KEEPALIVE_SECONDS = 15
-# A connection idle longer than this is closed and opened again rather than trusted.
+# A connection idle longer than this is closed; the next call opens a new one.
 IDLE_SECONDS = 300
 # How long opening a channel on a kept connection may take before the connection is written off.
 CHANNEL_OPEN_TIMEOUT = 15
