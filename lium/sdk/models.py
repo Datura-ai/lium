@@ -66,8 +66,8 @@ class ExecutorInfo(_Serializable):
     nvlink: Optional[bool] = None
     # A GPU on the node runs under 95 % of its default power limit, so a pod gets less than the card's
     # stock power (the backend's verdict; `lium ls` marks it ↓W). False = every GPU at its default.
-    # None = unknown: the platform could not judge it (no default limit reported, every reading is the
-    # temporary cap Lium's own Pearl job set) or the backend predates the field.
+    # None = the platform could not judge it (no default limit reported, or every reading is the
+    # temporary cap Lium's own Pearl job set).
     gpu_power_limited: Optional[bool] = None
     # The most reduced GPU's current and default power limit in watts; None with the verdict.
     gpu_power_limit_w: Optional[int] = None

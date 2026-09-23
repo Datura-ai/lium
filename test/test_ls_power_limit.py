@@ -1,16 +1,18 @@
 """The ↓W mark in ``lium ls`` and the three power-limit fields on ``ExecutorInfo``.
 
 The backend judges whether a GPU's power limit is set under the card's default
-(``gpu_power_limited`` on ``GET /executors``, not released yet) and the portal shows a
-"Reduced power limit" badge for it. The CLI shows the same verdict as a mark after the node's
-Id, explains it under the table when a row carries it, and carries it in ``--format json``.
-Held here: only an explicit ``true`` marks a node; ``false``, ``null`` and a backend without
-the field show nothing — no mark, no legend — and never read as "limited".
+(``gpu_power_limited`` on ``GET /executors``) and the portal shows a "Reduced power limit"
+badge for it. The CLI shows the same verdict as a mark after the node's Id, explains it under
+the table when a row carries it, and carries it in ``--format json``.
+Held here: only an explicit ``true`` marks a node; ``false`` (stock power), ``null`` (the
+platform could not judge the node) and a row without the key show nothing — no mark, no
+legend — and never read as "limited".
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +24,8 @@ from lium.cli.ls import command as ls_command_module
 from lium.cli.ls import display
 from lium.cli.ls.display import POWER_LIMITED_FOOTNOTE, POWER_LIMITED_MARK, compact_executor, power_limited
 from lium.sdk import Config, ExecutorInfo, Lium
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def _executor_dict(executor_id: str, **extra) -> dict:
@@ -138,7 +142,7 @@ def test_the_legend_explains_the_mark_and_names_the_json_field():
 
 
 def test_the_legend_is_printed_only_when_a_row_carries_the_mark():
-    # today's backend sends no such field, so every `lium ls` would otherwise gain a line for a mark never shown
+    # a listing with no reduced-power node must not gain a line explaining a mark it does not show
     limited = _map(_executor_dict("limited", **LIMITED))
     stock = _map(_executor_dict("stock", **STOCK))
 
@@ -188,11 +192,25 @@ def test_lium_ls_marks_the_limited_node_and_prints_the_legend(monkeypatch):
     assert f"{POWER_LIMITED_MARK} = reduced GPU power limit" in output
 
 
-def test_lium_ls_against_todays_backend_shows_neither_mark_nor_legend(monkeypatch):
-    # rows without the field (the platform has not shipped it) and a stock-power row: nothing changes
-    output = _run_ls(monkeypatch, [_executor_dict("old"), _executor_dict("stock", **STOCK)])
+def test_lium_ls_with_no_limited_node_shows_neither_mark_nor_legend(monkeypatch):
+    # stock power, a node the platform could not judge (null) and a row without the key: nothing is marked
+    output = _run_ls(
+        monkeypatch,
+        [_executor_dict("stock", **STOCK), _executor_dict("unjudged", **UNKNOWN), _executor_dict("old")],
+    )
 
     assert POWER_LIMITED_MARK not in output
+
+
+def test_the_docs_say_null_means_the_platform_could_not_judge_the_node():
+    # production returns gpu_power_limited; the README row and the changelog carry no "not released" marker
+    [row] = [line for line in (ROOT / "README.md").read_text().splitlines() if line.startswith("| `gpu_power_limited`")]
+    fragment = (ROOT / "changelog.d" / "pr-271.md").read_text()
+
+    assert "`null` when the platform cannot judge the node" in row
+    assert "`null` means the platform could not judge the node" in fragment
+    for text in (row, fragment):
+        assert "not released" not in text and "until" not in text
 
 
 def test_lium_ls_json_carries_the_verdict_and_the_watts(monkeypatch):

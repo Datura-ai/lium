@@ -760,7 +760,7 @@ class Lium:
             nvlink = (interconnect or {}).get("nvlink")
             nvlink = nvlink if isinstance(nvlink, bool) else None
         # The backend's power-limit verdict and its watts; anything but a JSON boolean / number is unknown,
-        # so a backend that predates the fields (or sends null) reads as "cannot say", never as "limited".
+        # so null (the platform could not judge the node) or a missing key reads as "cannot say", never "limited".
         gpu_power_limited = executor_dict.get("gpu_power_limited")
         gpu_power_limited = gpu_power_limited if isinstance(gpu_power_limited, bool) else None
 
