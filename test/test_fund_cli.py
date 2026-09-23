@@ -1000,6 +1000,20 @@ def test_alpha_netuid_shown_with_subnet_name_in_confirm(monkeypatch):
     assert not sub.transfer_called
 
 
+def test_alpha_netuid_subnet_name_with_markup_prints_literally(monkeypatch):
+    sub = FakeSubtensor([[_stake(netuid=64, stake=5.0)]], fee=0.01)
+    _patch_common(monkeypatch, sub, convert_netuids=(64,), accepted=((64, "a[/b]"),))
+
+    result = CliRunner().invoke(
+        cli,
+        ["fund", "--alpha", "-k", HK, "-w", "default", "-a", "2", "--netuid", "64", "-y"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Free alpha (netuid 64, a[/b])" in result.output
+    assert sub.transfer_called
+
+
 def test_alpha_netuid_not_accepted_aborts_before_unlock(monkeypatch):
     sub = FakeSubtensor([[_stake(netuid=16, stake=5.0)]], fee=0.01)
     events = []

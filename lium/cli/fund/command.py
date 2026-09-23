@@ -5,6 +5,7 @@ from decimal import Decimal, ROUND_DOWN
 from typing import Optional
 
 import click
+from rich.markup import escape
 
 from lium.sdk import Lium, LiumError
 from lium.cli import ui
@@ -146,7 +147,7 @@ def _alpha_fund(
     hotkey: Optional[str],
     yes: bool,
     json_output: bool,
-    requested_netuid: Optional[int] = None,
+    requested_netuid: Optional[int],
 ) -> None:
     """Fund the Lium account with free alpha via ``transfer_stake``.
 
@@ -290,7 +291,7 @@ def _alpha_fund(
     if requested_netuid is not None and quote.netuid != requested_netuid:
         raise LiumError(
             f"pay API quoted netuid {quote.netuid} for a netuid {requested_netuid} "
-            f"request; aborting"
+            "request; aborting"
         )
     netuid = quote.netuid
     subnet_label = subnet_label or f"netuid {netuid}"
@@ -324,7 +325,8 @@ def _alpha_fund(
 
     if not json_output:
         ui.info(f"Destination (Lium coldkey): {funding_address}")
-        ui.info(f"Free alpha ({subnet_label}): {free}")
+        # Subnet names are set on-chain by their owners; ui.confirm escapes its own text.
+        ui.info(f"Free alpha ({escape(subnet_label)}): {free}")
         if fee_modeled:
             ui.info(f"Movement fee: {fee}")
         ui.info(_USD_CAVEAT)
