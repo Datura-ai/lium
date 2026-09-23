@@ -198,4 +198,4 @@ def stop(lium: Any, pod: PodInfo) -> None:
     try:
         ControlMaster(lium, pod).stop()
     except (ValueError, OSError, LiumError, subprocess.SubprocessError):
-        pass
+        pass  # best effort: the pod is going away, and a master left behind exits after its ControlPersist idle limit

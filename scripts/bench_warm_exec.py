@@ -41,7 +41,7 @@ import threading
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import IO, Dict, List, Optional
 
 POD_ID = "0b6a7a3e-3797-4d2e-9d3e-5ea7c0ffee01"
 POD_NAME = "bench-pod"
@@ -66,6 +66,7 @@ class LocalSshd:
         self.user = getpass.getuser()
         self.client_key = workdir / "client_ed25519"
         self._proc: Optional[subprocess.Popen] = None
+        self._log: Optional[IO[str]] = None
 
     def start(self) -> "LocalSshd":
         sshd = find_sshd()
@@ -91,9 +92,10 @@ class LocalSshd:
             MaxSessions 100
             Subsystem sftp internal-sftp
             """))
+        self._log = open(self.workdir / "sshd.log", "w")
         self._proc = subprocess.Popen(
             [sshd, "-D", "-e", "-f", str(config)],
-            stdout=subprocess.DEVNULL, stderr=open(self.workdir / "sshd.log", "w"),
+            stdout=subprocess.DEVNULL, stderr=self._log,
         )
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
@@ -113,6 +115,9 @@ class LocalSshd:
                 self._proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
+        if self._log:
+            self._log.close()
+            self._log = None
 
 
 class DelayProxy:
@@ -177,7 +182,7 @@ class DelayProxy:
                     try:
                         writer.write_eof()
                     except (OSError, RuntimeError):
-                        pass
+                        pass  # the peer already closed its side, so there is nothing left to half-close
                     return
                 writer.write(data)
                 await writer.drain()
