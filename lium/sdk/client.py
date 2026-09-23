@@ -2619,8 +2619,14 @@ class Lium:
             kept.close()
 
     def _release_ssh(self, pod: Union[PodInfo, str]) -> None:
-        """Close the connection kept to a pod whose container is going away or being replaced."""
+        """Close every connection held to a pod whose container is going away or being replaced:
+        the one kept in this client and the ``lium exec`` control master (:mod:`lium.sdk.ssh_mux`)."""
         self._drop_pooled(pod)
+        if isinstance(pod, PodInfo) and pod.ssh_cmd:
+            from . import ssh_mux
+
+            if ssh_mux.available():
+                ssh_mux.stop(self, pod)
 
     def has_open_connection(self, pod: PodInfo) -> bool:
         """Whether this client holds a live SSH connection to ``pod`` (kept from an earlier call, or an open :meth:`ssh_session`)."""
