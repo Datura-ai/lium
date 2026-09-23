@@ -146,13 +146,13 @@ def _alpha_fund(
     hotkey: Optional[str],
     yes: bool,
     json_output: bool,
-    netuid: Optional[int] = None,
+    requested_netuid: Optional[int] = None,
 ) -> None:
     """Fund the Lium account with free alpha via ``transfer_stake``.
 
     The amount is denominated in USD: ``GET /balance/convert/alpha`` quotes both the
-    alpha amount to move and the subnet ``netuid`` to move it on (the requested
-    ``netuid``, checked against ``GET /balance/alpha/subnets``, or the pay API's
+    alpha amount to move and the subnet ``netuid`` to move it on (``requested_netuid``,
+    checked against ``GET /balance/alpha/subnets``, or the pay API's
     primary subnet when none is given), and
     ``GET /wallet/company/`` supplies the destination coldkey. All three values are
     resolved from pay-tao-api-v2 ONCE at the top of the flow — never hardcoded — so a
@@ -221,7 +221,6 @@ def _alpha_fund(
 
     # A requested subnet is checked against the accepted set before the password
     # prompt, so a subnet Lium does not take never costs the user an unlock.
-    requested_netuid = netuid
     subnet_label = None
     if requested_netuid is not None:
         accepted = ui.load("Checking accepted subnets", lambda: lium.alpha_subnets())
@@ -233,8 +232,13 @@ def _alpha_fund(
                 f"now. Accepted netuids: {', '.join(str(n) for n in accepted.netuids)}",
                 EXIT_CONFIGURATION_ERROR,
                 data={"netuid": requested_netuid, "accepted": list(accepted.netuids)},
-                hint="Pick an accepted netuid, or drop --netuid to pay from Lium's "
-                "primary subnet (the list follows pool liquidity and can change)",
+                hint=(
+                    "Pick an accepted netuid, or drop --netuid to pay from Lium's "
+                    "primary subnet (the list follows pool liquidity and can change)"
+                    if accepted.primary in accepted.netuids
+                    else "Pick an accepted netuid (the list follows pool liquidity "
+                    "and can change)"
+                ),
             )
         if subnet.name:
             subnet_label = f"netuid {requested_netuid}, {subnet.name}"
@@ -404,10 +408,7 @@ def _alpha_fund(
 @click.option("--wallet", "-w", help="Bittensor wallet name to fund from")
 @click.option("--amount", "-a", help="Amount to fund with (TAO; USD when --alpha)")
 @click.option(
-    "--alpha",
-    is_flag=True,
-    default=False,
-    help="Fund with free alpha stake (Lium's primary subnet, or --netuid)",
+    "--alpha", is_flag=True, default=False, help="Fund with free alpha stake"
 )
 @click.option(
     "--hotkey",
@@ -437,7 +438,7 @@ def fund_command(
     json_output: bool,
     yes: bool,
 ):
-    """Fund your Lium account with TAO (or subnet alpha) from a Bittensor wallet.
+    """Fund your Lium account with TAO or free alpha from your wallet.
 
     \b
     Examples:

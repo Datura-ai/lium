@@ -1039,6 +1039,25 @@ def test_alpha_netuid_not_accepted_json_envelope(monkeypatch):
     assert not sub.transfer_called
 
 
+def test_alpha_netuid_not_accepted_hint_skips_an_unaccepted_primary(monkeypatch):
+    # With the primary off the list, a netuid-less quote answers 503, so the hint
+    # must not send the user there.
+    sub = FakeSubtensor([[_stake(netuid=16, stake=5.0)]], fee=0.01)
+    _patch_common(monkeypatch, sub, accepted=((64, "Chutes"),))
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "fund", "--alpha", "-k", HK, "-w", "default", "-a", "2",
+            "--netuid", "16", "-y", "--json",
+        ],
+    )
+
+    envelope = json.loads(result.output.strip().splitlines()[-1])
+    assert envelope["error"]["code"] == "netuid_not_accepted"
+    assert "drop --netuid" not in envelope["error"]["hint"]
+
+
 def test_alpha_netuid_quote_on_other_subnet_aborts(monkeypatch):
     # Asked for 64, the pay API quoted 51: never transfer on a subnet nobody chose.
     sub = FakeSubtensor([[_stake(netuid=51, stake=5.0)]], fee=0.01)
