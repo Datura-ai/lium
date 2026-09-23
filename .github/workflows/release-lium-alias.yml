@@ -4,20 +4,57 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-publish:
-    name: Build and publish lium alias stub
+  # Holds no upload credential: build dependencies and the build backend come from PyPI and run here, never in the
+  # job that can mint a PyPI token.
+  build:
+    name: Build lium alias stub
     runs-on: ubuntu-latest
-    # same gate as release.yml's publish job: PyPI's (pending) trusted publisher names this file and the `pypi`
-    # environment; a required reviewer other than the loop's account approves the run (RELEASING.md "Who can publish")
-    environment: pypi
+    permissions:
+      contents: read
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install build dependencies
+      run: pip install build twine
+
+    - name: Build stub package
+      working-directory: stubs/lium
+      run: python -m build --sdist --wheel --outdir dist/
+
+    - name: Check the distributions' metadata
+      run: twine check --strict stubs/lium/dist/*
+
+    - name: Upload stub distributions
+      uses: actions/upload-artifact@v4
+      with:
+        name: lium-stub-dist
+        path: stubs/lium/dist/
+        if-no-files-found: error
+
+  # same gate as release.yml's publish job: PyPI's (pending) trusted publisher names this file and the `pypi`
+  # environment; a required reviewer other than the loop's account approves the run (RELEASING.md "Who can publish").
+  # The approval gates the upload only; the `if` keeps a dispatch from any other ref to a build.
+  publish:
+    name: Publish lium alias stub
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/lium/
     permissions:
       actions: read     # the environment read below
-      contents: read
       id-token: write
 
     steps:
     # Same guard as release.yml (the reasons are written there): at least one required reviewer, not the loop's
-    # account, users only, prevent_self_review true, can_admins_bypass false; checked before anything is built. It
+    # account, users only, prevent_self_review true, can_admins_bypass false; checked before the upload. It
     # cannot prove pypi.org's side (RELEASING.md "Who can publish").
     - name: Environment pypi must require a reviewer other than the loop's account
       env:
@@ -46,27 +83,16 @@ jobs:
         jq -e '.can_admins_bypass == false' <<<"$env_json" >/dev/null ||
           fail "can_admins_bypass is not false; a repository admin could start this job without a reviewer's approval"
 
-    - uses: actions/checkout@v4
-
-    - name: Set up Python
-      uses: actions/setup-python@v5
+    - name: Download stub distributions
+      uses: actions/download-artifact@v4
       with:
-        python-version: '3.10'
-
-    - name: Install build dependencies
-      run: pip install build twine
-
-    - name: Build stub package
-      working-directory: stubs/lium
-      run: python -m build --sdist --wheel --outdir dist/
-
-    - name: Check the distributions' metadata
-      run: twine check --strict stubs/lium/dist/*
+        name: lium-stub-dist
+        path: dist/
 
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
         attestations: true
-        packages-dir: stubs/lium/dist/
+        packages-dir: dist/
         verbose: true
         print-hash: true
