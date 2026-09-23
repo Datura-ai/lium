@@ -235,8 +235,9 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium audit --account [--action pod.] [--source cli] [--since 7d] [--cursor <next_cursor>]` - The account audit log: every request that changed something (pods, keys, logins, balance, settings, team members) with the client and IP it came from; your own IPs only, 90 days (`--json` prints the page with `next_cursor`)
 - `lium update <POD> --jupyter <PORT>` - Install Jupyter Notebook on a pod, served on that internal port (`--jupyter` is the only update; without it the command prints `No updates specified`)
 - `lium templates [SEARCH] [--arch hopper|blackwell] [--format json]` - List Docker templates with the CUDA build and the GPU generations it runs on
-- `lium fund` - Fund account with TAO from Bittensor wallet
+- `lium fund` - Fund account with TAO from your wallet
 - `lium topup create -a <USD> -c <COIN> -n <NETWORK>` - Top up with a stablecoin (`lium topup currencies` lists them)
+- `lium topup card -a <USD> [--card <pm_id>] [--yes]` - Charge a card saved on the account, with no browser; the API key needs the `billing` scope (not released: the platform switch is off). Asks first; `--yes` skips the question and `--json` needs it. Sent once with an idempotency key; a lost answer or a 202 without a payment_intent_id exits 6 ("the charge may have gone through" / "still being confirmed") with the key and the same amount to re-run with, never a bare retry. A 202 with a payment_intent_id is success (exit 0). The same key with a different amount is a new charge
 - `lium ssh-keys list|sync` - SSH public keys registered on the account
 
 `ls`, `ps`, `spend`, `templates`, `balance` and `describe` all accept `--format json` (and `--json`); `rm` accepts `--format json`; `up` accepts `--json`. All of them print a JSON error envelope on stderr when the command fails, so the same flag works across commands in scripts.
@@ -274,7 +275,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 
 ### Workspace Commands
 
-Teams share a workspace whose billing owner pays (lium-platform DAH-1992). An API key is bound to one workspace, so `--workspace NAME` on any command means "use the key saved for NAME" and nothing else. On a server without workspaces these commands say so (exit 3) and every other command behaves as today.
+Teams share a workspace whose billing owner pays. An API key is bound to one workspace, so `--workspace NAME` on any command means "use the key saved for NAME" and nothing else. On a server without workspaces these commands say so (exit 3) and every other command behaves as today.
 
 - `lium workspaces [list]` - The workspace this key acts in (the role shown is the account's the key runs as — the billing owner's for a team key); every workspace you belong to, with your own role, after `lium workspaces login`
 - `lium workspaces members [WORKSPACE]` - Members, roles and who pays
@@ -315,7 +316,7 @@ Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, 
 - `lium provider config show|opt-in|opt-out|set-email|set-subscriptions` - Portal-account configuration (incl. lium.io central miner server toggle)
 - `lium provider sync from-miner-server|to-miner-server` - Batch node-state sync between portal and the central miner server
 - `lium provider billing list [--all | --miner-hotkey HK] [--page N] [--limit N]` - Paginated billing history (active hotkey by default; `--all` for every provider's)
-- `lium provider machine-request list|get` - Pending tenant machine requests (the portal shows per-request detail once one of your nodes is verified by a validator — lium-platform#248, not deployed; until then `list` returns counts per GPU class and hourly budget band, and `get` exits 2 with `PORTAL_FORBIDDEN`)
+- `lium provider machine-request list|get` - Pending tenant machine requests (per-request detail only once one of your nodes is verified by a validator; before that `list` returns counts per GPU class and hourly budget band, and `get` exits 2 with `PORTAL_FORBIDDEN`)
 - `lium provider machine list|estimate` - Machine catalogue + reward estimates
 
 Full reference with every flag and runnable examples: <https://docs.lium.io/developers/cli/reference/provider>.
@@ -498,10 +499,10 @@ One object per node, sorted as the table is; the names are stable and pinned by 
 | `is_pareto` | the ★ mark |
 | `max_cuda_version` | highest CUDA the driver supports |
 | `tier` | `secure` or `spot` (reclaimable) |
-| `link`, `nvlink`, `p2p` | the Link column (`NV18` = NVLink with 18 links per GPU, `PCIe/SYS` = the worst PCIe class), `true` when every GPU pair is on NVLink, `true` when every pair passed the P2P check; `null` until the node's validator has reported its topology |
-| `interconnect` | the validator's topology object: pair and link counts, `pcie_class`, `p2p`; on the listing it has no `matrix` (the GPU x GPU table is in `lium describe <pod>`) |
+| `link`, `nvlink`, `p2p` | the Link column (`NV18` = NVLink with 18 links per GPU, `PCIe/SYS` = the worst PCIe class), `true` when every GPU pair is on NVLink, `true` when every pair passed the P2P check; `null` until Lium has reported the node's topology |
+| `interconnect` | the node's topology object: pair and link counts, `pcie_class`, `p2p`; on the listing it has no `matrix` (the GPU x GPU table is in `lium describe <pod>`) |
 
-The listing asks for `GET /executors?view=summary`, about 1 KB per node instead of about 8.6 KB. `link`, `nvlink`, `p2p` and `interconnect` need lium-platform#522 deployed; until then the summary view carries neither key and the four fields are `null`. `Lium.ls(view="full")` returns the whole validator scrape in `ExecutorInfo.specs`.
+The listing asks for `GET /executors?view=summary`, about 1 KB per node instead of about 8.6 KB. The summary view carries the `nvlink` and `interconnect` keys that `link`, `nvlink`, `p2p` and `interconnect` read. `Lium.ls(view="full")` returns the whole node scrape in `ExecutorInfo.specs`.
 
 ## Features
 

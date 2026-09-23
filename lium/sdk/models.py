@@ -171,7 +171,7 @@ class PodInfo(_Serializable):
     # None when the API did not send it. ``executor`` describes the whole host, so
     # for a GPU-split rental (2 of the host's 8) this is the smaller number.
     gpu_count: Optional[int] = None
-    # The workspace the pod belongs to (lium-platform DAH-3030); None from a server without
+    # The workspace the pod belongs to; None from a server without
     # workspaces or for a pod from before them.
     workspace_id: Optional[str] = None
 
@@ -477,7 +477,7 @@ class GpuStats(_Serializable):
 
 @dataclass
 class WorkspaceInfo:
-    """A workspace as the API describes it (lium-platform DAH-2975 / DAH-3030)."""
+    """A workspace (a team with roles and a billing owner) as the API describes it."""
 
     id: str
     name: str
