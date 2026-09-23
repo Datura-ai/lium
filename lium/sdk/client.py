@@ -499,7 +499,7 @@ class Lium:
     def __init__(self, config: Optional[Config] = None, source: str = "sdk", workspace: Optional[str] = None):
         """``workspace`` picks the API key saved for that workspace (``[workspace.<name>]`` in
         ~/.lium/config.ini, written by ``lium keys create --workspace … --save``); a key acts in exactly
-        one workspace, so choosing the workspace means choosing the key (lium-platform DAH-2986), and
+        one workspace, so choosing the workspace means choosing the key, and
         ``ValueError`` is raised when none is saved for it rather than running as another key."""
         self.config = config or Config.load(workspace=workspace)
         self.source = source
@@ -2097,7 +2097,7 @@ class Lium:
         """Remove every member pod of a cluster with one ``DELETE /clusters/{cluster_id}``.
 
         Returns one ``{"pod", "huid", "name", "node_rank", "success", "message", "error"}`` per
-        member, in the order the server reports them (``huid`` is the short name ``lium rm`` accepts). The server (lium-platform#411) finds the members by the
+        member, in the order the server reports them (``huid`` is the short name ``lium rm`` accepts). The server finds the members by the
         cluster id, checks ownership and API-key scope on every one of them before the first
         delete, then tears them down one by one; a member that failed is reported with ``success``
         false and its error text while the others are still removed, so nothing is left billing by
@@ -4261,7 +4261,7 @@ class Lium:
         cursor: Optional[str] = None,
         limit: int = 100,
     ) -> Dict[str, Any]:
-        """One page of the account audit log, newest first (``GET /account/audit``, lium-platform DAH-3245).
+        """One page of the account audit log, newest first (``GET /account/audit``).
 
         One entry per request that changed something on the account — a pod created, restarted or
         deleted, a key created or revoked, a login, a top-up requested, a setting or a workspace member
