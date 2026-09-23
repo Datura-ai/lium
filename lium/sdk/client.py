@@ -78,6 +78,7 @@ from .utils import (
     spend_cap_deadline,
     with_retry,
 )
+from .secrets import SecretsClient, require_secrets_enabled, validate_secret_names
 from .workspaces import WorkspacesClient
 
 # The backend feature `Lium.rent` looks for on GET /version before using POST /executors/rent-by-spec.
@@ -510,6 +511,7 @@ class Lium:
         }
         self._features: Optional[set] = None
         self.workspaces = WorkspacesClient(self)
+        self.secrets = SecretsClient(self)
         self._ssh_sessions: Dict[str, paramiko.SSHClient] = {}  # pod id -> connection held by ssh_session()
 
     def features(self) -> set:
@@ -889,6 +891,7 @@ class Lium:
         gpu_count: Optional[int] = None,
         wait: bool = False,
         timeout: int = 600,
+        secret_names: Optional[List[str]] = None,
     ) -> Union[Dict[str, Any], PodInfo]:
         """Start a new pod on a specific node.
 
@@ -931,6 +934,9 @@ class Lium:
                 takes every GPU that is free on the node right now (the whole node when
                 none of it is rented). The API rejects a count above the free GPUs, below
                 the provider's minimum, or on nodes that do not allow splitting.
+            secret_names: Names of secrets saved with :meth:`SecretsClient.set` to deliver as
+                files under ``/run/lium/secrets/`` in the pod (never as environment variables).
+                Experimental: needs ``LIUM_SECRETS_ENABLED=1``.
 
         Returns:
             Pod metadata as returned by the rent API (id, name, status, ssh command,
@@ -950,6 +956,7 @@ class Lium:
             backup_id=backup_id,
             restore_path=restore_path,
             gpu_count=gpu_count,
+            secret_names=secret_names,
         )
         if not wait:
             return created
@@ -979,6 +986,7 @@ class Lium:
         backup_id: Optional[str],
         restore_path: Optional[str],
         gpu_count: Optional[int] = None,
+        secret_names: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """The rent call itself; :meth:`up` adds the optional wait on top."""
         if sum(x is not None for x in (template_id, image, dockerfile_content)) > 1:
@@ -987,6 +995,9 @@ class Lium:
             )
         if bool(backup_id) != bool(restore_path):
             raise ValueError("backup_id and restore_path must be provided together")
+        if secret_names:
+            require_secrets_enabled()
+            secret_names = validate_secret_names(secret_names)
 
         executor_info = self.get_executor(executor_id)
         if not executor_info:
@@ -1025,6 +1036,8 @@ class Lium:
         }
         if gpu_count is not None:
             payload["gpu_count"] = gpu_count
+        if secret_names:
+            payload["secret_names"] = secret_names
 
         # The rent call is not idempotent, so it is never retried blindly. A
         # timeout or a 5xx may have created the pod anyway; look for it before
@@ -1316,6 +1329,7 @@ class Lium:
         backup_id: Optional[str] = None,
         restore_path: Optional[str] = None,
         dry_run: bool = False,
+        secret_names: Optional[List[str]] = None,
     ) -> RentResult:
         """Rent the cheapest available node that satisfies a spec, without listing the fleet.
 
@@ -1348,6 +1362,7 @@ class Lium:
                 with the account. Against a rent-by-spec backend the request still carries
                 your SSH public key (``ssh_keys`` or the configured key: the server validates
                 a dry run as a rent); the client-side pick needs no key.
+            secret_names: as in :meth:`up` (experimental, ``LIUM_SECRETS_ENABLED=1``).
 
         Returns:
             :class:`RentResult` — the node, the GPUs rented, the hourly price, the pod (``None``
@@ -1397,6 +1412,9 @@ class Lium:
             "backup_id": backup_id,
             "restore_path": restore_path,
         }
+        if secret_names:
+            require_secrets_enabled()
+            rental["secret_names"] = validate_secret_names(secret_names)
         if self.supports(RENT_BY_SPEC):
             return self._rent_on_server(spec, rental, dry_run)
         return self._rent_client_side(spec, rental, dry_run)
@@ -1431,6 +1449,8 @@ class Lium:
             "restore_path": rental["restore_path"],
             "dry_run": dry_run,
         }
+        if rental.get("secret_names"):
+            payload["secret_names"] = rental["secret_names"]
         gpu_count = int(spec.get("gpu_count") or 1)
         # A rent is billable and a lost response may have succeeded server-side, so it is sent
         # once, as in `up`; a dry run rents nothing and keeps the retries. Pods that exist before
@@ -1517,6 +1537,7 @@ class Lium:
                 enable_volume_encryption=rental["enable_volume_encryption"],
                 backup_id=rental["backup_id"],
                 restore_path=rental["restore_path"],
+                secret_names=rental.get("secret_names"),
             )
         return RentResult(
             executor=executor,

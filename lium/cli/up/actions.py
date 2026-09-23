@@ -246,6 +246,8 @@ class RentPodAction:
             backup_id=backup_id,
             restore_path=restore_path,
         )
+        if ctx.get("secret_names"):
+            rental["secret_names"] = ctx["secret_names"]
         spec: Optional[Dict] = ctx.get("spec")
         price_per_hour = getattr(executor, "price_per_hour", None)
         # The GPUs this rent gets: on the node path -c N, else the node's free GPUs (the host

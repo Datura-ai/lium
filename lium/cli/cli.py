@@ -47,6 +47,7 @@ from .update.command import update_command
 from .port_forward import port_forward_command
 from .workspaces import workspaces_command
 from .keys import keys_command
+from .secrets import secrets_command
 from .plugins import load_plugins
 from .self_update import maybe_perform_startup_update
 from . import telemetry
@@ -142,6 +143,7 @@ cli.add_command(update_command)
 cli.add_command(port_forward_command)
 cli.add_command(workspaces_command)
 cli.add_command(keys_command)
+cli.add_command(secrets_command)
 
 # Add compose placeholder (will be overridden if plugin is installed)
 # cli.add_command(compose_command)  # Disabled for beta.1

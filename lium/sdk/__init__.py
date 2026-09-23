@@ -34,12 +34,15 @@ from .models import (
     WorkspaceInfo,
     WorkspaceMember,
 )
+from .secrets import SecretInfo, SecretsClient
 from .workspaces import WorkspacesClient
 from .result_codec import ResultEncodingError
 
 __all__ = [
     "Lium",
     "WorkspacesClient",
+    "SecretsClient",
+    "SecretInfo",
     "WorkspaceInfo",
     "WorkspaceMember",
     "AlphaQuote",
