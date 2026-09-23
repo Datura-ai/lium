@@ -1058,6 +1058,8 @@ def test_a_402_on_a_pods_schedule_change_is_not_swallowed_as_a_failed_huid(home)
     result = run("rm", pod["pod_name"], "--in", "2h", "--yes", "--format", "json")
 
     assert result.exit_code == EXIT_PERMISSION_DENIED, result.output
+    summary = json.loads(result.stdout)
+    assert summary["scheduled"] == [] and summary["failed"] == []
     envelope = json.loads(next(line for line in result.stderr.splitlines() if line.startswith("{")))  # after the workspace line
     assert envelope["error"]["message"].startswith(f"Budget exceeded: {MAX_MESSAGE}")
     assert envelope["data"]["window"] == "max" and envelope["error"]["exit_code"] == EXIT_PERMISSION_DENIED
@@ -1077,15 +1079,66 @@ def test_schedule_removal_collects_a_402_and_still_schedules_later_pods():
             if pod.huid == "a":
                 raise LiumBudgetExceededError("budget a", window="daily")
 
-    with pytest.raises(LiumBudgetExceededError, match="budget a"):
-        ScheduleRemovalAction().execute(
-            {
-                "pods": [SimpleNamespace(huid="a"), SimpleNamespace(huid="b")],
-                "lium": FakeLium(),
-                "termination_time": "2h",
-            }
-        )
+    result = ScheduleRemovalAction().execute(
+        {
+            "pods": [SimpleNamespace(huid="a"), SimpleNamespace(huid="b")],
+            "lium": FakeLium(),
+            "termination_time": "2h",
+        }
+    )
     assert calls == ["a", "b"]
+    assert result.ok is False
+    assert result.data["failed_huids"] == []
+    assert result.data["budget_huids"] == ["a"]
+    assert result.data["budget_errors"][0].window == "daily"
+    assert "budget a" in str(result.data["budget_errors"][0])
+
+
+def test_rm_in_prints_scheduled_then_exits_6_when_one_pod_is_402(monkeypatch, home):
+    """Mikhail r4081732961: a 402 on a must not hide that b was rescheduled."""
+    from types import SimpleNamespace
+
+    from click.testing import CliRunner
+
+    from lium.cli.cli import cli
+    from lium.cli.rm import command as rm_module
+
+    pods = [
+        SimpleNamespace(
+            id="id-a", huid="pod-a", name="pod-a",
+            executor=SimpleNamespace(price_per_hour=1.0), created_at="2026-09-23T10:00:00",
+        ),
+        SimpleNamespace(
+            id="id-b", huid="pod-b", name="pod-b",
+            executor=SimpleNamespace(price_per_hour=1.0), created_at="2026-09-23T10:00:00",
+        ),
+    ]
+
+    class FakeLium:
+        workspaces = SimpleNamespace(current=lambda: None)
+        config = SimpleNamespace(workspace=None, workspace_id=None, workspace_explicit=False)
+
+        def __init__(self, *a, **k):
+            pass
+
+        def ps(self):
+            return pods
+
+        def schedule_termination(self, pod, termination_time=None):
+            if pod.huid == "pod-a":
+                raise LiumBudgetExceededError("budget a", window="daily")
+
+    monkeypatch.setattr(rm_module, "Lium", FakeLium)
+    result = CliRunner().invoke(cli, ["rm", "pod-a,pod-b", "--in", "2h", "--yes", "--format", "json"])
+
+    assert result.exit_code == EXIT_PERMISSION_DENIED, result.output
+    payload = json.loads(result.stdout)
+    assert [row["huid"] for row in payload["scheduled"]] == ["pod-b"]
+    assert payload["failed"] == []
+    envelope = json.loads(next(line for line in result.stderr.splitlines() if line.startswith("{")))
+    assert "budget a" in envelope["error"]["message"]
+    assert envelope["error"]["exit_code"] == EXIT_PERMISSION_DENIED
+    assert envelope["data"]["window"] == "daily"
 
 
 @responses.activate

@@ -274,8 +274,12 @@ def rm_command(
         action = RemovePodsAction()
         done_verb = "Removed"
 
-    failed_huids = action.execute(context).data["failed_huids"]
-    done_pods = [pod for pod in plan.pods if pod.huid not in failed_huids]
+    result = action.execute(context)
+    failed_huids = list(result.data.get("failed_huids") or [])
+    budget_errors = list(result.data.get("budget_errors") or [])
+    budget_huids = list(result.data.get("budget_huids") or [])
+    not_done = set(failed_huids) | set(budget_huids)
+    done_pods = [pod for pod in plan.pods if pod.huid not in not_done]
     removed_huids = [pod.huid for pod in done_pods]
 
     # The pods were listed before the delete, so their $/h and start time are
@@ -294,10 +298,6 @@ def rm_command(
         if plan.termination_time:
             payload["termination_time"] = context["termination_time"]
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-        if failed_huids:
-            # The payload already names the failures; a second message on stdout
-            # would break json.loads for the caller. The exit code says it failed.
-            raise SystemExit(EXIT_GENERAL_ERROR)
     elif removed_huids:
         # Say what happened: silence is indistinguishable from having done nothing.
         ui.success(f"{done_verb} {len(removed_huids)} pod(s): {', '.join(removed_huids)}")
@@ -305,7 +305,16 @@ def rm_command(
             for pod in done_pods:
                 ui.info(display.format_removed_line(pod, spends[pod.huid]))
 
+    if budget_errors:
+        # A 402 is the key's budget, not a generic failed huid. Print scheduled/failed
+        # first so `rm a b --in 2h` still shows that b was rescheduled, then exit 6.
+        # The refused pod is not retried — one refusal, no second charge.
+        raise budget_errors[0]
     if failed_huids:
+        if output_format == "json":
+            # The payload already names the failures; a second message on stdout
+            # would break json.loads for the caller. The exit code says it failed.
+            raise SystemExit(EXIT_GENERAL_ERROR)
         raise CliFailure(
             "removal_failed",
             f"Failed to remove pods: {', '.join(failed_huids)}",
