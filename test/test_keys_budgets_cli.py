@@ -371,6 +371,22 @@ def test_create_with_billing_scope_under_json_puts_the_warning_on_stderr(home, m
 
 
 @responses.activate
+def test_create_with_billing_scope_under_json_refused_leaves_only_the_envelope_on_stderr(home, monkeypatch):
+    """Mikhail r4083335854: under --json the warning waits for the minted key, so a refused create's stderr is
+    one JSON object."""
+    session(monkeypatch)
+    responses.add(responses.GET, f"{API}/keys/scopes", json=fixture("scopes"))
+    responses.add(responses.POST, f"{API}/keys", status=422, json={"detail": "billing keys are disabled on this server"})
+
+    result = run("keys", "create", "payer", "--scope", "billing", "--json")
+
+    assert result.exit_code != 0, result.output
+    assert result.stdout == ""
+    assert "Warning" not in result.stderr
+    assert json.loads(result.stderr)["error"]
+
+
+@responses.activate
 def test_create_with_billing_scope_on_a_server_without_the_scopes_route_still_warns(home, monkeypatch):
     session(monkeypatch)
     responses.add(responses.GET, f"{API}/keys/scopes", status=404, json={"detail": "Not Found"})

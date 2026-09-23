@@ -226,7 +226,7 @@ def keys_create_command(
     target = target_workspace(lium, workspace)
     # a name config.ini cannot hold, or a section already holding another same-named workspace's key, is refused before minting
     section = section_for(target) if save else None
-    if BILLING_SCOPE in chosen:
+    if BILLING_SCOPE in chosen and not json_output:
         _warn_billing(lium, json_output)
     key = lium.api_keys.create(
         name,
@@ -255,6 +255,8 @@ def keys_create_command(
     if missing:
         _warn_unrecorded(asked, missing, json_output)
     if json_output:
+        if BILLING_SCOPE in chosen:
+            _warn_billing(lium, json_output)
         click.echo(json.dumps({**key.raw, "workspace_name": target.name}, indent=2))
         return
     ui.success(f"Key '{escape(name)}' created in {escape(target.name)}")
@@ -347,7 +349,8 @@ def _warn_unrecorded(asked: Dict[str, Any], missing: List[str], json_output: boo
 def _warn_billing(lium: Lium, json_output: bool) -> None:
     """One line before minting a key that holds `billing`: the server's own description of the scope (the
     words come from `GET /keys/scopes`, not from here). On a server without that route the line names the
-    scope and says the description is unavailable. Under --json the line goes to stderr."""
+    scope and says the description is unavailable. Under --json the line goes to stderr, and only once the key
+    is minted: a refused create leaves stderr holding the error envelope alone."""
     description = _scopes_by_name(lium).get(BILLING_SCOPE)
     text = description.description if description and description.description else ""
     line = f"Warning: this key holds the '{BILLING_SCOPE}' scope — " + (
