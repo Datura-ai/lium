@@ -204,10 +204,15 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     except LiumChargeOutcomeUnknownError as e:
         raise charge_outcome_unknown_failure(e)
 
-    if result.get("status") == "processing":
-        # the platform's 202: the outcome is not known — Stripe's answer to the charge was lost, the charge is
-        # still processing, or the webhook has not credited it yet. Not a success, not "run it again".
+    if result.get("status") == "processing" and not result.get("payment_intent_id"):
+        # 202 without a payment intent: Stripe's answer to the charge was lost; the charge may never
+        # have happened. Not a success — stop so a caller does not treat it as credited. The same
+        # idempotency key repeats this charge and never makes a second one.
         raise charge_pending_failure(result)
+
+    # 200 succeeded, or 202 processing with a payment_intent_id (lium-platform#633: the platform
+    # took the charge and named the intent). Exit 0. Credit lands by webhook; a repeat with the
+    # same idempotency key and amount returns this charge and never a second one.
 
     # Best effort: the charge is done, so a balance read that fails must not turn the command
     # into a failure a caller would retry (and charge again). `balance()` re-raises a raw

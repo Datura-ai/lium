@@ -441,6 +441,27 @@ def test_card_json_is_the_servers_answer_plus_the_balance(fake_lium):
     assert result.stderr == ""
 
 
+def test_card_processing_with_payment_intent_is_success_exit_0(fake_lium):
+    """lium-platform#633 answers a taken charge with 202 `processing` plus a `pi_` id. That is
+    success (exit 0): the intent exists, the same idempotency key repeats it, no second charge."""
+    fake_lium.charge = {**CHARGED, "status": "processing"}
+
+    human = _run("-a", "50")
+    assert human.exit_code == 0, human.output
+    assert "Charged $50.00 to Visa ····4242" in human.output
+    assert "pi_3Test" in human.output
+    assert "Idempotency key: nightly-1" in human.output
+
+    machine = _run("-a", "50", "--json")
+    assert machine.exit_code == 0, machine.output
+    payload = json.loads(machine.stdout)
+    assert payload["status"] == "processing"
+    assert payload["payment_intent_id"] == "pi_3Test"
+    assert payload["idempotency_key"] == "nightly-1"
+    assert payload["balance"] == 61.25
+    assert fake_lium.calls == [(50.0, None, None)]
+
+
 def test_card_processing_is_payment_submitted_still_confirming_exit_6(fake_lium):
     """The platform answered 202: the outcome is NOT known (Stripe's answer was lost, or the webhook has not
     credited yet) — the charge may never have happened. Not "Payment accepted" and not exit 0 (the r2 review):
