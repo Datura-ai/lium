@@ -123,7 +123,7 @@ class ControlMaster:
         try:
             self.path.unlink()   # a dead master's socket, or one that is not ours: ssh -M would refuse the path
         except FileNotFoundError:
-            pass
+            pass  # no socket left behind: nothing stands in ssh -M's way
         # stderr goes to a file: the backgrounded master keeps it open, and a pipe would never see EOF
         with tempfile.TemporaryFile() as err:
             started = subprocess.run(
