@@ -455,7 +455,7 @@ class VolumeInfo(_Serializable):
 
 @dataclass
 class GpuStats(_Serializable):
-    """One GPU's utilisation as reported by ``nvidia-smi`` on the pod."""
+    """One GPU's utilization as reported by ``nvidia-smi`` on the pod."""
 
     index: int
     name: str
