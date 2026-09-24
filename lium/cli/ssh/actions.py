@@ -64,7 +64,8 @@ def ssh_banner_problem(host: str, port: int, timeout: float = SSH_PROBE_TIMEOUT)
     """None when ``host:port`` sends an SSH identification line, else what it did instead.
 
     RFC 4253 lets a server send other lines before ``SSH-``, so up to 4 KiB is read.
-    ``timeout`` bounds the whole probe, so a peer trickling bytes can't stretch it.
+    ``timeout`` bounds the connect and every read for one address, so a peer trickling bytes can't
+    stretch it; name lookup and a host with several addresses are not bounded by it.
     """
     buffer = b""
     deadline = time.monotonic() + timeout
