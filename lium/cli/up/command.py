@@ -942,8 +942,9 @@ def up_command(
     pod = result.data["pod"]
 
     from lium.cli.ssh.command import (
-        ssh_never_answered, ssh_session_connected, ssh_wait_data, try_once_options, wait_for_ssh_banner, with_ssh_options,
+        ssh_never_answered, ssh_session_connected, ssh_wait_data, try_once_options, wait_for_ssh_banner,
     )
+    from lium.cli.ssh.actions import with_ssh_options
 
     # sshd started by the image can come up seconds after RUNNING
     try:

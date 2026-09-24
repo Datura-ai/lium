@@ -14,7 +14,7 @@ from lium.cli.actions import ActionResult
 from lium.cli.utils import handle_errors, parse_targets, parse_timestamp
 from lium.cli.utils import CliFailure, EXIT_CONFIGURATION_ERROR, EXIT_POD_NOT_FOUND, EXIT_SSH_ERROR
 from . import validation, parsing
-from .actions import TRY_ONCE_SSH_OPTIONS, SshAction, WaitForSSHAction, host_port, with_ssh_options
+from .actions import TRY_ONCE_SSH_OPTIONS, SshAction, WaitForSSHAction, host_port
 
 
 # ssh(1) uses 255 for its own connection failures; anything else is the remote
