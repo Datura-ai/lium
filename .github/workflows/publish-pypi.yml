@@ -4,8 +4,9 @@ run-name: PyPI ${{ github.event.workflow_run.head_branch }}
 # The only path to PyPI for `lium.io`. pypi.org's trusted publisher names this file and the `pypi` environment, and
 # that environment admits only `main`. A `workflow_run` always runs the default branch's copy of this file, so an
 # edited copy on another branch never runs here, and the job below uploads only a release tag on a commit of main's
-# first-parent history. Main takes squash-merged, reviewed PRs only, so only reviewed code reaches PyPI (RELEASING.md
-# "Who can publish").
+# first-parent history. Once main takes squash-merged, reviewed PRs only (.github/rulesets/README.md section 3), new
+# commits there are reviewed PR states; older ones are not, so the `v*` tag ruleset (section 4) limits who can tag
+# (RELEASING.md "Who can publish").
 on:
   workflow_run:
     workflows: ["Build and Publish Python Package"]

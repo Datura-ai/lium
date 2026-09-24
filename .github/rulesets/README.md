@@ -70,9 +70,10 @@ Check: `gh api "repos/$R/rules/branches/main" --jq '[.[]|select(.type=="pull_req
 ## 4. Tag ruleset
 
 `release-tags.json` limits creating, moving and deleting `v*` tags to its bypass list (GitHub user ids,
-`gh api users/<login> --jq .id`). Once rebase merges are off (3), PyPI does not depend on it: `publish-pypi.yml` then
-accepts only a squash-merged PR state. Until then, a tag on a commit that a rebase-merged PR later removed passes that
-check, and only this ruleset stops it. It also matters for the GitHub release assets: `release.yml` builds the binaries from whatever commit the tag names
+`gh api users/<login> --jq .id`). It stays part of the PyPI rule permanently, even after rebase merges are off (3):
+`publish-pypi.yml` accepts any commit on `main`'s first-parent history, and that history already holds commits that were
+never a single reviewed PR state (rebase-merged or pushed directly). Squash merge only stops new ones, but a tag on an
+existing one still passes that check, and only this ruleset stops it. It also matters for the GitHub release assets: `release.yml` builds the binaries from whatever commit the tag names
 and marks the release `latest`, and `install.sh` and self-update download them. Apply or update it with
 `gh api "repos/$R/rulesets" --method POST --input .github/rulesets/release-tags.json` (or `PUT
 "repos/$R/rulesets/<id>"` for an existing one). Check: `gh api "repos/$R/rulesets?targets=tag" --jq

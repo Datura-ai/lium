@@ -103,7 +103,7 @@ def git(cwd: Path, *args: str) -> str:
 
 @pytest.fixture
 def checkout(tmp_path):
-    """A clone of an origin whose main is base -> `on_main` (v1.0.0) -> `merge` (v1.0.3), a --no-ff merge of `merged_in`
+    """A clone of an origin whose main is base -> `on_main` (v1.0.0) -> `merge` (v1.0.3, and v1.0.4 annotated), a --no-ff merge of `merged_in`
     (v1.0.2, an ancestor of main but not on its first-parent history), plus a side branch at `off_main` (v1.0.1)."""
     origin = tmp_path / "origin"
     origin.mkdir()
@@ -127,6 +127,7 @@ def checkout(tmp_path):
     git(origin, "checkout", "-q", "main")
     git(origin, "merge", "-q", "--no-ff", "-m", "merge feature", "feature")
     git(origin, "tag", "v1.0.3")
+    git(origin, "tag", "-a", "v1.0.4", "-m", "annotated release tag")
     shas["merge"] = git(origin, "rev-parse", "HEAD")
     git(origin, "branch", "-q", "-D", "side", "feature")
     clone = tmp_path / "clone"
@@ -148,7 +149,7 @@ def run_tag_check(clone: Path, tag: str, sha: str) -> subprocess.CompletedProces
     )
 
 
-@pytest.mark.parametrize("tag, which", [("v1.0.0", "on_main"), ("v1.0.3", "merge")])
+@pytest.mark.parametrize("tag, which", [("v1.0.0", "on_main"), ("v1.0.3", "merge"), ("v1.0.4", "merge")])
 def test_tag_check_passes_a_release_tag_on_mains_first_parent_history(checkout, tag, which):
     clone, shas = checkout
     result = run_tag_check(clone, tag, shas[which])
