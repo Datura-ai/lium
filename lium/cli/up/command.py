@@ -44,6 +44,7 @@ from .actions import (
     VerifyGpuCountAction,
     InstallJupyterAction,
     PrepareSSHAction,
+    WaitForSSHAction,
     rented_gpu_count,
 )
 
@@ -941,11 +942,29 @@ def up_command(
     ssh_argv = result.data["ssh_argv"]
     pod = result.data["pod"]
 
+    # A refused first connection is usually sshd still starting. The session is opened
+    # even when the wait runs out: the direct probe can miss a route the user's ssh
+    # config takes, and ssh then gives the real error.
+    action = WaitForSSHAction()
+    ssh_ready = ui.load("Waiting for SSH", lambda: action.execute({"pod": pod}))
+    if not ssh_ready.ok:
+        ui.warning(f"{ssh_ready.error}; trying ssh anyway")
+
     from lium.cli.ssh.command import ssh_session_connected
 
     if not ssh_session_connected(ssh_argv):
+        if ssh_ready.ok:
+            raise CliFailure(
+                "ssh_connection_failed",
+                f"Pod {pod.huid} is running but the SSH connection failed",
+                EXIT_SSH_ERROR,
+                data=billing_pod,
+            )
         raise CliFailure(
             "ssh_connection_failed",
-            f"Pod {pod.huid} is running but the SSH connection failed",
+            f"Pod {pod.huid} is running but its SSH port never answered: {ssh_ready.error}",
             EXIT_SSH_ERROR,
+            data={**billing_pod, "ssh_port_answered": False, "ssh_wait": ssh_ready.data},
+            hint=f"The pod was not removed and is billed until it is: retry with 'lium ssh {pod.huid}', "
+                 f"or remove it with 'lium rm {pod.huid}' and rent another node",
         )
