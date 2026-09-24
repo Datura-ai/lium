@@ -1,11 +1,10 @@
 from typing import Callable, Dict, List, Optional
 import re
-import socket
 import time
 
 from lium.cli.actions import ActionResult
 from lium.sdk import ExecutorInfo, Template, PodInfo, Lium, LiumError
-from lium.sdk.client import RENT_BY_SPEC, ssh_target
+from lium.sdk.client import RENT_BY_SPEC
 from lium.sdk.client import paramiko  # the lazy stand-in (DAH-3053): `paramiko.SSHException` below resolves when the except runs, not at import
 from lium.cli.utils import (
     _api_error_data,
@@ -589,69 +588,3 @@ class PrepareSSHAction:
         from lium.cli.ssh.command import get_ssh_method_and_pod
         ssh_argv, pod = get_ssh_method_and_pod(pod_name)
         return ActionResult(ok=True, data={"ssh_argv": ssh_argv, "pod": pod})
-
-
-# A pod reports RUNNING before an sshd the image starts itself is listening, and the
-# node's port forward accepts TCP meanwhile and then closes it: only the server's
-# "SSH-" identification line says ssh can connect.
-SSH_READY_SECONDS = 60
-SSH_READY_INTERVAL = 3
-SSH_PROBE_TIMEOUT = 5
-_SSH_BANNER_MAX_BYTES = 4096
-
-
-def ssh_banner_problem(host: str, port: int, timeout: float = SSH_PROBE_TIMEOUT) -> Optional[str]:
-    """None when ``host:port`` sends an SSH identification line, else what it did instead.
-
-    RFC 4253 lets a server send other lines before ``SSH-``, so up to 4 KiB is read.
-    """
-    buffer = b""
-    try:
-        with socket.create_connection((host, port), timeout=timeout) as sock:
-            sock.settimeout(timeout)
-            while len(buffer) < _SSH_BANNER_MAX_BYTES:
-                chunk = sock.recv(_SSH_BANNER_MAX_BYTES - len(buffer))
-                if not chunk:
-                    break
-                buffer += chunk
-                if any(line.startswith(b"SSH-") for line in buffer.split(b"\n")):
-                    return None
-    except socket.timeout:
-        return "no SSH banner" if buffer else "no answer"
-    except OSError as exc:
-        return (exc.strerror or str(exc)).lower()
-    if not buffer:
-        return "connection closed before an SSH banner"
-    return "not an SSH server"
-
-
-class WaitForSSHAction:
-    """Wait until the pod's SSH port answers with an SSH banner, for up to ``wait_seconds``.
-
-    ``ok`` False means the port never answered as an SSH server in that time; the
-    pod is left as it is, and ``data["last_problem"]`` says what the port did.
-    """
-
-    def execute(self, ctx: dict) -> ActionResult:
-        pod: PodInfo = ctx["pod"]
-        wait_seconds: float = ctx.get("wait_seconds", SSH_READY_SECONDS)
-        probe: Callable[[str, int], Optional[str]] = ctx.get("probe", ssh_banner_problem)
-        sleep = ctx.get("sleep", time.sleep)
-        clock = ctx.get("clock", time.monotonic)
-
-        _user, host, port = ssh_target(pod.ssh_cmd)
-        deadline = clock() + wait_seconds
-        attempts = 0
-        while True:
-            attempts += 1
-            problem = probe(host, port)
-            data = {"host": host, "port": port, "attempts": attempts}
-            if problem is None:
-                return ActionResult(ok=True, data=data)
-            if clock() + SSH_READY_INTERVAL > deadline:
-                return ActionResult(
-                    ok=False,
-                    data={**data, "last_problem": problem},
-                    error=f"{host}:{port} gave no SSH banner within {wait_seconds:g}s ({problem})",
-                )
-            sleep(SSH_READY_INTERVAL)

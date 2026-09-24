@@ -6,11 +6,13 @@ from typing import List, Tuple
 import click
 
 from lium.sdk import Lium, PodInfo
+from lium.sdk.client import ssh_target
 from lium.cli import ui
+from lium.cli.actions import ActionResult
 from lium.cli.utils import handle_errors, parse_targets
 from lium.cli.utils import CliFailure, EXIT_CONFIGURATION_ERROR, EXIT_POD_NOT_FOUND, EXIT_SSH_ERROR
 from . import validation, parsing
-from .actions import SshAction
+from .actions import SshAction, WaitForSSHAction
 
 
 # ssh(1) uses 255 for its own connection failures; anything else is the remote
@@ -70,6 +72,36 @@ def ssh_session_connected(ssh_argv: List[str]) -> bool:
         raise CliFailure("ssh_failed", f"Error executing SSH: {e}", EXIT_SSH_ERROR)
 
 
+def wait_for_ssh_banner(pod: PodInfo) -> ActionResult:
+    """Wait for the pod's SSH banner under a spinner; ``ok`` False when it never came.
+
+    The caller opens the session either way: the direct probe can miss a route the
+    user's ssh config takes, and ssh then reports the real error.
+    Raises ``ValueError`` for an ``ssh_cmd`` that ssh would not be given.
+    """
+    _user, host, port = ssh_target(pod.ssh_cmd)
+    action = WaitForSSHAction()
+    result = ui.load(f"Waiting for SSH on {host}:{port}", lambda: action.execute({"pod": pod}))
+    if not result.ok:
+        ui.warning(f"{result.error}; trying ssh anyway")
+    return result
+
+
+def ssh_never_answered(pod: PodInfo, wait: ActionResult, data: dict) -> CliFailure:
+    """``ssh_connection_failed`` for a pod whose SSH port sent no banner, then refused ssh too."""
+    huid = pod.huid
+    return CliFailure(
+        "ssh_connection_failed",
+        f"Pod {huid} is RUNNING and billing, but SSH did not answer within "
+        f"{wait.data['wait_seconds']:g}s ({wait.data['host']}:{wait.data['port']}: {wait.data['last_problem']}). "
+        f"Retry with 'lium ssh {huid}', or remove it with 'lium rm {huid}'",
+        EXIT_SSH_ERROR,
+        data={**data, "ssh_port_answered": False, "ssh_wait": wait.data},
+        hint=f"The pod was not removed and bills until it is: retry with 'lium ssh {huid}' in a minute, "
+             f"or remove it with 'lium rm {huid}' and rent another node",
+    )
+
+
 @click.command("ssh")
 @click.argument("target")
 @handle_errors
@@ -108,6 +140,11 @@ def ssh_command(target: str):
 
     pod = parsed.get("pod")
 
+    try:
+        ssh_ready = wait_for_ssh_banner(pod)
+    except ValueError:
+        ssh_ready = None  # SshAction refuses the same ssh_cmd below, naming the pod
+
     # Execute
     ctx = {"lium": lium, "pod": pod}
 
@@ -118,6 +155,8 @@ def ssh_command(target: str):
 
     exit_code = result.data.get("exit_code")
     if exit_code == _SSH_CONNECTION_FAILED:
+        if ssh_ready is not None and not ssh_ready.ok:
+            raise ssh_never_answered(pod, ssh_ready, {"pod_id": pod.id, "pod_name": pod.name})
         raise CliFailure(
             "ssh_failed",
             f"SSH connection to '{pod.huid}' failed",

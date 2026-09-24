@@ -615,6 +615,7 @@ def test_ssh_separates_its_own_failure_from_the_remote_shell(monkeypatch):
             return ["ssh", "root@203.0.113.7"]
 
     monkeypatch.setattr(ssh_module, "Lium", _SshLium)
+    monkeypatch.setattr(ssh_module, "wait_for_ssh_banner", lambda pod: ActionResult(ok=True, data={}))
 
     def _returncode(code):
         monkeypatch.setattr(
