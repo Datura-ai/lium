@@ -941,7 +941,7 @@ def up_command(
     ssh_argv = result.data["ssh_argv"]
     pod = result.data["pod"]
 
-    from lium.cli.ssh.command import ssh_never_answered, ssh_session_connected, wait_for_ssh_banner
+    from lium.cli.ssh.command import ssh_never_answered, ssh_session_connected, ssh_wait_data, wait_for_ssh_banner
 
     # sshd started by the image can come up seconds after RUNNING
     ssh_ready = wait_for_ssh_banner(pod)
@@ -953,5 +953,5 @@ def up_command(
             "ssh_connection_failed",
             f"Pod {pod.huid} is running but the SSH connection failed",
             EXIT_SSH_ERROR,
-            data=billing_pod,
+            data={**billing_pod, **ssh_wait_data(ssh_ready)},
         )

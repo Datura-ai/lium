@@ -2,7 +2,7 @@
 
 import shutil
 import subprocess
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 import click
 
 from lium.sdk import Lium, PodInfo
@@ -87,8 +87,15 @@ def wait_for_ssh_banner(pod: PodInfo) -> ActionResult:
     return result
 
 
+def ssh_wait_data(wait: Optional[ActionResult]) -> dict:
+    """What an SSH failure's ``data`` says about the banner wait before it."""
+    if wait is None:
+        return {}
+    return {"ssh_port_answered": wait.ok, "ssh_wait": wait.data}
+
+
 def ssh_never_answered(pod: PodInfo, wait: ActionResult, data: dict) -> CliFailure:
-    """``ssh_connection_failed`` for a pod whose SSH port sent no banner, then refused ssh too."""
+    """``lium up``'s ``ssh_connection_failed`` for a pod whose SSH port sent no banner, then refused ssh too."""
     huid = pod.huid
     return CliFailure(
         "ssh_connection_failed",
@@ -96,7 +103,7 @@ def ssh_never_answered(pod: PodInfo, wait: ActionResult, data: dict) -> CliFailu
         f"{wait.data['wait_seconds']:g}s ({host_port(wait.data['host'], wait.data['port'])}: {wait.data['last_problem']}). "
         f"Retry with 'lium ssh {huid}', or remove it with 'lium rm {huid}'",
         EXIT_SSH_ERROR,
-        data={**data, "ssh_port_answered": False, "ssh_wait": wait.data},
+        data={**data, **ssh_wait_data(wait)},
         hint=f"The pod was not removed and bills until it is: retry with 'lium ssh {huid}' in a minute, "
              f"or remove it with 'lium rm {huid}' and rent another node",
     )
@@ -155,12 +162,11 @@ def ssh_command(target: str):
 
     exit_code = result.data.get("exit_code")
     if exit_code == _SSH_CONNECTION_FAILED:
-        if ssh_ready is not None and not ssh_ready.ok:
-            raise ssh_never_answered(pod, ssh_ready, {"pod_id": pod.id, "pod_name": pod.name})
         raise CliFailure(
             "ssh_failed",
             f"SSH connection to '{pod.huid}' failed",
             EXIT_SSH_ERROR,
+            data={"pod_id": pod.id, "pod_name": pod.name, **ssh_wait_data(ssh_ready)},
         )
     if exit_code:
         ui.dim(f"SSH session ended with exit code {exit_code}")

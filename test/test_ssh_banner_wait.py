@@ -384,6 +384,16 @@ def test_up_keeps_the_old_failure_when_the_port_answered(monkeypatch):
     assert "did not answer within" not in _flat(result.output)
 
 
+def test_up_key_failure_envelope_says_the_port_answered(monkeypatch):
+    monkeypatch.setenv("LIUM_OUTPUT", "json")
+    result, calls = _run_up(monkeypatch, probe=lambda h, p: None, ssh_connects=False)
+
+    envelope = _envelope(result)
+    assert envelope["error"]["code"] == "ssh_connection_failed"
+    assert envelope["data"]["pod_id"] == "pod-1"
+    assert envelope["data"]["ssh_port_answered"] is True
+
+
 def test_up_json_does_not_probe_ssh(monkeypatch):
     result, calls = _run_up(monkeypatch, probe=lambda h, p: None, ssh_connects=True, json_output=True)
 
@@ -440,7 +450,8 @@ def test_ssh_waits_through_a_refused_port(monkeypatch):
     assert calls[0] == ("probe", "203.0.113.10", 20022)
 
 
-def test_ssh_fails_with_the_code_and_leaves_the_pod_when_ssh_never_comes_up(monkeypatch):
+def test_ssh_keeps_ssh_failed_and_leaves_the_pod_when_ssh_never_comes_up(monkeypatch):
+    """`lium ssh`'s code for ssh's own failure stays `ssh_failed`; only `data` grows."""
     monkeypatch.setenv("LIUM_OUTPUT", "json")
     result, calls = _run_ssh(monkeypatch, probe=lambda h, p: "connection refused", returncode=255)
 
@@ -448,18 +459,23 @@ def test_ssh_fails_with_the_code_and_leaves_the_pod_when_ssh_never_comes_up(monk
     assert result.exit_code == EXIT_SSH_ERROR
     assert ("rm", "pod-1") not in calls
     assert calls[-1][0] == "ssh"   # still tried once after the wait ran out
-    assert envelope["error"]["code"] == "ssh_connection_failed"
-    assert "is RUNNING and billing, but SSH did not answer within 60s" in envelope["error"]["message"]
-    assert "'lium rm eager-wolf-aa'" in envelope["error"]["message"]
+    assert envelope["error"]["code"] == "ssh_failed"
+    assert envelope["error"]["message"] == "SSH connection to 'eager-wolf-aa' failed"
     assert envelope["data"]["pod_id"] == "pod-1"
+    assert envelope["data"]["pod_name"] == "train"
     assert envelope["data"]["ssh_port_answered"] is False
+    assert envelope["data"]["ssh_wait"]["last_problem"] == "connection refused"
 
 
 def test_ssh_keeps_ssh_failed_when_the_port_answered(monkeypatch):
+    monkeypatch.setenv("LIUM_OUTPUT", "json")
     result, calls = _run_ssh(monkeypatch, probe=lambda h, p: None, returncode=255)
 
+    envelope = _envelope(result)
     assert result.exit_code == EXIT_SSH_ERROR
-    assert "SSH connection to 'eager-wolf-aa' failed" in _flat(result.output)
+    assert envelope["error"]["code"] == "ssh_failed"
+    assert envelope["error"]["message"] == "SSH connection to 'eager-wolf-aa' failed"
+    assert envelope["data"]["ssh_port_answered"] is True
 
 
 def test_ssh_remote_exit_status_is_not_a_failure_after_the_wait(monkeypatch):
