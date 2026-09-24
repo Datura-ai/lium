@@ -24,7 +24,7 @@
   <a href="https://pypi.org/project/lium.io/"><img src="https://img.shields.io/pypi/v/lium.io?label=pypi%20lium.io" alt="PyPI: lium.io" /></a>
   <a href="https://pypi.org/project/lium.io/"><img src="https://img.shields.io/pypi/pyversions/lium.io" alt="Python versions" /></a>
   <a href="https://github.com/Datura-ai/lium/releases"><img src="https://img.shields.io/github/v/release/Datura-ai/lium?label=binary%20release" alt="Latest binary release" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Datura-ai/lium" alt="License: MIT" /></a>
+  <a href="https://github.com/Datura-ai/lium/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Datura-ai/lium" alt="License: MIT" /></a>
   <a href="https://lium.io/pricing"><img src="https://img.shields.io/badge/live%20GPU%20prices-lium.io%2Fpricing-2ea44f" alt="Live GPU prices" /></a>
   <a href="https://github.com/Datura-ai/lium-skill"><img src="https://img.shields.io/badge/agent%20skill-Datura--ai%2Flium--skill-blue" alt="Agent skill" /></a>
 </p>
