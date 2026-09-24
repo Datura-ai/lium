@@ -9,7 +9,9 @@ line, then open the session (still tried once when the wait runs out). The pod i
 import json
 import socket
 import threading
+import shutil
 import time
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -24,11 +26,12 @@ from lium.cli.utils import EXIT_SSH_ERROR
 from lium.sdk import PodInfo
 
 
-def _pod(ssh_cmd="ssh root@203.0.113.10 -p 20022") -> PodInfo:
+def _pod(ssh_cmd="ssh root@203.0.113.10 -p 20022", created_at="2026-09-05T10:00:00Z",
+         updated_at="2026-09-05T10:00:00Z") -> PodInfo:
     return PodInfo(
         id="pod-1", name="train", status="RUNNING", huid="eager-wolf-aa",
-        ssh_cmd=ssh_cmd, ports={"22": 20022}, created_at="2026-09-05T10:00:00Z",
-        updated_at="2026-09-05T10:00:00Z", executor=None, template={}, removal_scheduled_at=None,
+        ssh_cmd=ssh_cmd, ports={"22": 20022}, created_at=created_at,
+        updated_at=updated_at, executor=None, template={}, removal_scheduled_at=None,
         jupyter_installation_status=None, jupyter_url=None, gpu_count=1,
     )
 
@@ -255,9 +258,14 @@ def test_the_wait_respects_a_shorter_timeout():
 
 # --- shared harness -----------------------------------------------------------------------------
 
-def _patch_probe(monkeypatch, calls, probe):
-    """Route the real wait through ``probe`` on a fake clock; return the clock."""
+def _ago(minutes: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+
+
+def _patch_probe(monkeypatch, calls, probe, route=None):
+    """Route the real wait through ``probe`` on a fake clock; ``ssh -G`` answers ``route``."""
     clock = _Clock()
+    monkeypatch.setattr(ssh_module, "ssh_route_skip_reason", lambda argv, host: route)
 
     def _probe(host, port):
         calls.append(("probe", host, port))
@@ -275,7 +283,7 @@ def _envelope(result) -> dict:
 
 # --- lium up ------------------------------------------------------------------------------------
 
-def _run_up(monkeypatch, *, probe, ssh_connects, json_output=False):
+def _run_up(monkeypatch, *, probe, ssh_connects, json_output=False, route=None):
     """`lium up brave-fox-3a --yes` against fakes, through to the SSH session; returns (result, calls)."""
     calls: list = []
     executor = SimpleNamespace(
@@ -315,7 +323,7 @@ def _run_up(monkeypatch, *, probe, ssh_connects, json_output=False):
     monkeypatch.setattr(up_module, "PrepareSSHAction", _action(lambda ctx: ActionResult(
         ok=True, data={"ssh_argv": ["ssh", "-p", "20022", "root@203.0.113.10"], "pod": _pod()})))
     monkeypatch.setattr(ssh_module, "ssh_session_connected", _ssh)
-    _patch_probe(monkeypatch, calls, probe)
+    _patch_probe(monkeypatch, calls, probe, route)
 
     args = ["up", "brave-fox-3a", "--yes"] + (["--json"] if json_output else [])
     return CliRunner().invoke(cli, args), calls
@@ -403,10 +411,10 @@ def test_up_json_does_not_probe_ssh(monkeypatch):
 
 # --- lium ssh -----------------------------------------------------------------------------------
 
-def _run_ssh(monkeypatch, *, probe, returncode, pod=None):
-    """`lium ssh eager-wolf-aa` against a fake pod list; returns (result, calls)."""
+def _run_ssh(monkeypatch, *, probe, returncode, pod=None, route=None):
+    """`lium ssh eager-wolf-aa` on a pod created a minute ago, against a fake pod list; returns (result, calls)."""
     calls: list = []
-    target = pod or _pod()
+    target = pod or _pod(created_at=_ago(1), updated_at=_ago(1))
 
     class _Lium:
         def __init__(self, *a, **kw):
@@ -429,7 +437,7 @@ def _run_ssh(monkeypatch, *, probe, returncode, pod=None):
 
     monkeypatch.setattr(ssh_module, "Lium", _Lium)
     monkeypatch.setattr(ssh_actions.subprocess, "run", _run)
-    _patch_probe(monkeypatch, calls, probe)
+    _patch_probe(monkeypatch, calls, probe, route)
     return CliRunner().invoke(cli, ["ssh", "eager-wolf-aa"]), calls
 
 
@@ -492,3 +500,114 @@ def test_ssh_does_not_probe_an_ssh_cmd_it_refuses(monkeypatch):
 
     assert result.exit_code == EXIT_SSH_ERROR
     assert calls == []
+
+
+# --- when the wait is skipped -------------------------------------------------------------------
+
+def _resolved(monkeypatch, stdout, returncode=0):
+    """``ssh -G`` answering ``stdout``; returns the argv lists it was given."""
+    seen = []
+
+    def _run(argv, **kwargs):
+        seen.append(argv)
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(ssh_module.subprocess, "run", _run)
+    return seen
+
+
+_ARGV = ["ssh", "-i", "/k/id", "-p", "20022", "root@203.0.113.10"]
+_DIRECT = "user root\nhostname 203.0.113.10\nport 20022\nproxycommand none\n"
+
+
+def test_route_check_runs_ssh_g_on_the_same_arguments(monkeypatch):
+    seen = _resolved(monkeypatch, _DIRECT)
+
+    assert ssh_module.ssh_route_skip_reason(_ARGV, "203.0.113.10") is None
+    assert seen == [["ssh", "-G", "-i", "/k/id", "-p", "20022", "root@203.0.113.10"]]
+
+
+@pytest.mark.parametrize(
+    "stdout, reason",
+    [
+        (_DIRECT + "proxyjump bastion\n", "ssh config sets ProxyJump"),
+        ("hostname 203.0.113.10\nproxycommand nc -X 5 -x proxy:1080 %h %p\n", "ssh config sets ProxyCommand"),
+        ("hostname pod-gw.internal\nport 20022\n", "ssh config sends 203.0.113.10 to pod-gw.internal"),
+    ],
+)
+def test_route_check_names_a_route_the_probe_would_miss(monkeypatch, stdout, reason):
+    _resolved(monkeypatch, stdout)
+
+    assert ssh_module.ssh_route_skip_reason(_ARGV, "203.0.113.10") == reason
+
+
+def test_route_check_falls_back_to_waiting_when_ssh_g_fails(monkeypatch):
+    _resolved(monkeypatch, "", returncode=255)
+
+    assert ssh_module.ssh_route_skip_reason(_ARGV, "203.0.113.10") is None
+
+
+@pytest.mark.skipif(not shutil.which("ssh"), reason="no ssh client")
+def test_route_check_reads_a_real_ssh_config(tmp_path):
+    config = tmp_path / "config"
+    config.write_text("Host 203.0.113.10\n  ProxyJump bastion.example\n")
+    argv = ["ssh", "-F", str(config), "-p", "20022", "root@203.0.113.10"]
+
+    assert ssh_module.ssh_route_skip_reason(argv, "203.0.113.10") == "ssh config sets ProxyJump"
+    config.write_text("")
+    assert ssh_module.ssh_route_skip_reason(argv, "203.0.113.10") is None
+
+
+def test_up_skips_the_wait_behind_a_proxy(monkeypatch):
+    monkeypatch.setenv("LIUM_OUTPUT", "json")
+    result, calls = _run_up(monkeypatch, probe=lambda h, p: None, ssh_connects=False, route="ssh config sets ProxyJump")
+
+    envelope = _envelope(result)
+    assert [c[0] for c in calls] == ["ssh"]
+    assert envelope["error"]["code"] == "ssh_connection_failed"
+    assert envelope["data"]["ssh_wait"] == {"skipped": "ssh config sets ProxyJump"}
+    assert "ssh_port_answered" not in envelope["data"]
+
+
+def test_ssh_skips_the_wait_behind_a_proxy(monkeypatch):
+    result, calls = _run_ssh(monkeypatch, probe=lambda h, p: None, returncode=0, route="ssh config sets ProxyJump")
+
+    assert result.exit_code == 0, result.output
+    assert [c[0] for c in calls] == ["ssh"]
+
+
+def test_ssh_skips_the_wait_for_a_pod_unchanged_for_over_ten_minutes(monkeypatch):
+    monkeypatch.setenv("LIUM_OUTPUT", "json")
+    pod = _pod(created_at=_ago(180), updated_at=_ago(11))
+
+    result, calls = _run_ssh(monkeypatch, probe=lambda h, p: "connection refused", returncode=255, pod=pod)
+
+    envelope = _envelope(result)
+    assert [c[0] for c in calls] == ["ssh"]
+    assert envelope["error"]["code"] == "ssh_failed"
+    assert envelope["data"]["ssh_wait"] == {"skipped": "pod unchanged for 11 min"}
+
+
+def test_ssh_waits_for_a_pod_updated_in_the_last_ten_minutes(monkeypatch):
+    """An old pod that just changed (a restart) is a fresh sshd start: the later stamp counts."""
+    pod = _pod(created_at=_ago(180), updated_at=_ago(2))
+
+    result, calls = _run_ssh(monkeypatch, probe=lambda h, p: None, returncode=0, pod=pod)
+
+    assert [c[0] for c in calls] == ["probe", "ssh"]
+
+
+@pytest.mark.parametrize("stamp", ["", "not a time"])
+def test_ssh_waits_when_the_pod_has_no_usable_timestamp(monkeypatch, stamp):
+    pod = _pod(created_at=stamp, updated_at=stamp)
+
+    result, calls = _run_ssh(monkeypatch, probe=lambda h, p: None, returncode=0, pod=pod)
+
+    assert [c[0] for c in calls] == ["probe", "ssh"]
+
+
+def test_up_waits_whatever_the_pod_age(monkeypatch):
+    """`lium up` just rented the pod: its age is never a reason to skip."""
+    result, calls = _run_up(monkeypatch, probe=lambda h, p: None, ssh_connects=True)
+
+    assert [c[0] for c in calls] == ["probe", "ssh"]

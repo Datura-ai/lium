@@ -2,6 +2,7 @@
 
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 import click
 
@@ -9,7 +10,7 @@ from lium.sdk import Lium, PodInfo
 from lium.sdk.client import ssh_target
 from lium.cli import ui
 from lium.cli.actions import ActionResult
-from lium.cli.utils import handle_errors, parse_targets
+from lium.cli.utils import handle_errors, parse_targets, parse_timestamp
 from lium.cli.utils import CliFailure, EXIT_CONFIGURATION_ERROR, EXIT_POD_NOT_FOUND, EXIT_SSH_ERROR
 from . import validation, parsing
 from .actions import SshAction, WaitForSSHAction, host_port
@@ -18,6 +19,10 @@ from .actions import SshAction, WaitForSSHAction, host_port
 # ssh(1) uses 255 for its own connection failures; anything else is the remote
 # shell's own exit status, which is not a failure of the lium command.
 _SSH_CONNECTION_FAILED = 255
+
+# `lium ssh` waits for the banner only on a pod that changed less than this long ago:
+# an older one is past the sshd start-up race the wait covers.
+POD_SETTLED_SECONDS = 600
 
 
 def get_ssh_method_and_pod(target: str) -> Tuple[List[str], PodInfo]:
@@ -72,14 +77,60 @@ def ssh_session_connected(ssh_argv: List[str]) -> bool:
         raise CliFailure("ssh_failed", f"Error executing SSH: {e}", EXIT_SSH_ERROR)
 
 
-def wait_for_ssh_banner(pod: PodInfo) -> ActionResult:
+def ssh_route_skip_reason(ssh_argv: List[str], host: str) -> Optional[str]:
+    """Why dialling ``host`` directly would not test the route ``ssh_argv`` takes, or None.
+
+    Read from ``ssh -G`` on the same arguments, so ``~/.ssh/config``, ``-F`` and ``-o``
+    all count. An ssh that can't answer ``-G`` (before OpenSSH 6.8) gives None.
+    """
+    try:
+        resolved = subprocess.run(
+            [ssh_argv[0], "-G", *ssh_argv[1:]],
+            capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if resolved.returncode != 0:
+        return None
+    config: dict = {}
+    for line in resolved.stdout.splitlines():
+        key, _, value = line.strip().partition(" ")
+        config.setdefault(key.lower(), value.strip())
+    for key, name in (("proxyjump", "ProxyJump"), ("proxycommand", "ProxyCommand")):
+        if config.get(key, "none").lower() != "none":
+            return f"ssh config sets {name}"
+    hostname = config.get("hostname")
+    if hostname and hostname.lower() != host.lower():
+        return f"ssh config sends {host} to {hostname}"
+    return None
+
+
+def pod_settled_seconds(pod: PodInfo) -> Optional[float]:
+    """Seconds since the later of the pod's ``created_at`` and ``updated_at``; None without a usable one."""
+    stamps = [parse_timestamp(s) for s in (pod.created_at, pod.updated_at) if isinstance(s, str) and s]
+    stamps = [s if s.tzinfo else s.replace(tzinfo=timezone.utc) for s in stamps if s]
+    if not stamps:
+        return None
+    return (datetime.now(timezone.utc) - max(stamps)).total_seconds()
+
+
+def wait_for_ssh_banner(pod: PodInfo, ssh_argv: List[str], *, settled_after: Optional[float] = None) -> ActionResult:
     """Wait for the pod's SSH banner under a spinner; ``ok`` False when it never came.
 
-    The caller opens the session either way: the direct probe can miss a route the
-    user's ssh config takes, and ssh then reports the real error.
+    The caller opens the session either way, and ssh then reports the real error.
+    Skipped (``ok`` True, ``data["skipped"]`` says why) when ssh's own config routes
+    the session elsewhere, or when ``settled_after`` is given and the pod has not
+    changed for longer than that.
     Raises ``ValueError`` for an ``ssh_cmd`` that ssh would not be given.
     """
     _user, host, port = ssh_target(pod.ssh_cmd)
+    skipped = ssh_route_skip_reason(ssh_argv, host)
+    if skipped is None and settled_after is not None:
+        settled = pod_settled_seconds(pod)
+        if settled is not None and settled > settled_after:
+            skipped = f"pod unchanged for {settled / 60:.0f} min"
+    if skipped:
+        return ActionResult(ok=True, data={"skipped": skipped})
     action = WaitForSSHAction()
     result = ui.load(f"Waiting for SSH on {host_port(host, port)}", lambda: action.execute({"pod": pod}))
     if not result.ok:
@@ -91,6 +142,8 @@ def ssh_wait_data(wait: Optional[ActionResult]) -> dict:
     """What an SSH failure's ``data`` says about the banner wait before it."""
     if wait is None:
         return {}
+    if wait.data.get("skipped"):
+        return {"ssh_wait": wait.data}
     return {"ssh_port_answered": wait.ok, "ssh_wait": wait.data}
 
 
@@ -148,7 +201,7 @@ def ssh_command(target: str):
     pod = parsed.get("pod")
 
     try:
-        ssh_ready = wait_for_ssh_banner(pod)
+        ssh_ready = wait_for_ssh_banner(pod, lium.ssh_argv(pod), settled_after=POD_SETTLED_SECONDS)
     except ValueError:
         ssh_ready = None  # SshAction refuses the same ssh_cmd below, naming the pod
 
