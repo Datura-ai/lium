@@ -707,7 +707,11 @@ def test_keys_create_binds_the_key_to_the_workspace_and_saves_it_for_the_flag(ho
 
     assert result.exit_code == 0, result.output
     post = responses.calls[-1].request
-    assert post.headers["X-Lium-Workspace-Id"] == RESEARCH and json.loads(post.body) == {"name": "ci"}
+    # no --scope: the three working scopes are sent by name, so the server's "omitted = every scope" default
+    # never hands a key `billing`; no pod_visibility is sent, so the server's own default decides
+    assert post.headers["X-Lium-Workspace-Id"] == RESEARCH and json.loads(post.body) == {
+        "name": "ci", "scopes": ["read", "rent", "manage"],
+    }
     assert "sk_test_fixture_key_not_a_secret_0000000000" in result.output
     assert f"[workspace.research]\nid = {RESEARCH}\napi_key = sk_test_fixture_key_not_a_secret_0000000000" in config_text(home)
 
