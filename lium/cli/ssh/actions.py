@@ -85,6 +85,8 @@ def ssh_banner_problem(host: str, port: int, timeout: float = SSH_PROBE_TIMEOUT)
         return "no SSH banner" if buffer else "no answer"
     except OSError as exc:
         return (exc.strerror or str(exc)).lower()
+    except UnicodeError:  # IDNA refuses a name like "a..b" before any lookup
+        return "name or service not known"
     if not buffer:
         return "connection closed before an SSH banner"
     return "not an SSH server"

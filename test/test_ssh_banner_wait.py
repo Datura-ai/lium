@@ -131,6 +131,23 @@ def test_an_ipv6_address_is_shown_in_brackets():
     assert result.error.startswith("[2001:db8::1]:20022 gave no SSH banner")
 
 
+@pytest.mark.parametrize("host", ["a..b", "a" * 64 + ".example"])
+def test_a_host_name_idna_refuses_is_reported_not_raised(host):
+    """IDNA raises UnicodeError, not OSError, for an empty or over-long label."""
+    assert ssh_actions.ssh_banner_problem(host, 22) == "name or service not known"
+
+
+def test_a_malformed_host_ends_the_wait_as_a_failed_wait():
+    clock = _Clock()
+
+    result = ssh_actions.WaitForSSHAction().execute(
+        {"pod": _pod("ssh root@a..b -p 22"), "sleep": clock.sleep, "clock": clock}
+    )
+
+    assert not result.ok
+    assert result.data["last_problem"] == "name or service not known"
+
+
 def test_another_protocol_is_not_ready(server):
     port = server(lambda conn: conn.sendall(b"HTTP/1.1 400 Bad Request\r\n\r\n"))
 
