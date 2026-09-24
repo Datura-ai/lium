@@ -941,12 +941,14 @@ def up_command(
     ssh_argv = result.data["ssh_argv"]
     pod = result.data["pod"]
 
-    from lium.cli.ssh.command import ssh_never_answered, ssh_session_connected, ssh_wait_data, wait_for_ssh_banner
+    from lium.cli.ssh.command import (
+        ssh_never_answered, ssh_session_connected, ssh_wait_data, try_once_options, wait_for_ssh_banner, with_ssh_options,
+    )
 
     # sshd started by the image can come up seconds after RUNNING
     ssh_ready = wait_for_ssh_banner(pod, ssh_argv)
 
-    if not ssh_session_connected(ssh_argv):
+    if not ssh_session_connected(with_ssh_options(ssh_argv, try_once_options(ssh_ready))):
         if not ssh_ready.ok:
             raise ssh_never_answered(pod, ssh_ready, billing_pod)
         raise CliFailure(

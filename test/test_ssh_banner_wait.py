@@ -611,3 +611,34 @@ def test_up_waits_whatever_the_pod_age(monkeypatch):
     result, calls = _run_up(monkeypatch, probe=lambda h, p: None, ssh_connects=True)
 
     assert [c[0] for c in calls] == ["probe", "ssh"]
+
+
+# --- the try-once after a wait that saw no banner -----------------------------------------------
+
+def _ssh_argv(calls):
+    return next(list(c[1]) for c in calls if c[0] == "ssh")
+
+
+def test_up_try_once_has_a_connect_timeout(monkeypatch):
+    result, calls = _run_up(monkeypatch, probe=lambda h, p: "no answer", ssh_connects=False)
+
+    argv = _ssh_argv(calls)
+    assert argv[:3] == ["ssh", "-o", "ConnectTimeout=15"]
+    assert argv[-1] == "root@203.0.113.10"
+
+
+def test_ssh_try_once_has_a_connect_timeout(monkeypatch):
+    result, calls = _run_ssh(monkeypatch, probe=lambda h, p: "no answer", returncode=255)
+
+    argv = _ssh_argv(calls)
+    assert argv[:3] == ["ssh", "-o", "ConnectTimeout=15"]
+    assert argv[-1] == "root@203.0.113.10"
+
+
+@pytest.mark.parametrize("route", [None, "ssh config sets ProxyJump"])
+def test_a_session_after_a_banner_or_a_skipped_wait_has_no_connect_timeout(monkeypatch, route):
+    _, up_calls = _run_up(monkeypatch, probe=lambda h, p: None, ssh_connects=True, route=route)
+    _, ssh_calls = _run_ssh(monkeypatch, probe=lambda h, p: None, returncode=0, route=route)
+
+    assert "ConnectTimeout=15" not in _ssh_argv(up_calls)
+    assert "ConnectTimeout=15" not in _ssh_argv(ssh_calls)

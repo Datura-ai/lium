@@ -1,7 +1,7 @@
 import socket
 import subprocess
 import time
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from lium.cli.actions import ActionResult
 from lium.sdk import Lium, PodInfo
@@ -23,6 +23,8 @@ class SshAction:
             ssh_argv = lium.ssh_argv(pod)
         except ValueError as e:
             return ActionResult(ok=False, data={}, error=f"Pod '{pod.huid}': {e}")
+        ssh_argv = with_ssh_options(ssh_argv, ctx.get("ssh_options") or [])
+
         try:
             result = subprocess.run(ssh_argv, check=False)
         except KeyboardInterrupt:
@@ -42,6 +44,16 @@ SSH_READY_SECONDS = 60
 SSH_READY_INTERVAL = 3
 SSH_PROBE_TIMEOUT = 5
 _SSH_BANNER_MAX_BYTES = 4096
+
+# The one ssh attempt after a wait that saw no banner: without it a silent port holds
+# ssh for the kernel's SYN timeout (about two minutes) or, after an accept, for ever.
+TRY_ONCE_SSH_OPTIONS = ["-o", "ConnectTimeout=15"]
+
+
+def with_ssh_options(ssh_argv: List[str], options: List[str]) -> List[str]:
+    """``ssh_argv`` with ``options`` right after the program; ssh takes the first value it sees."""
+    return [ssh_argv[0], *options, *ssh_argv[1:]] if options else list(ssh_argv)
+
 
 def host_port(host: str, port: int) -> str:
     """``host:port``, with an IPv6 address in brackets."""

@@ -13,7 +13,7 @@ from lium.cli.actions import ActionResult
 from lium.cli.utils import handle_errors, parse_targets, parse_timestamp
 from lium.cli.utils import CliFailure, EXIT_CONFIGURATION_ERROR, EXIT_POD_NOT_FOUND, EXIT_SSH_ERROR
 from . import validation, parsing
-from .actions import SshAction, WaitForSSHAction, host_port
+from .actions import TRY_ONCE_SSH_OPTIONS, SshAction, WaitForSSHAction, host_port, with_ssh_options
 
 
 # ssh(1) uses 255 for its own connection failures; anything else is the remote
@@ -138,6 +138,11 @@ def wait_for_ssh_banner(pod: PodInfo, ssh_argv: List[str], *, settled_after: Opt
     return result
 
 
+def try_once_options(wait: Optional[ActionResult]) -> List[str]:
+    """Extra ssh options for the session: a connect timeout after a wait that saw no banner."""
+    return list(TRY_ONCE_SSH_OPTIONS) if wait is not None and not wait.ok else []
+
+
 def ssh_wait_data(wait: Optional[ActionResult]) -> dict:
     """What an SSH failure's ``data`` says about the banner wait before it."""
     if wait is None:
@@ -206,7 +211,7 @@ def ssh_command(target: str):
         ssh_ready = None  # SshAction refuses the same ssh_cmd below, naming the pod
 
     # Execute
-    ctx = {"lium": lium, "pod": pod}
+    ctx = {"lium": lium, "pod": pod, "ssh_options": try_once_options(ssh_ready)}
 
     action = SshAction()
     result = action.execute(ctx)
