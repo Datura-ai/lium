@@ -1,7 +1,7 @@
-# Recorded fixtures — workspaces (lium-platform DAH-1992 / DAH-3030 / DAH-3031)
+# Recorded fixtures — workspaces
 
-Bodies as the API returns them, written from the OpenAPI of lium-platform#208 (branch `DAH-1992-team-accounts`, into
-which the former #123 and #124 — the `workspace` field on `/users/me`, the invitations — were folded on 8 Sep) and
+Bodies as the API returns them, written from the platform's OpenAPI for workspaces (into
+which the `workspace` field on `/users/me` and the invitations were folded on 8 Sep) and
 checked against its DTOs: every required field present, no field
 the schema does not have (`WorkspaceResponse`, `WorkspaceMemberResponse`, `WorkspaceInvitationResponse`,
 `ActiveWorkspaceResponse`, `PodListItemResponse` with its required `executor: ExecutorForPodResponse` and a
