@@ -670,3 +670,29 @@ def test_up_ctrl_c_in_the_wait_reads_for_a_person(monkeypatch):
     assert result.exit_code == EXIT_GENERAL_ERROR
     assert "Stopped waiting for SSH; pod eager-wolf-aa is RUNNING and billing" in _flat(result.output)
     assert "Aborted!" not in result.output
+
+
+# --- IPv6 hosts through Rich markup -------------------------------------------------------------
+
+def test_an_ipv6_host_that_reads_as_a_rich_tag_survives_the_warning(monkeypatch):
+    """`[fe80::1]` is valid Rich markup; unescaped it vanished from the line."""
+    pod = _pod("ssh root@fe80::1 -p 22", created_at=_ago(1), updated_at=_ago(1))
+
+    result, calls = _run_ssh(monkeypatch, probe=lambda h, p: "connection refused", returncode=0, pod=pod)
+
+    assert result.exit_code == 0, result.output
+    assert "[fe80::1]:22 gave no SSH banner within 60s" in _flat(result.output)
+
+
+def test_an_ipv6_host_that_reads_as_a_rich_tag_survives_the_spinner(monkeypatch):
+    from rich.text import Text
+    from lium.cli.utils import console
+
+    labels = []
+    monkeypatch.setattr(ssh_module.ui, "load", lambda message, fn: (labels.append(message), fn())[1])
+    pod = _pod("ssh root@fe80::1 -p 22", created_at=_ago(1), updated_at=_ago(1))
+
+    _run_ssh(monkeypatch, probe=lambda h, p: None, returncode=0, pod=pod)
+
+    rendered = Text.from_markup(console.get_styled(labels[-1] + "...", "info")).plain
+    assert rendered == "Waiting for SSH on [fe80::1]:22..."

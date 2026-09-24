@@ -5,6 +5,7 @@ import subprocess
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 import click
+from rich.markup import escape
 
 from lium.sdk import Lium, PodInfo
 from lium.sdk.client import ssh_target
@@ -132,9 +133,10 @@ def wait_for_ssh_banner(pod: PodInfo, ssh_argv: List[str], *, settled_after: Opt
     if skipped:
         return ActionResult(ok=True, data={"skipped": skipped})
     action = WaitForSSHAction()
-    result = ui.load(f"Waiting for SSH on {host_port(host, port)}", lambda: action.execute({"pod": pod}))
+    # Rich markup: an IPv6 "[fe80::1]:22" would otherwise be read as a tag and vanish
+    result = ui.load(f"Waiting for SSH on {escape(host_port(host, port))}", lambda: action.execute({"pod": pod}))
     if not result.ok:
-        ui.warning(f"{result.error}; trying ssh anyway")
+        ui.warning(f"{escape(result.error)}; trying ssh anyway")
     return result
 
 
