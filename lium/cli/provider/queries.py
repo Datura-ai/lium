@@ -130,10 +130,10 @@ def get_machine_request(ctx: click.Context, request_id: str) -> None:
 
 @click.group("machine")
 def machine_command() -> None:
-    """GPU machine catalogue + reward estimates."""
+    """GPU machine catalog + reward estimates."""
 
 
-@machine_command.command("list", short_help="Available GPU machine catalogue.")
+@machine_command.command("list", short_help="Available GPU machine catalog.")
 @with_provider_overrides
 @click.pass_context
 def list_machines(ctx: click.Context) -> None:
