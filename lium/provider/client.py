@@ -53,6 +53,7 @@ from lium.provider.auth import LocalKeypairSigner, Signer, build_login_payload
 from lium.provider.chain_stack import missing_chain_stack_message
 from lium.provider.errors import (
     ARG_INVALID,
+    PORTAL_AUTH_EXPIRED,
     PORTAL_AUTH_INVALID,
     ProviderAuthError,
     ProviderConfigError,
@@ -140,14 +141,17 @@ class ProviderClient:
         """Exchange a hotkey signature for a JWT.
 
         If a non-expired token is cached for this hotkey and ``force`` is
-        False, the cached value is returned without a network call.
+        False, it is checked with ``GET /auth/me`` and returned when the
+        portal still accepts it. A 401 means the portal ended the session
+        before its expiry (sign-out everywhere, a password or e-mail change,
+        an admin revoke): the entry is dropped and the hotkey signs in again.
         """
         signer = self.signer
         if not force:
             cached = with_refresh_retry(
                 lambda: self._token_store.load(signer.ss58_address)
             )
-            if cached is not None:
+            if cached is not None and not self._session_ended(cached):
                 self._cached_token = cached
                 # We still need the SafeProviderResponse for callers; fetch
                 # /auth/me lazily via ``whoami``. For the cached path we
@@ -161,6 +165,8 @@ class ProviderClient:
                     updated_at="",
                 )
                 return LoginResponse(provider=provider_body, token=cached.token)
+            if cached is not None:
+                with_refresh_retry(lambda: self._token_store.clear(signer.ss58_address))
 
         payload = build_login_payload(signer)
         body = self._http.post(LOGIN_FLEXIBLE, json_body=payload, auth=False)
@@ -180,6 +186,19 @@ class ProviderClient:
             )
         )
         return response
+
+    def _session_ended(self, cached: CachedToken) -> bool:
+        """True when the portal answers 401 to ``cached``; any other failure (offline, 5xx) keeps it, as before."""
+        self._cached_token = cached
+        try:
+            self.whoami()
+        except ProviderAuthError as e:
+            if e.code in (PORTAL_AUTH_INVALID, PORTAL_AUTH_EXPIRED):
+                self._cached_token = None
+                return True
+        except ProviderError as e:
+            logger.debug("cached session not checked: %s", e)
+        return False
 
     def logout(self) -> None:
         """Clear the local token cache for this hotkey.
@@ -347,11 +366,23 @@ class ProviderClient:
     def set_email(self, email: str) -> dict[str, Any]:
         """``POST /auth/set-email`` -- update the provider's contact email.
 
-        Returns the raw envelope from the portal so callers can read the
-        refreshed ``DetailResponse`` shape.
+        The portal takes a new address only from a session signed in within
+        the last few minutes, so this signs in with the hotkey first. A new
+        address ends every earlier session and the answer carries the
+        caller's new ``token``: it is stored in place of the old one and
+        left out of the returned profile, which callers may print.
         """
         payload = _build_payload(SetEmailPayload, email=email)
-        return self._http.post(SET_EMAIL, json_body=payload)
+        self.login(force=True)
+        body = self._http.post(SET_EMAIL, json_body=payload)
+        token = body.pop("token", None) if isinstance(body, dict) else None
+        if isinstance(token, str) and token:
+            ss58 = self.signer.ss58_address
+            provider_id = self._cached_token.provider_id if self._cached_token else None
+            self._cached_token = with_refresh_retry(
+                lambda: self._token_store.save(ss58, token, provider_id=provider_id)
+            )
+        return body
 
     def set_password(
         self, new_password: str, *, wait_for_fresh_timestamp: bool = True
