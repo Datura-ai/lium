@@ -3,8 +3,9 @@ run-name: PyPI ${{ github.event.workflow_run.head_branch }}
 
 # The only path to PyPI for `lium.io`. pypi.org's trusted publisher names this file and the `pypi` environment, and
 # that environment admits only `main`. A `workflow_run` always runs the default branch's copy of this file, so an
-# edited copy on another branch never runs here, and the job below uploads only a release tag that is on main.
-# Main takes reviewed PRs only, so only reviewed code reaches PyPI (RELEASING.md "Who can publish").
+# edited copy on another branch never runs here, and the job below uploads only a release tag on a commit of main's
+# first-parent history. Main takes squash-merged, reviewed PRs only, so only reviewed code reaches PyPI (RELEASING.md
+# "Who can publish").
 on:
   workflow_run:
     workflows: ["Build and Publish Python Package"]
@@ -36,8 +37,9 @@ jobs:
         git fetch --force origin "+refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG" "+refs/heads/main:refs/remotes/origin/main"
         tagged="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
         [[ "$tagged" == "$RELEASE_SHA" ]] || { echo "$RELEASE_TAG points at $tagged, the release ran $RELEASE_SHA" >&2; exit 1; }
-        git merge-base --is-ancestor "$RELEASE_SHA" origin/main ||
-          { echo "$RELEASE_TAG ($RELEASE_SHA) is not on main; nothing published" >&2; exit 1; }
+        # main's first-parent history holds the merged PR states only, not the commits a merged branch was built from
+        git rev-list --first-parent origin/main | grep -xF "$RELEASE_SHA" >/dev/null ||
+          { echo "$RELEASE_TAG ($RELEASE_SHA) is not on main's first-parent history; nothing published" >&2; exit 1; }
 
     - name: Set up Python
       uses: actions/setup-python@v5

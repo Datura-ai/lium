@@ -103,28 +103,41 @@ def git(cwd: Path, *args: str) -> str:
 
 @pytest.fixture
 def checkout(tmp_path):
-    """A clone whose origin has main at `on_main` (tagged v1.0.0) and a side branch at `off_main` (tagged v1.0.1)."""
+    """A clone of an origin whose main is base -> `on_main` (v1.0.0) -> `merge` (v1.0.3), a --no-ff merge of `merged_in`
+    (v1.0.2, an ancestor of main but not on its first-parent history), plus a side branch at `off_main` (v1.0.1)."""
     origin = tmp_path / "origin"
     origin.mkdir()
     git(origin, "init", "-q", "-b", "main")
     git(origin, "config", "user.email", "t@example.com")
     git(origin, "config", "user.name", "t")
+    git(origin, "config", "uploadpack.allowAnySHA1InWant", "true")
     git(origin, "commit", "-q", "--allow-empty", "-m", "base")
     git(origin, "commit", "-q", "--allow-empty", "-m", "on main")
     git(origin, "tag", "v1.0.0")
-    on_main = git(origin, "rev-parse", "HEAD")
+    shas = {"on_main": git(origin, "rev-parse", "HEAD")}
     git(origin, "checkout", "-q", "-b", "side", "HEAD~1")
     git(origin, "commit", "-q", "--allow-empty", "-m", "off main")
     git(origin, "tag", "v1.0.1")
     git(origin, "tag", "later")
-    off_main = git(origin, "rev-parse", "HEAD")
+    shas["off_main"] = git(origin, "rev-parse", "HEAD")
+    git(origin, "checkout", "-q", "-b", "feature", "main")
+    git(origin, "commit", "-q", "--allow-empty", "-m", "merged in")
+    git(origin, "tag", "v1.0.2")
+    shas["merged_in"] = git(origin, "rev-parse", "HEAD")
     git(origin, "checkout", "-q", "main")
+    git(origin, "merge", "-q", "--no-ff", "-m", "merge feature", "feature")
+    git(origin, "tag", "v1.0.3")
+    shas["merge"] = git(origin, "rev-parse", "HEAD")
+    git(origin, "branch", "-q", "-D", "side", "feature")
     clone = tmp_path / "clone"
     git(tmp_path, "clone", "-q", "--no-tags", str(origin), str(clone))
-    return clone, on_main, off_main
+    return clone, shas
 
 
 def run_tag_check(clone: Path, tag: str, sha: str) -> subprocess.CompletedProcess[str]:
+    # the job runs the step after actions/checkout has put the clone on the release commit
+    git(clone, "fetch", "-q", "origin", sha)
+    git(clone, "checkout", "-q", "--detach", sha)
     return subprocess.run(
         ["bash", "-e", "-c", tag_check_script()],
         cwd=clone,
@@ -135,22 +148,24 @@ def run_tag_check(clone: Path, tag: str, sha: str) -> subprocess.CompletedProces
     )
 
 
-def test_tag_check_passes_a_release_tag_on_main(checkout):
-    clone, on_main, _ = checkout
-    result = run_tag_check(clone, "v1.0.0", on_main)
+@pytest.mark.parametrize("tag, which", [("v1.0.0", "on_main"), ("v1.0.3", "merge")])
+def test_tag_check_passes_a_release_tag_on_mains_first_parent_history(checkout, tag, which):
+    clone, shas = checkout
+    result = run_tag_check(clone, tag, shas[which])
     assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize(
     "tag, which, message",
     [
-        ("v1.0.1", "off_main", "is not on main"),
+        ("v1.0.1", "off_main", "is not on main's first-parent history"),
+        ("v1.0.2", "merged_in", "is not on main's first-parent history"),
         ("v1.0.0", "off_main", "points at"),
         ("later", "off_main", "not a release tag"),
     ],
 )
 def test_tag_check_refuses(checkout, tag, which, message):
-    clone, on_main, off_main = checkout
-    result = run_tag_check(clone, tag, {"on_main": on_main, "off_main": off_main}[which])
+    clone, shas = checkout
+    result = run_tag_check(clone, tag, shas[which])
     assert result.returncode != 0
     assert message in result.stderr

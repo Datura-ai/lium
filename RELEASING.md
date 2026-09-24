@@ -2,7 +2,7 @@
 
 The version is the git tag. Publishing a GitHub release on a tag `vX.Y.Z` runs `.github/workflows/release.yml`, which
 builds the wheel and the binaries from that tag and uploads them; `publish-pypi.yml` then publishes the tag to PyPI
-if it is on `main`. Nothing in the tree is bumped (DAH-3225). Create the release with `--prerelease` so `latest` moves
+if it is on `main`. Nothing in the tree is bumped. Create the release with `--prerelease` so `latest` moves
 only once the assets are up. The `lium` CLI and the
 `lium.sdk` Python SDK ship in the same `lium.io` package, so one tag versions both.
 
@@ -30,15 +30,15 @@ nothing, at a later `0.1.1` it would demand `0.2.0`.
 Only code on `main` reaches PyPI, and `main` takes reviewed PRs only. `.github/workflows/publish-pypi.yml` is the only
 path to PyPI for `lium.io`. It starts after `release.yml` succeeds for a published release (`workflow_run`), so it
 always runs `main`'s copy of the file: an edited copy on another branch never runs. It checks that the release tag
-points at the commit the release built and that this commit is on `main` (`git merge-base --is-ancestor`), rebuilds
-it, and uploads from a separate job in the `pypi` environment. That environment admits only `main` and has no
+points at the commit the release built and that this commit is on `main`'s first-parent history (`git rev-list
+--first-parent origin/main`; with squash merges only, that is a reviewed PR state), rebuilds it, and uploads from a separate job in the `pypi` environment. That environment admits only `main` and has no
 required reviewers. PyPI's trusted publisher names this repository, `publish-pypi.yml` and `pypi`, so the upload
 token is minted only there; there is no PyPI API token in the repository's secrets or on anyone's machine. The two
 stub publishers, `release-deprecate-lium-cli.yml` (`lium-cli`) and `release-lium-alias.yml` (`lium`), run by hand in
 the same environment, so they run only from `main`.
 
-The settings behind this (the environment, the pypi.org publishers, approval after the last push on `main`'s PR rule,
-and the `v*` tag ruleset) and the order to apply them are in `.github/rulesets/README.md`. The old pypi.org publisher
+The settings behind this (the environment, the pypi.org publishers, squash merge only and approval after the last
+push on `main`, and the `v*` tag ruleset) and the order to apply them are in `.github/rulesets/README.md`. The old pypi.org publisher
 (`release.yml`, no environment) must be deleted right after the merge; until then a hand-run, edited `release.yml` on
 a branch can still upload.
 

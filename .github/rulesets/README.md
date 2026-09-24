@@ -29,8 +29,8 @@ Check: `gh api "repos/$R/environments/pypi/deployment-branch-policies" --jq '.br
 `required_reviewers`. The same settings are under Settings → Environments → `pypi`.
 
 `publish-pypi.yml` starts from `workflow_run`, which always runs on `main` with `main`'s copy of the file, so it
-enters the environment. It uploads only a release tag whose commit is on `main` (`git merge-base --is-ancestor`), and
-it rebuilds that commit itself. The stubs run by hand, and the environment refuses a run from any branch but `main`.
+enters the environment. It uploads only a release tag whose commit is on `main`'s first-parent history (`git rev-list
+--first-parent origin/main`), and it rebuilds that commit itself. The stubs run by hand, and the environment refuses a run from any branch but `main`.
 
 ## 2. pypi.org publishers (owner, on pypi.org)
 
@@ -39,7 +39,20 @@ environment `pypi`, and **delete** the old `Datura-ai` · `lium` · `release.yml
 that one is gone, a branch with an edited `release.yml`, run by hand, can still upload. For the stubs: the same shape
 with `release-deprecate-lium-cli.yml` and `release-lium-alias.yml` (a pending publisher for a name not yet on PyPI).
 
-## 3. Main's PR rule: approval after the last push (admin, once)
+## 3. Main's PR rules: squash merge only, approval after the last push (admin, once)
+
+Squash merge only: a rebase merge puts each commit of a PR on `main`'s first-parent history one by one, including a
+commit that a later commit of the same PR removed, so a tag on it would pass `publish-pypi.yml`'s check although the
+reviewed diff never contained it. A squash merge adds one commit, the reviewed state of the PR.
+
+```bash
+gh api -X PATCH "repos/$R" -F allow_squash_merge=true -F allow_rebase_merge=false -F allow_merge_commit=false
+```
+
+Check: `gh api "repos/$R" --jq '[.allow_squash_merge, .allow_rebase_merge, .allow_merge_commit]'` →
+`[true,false,false]`.
+
+Approval after the last push:
 
 Without it, an approved PR can take more commits and merge with no second review. The strictest rule of all the
 rulesets on `main` applies, so turning it on in one of them is enough, for example `protect main`:
@@ -57,8 +70,9 @@ Check: `gh api "repos/$R/rules/branches/main" --jq '[.[]|select(.type=="pull_req
 ## 4. Tag ruleset
 
 `release-tags.json` limits creating, moving and deleting `v*` tags to its bypass list (GitHub user ids,
-`gh api users/<login> --jq .id`). PyPI does not depend on it: `publish-pypi.yml` refuses a tag that is not on `main`.
-It still matters for the GitHub release assets: `release.yml` builds the binaries from whatever commit the tag names
+`gh api users/<login> --jq .id`). Once rebase merges are off (3), PyPI does not depend on it: `publish-pypi.yml` then
+accepts only a squash-merged PR state. Until then, a tag on a commit that a rebase-merged PR later removed passes that
+check, and only this ruleset stops it. It also matters for the GitHub release assets: `release.yml` builds the binaries from whatever commit the tag names
 and marks the release `latest`, and `install.sh` and self-update download them. Apply or update it with
 `gh api "repos/$R/rulesets" --method POST --input .github/rulesets/release-tags.json` (or `PUT
 "repos/$R/rulesets/<id>"` for an existing one). Check: `gh api "repos/$R/rulesets?targets=tag" --jq
@@ -66,6 +80,6 @@ and marks the release `latest`, and `install.sh` and self-update download them. 
 
 ## Order
 
-(1) the environment and (3) the review rule can be set at any time; the current `main` does not upload from `pypi`.
+(1) the environment and (3) the merge and review rules can be set at any time; the current `main` does not upload from `pypi`.
 Add the new pypi.org publisher from (2) before the merge. Merge. Right after the merge, delete the old publisher from
 (2): from the merge on, `release.yml` no longer uploads, and the first release after it shows `publish-pypi.yml` works.
