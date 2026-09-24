@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "lium.io"
 dynamic = ["version"]
-description = "Rent NVIDIA GPU pods per second from Lium (lium.io), the GPU marketplace on Bittensor Subnet 51 (B300, B200, H200, H100, RTX PRO 6000, RTX 5090 and more). CLI and Python SDK to launch, manage and scale GPU pods."
+description = "Rent NVIDIA GPU pods per second from Lium (lium.io), the GPU marketplace (B300, B200, H200, H100, RTX PRO 6000, RTX 5090 and more). CLI and Python SDK to launch, manage and scale GPU pods."
 readme = "README.md"
 requires-python = ">=3.10, <3.15"
 license = "MIT"
@@ -13,7 +13,7 @@ keywords = [
     "gpu", "cloud-gpu", "gpu-cloud", "gpu-rental", "gpu-marketplace", "cloud-compute", "decentralized-compute",
     "h100", "h200", "b200", "b300", "rtx-4090", "rtx-5090", "rtx-pro-6000",
     "machine-learning", "deep-learning", "ai-infrastructure", "ai-agents", "agent-skills",
-    "bittensor", "subnet-51", "cli", "sdk",
+    "bittensor", "cli", "sdk",
 ]
 authors = [{ name = "Lium", email = "support@lium.io" }]
 classifiers = [
