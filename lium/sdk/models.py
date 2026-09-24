@@ -64,6 +64,14 @@ class ExecutorInfo(_Serializable):
     interconnect: Optional[Dict] = None
     # Every GPU pair on NVLink (an HGX board). False = PCIe and/or no peer-to-peer; None = unknown.
     nvlink: Optional[bool] = None
+    # A GPU on the node runs under 95 % of its default power limit, so a pod gets less than the card's
+    # stock power (the backend's verdict; `lium ls` marks it ↓W). False = every GPU at its default.
+    # None = the platform could not judge it (no default limit reported, or every reading is the
+    # temporary cap Lium's own Pearl job set).
+    gpu_power_limited: Optional[bool] = None
+    # The most reduced GPU's current and default power limit in watts; None with the verdict.
+    gpu_power_limit_w: Optional[int] = None
+    gpu_power_limit_default_w: Optional[int] = None
 
     @property
     def link(self) -> Optional[str]:
