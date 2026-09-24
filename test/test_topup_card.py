@@ -23,10 +23,12 @@ from lium.cli.utils import EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, EXIT_PERMIS
 from lium.sdk import (
     Config,
     Lium,
+    LiumBudgetExceededError,
     LiumCardTopUpError,
     LiumChargeOutcomeUnknownError,
     LiumError,
     LiumPermissionError,
+    LiumScopeError,
     LiumServerError,
 )
 
@@ -216,7 +218,7 @@ def test_a_402_of_another_code_stays_a_plain_lium_error(client):
 
 @responses.activate
 def test_a_key_at_its_budget_is_not_a_card_topup_error(client):
-    """A shared 402 `API_KEY_BUDGET_EXCEEDED` is a plain LiumError so the keys PR can own it."""
+    """A shared 402 `API_KEY_BUDGET_EXCEEDED` is the key's budget refusal, never a card top-up error."""
     body = _error_body(
         402,
         {
@@ -234,8 +236,10 @@ def test_a_key_at_its_budget_is_not_a_card_topup_error(client):
     with pytest.raises(LiumError) as raised:
         client.topup_card(50)
 
-    assert type(raised.value) is LiumError
+    assert isinstance(raised.value, LiumBudgetExceededError)
+    assert not isinstance(raised.value, LiumCardTopUpError)
     assert raised.value.code == "API_KEY_BUDGET_EXCEEDED"
+    assert raised.value.window == "daily"
     assert "at its daily budget" in str(raised.value)
 
 
@@ -243,10 +247,10 @@ def test_a_key_at_its_budget_is_not_a_card_topup_error(client):
 def test_a_key_without_the_billing_scope_is_a_permission_error(client):
     responses.post(TOPUP, status=403, json=SCOPE_MISSING)
 
-    with pytest.raises(LiumPermissionError) as raised:
+    with pytest.raises(LiumScopeError) as raised:
         client.topup_card(50)
 
-    assert raised.value.code == "forbidden"
+    assert raised.value.code == "missing_scope"
     assert SCOPE_MISSING_MESSAGE in str(raised.value)
 
 

@@ -1,0 +1,82 @@
+{
+  "scopes": [
+    {
+      "scope": "read",
+      "title": "Read",
+      "description": "See pods, nodes, templates, volumes and spend — nothing is changed.",
+      "can": [
+        "list and inspect pods (all of the account's, or only its own — see pod visibility)",
+        "read pod logs, GPU and hardware metrics",
+        "browse nodes and prices, templates, volumes, SSH keys",
+        "read the spend statement and the account event log"
+      ],
+      "route_families": ["GET /pods", "GET /executors", "GET /templates", "GET /volumes", "GET /billing", "GET /account"],
+      "default": true
+    },
+    {
+      "scope": "rent",
+      "title": "Rent",
+      "description": "Start new pods; the key then controls the pods it started.",
+      "can": [
+        "rent a node, rent by spec, rent a cluster",
+        "reboot, edit, add SSH keys to and delete the pods it started",
+        "create templates and volumes for them"
+      ],
+      "route_families": ["POST /executors/{id}/rent", "POST /executors/rent-by-spec", "POST /executors/cluster/rent"],
+      "default": true
+    },
+    {
+      "scope": "manage",
+      "title": "Manage",
+      "description": "Control pods this key did not start, when its pod visibility is the whole account.",
+      "can": [
+        "reboot, edit, switch the template of, and delete pods started by other keys or in the browser",
+        "manage the account's templates, volumes, SSH keys and backup schedules"
+      ],
+      "route_families": ["POST/PUT/PATCH/DELETE /pods/{id}", "/templates", "/volumes", "/ssh-keys", "/backup-configs"],
+      "default": true
+    },
+    {
+      "scope": "billing",
+      "title": "Billing",
+      "description": "Move money: card payments, credit transfers, crypto top-ups, auto top-up and wallets. Off unless you pick it.",
+      "can": [
+        "top up by card (Stripe checkout, saved payment methods)",
+        "top up with crypto (Coinbase, TAO, TMC Pay) and manage wallets",
+        "transfer credits to another account",
+        "read and change the auto top-up settings",
+        "read the payment ledger"
+      ],
+      "route_families": [
+        "POST /stripe/create-checkout-session",
+        "/stripe/payments/payment-methods",
+        "POST /coinbase/create-charge",
+        "POST /tao/create-transfer",
+        "POST /tmc-pay/create-invoice",
+        "POST /users/me/transfer-credits",
+        "/users/me/auto-top-up",
+        "/crypto-wallets",
+        "GET /transactions"
+      ],
+      "default": false
+    }
+  ],
+  "pod_visibility": [
+    {"value": "own", "description": "Only the pods this key creates. Pods from other keys or the browser do not exist for it.", "default": true},
+    {"value": "account", "description": "Every pod of the account, within the key's scopes (read sees them, manage controls them).", "default": false}
+  ],
+  "money_routes": [
+    "DELETE /crypto-wallets/{wallet_id}",
+    "GET /crypto-wallets",
+    "GET /stripe/payments/payment-methods",
+    "GET /transactions",
+    "GET /users/me/auto-top-up",
+    "POST /coinbase/create-charge",
+    "POST /crypto-wallets",
+    "POST /stripe/create-checkout-session",
+    "POST /tao/create-transfer",
+    "POST /tmc-pay/create-invoice",
+    "POST /users/me/transfer-credits",
+    "PUT /users/me/auto-top-up"
+  ]
+}
