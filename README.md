@@ -180,7 +180,6 @@ JSON keeps the API's raw value as `ssh_cmd`.
 Lium (lium.io) publishes its inventory and prices without an account — https://lium.io/pricing.json (one row per GPU model) and https://lium.io/api/public/v1/nodes (every rentable node) — and independent sites index them:
 
 - Price comparison: [rentgpu.org](https://rentgpu.org/providers/lium) · [getdeploying.com](https://getdeploying.com/lium) · [computeprices.com](https://computeprices.com/providers/lium)
-- Bittensor Subnet 51 directories: [taostats.io](https://taostats.io/subnets/51/chart) · [bittensor.ai](https://bittensor.ai/subnets/51) · [subnetalpha.ai](https://subnetalpha.ai/)
 - Packages: [PyPI `lium.io`](https://pypi.org/project/lium.io/) · [libraries.io](https://libraries.io/pypi/lium.io) · the agent skill on [skills.sh](https://skills.sh/Datura-ai/lium-skill)
 
 Running a comparison site or catalog? The two JSON feeds above are documented at https://docs.lium.io/developers/public-nodes-feed.md and need no key.
