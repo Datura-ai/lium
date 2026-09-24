@@ -555,7 +555,12 @@ class ProviderClient:
     def create_notice_period(
         self, node_id: str, payload: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        """``POST /executors/{id}/notice-period``."""
+        """``POST /executors/{id}/notice-period``.
+
+        ``payload`` carries ``starting_at`` plus either ``period_in_minute``
+        (maintenance) or ``permanent_removal=True``; see
+        :class:`~lium.provider.models.NoticePeriodPayload`.
+        """
         try:
             body = NoticePeriodPayload.model_validate(payload or {}).model_dump()
         except Exception as e:
@@ -563,6 +568,10 @@ class ProviderClient:
                 f"invalid notice-period payload: {e}",
                 code=ARG_INVALID,
                 cause=e,
+                hint=(
+                    "Pass starting_at (ISO 8601 with offset) and either period_in_minute (1-60) "
+                    "or permanent_removal=True."
+                ),
             ) from e
         return self._http.post(
             EXECUTOR_NOTICE_PERIOD.format(id=_safe_id(node_id, label="node_id")),

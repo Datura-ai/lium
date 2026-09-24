@@ -41,6 +41,7 @@ from lium.cli.provider._render import fatal, render
 from lium.cli.provider._verification import render_text
 from lium.provider._shared_config import default_price_for_gpu, fetch_shared_config
 from lium.provider.errors import ARG_INVALID, ProviderError
+from lium.provider.models import NOTICE_PERIOD_MAX_MINUTES
 
 
 @click.group("node")
@@ -374,14 +375,65 @@ def notice_period_command() -> None:
 
 @notice_period_command.command("set", short_help="Open a notice period.")
 @click.argument("node_id", required=True)
+@click.option(
+    "--start",
+    "starting_at",
+    required=True,
+    help="Start time, ISO 8601 with a UTC offset (2026-10-01T09:00:00+00:00). "
+    "At least 24 h ahead for maintenance, 48 h for --permanent.",
+)
+@click.option(
+    "--minutes",
+    "period_in_minute",
+    type=click.IntRange(1, NOTICE_PERIOD_MAX_MINUTES),
+    default=None,
+    help=f"Maintenance window length in minutes (1-{NOTICE_PERIOD_MAX_MINUTES}).",
+)
+@click.option(
+    "--permanent",
+    "permanent_removal",
+    is_flag=True,
+    default=False,
+    help="Permanent removal: at the start time the renter's pod is deleted and the node is marked removed.",
+)
+@click.option("--reason", default=None, help="Reason shown to the renters of the node.")
 @with_provider_overrides
 @click.pass_context
-def set_notice_period(ctx: click.Context, node_id: str) -> None:
+def set_notice_period(
+    ctx: click.Context,
+    node_id: str,
+    starting_at: str,
+    period_in_minute: int | None,
+    permanent_removal: bool,
+    reason: str | None,
+) -> None:
+    """Tell the node's renters it will be down, and tell the platform you planned it.
+
+    \b
+      lium provider node notice-period set NODE --start 2026-10-01T09:00:00+00:00 --minutes 60
+      lium provider node notice-period set NODE --start 2026-10-02T09:00:00+00:00 --permanent
+
+    Every renter with a pod on the node gets an e-mail when the notice is saved.
+    """
     require_hotkey(ctx, group="node")
+    if permanent_removal == (period_in_minute is not None):
+        fatal(
+            ctx,
+            ProviderError(
+                "pass exactly one of --minutes and --permanent",
+                code=ARG_INVALID,
+                hint="--minutes N for a maintenance window of N minutes; --permanent to remove the node.",
+            ),
+        )
+    payload = {"starting_at": starting_at, "permanent_removal": permanent_removal}
+    if period_in_minute is not None:
+        payload["period_in_minute"] = period_in_minute
+    if reason:
+        payload["reason"] = reason
     require_persona_ack(ctx)
     client = build_client(ctx)
     try:
-        body = client.create_notice_period(node_id)
+        body = client.create_notice_period(node_id, payload)
     except ProviderError as e:
         ctx.exit(handle_provider_error(ctx, e))
         return

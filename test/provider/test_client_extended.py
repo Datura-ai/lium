@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from lium.provider.client import ProviderClient
-from lium.provider.errors import ProviderError
+from lium.provider.errors import ARG_INVALID, ProviderError
 from lium.provider.models import OptInStatusResponse
 
 
@@ -259,8 +259,36 @@ def test_node_pods(client) -> None:
 def test_create_notice_period(client) -> None:
     portal = _Portal(post_body={})
     c = client(portal)
-    c.create_notice_period("e-1")
+    c.create_notice_period(
+        "e-1", {"starting_at": "2026-10-01T09:00:00+00:00", "period_in_minute": 60}
+    )
     assert portal.posts[0][0] == "/executors/e-1/notice-period"
+    assert portal.posts[0][1] == {
+        "starting_at": "2026-10-01T09:00:00+00:00",
+        "period_in_minute": 60,
+        "reason": None,
+        "permanent_removal": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {"starting_at": "2026-10-01T09:00:00+00:00"},
+        {"starting_at": "2026-10-01T09:00:00+00:00", "period_in_minute": 30, "permanent_removal": True},
+        {"starting_at": "2026-10-01T09:00:00+00:00", "period_in_minute": 61},
+        {"starting_at": "2026-10-01T09:00:00+00:00", "permanent_removal": True, "force": True},
+    ],
+    ids=["empty", "no-kind", "both-kinds", "window-over-60", "extra-key"],
+)
+def test_create_notice_period_refuses_a_payload_the_portal_would_refuse(client, payload) -> None:
+    portal = _Portal(post_body={})
+    c = client(portal)
+    with pytest.raises(ProviderError) as exc:
+        c.create_notice_period("e-1", payload)
+    assert exc.value.code == ARG_INVALID
+    assert portal.posts == []
 
 
 def test_delete_notice_period(client) -> None:
