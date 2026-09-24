@@ -1,9 +1,11 @@
 """Execute commands on pods using Lium SDK."""
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
 import os
+import shlex
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -14,6 +16,12 @@ import click
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from lium.sdk import Lium, PodInfo
 from lium.sdk.client import ENV_NAME
+from lium.sdk.detach import (
+    DEFAULT_DETACH_LOG_DIR,
+    build_detached_command,
+    default_detach_log_path,
+    detach_token,
+)
 from ..utils import (
     EXIT_CONFIGURATION_ERROR,
     EXIT_GENERAL_ERROR,
@@ -93,6 +101,88 @@ def print_execution_for_a_human(execution: PodExecution, show_pod_header: bool) 
         if PEP668_MARKER in execution.stderr or PEP668_MARKER in execution.stdout:
             for line in PEP668_HINT:
                 console.dim(line, soft_wrap=True)  # one copy-pasteable command per line
+
+
+DETACH_SCRIPT_DIR = "/tmp"
+
+
+def build_script_upload_command(script_text: str, remote_path: str) -> str:
+    """Write ``script_text`` to ``remote_path`` on the pod, byte for byte.
+
+    Base64 keeps quoting out of it: the script may contain anything.
+    """
+    encoded = base64.b64encode(script_text.encode("utf-8")).decode("ascii")
+    quoted_path = shlex.quote(remote_path)
+    return (
+        f"printf %s {shlex.quote(encoded)} | base64 -d > {quoted_path} "
+        f"&& chmod +x {quoted_path}"
+    )
+
+
+def build_detached_script_command(script_text: str, log_path: str, token: str, prelude: str = "") -> str:
+    """Copy the script to the pod, then start it detached and print its PID.
+
+    ``prelude`` runs inside the detached login shell before the script (the
+    ``-e`` exports, see :meth:`Lium.login_shell_env`).
+    """
+    remote_script = f"{DETACH_SCRIPT_DIR}/lium-exec-{token}.sh"
+    return (
+        f"{build_script_upload_command(script_text, remote_script)} && "
+        f"{build_detached_command(prelude + remote_script, log_path)}"
+    )
+
+
+def parse_detached_pid(stdout: str) -> Optional[int]:
+    """The PID ``echo $!`` printed, or None when the launcher did not get that far."""
+    for token in (stdout or "").split():
+        if token.isdigit():
+            return int(token)
+    return None
+
+
+@dataclass(frozen=True)
+class DetachedExecution:
+    """What one pod reported after being asked to start a command in the background."""
+
+    pod: str
+    pid: int | None
+    log: str
+    error: str | None
+
+    @classmethod
+    def from_sdk_result(cls, pod: PodInfo, result: Mapping[str, object], log_path: str) -> "DetachedExecution":
+        pid = parse_detached_pid(str(result.get("stdout") or ""))
+        error = str(result["error"]) if result.get("error") else None
+        if pid is None and error is None:
+            stderr = str(result.get("stderr") or "").strip()
+            error = stderr or f"Launcher exited with code {result.get('exit_code')} without printing a PID"
+        return cls(pod=pod.huid, pid=pid, log=log_path, error=error)
+
+    @property
+    def succeeded(self) -> bool:
+        return self.pid is not None
+
+
+def report_detached_executions(executions: list[DetachedExecution], json_output: bool) -> None:
+    if json_output:
+        payload = {
+            "ok": all(execution.succeeded for execution in executions),
+            "results": [asdict(execution) for execution in executions],
+        }
+        click.echo(json.dumps(payload, sort_keys=True))
+        return
+
+    for execution in executions:
+        if execution.succeeded:
+            console.success(
+                f"Started on {console.get_styled(execution.pod, 'pod_id')}: "
+                f"PID {execution.pid}, log {execution.log}"
+            )
+            # `lium exec` returns the command's output once it exits, so the
+            # hint is a bounded read; a `tail -f` there would never come back.
+            console.dim(f"  follow with: lium exec {execution.pod} \"tail -n 200 {execution.log}\"")
+        else:
+            console.error(f"Failed to start on {execution.pod}: {execution.error}")
 
 
 def resolve_command_to_run(command: Optional[str], script: Optional[str]) -> str:
@@ -183,6 +273,14 @@ def report_executions(executions: list[PodExecution], json_output: bool) -> None
 @click.option("--script", "-s", help="Execute a script file")
 @click.option("--env", "-e", multiple=True, help="Set environment variables (KEY=VALUE)")
 @click.option(
+    "--detach", "-d", is_flag=True,
+    help="Start the command in the background on the pod (nohup + setsid, stdin closed), print its PID and log path, and return immediately",
+)
+@click.option(
+    "--log", "log_path",
+    help=f"Log file for --detach on the pod (default: {DEFAULT_DETACH_LOG_DIR}/exec-<timestamp>-<id>.log)",
+)
+@click.option(
     "--json", "json_output", is_flag=True,
     help="Print machine-readable JSON (stdout, stderr, exit_code) instead of raw output",
 )
@@ -192,6 +290,8 @@ def exec_command(
     command: Optional[str],
     script: Optional[str],
     env: Tuple[str],
+    detach: bool,
+    log_path: Optional[str],
     json_output: bool,
 ):
     """Execute commands on GPU pods.
@@ -214,13 +314,20 @@ def exec_command(
       lium exec 1 --script setup.sh            # Run script on pod
       lium exec 1 -e API_KEY=xyz "python app.py"  # With env vars
       lium exec 1 --json "python train.py"     # Machine-readable result
+      lium exec 1 -d "python train.py"         # Start in background, print PID and log path
+      lium exec 1 -d --log /workspace/train.log --script train.sh
 
     \b
     The process exits with the remote command's exit code, so
     'lium exec <pod> "cmd" && next-step' behaves the way a caller expects.
+    With --detach it exits 0 once the command has been started.
     """
     command_to_run = resolve_command_to_run(command, script)
     env_dict = parse_environment_variables(env)
+    if log_path and not detach:
+        raise CliFailure(
+            "invalid_arguments", "--log only applies together with --detach", EXIT_CONFIGURATION_ERROR
+        )
 
     lium = Lium()
     selected_pods = resolve_pods_or_fail(lium, targets, show_progress=not json_output)
@@ -238,10 +345,34 @@ def exec_command(
             masked = ", ".join(f"{name}=****" for name in env_dict)
             console.dim(f"Environment: {masked}")
 
+    if detach:
+        token = detach_token()
+        log_path = log_path or default_detach_log_path(token)
+        # The detached process runs under a login shell whose profile would win
+        # over an inherited value: the -e exports travel as one variable and are
+        # applied inside that shell instead (names only ever reach the pod's argv).
+        prelude, env_dict = lium.login_shell_env(env_dict)
+        # A script is copied to the pod first so the detached process runs it
+        # from a file rather than from a command line that ends with this session.
+        if script:
+            command_to_run = build_detached_script_command(command_to_run, log_path, token, prelude=prelude)
+        else:
+            command_to_run = build_detached_command(prelude + command_to_run, log_path)
+
     if len(selected_pods) == 1:
         results = [lium.exec(selected_pods[0], command=command_to_run, env=env_dict)]
     else:
         results = lium.exec_all(selected_pods, command=command_to_run, env=env_dict)
+
+    if detach:
+        detached = [
+            DetachedExecution.from_sdk_result(pod, result, log_path)
+            for pod, result in zip(selected_pods, results)
+        ]
+        report_detached_executions(detached, json_output)
+        if not all(execution.succeeded for execution in detached):
+            raise SystemExit(EXIT_GENERAL_ERROR)
+        return
 
     executions = [
         PodExecution.from_sdk_result(pod, result)

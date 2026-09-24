@@ -26,7 +26,7 @@ SSH: the CLI and SDK use `LIUM_SSH_KEY_PATH` if set, else `[ssh] key_path` in `~
 
 Success: the JSON result is on **stdout**, exit code 0.
 
-Failure on a renter command that takes `--json` (`exec`, `describe`, `balance`, `whoami`, `audit`, `cp`, `init`; `fund`, `signup`, `topup currencies`, `topup create`, `keys create`, `keys list`, `workspaces list` and `workspaces members` too): stdout is empty, **stderr** holds one JSON object, the exit code is non-zero:
+Failure on a renter command that takes `--json` (`up`, `exec`, `describe`, `balance`, `whoami`, `audit`, `cp`, `init`; `fund`, `signup`, `topup currencies`, `topup create`, `topup card`, `keys create`, `keys list`, `keys show`, `keys scopes`, `keys budget`, `workspaces list` and `workspaces members` too): stdout is empty, **stderr** holds one JSON object, the exit code is non-zero:
 
 ```json
 {"ok": false, "error": {"code": "pod_not_found", "message": "No pods match targets: train-1", "hint": "Run 'lium ps' to list pods; a name, huid, id or 1-based index is accepted", "exit_code": 5}}
@@ -83,15 +83,13 @@ lium ls --gpu H100 --count 1 --format json | jq -r '.[0].huid'
 
 ### Rent it
 
-`lium up` has no JSON output, so name the pod yourself and read it back from `lium ps`:
+`lium up --json` prints the ready pod as one JSON document on stdout, `{"pod": {…}}` with the keys of one `lium ps --format json` row (plus `termination_time` when `--ttl`, `--until` or `--budget` set one), and returns instead of opening a shell; progress lines go to stderr:
 
 ```bash
-NAME="job-$(date +%s)"
-lium up "$NODE" --name "$NAME" --ttl 4h --yes --no-ssh
-POD=$(lium ps --format json | jq -r --arg n "$NAME" '.[] | select(.name==$n) | .huid')
+POD=$(lium up "$NODE" --ttl 4h --yes --json | jq -r '.pod.huid')
 ```
 
-`--yes` skips the price confirmation, `--no-ssh` returns instead of opening a shell, `--ttl` is the safety net. `up` waits until SSH is reachable before returning. Check the GPU count yourself before spending on the job:
+`--yes` skips the price confirmation (behind a pipe it cannot be asked, and `up` fails with `confirmation_required` before renting), `--json` implies `--no-ssh`, `--ttl` is the safety net. `up` waits until SSH is reachable before printing. When `up` fails after the rent landed (`pod_not_ready`, `api_timeout`, …), the envelope's `data.pod_id` / `data.pod_name` name the pod that bills: `lium rm` it, do not run `up` again. Check the GPU count yourself before spending on the job:
 
 ```bash
 lium exec "$POD" --json "nvidia-smi -L | wc -l"    # must equal gpu_count from `lium ps --format json`
@@ -184,8 +182,10 @@ trap 'lium rm "$POD" --yes >/dev/null 2>&1 || true' EXIT
 
 - `lium cp <src-pod>:<path> <dst-pod>:<path> --json` returns one object: `ok`, `source` and `destination` (each `{"pod": <huid>, "path": …}`) and rsync's `exit_code`.
 - `lium init --api-key <key> --json` returns one object: `ok`, `api_key_source` (the same value `whoami --json` prints), `saved_from`, `env_key`, `active_workspace`, `config_path`, `ssh_key_path`; `--json` needs `--api-key` or an exported `LIUM_API_KEY`, the browser flows print for a person (rule 1: export the key instead when you can).
-- `lium keys create <name> --json` returns the new key as the server sends it (the secret under `key`, printed this once) plus `workspace_name`; needs `lium workspaces login` first.
-- `lium keys list --json` returns a list of the workspace's key rows (`id`, `name`, `scopes`, `created_at`, `last_used`) without the key material; needs `lium workspaces login` first.
+- `lium keys create <name> --json` returns the new key as the server sends it (the secret under `key`, printed this once) plus `workspace_name`; needs `lium workspaces login` first. Without `--scope` the key gets `read`, `rent` and `manage` — never `billing`, the money-moving scope, which is added only by `--scope billing` (a warning line goes to stderr once the key is minted, so a refused create leaves only the error envelope there). `billing` stands alone: `--scope billing` with `read`, `rent` or `manage` is `invalid_arguments` (exit 2) before any request — refused by the CLI itself. `--daily-budget USD` / `--monthly-budget USD` / `--max-budget USD` cap what the key's pods may be billed per UTC day / per UTC month / over the key's lifetime, `--pod-visibility own|account` says whether the key sees only the pods it rented or every pod of the account (not passed: the field is not sent and the server's default decides). Budgets are at least $1 in whole cents and keep daily ≤ monthly ≤ max (exit 2 otherwise). `--scope billing` and its money-route rule (card payments, credit transfers and crypto payments through the API need a key holding `billing`), budgets and visibility need a server with per-key budgets (not on lium.io yet: its `POST /keys` takes `read`, `rent` and `manage` only, so `--scope billing` is refused there). On an older server a `create` that asks for a budget or visibility is `invalid_arguments` (exit 2) — a budget before minting when the server has no `GET /keys/scopes`, otherwise after it (visibility is judged on the echo alone), with the uncapped key revoked and `data.unrecorded` naming the fields — unless `--allow-unbudgeted` is passed, which keeps the key and puts a warning on stderr.
+- `lium keys list --json` returns a list of the workspace's key rows (`id`, `name`, `scopes`, `created_at`, `last_used`, and — `null` from a server without per-key budgets — `daily_budget_usd`, `monthly_budget_usd`, `max_budget_usd`, `spent_today_usd`, `spent_month_usd`, `spent_total_usd`, `pod_visibility`, `pods_count`) without the key material; needs `lium workspaces login` first.
+- `lium keys show <name|id> --json` returns one key's row (with `pods_count`, the active pods the key created) plus `can_do`: one `<scope>: <line>` per line of the server's `can` list for each scope the key holds (`GET /keys/scopes`; the scope name alone on an older server), `refusals`: the server's `GET /keys/{id}/refusals` rows newest first (each names the `window` hit, the `route`, the `amount_usd` asked; `null` from a server without the ledger) and `refusals_today`, how many fell on the current UTC day. `lium keys scopes --json` returns the server's body whole: `scopes` as `{"scope", "title", "description", "can", "route_families", "default"}`, `pod_visibility` as `{"value", "description", "default"}`, and `money_routes` (needs a newer Lium server, not on lium.io yet; older servers answer `not_found`). `lium keys budget <name|id> --json` (`--daily-budget USD`, `--monthly-budget USD`, `--max-budget USD`, `--no-daily-budget`, `--no-monthly-budget`, `--no-max-budget`) returns the key's row after `PATCH /keys/{id}`; naming nothing, setting and clearing the same budget, or a wider window below a narrower one, is `invalid_arguments` (exit 2) before any request; a window not named keeps the key's current budget and counts in that order too (`--monthly-budget 5` on a key with a $20 daily budget is refused after the key is read, before the `PATCH`); a server without the route is `not_found` (exit 3), a window it did not record `invalid_arguments` (exit 2, `data.unrecorded`). `lium ps --key <name|id> --format json` and `lium billing history --key <name|id> --format json` keep the rows stamped with that `api_key_id`; on a server that stamps none the lists are the whole account's and one stderr line says the server cannot filter by key — the statement's body says it too, `"api_key_filter": {"api_key_id": "…", "applied": false}`.
+- `lium ps --key <name|id> --format json` lists only the pods rented through that key (each row then carries `api_key_id` / `api_key_name`); `lium billing history [--key <name|id>] [--from YYYY-MM-DD] [--to YYYY-MM-DD] --format json` prints the ledger statement, `{"start_day", "end_day", "total", "pods": [...]}`, each pod with its `total`, `billed_seconds` and per-day `days`; with `--key` also `api_key_filter` (`{"api_key_id", "applied"}` — `applied: false` means the server could not filter and the figures are the whole account's). A key name needs `lium workspaces login`; an id does not. A request refused by the key's budget — a rent (`up`), a pod's schedule change (`rm --in/--at`), a top-up (`fund`, `topup create`, `topup card`) — fails alike with the server's code `API_KEY_BUDGET_EXCEEDED` (exit 6; the message names the window hit — daily, monthly or lifetime; `data.window` is `daily` / `monthly` / `max`, with `data.budget_usd`, `data.spent_usd`, `data.api_key_id`), a route the key's scopes do not cover with `missing_scope` (exit 6, `data.scope`).
 - `lium workspaces list --json` returns a list of `{"id", "name", "role", "billing_owner_user_id", "pending_billing_owner_user_id", "is_personal", "created_at"}`: the key's own workspace, or every one you belong to with a session.
 - `lium workspaces members [<workspace>] --json` returns a list of `{"user_id", "name", "email", "role", "is_billing_owner", "joined_at"}`.
 
@@ -196,9 +196,7 @@ trap 'lium rm "$POD" --yes >/dev/null 2>&1 || true' EXIT
 set -euo pipefail
 
 NODE=$(lium ls --gpu H100 --count 1 --format json | jq -r '.[0].huid')
-NAME="job-$(date +%s)"
-lium up "$NODE" --name "$NAME" --ttl 4h --yes --no-ssh
-POD=$(lium ps --format json | jq -r --arg n "$NAME" '.[] | select(.name==$n) | .huid')
+POD=$(lium up "$NODE" --ttl 4h --yes --json | jq -r '.pod.huid')
 trap 'lium rm "$POD" --yes >/dev/null 2>&1 || true' EXIT
 
 lium rsync "$POD" ./project /root/project

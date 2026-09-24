@@ -2,6 +2,9 @@
 
 import click
 import os
+import sys
+from typing import Optional
+from importlib import import_module
 from importlib.metadata import version, PackageNotFoundError
 from lium.__about__ import __version__ as fallback_version
 from .themed_console import ThemedConsole
@@ -22,6 +25,7 @@ from .rsync import rsync_command
 from .whoami import whoami_command
 from .cp import cp_command
 from .spend import spend_command
+from .completion_command import completion_command
 from .theme import theme_command
 
 # from .commands.compose import compose_command  # Disabled for beta.1
@@ -35,7 +39,6 @@ from .topup import topup_command
 from .gpu_splitting import gpu_splitting_command
 from .bk import bk_command
 from .mine import mine_command
-from .provider import provider_command
 from .volumes import volumes_command
 from .clusters import clusters_command
 from .ssh_keys import ssh_keys_command
@@ -44,6 +47,7 @@ from .update.command import update_command
 from .port_forward import port_forward_command
 from .workspaces import workspaces_command
 from .keys import keys_command
+from .billing import billing_command
 from .plugins import load_plugins
 from .self_update import maybe_perform_startup_update
 from . import telemetry
@@ -57,7 +61,25 @@ def get_version():
         return os.environ.get("LIUM_BUILD_VERSION", fallback_version)
 
 
-@click.group(invoke_without_command=True)
+# Command groups imported the first time they are invoked (or listed by --help/completion). The
+# provider group and the package behind it — pydantic models, JWT, the portal client — are a fifth of
+# the CLI's import time warm (89 of 440 ms on a pod) and 40 % cold (281 of 696 ms on a fresh box);
+# `lium ls`/`ps`/`up` never touch it (DAH-3053).
+LAZY_COMMANDS = {"provider": "lium.cli.provider:provider_command"}
+
+
+class LazyGroup(click.Group):
+    def list_commands(self, ctx):
+        return sorted(set(super().list_commands(ctx)) | set(LAZY_COMMANDS))
+
+    def get_command(self, ctx, cmd_name):
+        if cmd_name in LAZY_COMMANDS and cmd_name not in self.commands:
+            module, attr = LAZY_COMMANDS[cmd_name].split(":")
+            self.add_command(getattr(import_module(module), attr), cmd_name)
+        return super().get_command(ctx, cmd_name)
+
+
+@click.group(cls=LazyGroup, invoke_without_command=True)
 @click.version_option(version=get_version(), prog_name="lium")
 @click.option(
     "--workspace", "-w", "workspace", default=None, envvar="LIUM_WORKSPACE", metavar="NAME",
@@ -102,6 +124,7 @@ cli.add_command(rsync_command)
 cli.add_command(whoami_command)
 cli.add_command(cp_command)
 cli.add_command(spend_command)
+cli.add_command(completion_command)
 cli.add_command(theme_command)
 cli.add_command(config_command)
 # cli.add_command(image_command)  # Disabled for beta.1
@@ -112,7 +135,6 @@ cli.add_command(topup_command)
 cli.add_command(gpu_splitting_command)
 cli.add_command(bk_command, name="bk")
 cli.add_command(mine_command)
-cli.add_command(provider_command)
 cli.add_command(volumes_command)
 cli.add_command(clusters_command, name="clusters")
 cli.add_command(ssh_keys_command, name="ssh-keys")
@@ -121,6 +143,7 @@ cli.add_command(update_command)
 cli.add_command(port_forward_command)
 cli.add_command(workspaces_command)
 cli.add_command(keys_command)
+cli.add_command(billing_command)
 
 # Add compose placeholder (will be overridden if plugin is installed)
 # cli.add_command(compose_command)  # Disabled for beta.1
@@ -130,13 +153,29 @@ cli.add_command(keys_command)
 load_plugins(cli)
 
 
+def invoked_subcommand(argv: list) -> Optional[str]:
+    """The subcommand name in argv, past the group's own `-w NAME` / `-wNAME` / `--workspace NAME` / `--workspace=NAME`."""
+    args = iter(argv[1:])
+    for arg in args:
+        if arg in ("-w", "--workspace"):
+            next(args, None)
+        elif arg.startswith(("--workspace=", "-w")):
+            continue
+        else:
+            return arg
+    return None
+
+
 def main():
     """Main entry point for the CLI."""
     if not os.environ.get("_LIUM_COMPLETE"):
         maybe_perform_startup_update()
-        from .completion import ensure_completion
+        # `lium completion ...` manages the rc file itself: the silent install must not run first,
+        # or `lium completion bash >> ~/.bashrc` on a fresh install would write the line twice.
+        if invoked_subcommand(sys.argv) != "completion":
+            from .completion import ensure_completion
 
-        ensure_completion()
+            ensure_completion()
 
     cli()
 

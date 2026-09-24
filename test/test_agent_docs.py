@@ -50,8 +50,10 @@ def _lium_invocations(text: str):
 def _resolve(tokens):
     """→ (command, chain, flags) or None when the first token is prose (e.g. 'lium requires …')."""
     command, chain, i = cli, [], 0
-    while i < len(tokens) and isinstance(command, click.Group) and tokens[i] in command.commands:
-        command = command.commands[tokens[i]]
+    ctx = click.Context(cli)
+    # get_command, not `.commands`: the provider group is added on first use (LazyGroup, DAH-3053)
+    while i < len(tokens) and isinstance(command, click.Group) and command.get_command(ctx, tokens[i]) is not None:
+        command = command.get_command(ctx, tokens[i])
         chain.append(tokens[i])
         i += 1
     if not chain:

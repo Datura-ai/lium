@@ -99,7 +99,9 @@ def confirm(message: str, default: bool = False, *, hint: str = "re-run with --y
     try:
         if stderr:
             return Confirm.ask(escape(message), default=default, console=notice_console())
-        return Confirm.ask(escape(message), default=default)
+        # Asked on the themed console, not Rich's global one: under `--json` the
+        # console is on stderr and the question must not land in the JSON on stdout.
+        return Confirm.ask(escape(message), default=default, console=console)
     except EOFError:
         # The terminal went away mid-prompt. No answer is not a yes.
         raise CliFailure(

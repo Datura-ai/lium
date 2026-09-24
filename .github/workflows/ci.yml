@@ -156,15 +156,39 @@ jobs:
     - uses: astral-sh/setup-uv@v6
 
     # the build image has no git (Dockerfile.build): the version hatch-vcs derives from the tags here is handed in
-    - name: Build Linux bundle in Docker
+    - name: Bundle version (hatch-vcs, from the tags)
+      id: version
       run: |
         version="$(uvx --from hatchling --with hatch-vcs hatchling version)"
         echo "version $version"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    # docker-container builder: the one that can export its layer cache (the default `docker` driver cannot)
+    - uses: docker/setup-buildx-action@v3
+
+    # Layers cached in the GitHub Actions cache, one scope per asset (amd64 and arm64 layers differ). Dockerfile.build
+    # installs the dependencies from the lockfile before it copies the source, so a push that changes only code
+    # reuses the apt, libssl, uv and dependency layers; the source copy, the project install and PyInstaller rerun.
+    # `ignore-error`: a cache export the cache service refuses (429, timeout) must not fail a build that produced
+    # the image — release-assets needs this job. `load` puts the image in the engine for the extract and the report.
+    - name: Build Linux bundle in Docker
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: Dockerfile.build
+        platforms: ${{ matrix.platform }}
+        build-args: LIUM_VERSION=${{ steps.version.outputs.version }}
+        tags: lium-build:${{ github.sha }}-${{ matrix.asset_name }}
+        load: true
+        cache-from: type=gha,scope=linux-bundle-${{ matrix.asset_name }}
+        cache-to: type=gha,scope=linux-bundle-${{ matrix.asset_name }},ignore-error=true
+
+    - name: Extract the bundle from the image
+      run: |
         mkdir -p dist
         rm -rf dist/lium
         docker rm -f lium-extract >/dev/null 2>&1 || true
-        docker build --build-arg LIUM_VERSION="$version" --platform ${{ matrix.platform }} -f Dockerfile.build -t lium-build:${GITHUB_SHA}-${{ matrix.asset_name }} .
-        docker create --name lium-extract lium-build:${GITHUB_SHA}-${{ matrix.asset_name }} true
+        docker create --name lium-extract "lium-build:${GITHUB_SHA}-${{ matrix.asset_name }}" true
         docker cp lium-extract:/app/dist/lium dist/lium
         docker rm -f lium-extract
         tar -czf dist/${{ matrix.asset_name }}.tar.gz -C dist lium
@@ -297,9 +321,10 @@ jobs:
   # billing → rm → gone → final charge, plus the error contract (wrong key 3, no key 2, unknown pod 5), then the
   # SDK's pod-lifecycle example. Rents the cheapest ≥1-GPU node under $0.50/h for a few minutes ($0.03 on 7 Sep 2026:
   # two RTX 4090 rentals of 6 and 0.5 min). Needs the secret LIUM_E2E_API_KEY (the dedicated test account's key);
-  # without it the job skips every test and stays green, so fork PRs are unaffected. One run at a time repo-wide:
-  # two suites on one account would sweep each other's pods. e2e/run.sh puts a timeout on every step and always leaves e2e/artifacts (timings,
-  # summary.md, junit, commands.json); summarised in one sticky PR comment. Reproduce: E2E_API_KEY=… e2e/run.sh
+  # without it the job skips every test and stays green, so fork PRs are unaffected. One run at a time repo-wide
+  # (the job's `concurrency:` group, explained at the job). e2e/run.sh puts a timeout on every step and always
+  # leaves e2e/artifacts (timings, summary.md, junit, commands.json); summarised in one sticky PR comment.
+  # Reproduce: E2E_API_KEY=… e2e/run.sh
   e2e-live:
     name: e2e-live
     needs: e2e-inputs
@@ -309,9 +334,13 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+    # The group stays repo-wide, never per PR: two suites on one account would sweep each other's pods (the cleanup
+    # step below removes every e2e-… pod it sees). `queue: max` queues the waiting jobs as `pending`; the default
+    # (`queue: single`) keeps one pending job and cancels it when another PR's job arrives. `cancel-in-progress: true`
+    # cannot be combined with `queue: max`; a newer push on the same PR is cancelled by the workflow-level group.
     concurrency:
       group: e2e-live-staging
-      cancel-in-progress: false
+      queue: max
     steps:
     - uses: actions/checkout@v4
       with:

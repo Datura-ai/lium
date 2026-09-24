@@ -11,31 +11,37 @@ Public surface:
     from lium.provider import ProviderClient
     from lium.provider.auth import Signer, LocalKeypairSigner
     from lium.provider.errors import ProviderError, ProviderAuthError
+
+The names are resolved on first use: ``lium/cli/fund/command.py`` imports
+``lium.provider.chain_stack`` for its error text and ``cli.py`` imports ``fund``
+at start-up, so every ``lium`` command paid for the portal client (pydantic
+models, JWT) that only ``lium provider`` calls (DAH-3053).
 """
 
-from lium.provider.auth import LocalKeypairSigner, Signer
-from lium.provider.client import ProviderClient
-from lium.provider.errors import (
-    ProviderAuthError,
-    ProviderConfigError,
-    ProviderError,
-    ProviderInstallError,
-    ProviderNotFoundError,
-    ProviderPortalContractError,
-    ProviderServerError,
-    ProviderSshError,
-)
+from importlib import import_module
 
-__all__ = [
-    "LocalKeypairSigner",
-    "ProviderAuthError",
-    "ProviderClient",
-    "ProviderConfigError",
-    "ProviderError",
-    "ProviderInstallError",
-    "ProviderNotFoundError",
-    "ProviderPortalContractError",
-    "ProviderServerError",
-    "ProviderSshError",
-    "Signer",
-]
+_HOME = {
+    "LocalKeypairSigner": "lium.provider.auth",
+    "Signer": "lium.provider.auth",
+    "ProviderClient": "lium.provider.client",
+    "ProviderAuthError": "lium.provider.errors",
+    "ProviderConfigError": "lium.provider.errors",
+    "ProviderError": "lium.provider.errors",
+    "ProviderInstallError": "lium.provider.errors",
+    "ProviderNotFoundError": "lium.provider.errors",
+    "ProviderPortalContractError": "lium.provider.errors",
+    "ProviderServerError": "lium.provider.errors",
+    "ProviderSshError": "lium.provider.errors",
+}
+
+__all__ = sorted(_HOME)
+
+
+def __getattr__(name: str):
+    try:
+        module = _HOME[name]
+    except KeyError:
+        raise AttributeError(f"module 'lium.provider' has no attribute '{name}'") from None
+    value = getattr(import_module(module), name)
+    globals()[name] = value
+    return value
