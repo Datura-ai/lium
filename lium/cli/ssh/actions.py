@@ -23,7 +23,6 @@ class SshAction:
             ssh_argv = lium.ssh_argv(pod)
         except ValueError as e:
             return ActionResult(ok=False, data={}, error=f"Pod '{pod.huid}': {e}")
-
         try:
             result = subprocess.run(ssh_argv, check=False)
         except KeyboardInterrupt:
@@ -44,17 +43,26 @@ SSH_READY_INTERVAL = 3
 SSH_PROBE_TIMEOUT = 5
 _SSH_BANNER_MAX_BYTES = 4096
 
+def host_port(host: str, port: int) -> str:
+    """``host:port``, with an IPv6 address in brackets."""
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
 
 def ssh_banner_problem(host: str, port: int, timeout: float = SSH_PROBE_TIMEOUT) -> Optional[str]:
     """None when ``host:port`` sends an SSH identification line, else what it did instead.
 
     RFC 4253 lets a server send other lines before ``SSH-``, so up to 4 KiB is read.
+    ``timeout`` bounds the whole probe, so a peer trickling bytes can't stretch it.
     """
     buffer = b""
+    deadline = time.monotonic() + timeout
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
-            sock.settimeout(timeout)
             while len(buffer) < _SSH_BANNER_MAX_BYTES:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise socket.timeout()
+                sock.settimeout(remaining)
                 chunk = sock.recv(_SSH_BANNER_MAX_BYTES - len(buffer))
                 if not chunk:
                     break
@@ -98,6 +106,6 @@ class WaitForSSHAction:
                 return ActionResult(
                     ok=False,
                     data={**data, "last_problem": problem},
-                    error=f"{host}:{port} gave no SSH banner within {wait_seconds:g}s ({problem})",
+                    error=f"{host_port(host, port)} gave no SSH banner within {wait_seconds:g}s ({problem})",
                 )
             sleep(SSH_READY_INTERVAL)

@@ -9,6 +9,7 @@ line, then open the session (still tried once when the wait runs out). The pod i
 import json
 import socket
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -95,6 +96,38 @@ def test_a_silent_port_is_not_ready(server):
         release.set()
 
 
+def test_a_trickling_peer_cannot_stretch_one_probe(server):
+    """The timeout bounds the whole probe, not each recv."""
+    release = threading.Event()
+
+    def trickle(conn):
+        while not release.is_set():
+            try:
+                conn.sendall(b"x")
+            except OSError:
+                return
+            release.wait(0.05)
+
+    port = server(trickle)
+    started = time.monotonic()
+    try:
+        problem = ssh_actions.ssh_banner_problem("127.0.0.1", port, timeout=0.3)
+    finally:
+        release.set()
+
+    assert problem == "no SSH banner"
+    assert time.monotonic() - started < 1.0
+
+
+def test_an_ipv6_address_is_shown_in_brackets():
+    assert ssh_actions.host_port("2001:db8::1", 20022) == "[2001:db8::1]:20022"
+    assert ssh_actions.host_port("203.0.113.10", 20022) == "203.0.113.10:20022"
+
+    result = _wait(lambda h, p: "connection refused", _Clock(), pod=_pod("ssh root@2001:db8::1 -p 20022"))
+
+    assert result.error.startswith("[2001:db8::1]:20022 gave no SSH banner")
+
+
 def test_another_protocol_is_not_ready(server):
     port = server(lambda conn: conn.sendall(b"HTTP/1.1 400 Bad Request\r\n\r\n"))
 
@@ -129,6 +162,32 @@ def _wait(probe, clock, **ctx):
     return ssh_actions.WaitForSSHAction().execute(
         {"pod": _pod(), "probe": probe, "sleep": clock.sleep, "clock": clock, **ctx}
     )
+
+
+def test_a_trickling_peer_uses_the_probe_deadline():
+    """No real socket: each recv returns a byte and the clock moves 0.1 s."""
+    now = {"t": 0.0}
+
+    class _Sock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def settimeout(self, value):
+            assert value > 0
+
+        def recv(self, n):
+            now["t"] += 0.1
+            return b"x"
+
+    import unittest.mock as mock
+    with mock.patch.object(ssh_actions.socket, "create_connection", lambda *a, **k: _Sock()), \
+            mock.patch.object(ssh_actions.time, "monotonic", lambda: now["t"]):
+        assert ssh_actions.ssh_banner_problem("203.0.113.10", 20022, timeout=0.5) == "no SSH banner"
+
+    assert now["t"] <= 0.6
 
 
 def test_a_ready_port_is_not_waited_on():

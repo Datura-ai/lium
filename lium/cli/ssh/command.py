@@ -12,7 +12,7 @@ from lium.cli.actions import ActionResult
 from lium.cli.utils import handle_errors, parse_targets
 from lium.cli.utils import CliFailure, EXIT_CONFIGURATION_ERROR, EXIT_POD_NOT_FOUND, EXIT_SSH_ERROR
 from . import validation, parsing
-from .actions import SshAction, WaitForSSHAction
+from .actions import SshAction, WaitForSSHAction, host_port
 
 
 # ssh(1) uses 255 for its own connection failures; anything else is the remote
@@ -81,7 +81,7 @@ def wait_for_ssh_banner(pod: PodInfo) -> ActionResult:
     """
     _user, host, port = ssh_target(pod.ssh_cmd)
     action = WaitForSSHAction()
-    result = ui.load(f"Waiting for SSH on {host}:{port}", lambda: action.execute({"pod": pod}))
+    result = ui.load(f"Waiting for SSH on {host_port(host, port)}", lambda: action.execute({"pod": pod}))
     if not result.ok:
         ui.warning(f"{result.error}; trying ssh anyway")
     return result
@@ -93,7 +93,7 @@ def ssh_never_answered(pod: PodInfo, wait: ActionResult, data: dict) -> CliFailu
     return CliFailure(
         "ssh_connection_failed",
         f"Pod {huid} is RUNNING and billing, but SSH did not answer within "
-        f"{wait.data['wait_seconds']:g}s ({wait.data['host']}:{wait.data['port']}: {wait.data['last_problem']}). "
+        f"{wait.data['wait_seconds']:g}s ({host_port(wait.data['host'], wait.data['port'])}: {wait.data['last_problem']}). "
         f"Retry with 'lium ssh {huid}', or remove it with 'lium rm {huid}'",
         EXIT_SSH_ERROR,
         data={**data, "ssh_port_answered": False, "ssh_wait": wait.data},
