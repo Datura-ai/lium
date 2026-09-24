@@ -110,15 +110,35 @@ jobs:
     - uses: astral-sh/setup-uv@v6
 
     # the build image has no git (Dockerfile.build): the version hatch-vcs derives from the tags here is handed in
-    - name: Build Linux bundle in Docker
+    - name: Bundle version (hatch-vcs, from the tags)
+      id: version
       run: |
         version="$(uvx --from hatchling --with hatch-vcs hatchling version)"
         echo "version $version"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    # Release builds do not import or export GHA cache: a default-branch layer is mutable and
+    # must not enter a published CLI bundle. CI workflows still cache.
+    - uses: docker/setup-buildx-action@v3
+
+    # Dockerfile.build installs lockfile dependencies before COPY . . `load` puts the image
+    # in the engine for the extract and the report.
+    - name: Build Linux bundle in Docker
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: Dockerfile.build
+        platforms: ${{ matrix.platform }}
+        build-args: LIUM_VERSION=${{ steps.version.outputs.version }}
+        tags: lium-build:${{ github.sha }}-${{ matrix.asset_name }}
+        load: true
+
+    - name: Extract the bundle from the image
+      run: |
         mkdir -p dist
         rm -rf dist/lium
         docker rm -f lium-extract >/dev/null 2>&1 || true
-        docker build --build-arg LIUM_VERSION="$version" --platform ${{ matrix.platform }} -f Dockerfile.build -t lium-build:${GITHUB_SHA}-${{ matrix.asset_name }} .
-        docker create --name lium-extract lium-build:${GITHUB_SHA}-${{ matrix.asset_name }} true
+        docker create --name lium-extract "lium-build:${GITHUB_SHA}-${{ matrix.asset_name }}" true
         docker cp lium-extract:/app/dist/lium dist/lium
         docker rm -f lium-extract
         tar -czf dist/${{ matrix.asset_name }}.tar.gz -C dist lium

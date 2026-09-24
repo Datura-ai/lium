@@ -1,14 +1,16 @@
 """Remove (rm) command implementation."""
 
 import json
+import shlex
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, NoReturn, Optional
 import click
 
 from lium.sdk import Lium, PodInfo
 from lium.cli import ui
 from lium.cli.workspaces.context import show_workspace
+from lium.cli.interactive import noninteractive_reason
 from lium.cli.utils import (
     EXIT_CONFIGURATION_ERROR,
     EXIT_GENERAL_ERROR,
@@ -95,11 +97,10 @@ def human_approved_index_targets(matches: List[TargetMatch], yes: bool = False, 
 
     A number is the one way to name a pod the caller may never have looked at, so
     the pod behind it is spelled out here — huid and name — before anything is
-    removed, with or without --yes. Without a terminal nobody can answer, so the
-    command fails closed (``confirmation_required``) unless ``--yes`` was given:
-    a script names its intent with the flag, never by the absence of a prompt.
-    ``on_stderr`` keeps the line off stdout when stdout is a JSON document
-    (``--format json``).
+    removed, with or without --yes. Reached only on a terminal or with ``--yes``:
+    :func:`refuse_without_a_terminal` has already turned away a piped caller
+    that gave no flag. ``on_stderr`` keeps the line off stdout when stdout is a
+    JSON document (``--format json``).
     """
     for match in matches:
         (ui.notice if on_stderr else ui.info)(f"Pod {describe_index_match(match)}")
@@ -113,28 +114,82 @@ def human_approved_index_targets(matches: List[TargetMatch], yes: bool = False, 
 
 
 def human_approved_removing_every_pod(pods: List[PodInfo]) -> bool:
-    """Ask before wiping the whole account — and fail closed when nobody can answer.
+    """Ask on a terminal before wiping the whole account.
 
-    A piped caller (or one that set ``LIUM_NONINTERACTIVE``) cannot answer a
-    prompt; wiping every pod on the strength of a missing prompt is the one thing
-    this module exists to prevent, so the command fails with
-    ``confirmation_required`` and names ``--yes`` (the caller of this function
-    already skips it when ``--yes`` was given).
+    Reached only when a human can answer: the command skips it with ``--yes``,
+    and :func:`refuse_without_a_terminal` has already turned away a piped caller.
     """
     listed_huids = ", ".join(pod.huid for pod in pods)
     try:
         return ui.confirm(f"Remove all {len(pods)} pods ({listed_huids})?", hint="pass --yes to remove every pod without a prompt")
     except EOFError:
-        # The terminal went away mid-prompt. No answer is not a yes. (A refused prompt —
-        # nobody to answer — is the CliFailure ui.confirm raises; it propagates.)
+        # The terminal went away mid-prompt. No answer is not a yes.
         ui.warning("\nNo answer — nothing removed")
         return False
+
+
+def rerun_with_yes(
+    targets: Optional[str],
+    remove_all: bool,
+    in_duration: Optional[str],
+    at_time: Optional[str],
+    name_only: bool,
+    workspace: Optional[str] = None,
+    output_format: str = "table",
+) -> str:
+    """The command line that was given, with ``--yes`` added — what a refused caller re-runs.
+
+    ``workspace`` is the workspace the caller named (``-w`` / ``LIUM_WORKSPACE``, lium#183): the
+    line must carry it, or ``lium -w research rm --all </dev/null`` would suggest a
+    ``lium rm --all --yes`` that wipes the default workspace instead. ``output_format``
+    (``--format``, lium#218) is carried the same way when it is not the default.
+    """
+    words = ["lium", "--workspace", shlex.quote(workspace), "rm"] if workspace else ["lium", "rm"]
+    if targets:
+        words.append(shlex.quote(targets))
+    if remove_all:
+        words.append("--all")
+    if in_duration:
+        words.extend(["--in", shlex.quote(in_duration)])
+    if at_time:
+        words.extend(["--at", shlex.quote(at_time)])
+    if name_only:
+        words.append("--name-only")
+    if output_format != "table":
+        words.extend(["--format", output_format])
+    words.append("--yes")
+    return " ".join(words)
+
+
+def refuse_without_a_terminal(plan: RemovalPlan, rerun: str) -> NoReturn:
+    """Without a terminal, ``--yes`` is the only approval ``lium rm`` accepts.
+
+    A pipe on stdin is not a yes: a script, an agent or an ``echo y |`` that
+    named a pod has said which pod, not that it may go (DAH-2556 read a piped
+    caller as approval; the loop lost a pod that way). So a caller nobody can
+    prompt fails with ``confirmation_required`` (exit 2) — one message naming
+    every pod the command would have acted on and the same command line with
+    ``--yes`` — and nothing is removed or scheduled.
+    """
+    verb = "schedule removal of" if plan.termination_time else "remove"
+    listed_huids = ", ".join(pod.huid for pod in plan.pods)
+    hint = f"Re-run with --yes: {rerun}"
+    raise CliFailure(
+        "confirmation_required",
+        f"Would {verb} {len(plan.pods)} pod(s): {listed_huids} — nothing done because "
+        f"{noninteractive_reason()}. {hint}",
+        EXIT_CONFIGURATION_ERROR,
+        hint=hint,
+    )
 
 
 @click.command("rm")
 @click.argument("targets", required=False)
 @click.option("--all", "-a", "remove_all", is_flag=True, help="Remove all active pods")
-@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt")
+@click.option(
+    "--yes", "-y", is_flag=True,
+    help="Skip the confirmation prompt; required when stdin is not a terminal (scripts, pipes).",
+)
 @click.option("--in", "in_duration", help="Schedule removal after duration")
 @click.option("--at", "at_time", help="Schedule removal at time")
 @click.option(
@@ -173,7 +228,8 @@ def rm_command(
 
     \b
     Removal is irreversible. Exits non-zero when nothing matched TARGETS, so a
-    typo cannot look like a successful teardown.
+    typo cannot look like a successful teardown. Without a terminal on stdin,
+    --yes is required: the command names the pods it would remove and exits 2.
     \b
     Each removed pod is reported with its uptime and estimated spend
     (uptime × $/h, marked ≈ because the API returns no billed figure).
@@ -192,6 +248,15 @@ def rm_command(
             click.echo(json.dumps({"removed": [], "failed": []}))
         return
 
+    if not yes and not ui.is_interactive():
+        refuse_without_a_terminal(
+            plan, rerun_with_yes(
+                targets, remove_all, in_duration, at_time, name_only,
+                workspace=lium.config.workspace if lium.config.workspace_explicit else None,
+                output_format=output_format,
+            )
+        )
+
     if remove_all and not yes and not human_approved_removing_every_pod(plan.pods):
         return
 
@@ -209,8 +274,12 @@ def rm_command(
         action = RemovePodsAction()
         done_verb = "Removed"
 
-    failed_huids = action.execute(context).data["failed_huids"]
-    done_pods = [pod for pod in plan.pods if pod.huid not in failed_huids]
+    result = action.execute(context)
+    failed_huids = list(result.data.get("failed_huids") or [])
+    budget_errors = list(result.data.get("budget_errors") or [])
+    budget_huids = list(result.data.get("budget_huids") or [])
+    not_done = set(failed_huids) | set(budget_huids)
+    done_pods = [pod for pod in plan.pods if pod.huid not in not_done]
     removed_huids = [pod.huid for pod in done_pods]
 
     # The pods were listed before the delete, so their $/h and start time are
@@ -228,11 +297,8 @@ def rm_command(
         }
         if plan.termination_time:
             payload["termination_time"] = context["termination_time"]
+            payload["budget_refused"] = budget_huids
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-        if failed_huids:
-            # The payload already names the failures; a second message on stdout
-            # would break json.loads for the caller. The exit code says it failed.
-            raise SystemExit(EXIT_GENERAL_ERROR)
     elif removed_huids:
         # Say what happened: silence is indistinguishable from having done nothing.
         ui.success(f"{done_verb} {len(removed_huids)} pod(s): {', '.join(removed_huids)}")
@@ -240,7 +306,18 @@ def rm_command(
             for pod in done_pods:
                 ui.info(display.format_removed_line(pod, spends[pod.huid]))
 
+    if budget_errors:
+        # A 402 is the key's budget, not a generic failed huid. Print scheduled/failed
+        # first so `rm a b --in 2h` still shows that b was rescheduled, then exit 6.
+        # The refused pod is not retried — one refusal, no second charge.
+        if failed_huids and output_format != "json":
+            ui.error(f"Failed to schedule removal for pods: {', '.join(failed_huids)}")
+        raise budget_errors[0]
     if failed_huids:
+        if output_format == "json":
+            # The payload already names the failures; a second message on stdout
+            # would break json.loads for the caller. The exit code says it failed.
+            raise SystemExit(EXIT_GENERAL_ERROR)
         raise CliFailure(
             "removal_failed",
             f"Failed to remove pods: {', '.join(failed_huids)}",
