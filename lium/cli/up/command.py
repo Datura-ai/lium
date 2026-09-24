@@ -946,7 +946,16 @@ def up_command(
     )
 
     # sshd started by the image can come up seconds after RUNNING
-    ssh_ready = wait_for_ssh_banner(pod, ssh_argv)
+    try:
+        ssh_ready = wait_for_ssh_banner(pod, ssh_argv)
+    except KeyboardInterrupt:
+        raise CliFailure(
+            "ssh_wait_interrupted",
+            f"Stopped waiting for SSH; pod {pod.huid} is RUNNING and billing",
+            EXIT_GENERAL_ERROR,
+            data=billing_pod,
+            hint=f"Connect with 'lium ssh {pod.huid}', or remove it with 'lium rm {pod.huid}'",
+        ) from None
 
     if not ssh_session_connected(with_ssh_options(ssh_argv, try_once_options(ssh_ready))):
         if not ssh_ready.ok:

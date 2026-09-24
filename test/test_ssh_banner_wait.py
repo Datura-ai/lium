@@ -22,7 +22,7 @@ from lium.cli.cli import cli
 from lium.cli.ssh import actions as ssh_actions
 from lium.cli.ssh import command as ssh_module
 from lium.cli.up import command as up_module
-from lium.cli.utils import EXIT_SSH_ERROR
+from lium.cli.utils import EXIT_GENERAL_ERROR, EXIT_SSH_ERROR
 from lium.sdk import PodInfo
 
 
@@ -642,3 +642,31 @@ def test_a_session_after_a_banner_or_a_skipped_wait_has_no_connect_timeout(monke
 
     assert "ConnectTimeout=15" not in _ssh_argv(up_calls)
     assert "ConnectTimeout=15" not in _ssh_argv(ssh_calls)
+
+
+# --- Ctrl-C during the wait ---------------------------------------------------------------------
+
+def _interrupt(host, port):
+    raise KeyboardInterrupt
+
+
+def test_up_ctrl_c_in_the_wait_names_the_billing_pod(monkeypatch):
+    monkeypatch.setenv("LIUM_OUTPUT", "json")
+    result, calls = _run_up(monkeypatch, probe=_interrupt, ssh_connects=True)
+
+    envelope = _envelope(result)
+    assert result.exit_code == EXIT_GENERAL_ERROR
+    assert envelope["error"]["code"] == "ssh_wait_interrupted"
+    assert "pod eager-wolf-aa is RUNNING and billing" in envelope["error"]["message"]
+    assert "'lium ssh eager-wolf-aa'" in envelope["error"]["hint"]
+    assert "'lium rm eager-wolf-aa'" in envelope["error"]["hint"]
+    assert envelope["data"] == {"pod_id": "pod-1", "pod_name": "train"}
+    assert not [c for c in calls if c[0] in ("ssh", "rm")]
+
+
+def test_up_ctrl_c_in_the_wait_reads_for_a_person(monkeypatch):
+    result, calls = _run_up(monkeypatch, probe=_interrupt, ssh_connects=True)
+
+    assert result.exit_code == EXIT_GENERAL_ERROR
+    assert "Stopped waiting for SSH; pod eager-wolf-aa is RUNNING and billing" in _flat(result.output)
+    assert "Aborted!" not in result.output
