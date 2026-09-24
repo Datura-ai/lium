@@ -1,8 +1,9 @@
 # Releasing lium
 
 The version is the git tag. Publishing a GitHub release on a tag `vX.Y.Z` runs `.github/workflows/release.yml`, which
-builds the wheel and the binaries from that tag, uploads them and publishes to PyPI; nothing in the tree is bumped
-(DAH-3225). Create the release with `--prerelease` so `latest` moves only once the assets are up. The `lium` CLI and the
+builds the wheel and the binaries from that tag and uploads them; `publish-pypi.yml` then publishes the tag to PyPI
+if it is on `main`. Nothing in the tree is bumped (DAH-3225). Create the release with `--prerelease` so `latest` moves
+only once the assets are up. The `lium` CLI and the
 `lium.sdk` Python SDK ship in the same `lium.io` package, so one tag versions both.
 
 ## Choosing the version
@@ -26,48 +27,23 @@ nothing, at a later `0.1.1` it would demand `0.2.0`.
 
 ## Who can publish
 
-Only `.github/workflows/release.yml` can upload `lium.io` to PyPI, and only from a run that the **`pypi` environment's
-required reviewer approved**. Self-approval is blocked (`prevent_self_review: true`), which only refuses the account
-that started the run: any other listed reviewer can approve. So the required reviewers are humans only, at least one,
-and never the loop's account (`surcyf123`, user id 114649324), which never approves a release; the publish job
-refuses to run while it is listed. Today (23 Sep 2026) `surcyf123` is the environment's only required reviewer, so no
-release ships until an admin replaces it with a human. The environment reads `can_admins_bypass: true` today: a repository
-admin can start a waiting publish job without approval, and the loop's account is one of this repository's two admins
-(with `colin-002`, read 23 Sep 2026). So the publish job also refuses to run unless `can_admins_bypass` is `false`;
-the admin command in `.github/rulesets/README.md` sets it. PyPI's
-trusted publisher for the project names this repository, that file and that environment, so the upload
-token is minted inside the approved job and nowhere else; there is no PyPI API token in the repository's secrets or on
-anyone's machine. Two more things gate a release: the `release-tags` ruleset lets only its bypass list, humans only,
-create, move or delete a `v*` tag (`gh release create` creates the tag, so it is covered), and the environment's
-branch policy admits only `v*` tags and `main`. `.github/rulesets/README.md` has the admin commands and the
-two checks. A human creates each release tag; the loop's account is not on the ruleset's bypass list and never
-creates, moves or deletes a release tag. Today (read 23 Sep 2026) no tag ruleset is applied to this repository, so any
-account with write access, the loop's account included, can create a `v*` tag until an admin applies
-`.github/rulesets/release-tags.json`. The same environment covers the two stub publishers, `release-deprecate-lium-cli.yml` (`lium-cli`) and
-`release-lium-alias.yml` (`lium`), which run by hand. Neither name is held on PyPI today (read 23 Sep 2026):
-`https://pypi.org/pypi/lium/json` returns 404 and `https://pypi.org/simple/lium/` returns 404, so `lium` is not
-registered and anyone can register it; `lium-cli` is archived with no files (`https://pypi.org/simple/lium-cli/` →
-`"project-status": {"status": "archived"}`, `"files": []`). The last run of each stub failed:
-`release-deprecate-lium-cli.yml` on 11 May 2026, `release-lium-alias.yml` (its only run) on 31 Mar 2026.
+Only code on `main` reaches PyPI, and `main` takes reviewed PRs only. `.github/workflows/publish-pypi.yml` is the only
+path to PyPI for `lium.io`. It starts after `release.yml` succeeds for a published release (`workflow_run`), so it
+always runs `main`'s copy of the file: an edited copy on another branch never runs. It checks that the release tag
+points at the commit the release built and that this commit is on `main` (`git merge-base --is-ancestor`), rebuilds
+it, and uploads from a separate job in the `pypi` environment. That environment admits only `main` and has no
+required reviewers. PyPI's trusted publisher names this repository, `publish-pypi.yml` and `pypi`, so the upload
+token is minted only there; there is no PyPI API token in the repository's secrets or on anyone's machine. The two
+stub publishers, `release-deprecate-lium-cli.yml` (`lium-cli`) and `release-lium-alias.yml` (`lium`), run by hand in
+the same environment, so they run only from `main`.
 
-All of that is true once the admin steps have run **in this order**: (1) create the `pypi` environment with
-self-approval blocked, admin bypass off (`"can_admins_bypass": false`) and its required reviewers — before the workflow
-change merges, because a missing environment is created unprotected on first use; (2) merge; (3) on pypi.org, **in
-the same sitting**, add the publisher `Datura-ai/lium` · `release.yml` · environment `pypi` and delete the old,
-environment-less `Datura-ai/lium` · `release.yml` publisher; (4) apply the tag ruleset. Step (3) is the one that
-closes the door: until the old publisher is gone any account with write access can still publish through a hand-run,
-edited copy of the workflow, so step (3) does not wait for a release. While `surcyf123` is the only required reviewer
-(today), step (3) runs right after the merge, and from then until a human replaces `surcyf123` as reviewer no release
-can publish: the publish job refuses every run. That pause is the intended cost. If a human reviewer other than
-`surcyf123` is set instead, step (3) runs as soon as that reviewer is set and the change is merged, and the first
-release after it shows the new publisher works. The publish
-job reads the environment's rules back first and refuses to run unless there is at least one required reviewer, the
-loop's account is not one of them, every reviewer is a user (it cannot read team membership),
-`prevent_self_review` is `true`, and `can_admins_bypass` is `false`; it cannot see pypi.org's publisher list.
+The settings behind this (the environment, the pypi.org publishers, approval after the last push on `main`'s PR rule,
+and the `v*` tag ruleset) and the order to apply them are in `.github/rulesets/README.md`. The old pypi.org publisher
+(`release.yml`, no environment) must be deleted right after the merge; until then a hand-run, edited `release.yml` on
+a branch can still upload.
 
-What a release looks like after this: a human on the ruleset's bypass list runs `gh release create vX.Y.Z
---prerelease …` → the build jobs run → the run pauses at
-**approve-and-publish** and GitHub e-mails the reviewer → Actions → the run → **Review deployments** → **Approve and
-deploy** → the wheel and sdist go up with PEP 740 attestations (each file's page on pypi.org shows a *Provenance* link;
-`https://pypi.org/integrity/lium.io/X.Y.Z/<filename>/provenance` returns the signed statement) → the GitHub release
-assets job marks the release `latest`. A run nobody approves times out after 30 days and publishes nothing.
+What a release looks like: create the release on a commit that is on `main` (`gh release create vX.Y.Z --prerelease
+…`) → `release.yml` builds, uploads the GitHub release assets and marks the release `latest` → `publish-pypi.yml`
+checks the tag, rebuilds it and uploads the wheel and sdist with PEP 740 attestations (each file's page on pypi.org
+shows a *Provenance* link; `https://pypi.org/integrity/lium.io/X.Y.Z/<filename>/provenance` returns the signed
+statement). A tag on a commit that is not on `main` publishes nothing to PyPI: the check fails the run.
