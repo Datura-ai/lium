@@ -9,7 +9,7 @@ description = "Rent cloud GPUs by the hour from the Lium marketplace (H200, B200
 readme = "README.md"
 requires-python = ">=3.10, <3.15"
 license = "MIT"
-keywords = ["gpu", "cloud-gpu", "gpu-cloud", "gpu-rental", "cloud-compute", "h100", "h200", "b200", "rtx-4090", "machine-learning", "deep-learning", "bittensor", "cli", "sdk"]
+keywords = ["gpu", "cloud-gpu", "gpu-cloud", "gpu-rental", "cloud-compute", "h100", "h200", "b200", "rtx-4090", "machine-learning", "deep-learning", "cli", "sdk"]
 authors = [{ name = "Lium", email = "support@lium.io" }]
 classifiers = [
     "Development Status :: 4 - Beta",
