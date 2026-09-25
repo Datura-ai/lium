@@ -32,7 +32,7 @@ path to PyPI for `lium.io`. It starts after `release.yml` succeeds for a publish
 always runs `main`'s copy of the file: an edited copy on another branch never runs. It checks that the release tag
 points at the commit the release built and that this commit is on `main`'s first-parent history (`git rev-list
 --first-parent origin/main`; with squash merges only, that is a reviewed PR state), rebuilds it, and uploads from a separate job in the `pypi` environment. That environment admits only `main` and
-requires one approval from a maintainer before a publish runs. Before it uploads, `publish-pypi.yml` checks that the
+requires one approval from a maintainer before a publish runs. Before any upload, the uploading job checks that the
 environment has at least one required reviewer who is not the loop's account, blocks self-approval and has admin
 bypass off; the settings are in `.github/rulesets/README.md` section 1. PyPI's trusted publisher names this repository, `publish-pypi.yml` and `pypi`, so the upload
 token is minted only there; there is no PyPI API token in the repository's secrets or on anyone's machine. The two

@@ -55,7 +55,7 @@ jobs:
     steps:
     # Checked before the upload: at least one required reviewer; not the loop's account (any one listed reviewer can
     # approve); users only (this job's token cannot read team membership); prevent_self_review true; can_admins_bypass
-    # false (a missing field counts as true). It cannot prove pypi.org's side (RELEASING.md "Who can publish").
+    # false (a missing field counts as true). It cannot prove pypi.org's side (.github/rulesets/README.md section 2).
     - name: Environment pypi must require a reviewer other than the loop's account
       env:
         GH_TOKEN: ${{ github.token }}
@@ -63,7 +63,7 @@ jobs:
       run: |
         fail() {
           echo "environment pypi: $1" >&2
-          echo "nothing published (RELEASING.md 'Who can publish', step 1)" >&2
+          echo "nothing published (.github/rulesets/README.md section 1)" >&2
           exit 1
         }
         [[ "$LOOP_ACCOUNT_ID" =~ ^[0-9]+$ ]] || fail "LOOP_ACCOUNT_ID is not a user id; this step cannot rule out the loop's account"
