@@ -2,7 +2,7 @@
 
 publish-pypi.yml is the one upload path for `lium.io`: it runs from main's copy (workflow_run), checks that the release
 tag is on main, and holds the upload token in a job that checks nothing out. The stubs run by hand in the main-only
-`pypi` environment. No reviewer gate or guard step is needed on top of that.
+`pypi` environment, which also requires one maintainer approval before a publish runs.
 """
 
 import subprocess
