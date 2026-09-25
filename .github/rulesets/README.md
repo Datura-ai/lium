@@ -6,14 +6,16 @@ Only code on `main` reaches PyPI, and `main` takes reviewed PRs only. Three work
 and authenticates with PyPI **trusted publishing** (a short-lived OIDC token; no PyPI token is stored anywhere). The
 settings below are repository and pypi.org settings, not files; a repository admin applies them once.
 
-## 1. The `pypi` environment admits only `main` (admin, once)
+## 1. The `pypi` environment admits only `main` and needs one maintainer approval (admin, once)
 
-No required reviewers: the review happens on the PR, before the code reaches `main`.
+The environment deploys only from `main`, and it requires one approval from a maintainer before a publish runs: the
+code review happens on the PR, and the approval confirms the upload itself. `<maintainer-id>` is the maintainer's
+numeric user id (`gh api users/<login> --jq .id`).
 
 ```bash
 R=Datura-ai/lium
 gh api -X PUT "repos/$R/environments/pypi" --input - <<'JSON'
-{ "reviewers": [],
+{ "reviewers": [ { "type": "User", "id": <maintainer-id> } ],
   "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true } }
 JSON
 # remove every policy other than the `main` branch (for example a `v*` tag policy), then add `main` if it is missing
@@ -25,8 +27,8 @@ gh api "repos/$R/environments/pypi/deployment-branch-policies" --jq '.branch_pol
 ```
 
 Check: `gh api "repos/$R/environments/pypi/deployment-branch-policies" --jq '.branch_policies[]|.type+" "+.name'` →
-`branch main` only, and `gh api "repos/$R/environments/pypi" --jq '[.protection_rules[].type]'` → no
-`required_reviewers`. The same settings are under Settings → Environments → `pypi`.
+`branch main` only, and `gh api "repos/$R/environments/pypi" --jq '[.protection_rules[].type]'` → includes
+`required_reviewers` (one maintainer). The same settings are under Settings → Environments → `pypi`.
 
 `publish-pypi.yml` starts from `workflow_run`, which always runs on `main` with `main`'s copy of the file, so it
 enters the environment. It uploads only a release tag whose commit is on `main`'s first-parent history (`git rev-list

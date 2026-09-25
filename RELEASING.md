@@ -31,8 +31,8 @@ Only code on `main` reaches PyPI, and `main` takes reviewed PRs only. `.github/w
 path to PyPI for `lium.io`. It starts after `release.yml` succeeds for a published release (`workflow_run`), so it
 always runs `main`'s copy of the file: an edited copy on another branch never runs. It checks that the release tag
 points at the commit the release built and that this commit is on `main`'s first-parent history (`git rev-list
---first-parent origin/main`; with squash merges only, that is a reviewed PR state), rebuilds it, and uploads from a separate job in the `pypi` environment. That environment admits only `main` and has no
-required reviewers. PyPI's trusted publisher names this repository, `publish-pypi.yml` and `pypi`, so the upload
+--first-parent origin/main`; with squash merges only, that is a reviewed PR state), rebuilds it, and uploads from a separate job in the `pypi` environment. That environment admits only `main` and
+requires one approval from a maintainer before a publish runs. PyPI's trusted publisher names this repository, `publish-pypi.yml` and `pypi`, so the upload
 token is minted only there; there is no PyPI API token in the repository's secrets or on anyone's machine. The two
 stub publishers, `release-deprecate-lium-cli.yml` (`lium-cli`) and `release-lium-alias.yml` (`lium`), run by hand in
 the same environment, so they run only from `main`.
