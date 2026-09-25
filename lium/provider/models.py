@@ -142,7 +142,7 @@ class NoticePeriodPayload(BaseModel):
         return parsed.isoformat()
 
     @model_validator(mode="after")
-    def _period_matches_kind(self) -> "NoticePeriodPayload":
+    def _period_set_only_for_maintenance(self) -> NoticePeriodPayload:
         if self.permanent_removal and self.period_in_minute is not None:
             raise ValueError("a permanent removal takes no period_in_minute")
         if not self.permanent_removal and self.period_in_minute is None:

@@ -425,15 +425,16 @@ def set_notice_period(
                 hint="--minutes N for a maintenance window of N minutes; --permanent to remove the node.",
             ),
         )
-    payload = {"starting_at": starting_at, "permanent_removal": permanent_removal}
-    if period_in_minute is not None:
-        payload["period_in_minute"] = period_in_minute
-    if reason:
-        payload["reason"] = reason
     require_persona_ack(ctx)
     client = build_client(ctx)
     try:
-        body = client.create_notice_period(node_id, payload)
+        body = client.create_notice_period(
+            node_id,
+            starting_at=starting_at,
+            period_in_minute=period_in_minute,
+            reason=reason or None,
+            permanent_removal=permanent_removal,
+        )
     except ProviderError as e:
         ctx.exit(handle_provider_error(ctx, e))
         return

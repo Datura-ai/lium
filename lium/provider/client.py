@@ -553,29 +553,29 @@ class ProviderClient:
         )
 
     def create_notice_period(
-        self, node_id: str, payload: dict[str, Any] | None = None
+        self,
+        node_id: str,
+        *,
+        starting_at: str,
+        period_in_minute: int | None = None,
+        reason: str | None = None,
+        permanent_removal: bool = False,
     ) -> dict[str, Any]:
         """``POST /executors/{id}/notice-period``.
 
-        ``payload`` carries ``starting_at`` plus either ``period_in_minute``
-        (maintenance) or ``permanent_removal=True``; see
-        :class:`~lium.provider.models.NoticePeriodPayload`.
+        Pass ``period_in_minute`` for maintenance or ``permanent_removal=True``
+        for a removal; see :class:`~lium.provider.models.NoticePeriodPayload`.
         """
-        try:
-            body = NoticePeriodPayload.model_validate(payload or {}).model_dump()
-        except Exception as e:
-            raise ProviderError(
-                f"invalid notice-period payload: {e}",
-                code=ARG_INVALID,
-                cause=e,
-                hint=(
-                    "Pass starting_at (ISO 8601 with offset) and either period_in_minute (1-60) "
-                    "or permanent_removal=True."
-                ),
-            ) from e
+        payload = _build_payload(
+            NoticePeriodPayload,
+            starting_at=starting_at,
+            period_in_minute=period_in_minute,
+            reason=reason,
+            permanent_removal=permanent_removal,
+        )
         return self._http.post(
             EXECUTOR_NOTICE_PERIOD.format(id=_safe_id(node_id, label="node_id")),
-            json_body=body,
+            json_body=payload,
         )
 
     def delete_notice_period(self, node_id: str) -> dict[str, Any]:

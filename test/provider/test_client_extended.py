@@ -260,7 +260,7 @@ def test_create_notice_period(client) -> None:
     portal = _Portal(post_body={})
     c = client(portal)
     c.create_notice_period(
-        "e-1", {"starting_at": "2026-10-01T09:00:00+00:00", "period_in_minute": 60}
+        "e-1", starting_at="2026-10-01T09:00:00+00:00", period_in_minute=60
     )
     assert portal.posts[0][0] == "/executors/e-1/notice-period"
     assert portal.posts[0][1] == {
@@ -272,21 +272,20 @@ def test_create_notice_period(client) -> None:
 
 
 @pytest.mark.parametrize(
-    "payload",
+    "kwargs",
     [
-        None,
+        {"starting_at": "2026-10-01T09:00:00"},
         {"starting_at": "2026-10-01T09:00:00+00:00"},
         {"starting_at": "2026-10-01T09:00:00+00:00", "period_in_minute": 30, "permanent_removal": True},
         {"starting_at": "2026-10-01T09:00:00+00:00", "period_in_minute": 61},
-        {"starting_at": "2026-10-01T09:00:00+00:00", "permanent_removal": True, "force": True},
     ],
-    ids=["empty", "no-kind", "both-kinds", "window-over-60", "extra-key"],
+    ids=["no-offset", "no-kind", "both-kinds", "window-over-60"],
 )
-def test_create_notice_period_refuses_a_payload_the_portal_would_refuse(client, payload) -> None:
+def test_create_notice_period_refuses_a_payload_the_portal_would_refuse(client, kwargs) -> None:
     portal = _Portal(post_body={})
     c = client(portal)
     with pytest.raises(ProviderError) as exc:
-        c.create_notice_period("e-1", payload)
+        c.create_notice_period("e-1", **kwargs)
     assert exc.value.code == ARG_INVALID
     assert portal.posts == []
 
