@@ -10,12 +10,15 @@ settings below are repository and pypi.org settings, not files; a repository adm
 
 The environment deploys only from `main`, and it requires one approval from a maintainer before a publish runs: the
 code review happens on the PR, and the approval confirms the upload itself. `<maintainer-id>` is the maintainer's
-numeric user id (`gh api users/<login> --jq .id`).
+numeric user id (`gh api users/<login> --jq .id`); list people, not a team, and not the loop's account. Whoever starts
+a run cannot approve it, and an admin cannot skip the approval. `publish-pypi.yml` checks all of this before it
+uploads and publishes nothing if one setting is off.
 
 ```bash
 R=Datura-ai/lium
 gh api -X PUT "repos/$R/environments/pypi" --input - <<'JSON'
 { "reviewers": [ { "type": "User", "id": <maintainer-id> } ],
+  "prevent_self_review": true, "can_admins_bypass": false,
   "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true } }
 JSON
 # remove every policy other than the `main` branch (for example a `v*` tag policy), then add `main` if it is missing
@@ -27,8 +30,10 @@ gh api "repos/$R/environments/pypi/deployment-branch-policies" --jq '.branch_pol
 ```
 
 Check: `gh api "repos/$R/environments/pypi/deployment-branch-policies" --jq '.branch_policies[]|.type+" "+.name'` →
-`branch main` only, and `gh api "repos/$R/environments/pypi" --jq '[.protection_rules[].type]'` → includes
-`required_reviewers` (one maintainer). The same settings are under Settings → Environments → `pypi`.
+`branch main` only, and `gh api "repos/$R/environments/pypi" --jq '[(.protection_rules[] | select(.type ==
+"required_reviewers") | (.reviewers | length > 0), .prevent_self_review), .can_admins_bypass]'` → `[true,true,false]`
+(at least one reviewer, self-review blocked, no admin bypass). The same settings are under Settings → Environments →
+`pypi` ("Required reviewers", "Prevent self-review", "Allow administrators to bypass" off).
 
 `publish-pypi.yml` starts from `workflow_run`, which always runs on `main` with `main`'s copy of the file, so it
 enters the environment. It uploads only a release tag whose commit is on `main`'s first-parent history (`git rev-list
@@ -85,4 +90,4 @@ and marks the release `latest`, and `install.sh` and self-update download them. 
 
 (1) the environment and (3) the merge and review rules can be set at any time; the current `main` does not upload from `pypi`.
 Add the new pypi.org publisher from (2) before the merge. Merge. Right after the merge, delete the old publisher from
-(2): from the merge on, `release.yml` no longer uploads, and the first release after it shows `publish-pypi.yml` works.
+(2): from the merge on, only `publish-pypi.yml` uploads `lium.io`, and the first release after it shows `publish-pypi.yml` works.

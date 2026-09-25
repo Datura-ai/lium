@@ -2,9 +2,11 @@
 
 publish-pypi.yml is the one upload path for `lium.io`: it runs from main's copy (workflow_run), checks that the release
 tag is on main, and holds the upload token in a job that checks nothing out. The stubs run by hand in the main-only
-`pypi` environment, which also requires one maintainer approval before a publish runs.
+`pypi` environment, which also requires one maintainer approval before a publish runs; publish-pypi.yml reads that
+rule back before its upload.
 """
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -19,6 +21,7 @@ RELEASE = WORKFLOWS / "release.yml"
 STUBS = [WORKFLOWS / "release-lium-alias.yml", WORKFLOWS / "release-deprecate-lium-cli.yml"]
 PYPI_ACTION = "pypa/gh-action-pypi-publish"
 TAG_CHECK_STEP = "Release tag must point at this commit, and the commit must be on main"
+GUARD_STEP = "Environment pypi must require a reviewer other than the loop's account"
 
 
 def load(path: Path) -> dict:
@@ -61,9 +64,11 @@ def test_only_the_publish_job_holds_the_upload_token():
     publish = jobs["publish"]
     assert publish["needs"] == "build"
     assert environment_name(publish) == "pypi"
-    assert publish["permissions"] == {"id-token": "write"}
+    assert publish["permissions"] == {"actions": "read", "id-token": "write"}
     assert not steps_using(publish, "actions/checkout")
-    assert all("run" not in step for step in publish["steps"])
+    guard, *rest = publish["steps"]
+    assert guard["name"] == GUARD_STEP and "continue-on-error" not in guard
+    assert all("run" not in step for step in rest)
     assert "id-token" not in jobs["build"]["permissions"]
 
 
@@ -170,3 +175,56 @@ def test_tag_check_refuses(checkout, tag, which, message):
     result = run_tag_check(clone, tag, shas[which])
     assert result.returncode != 0
     assert message in result.stderr
+
+
+def environment(reviewers, prevent_self_review=True, can_admins_bypass=False) -> dict:
+    rule = {"type": "required_reviewers", "prevent_self_review": prevent_self_review, "reviewers": reviewers}
+    return {"can_admins_bypass": can_admins_bypass, "protection_rules": [rule]}
+
+
+def user(login: str, uid: int) -> dict:
+    return {"type": "User", "reviewer": {"login": login, "id": uid}}
+
+
+GUARD_CASES = [
+    (environment([user("alice", 1001)]), None),
+    (environment([user("alice", 1001), user("loop", 114649324)]), "the loop's account"),
+    (environment([]), "no required reviewer"),
+    ({"can_admins_bypass": False, "protection_rules": []}, "no required reviewer"),
+    (environment([{"type": "Team", "reviewer": {"slug": "maintainers", "id": 7}}]), "a team is a required reviewer"),
+    (environment([user("alice", 1001)], prevent_self_review=False), "prevent_self_review is not true"),
+    (environment([user("alice", 1001)], can_admins_bypass=True), "can_admins_bypass is not false"),
+    ({"protection_rules": environment([user("alice", 1001)])["protection_rules"]}, "can_admins_bypass is not false"),
+    (None, "could not be read"),
+]
+
+
+def run_guard(tmp_path: Path, path: Path, env_json: dict | None) -> subprocess.CompletedProcess[str]:
+    """Runs the upload job's guard step against a fake `gh` that prints env_json, or fails when it is None."""
+    (job,) = jobs_uploading(load(path)).values()
+    (step,) = [s for s in job["steps"] if s.get("name") == GUARD_STEP]
+    fake_gh = tmp_path / "gh"
+    if env_json is None:
+        fake_gh.write_text("#!/bin/sh\necho 'HTTP 403' >&2\nexit 1\n")
+    else:
+        (tmp_path / "env.json").write_text(json.dumps(env_json))
+        fake_gh.write_text(f'#!/bin/sh\ncat "{tmp_path / "env.json"}"\n')
+    fake_gh.chmod(0o755)
+    return subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", step["run"]],
+        env={"PATH": f"{tmp_path}:/usr/bin:/bin", "GITHUB_REPOSITORY": "o/r", **step["env"]},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("env_json, message", GUARD_CASES)
+def test_publish_reviewer_guard(tmp_path, env_json, message):
+    result = run_guard(tmp_path, PUBLISH, env_json)
+    if message is None:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode == 1
+        assert message in result.stderr
+        assert ".github/rulesets/README.md section 1" in result.stderr
