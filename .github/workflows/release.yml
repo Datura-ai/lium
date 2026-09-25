@@ -5,7 +5,8 @@ on:
   # Publishing a GitHub release on tag vX.Y.Z builds that tag and ships it: the version is the
   # tag (hatch-vcs, pyproject.toml), nothing in the tree is bumped (DAH-3225). Create it with
   # --prerelease: `latest` must not point at it until the assets are uploaded below, or install.sh
-  # and self-update see a release without binaries for ~3 min.
+  # and self-update see a release without binaries for ~3 min. PyPI is not uploaded here: publish-pypi.yml runs
+  # after this workflow succeeds and uploads the tag only when it is on main.
   release:
     types: [published]
   # A manual run only builds: no version input, nothing is published.
@@ -53,7 +54,7 @@ jobs:
     - name: Build package
       run: python -m build --sdist --wheel --outdir dist/
 
-    # PyPI refuses a distribution whose metadata it cannot render; find out here, before the publish job holds a reviewer
+    # PyPI refuses a distribution whose metadata it cannot render; find out here, before the release goes out
     - name: Check the distributions' metadata
       run: twine check --strict dist/*
 
@@ -326,74 +327,3 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: gh release edit "$RELEASE_TAG" --prerelease=false --latest
-
-  # The only path to PyPI. pypi.org's trusted publisher for `lium.io` names this repository, this file and the
-  # `pypi` environment, so the upload token exists only inside this job, and only after the environment's
-  # required reviewer approves the run (RELEASING.md "Who can publish"). No PyPI token is stored anywhere.
-  # The `if` keeps a manual run out (a dispatch never publishes); the tag's shape is enforced by build-python
-  # (next_version.py + the built-version check), which this job needs — `startsWith` alone is case-insensitive.
-  approve-and-publish:
-    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v')
-    needs: build-python
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/project/lium.io/
-    permissions:
-      actions: read     # the environment read below (GitHub: "Actions" repository permission, read)
-      contents: read
-      id-token: write
-
-    steps:
-    # A workflow that names an environment that does not exist makes GitHub create it with NO protection, so
-    # reaching this step proves nothing by itself. Read the environment's rules back and stop unless: at least one
-    # required reviewer is set; the loop's account (LOOP_ACCOUNT_ID, surcyf123) is not one of them — GitHub lets any
-    # one listed reviewer approve, and prevent_self_review only blocks the account that started the run; every
-    # reviewer is a user (this job's token cannot read team membership, which needs the organization "Members"
-    # permission, so a team could hide the loop's account); prevent_self_review is true; can_admins_bypass is false
-    # (with it true, a repository admin — the loop's account is one — can start this job with no reviewer's approval,
-    # and a missing field counts as true). The guard cannot tell a human from another machine account; the admin
-    # lists humans.
-    # What this cannot prove: that pypi.org's old, environment-less publisher is gone (until it is, an edited copy
-    # of this file on a branch, run by hand, still uploads — RELEASING.md "Who can publish", step 3).
-    - name: Environment pypi must require a reviewer other than the loop's account
-      env:
-        GH_TOKEN: ${{ github.token }}
-        LOOP_ACCOUNT_ID: '114649324'
-      run: |
-        fail() {
-          echo "environment pypi: $1" >&2
-          echo "nothing published (RELEASING.md 'Who can publish', step 1)" >&2
-          exit 1
-        }
-        [[ "$LOOP_ACCOUNT_ID" =~ ^[0-9]+$ ]] || fail "LOOP_ACCOUNT_ID is not a user id; this step cannot rule out the loop's account"
-        env_json="$(gh api "repos/$GITHUB_REPOSITORY/environments/pypi")" || fail "could not be read"
-        rule="$(jq -c '[.protection_rules[]? | select(.type == "required_reviewers")] | first // {}' <<<"$env_json")" ||
-          fail "could not be parsed"
-        echo "required reviewers on environment pypi: $(jq -r '[.reviewers[]? | "\(.type) \(.reviewer.login // .reviewer.slug) (id \(.reviewer.id))"] | join(", ") | if . == "" then "none" else . end' <<<"$rule")"
-        echo "can_admins_bypass on environment pypi: $(jq -r '.can_admins_bypass | tostring' <<<"$env_json")"
-        jq -e '(.reviewers // []) | length > 0' <<<"$rule" >/dev/null ||
-          fail "no required reviewer; an admin adds at least one human"
-        jq -e --argjson loop "$LOOP_ACCOUNT_ID" 'all(.reviewers[]; .reviewer.id != $loop)' <<<"$rule" >/dev/null ||
-          fail "the loop's account (user id $LOOP_ACCOUNT_ID) is a required reviewer and could approve a release; an admin replaces it with a human"
-        jq -e 'all(.reviewers[]; .type == "User")' <<<"$rule" >/dev/null ||
-          fail "a team is a required reviewer; this job cannot read team membership, so an admin lists people by user id"
-        jq -e '.prevent_self_review == true' <<<"$rule" >/dev/null ||
-          fail "prevent_self_review is not true"
-        jq -e '.can_admins_bypass == false' <<<"$env_json" >/dev/null ||
-          fail "can_admins_bypass is not false; a repository admin could start this job without a reviewer's approval"
-
-    - name: Download artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: python-dist
-        path: dist/
-
-    # attestations is the action's default; written out so a future edit cannot drop it unnoticed (PEP 740:
-    # PyPI shows a "Provenance" link per file, and `pypi.org/integrity/lium.io/<version>/<file>/provenance` holds it)
-    - name: Publish package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        attestations: true
-        verbose: true
-        print-hash: true

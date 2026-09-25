@@ -3,6 +3,7 @@
 import getpass
 import hashlib
 import ipaddress
+import math
 import os
 import posixpath
 import re
@@ -34,12 +35,16 @@ from .config import Config
 from .exceptions import (
     ClusterNotListedError,
     LiumAuthError,
+    LiumBudgetExceededError,
+    LiumCardTopUpError,
+    LiumChargeOutcomeUnknownError,
     LiumError,
     LiumHostKeyError,
     LiumNotFoundError,
     LiumInsufficientBalanceError,
     LiumPermissionError,
     LiumRateLimitError,
+    LiumScopeError,
     LiumServerError,
     PodStartError,
 )
@@ -78,6 +83,7 @@ from .utils import (
     spend_cap_deadline,
     with_retry,
 )
+from .api_keys import ApiKeysClient
 from .workspaces import WorkspacesClient
 
 # The backend feature `Lium.rent` looks for on GET /version before using POST /executors/rent-by-spec.
@@ -322,6 +328,46 @@ def _response_error_code(response: requests.Response) -> Optional[str]:
     return code if isinstance(code, str) and code else None
 
 
+# The 402 codes `POST /payments/topup` answers with (lium-platform services/api_card_topup.py); a 402 with any
+# other code (a spend cap, an older server, or a key budget refusal) stays a plain LiumError.
+# `API_KEY_BUDGET_EXCEEDED` is owned by the keys PR (LiumBudgetExceededError, exit 6): this helper is
+# shared, so a rent 402 must not become LiumCardTopUpError.
+CARD_TOPUP_ERROR_CODES = frozenset(
+    {
+        "CARD_AUTHENTICATION_REQUIRED",
+        "CARD_DECLINED",
+        "NO_SAVED_CARD",
+        "NO_DEFAULT_CARD",
+    }
+)
+# 502s from the same route that fire before Stripe is asked to charge (or that Stripe refused
+# before processing). A 5xx without one of these still means the charge may have gone through.
+CARD_TOPUP_NOT_CHARGED_CODES = frozenset({"STRIPE_UNAVAILABLE", "STRIPE_REFUSED"})
+
+
+def card_topup_error(response: requests.Response, **context: Optional[str]) -> LiumCardTopUpError:
+    """The exception for a card top-up 402: the server's sentence as the message, and the fields
+    of its structured body (``status``, ``decline_code``, ``dashboard_url``, ``payment_intent_id``)."""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    detail = payload.get("message") if isinstance(payload, dict) else None
+    detail = detail if isinstance(detail, dict) else {}
+
+    def text(value: Any) -> Optional[str]:
+        return value if isinstance(value, str) and value else None
+
+    return LiumCardTopUpError(
+        _response_error_message(response),
+        status=text(detail.get("status")),
+        decline_code=text(detail.get("decline_code")),
+        dashboard_url=text(detail.get("dashboard_url")),
+        payment_intent_id=text(detail.get("payment_intent_id")),
+        **context,
+    )
+
+
 def permission_error(
     detail: str, code: Optional[str] = None, key: Optional[str] = None, **context: Optional[str]
 ) -> LiumPermissionError:
@@ -337,6 +383,11 @@ def permission_error(
     hint/request_id) are carried on the exception.
     """
     message = f"Permission denied: {detail}" + (f" ({key})" if key else "")
+    scope = _missing_scope(detail, code)
+    if scope is not None:
+        # the platform's wording (utils/auth.py require_api_key_scope): "API key '<name>' does not have the
+        # '<scope>' scope" — the fix is a key with that scope, not funds, so the class says so
+        return LiumScopeError(message, scope=scope or None, code="missing_scope", request_id=context.get("request_id"))
     if code is not None:
         insufficient = code == "insufficient_balance"
     else:
@@ -354,6 +405,79 @@ def permission_error(
         code=code,
         **context,
     )
+
+
+# "API key 'ci' does not have the 'rent' scope" (lium-platform utils/auth.py, require_api_key_scope)
+_MISSING_SCOPE_RE = re.compile(r"does not have the '([a-z_]+)' scope", re.I)
+# error.code values a scope refusal may carry once the platform sends one; the message decides otherwise
+_SCOPE_CODES = frozenset({"api_key_scope", "missing_scope", "insufficient_scope", "scope_required"})
+
+
+def _missing_scope(detail: Optional[str], code: Optional[str]) -> Optional[str]:
+    """The scope a 403 says the key lacks: the name when the message states it, ``""`` when only the
+    code says it is a scope refusal, ``None`` when this 403 is about something else."""
+    match = _MISSING_SCOPE_RE.search(detail or "")
+    if match:
+        return match.group(1).lower()
+    return "" if code in _SCOPE_CODES else None
+
+
+def budget_error(detail: str, key: Optional[str] = None, **context: Optional[str]) -> LiumBudgetExceededError:
+    """The exception for a 402: the key's budget refused the request (``API_KEY_BUDGET_EXCEEDED``).
+
+    One mapping for every route the budget guards — rent, a pod's schedule/extend, `fund`, `topup` and `topup
+    card` all come through :meth:`Lium._request`, so they surface the same sentence. The message is the
+    server's own, plus the key it refused; it names the window hit (daily / monthly / max) — when the server's
+    sentence does not and the body's ``window`` does, the window is appended so the reader knows which budget
+    to raise. ``budget_usd``, ``spent_usd`` and ``window`` come from ``context`` when the error body carried
+    them (``_error_context`` passes only code/hint/request_id; the caller adds the body's ``data`` fields).
+    """
+    data = context.pop("data", None) or {}
+    window = data.get("window")
+    window = window if isinstance(window, str) and window else None
+    # the server says "lifetime budget" for the `max` window
+    words = {"max": ("max", "lifetime", "total")}.get((window or "").lower(), (window or "",))
+    named = window and any(word in detail.lower() for word in words)
+    message = f"Budget exceeded: {detail}" + ("" if not window or named else f" ({window} budget)") + (f" ({key})" if key else "")
+
+    def usd(value: Any) -> Optional[float]:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    key_id = data.get("api_key_id")
+    return LiumBudgetExceededError(
+        message,
+        budget_usd=usd(data.get("budget_usd")),
+        spent_usd=usd(data.get("spent_usd")),
+        window=window,
+        api_key_id=str(key_id) if key_id else None,
+        **context,
+    )
+
+
+def _error_data(response: requests.Response) -> Dict[str, Any]:
+    """The structured fields of an error body beyond code/message/hint/request_id.
+
+    The platform's envelope (``core/exception_handlers.py error_response``) keeps ``HTTPException.detail`` as
+    the top-level ``message`` (``detail`` on older servers): a budget refusal's ``window``, ``budget_usd``,
+    ``spent_usd`` and ``api_key_id`` live there. ``error.data`` is read first should a server nest them.
+    """
+    try:
+        payload = response.json()
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    error = payload.get("error")
+    nested = error.get("data") if isinstance(error, dict) else None
+    if isinstance(nested, dict):
+        return nested
+    for key in ("message", "detail"):
+        if isinstance(payload.get(key), dict):
+            return payload[key]
+    return {}
 
 
 def __getattr__(name: str) -> Any:
@@ -417,6 +541,16 @@ def _int_or_none(row: Dict[str, Any], key: str) -> Optional[int]:
 def _pod_gpu_count(row: Dict[str, Any]) -> Optional[int]:
     """The pod's own billed GPU count from a ``/pods`` row (a string in the payload), or None."""
     return _int_or_none(row, "gpu_count")
+
+
+def _pod_api_key_id(row: Dict[str, Any]) -> Optional[str]:
+    """The id of the key that rented the pod from a ``/pods`` row: ``api_key_id`` as the per-key-budgets server
+    names it, else the row's own ``created_by_api_key_id`` column. Read on presence, not truthiness — an id of
+    ``0`` or ``""`` is still a stamp; only ``null`` (a browser rental) or no field at all is None."""
+    key_id = row.get("api_key_id")
+    if key_id is None:
+        key_id = row.get("created_by_api_key_id")
+    return None if key_id is None else str(key_id)
 
 
 def _error_context(response: requests.Response) -> dict:
@@ -499,7 +633,7 @@ class Lium:
     def __init__(self, config: Optional[Config] = None, source: str = "sdk", workspace: Optional[str] = None):
         """``workspace`` picks the API key saved for that workspace (``[workspace.<name>]`` in
         ~/.lium/config.ini, written by ``lium keys create --workspace … --save``); a key acts in exactly
-        one workspace, so choosing the workspace means choosing the key (lium-platform DAH-2986), and
+        one workspace, so choosing the workspace means choosing the key, and
         ``ValueError`` is raised when none is saved for it rather than running as another key."""
         self.config = config or Config.load(workspace=workspace)
         self.source = source
@@ -510,6 +644,7 @@ class Lium:
         }
         self._features: Optional[set] = None
         self.workspaces = WorkspacesClient(self)
+        self.api_keys = ApiKeysClient(self)
         self._ssh_sessions: Dict[str, paramiko.SSHClient] = {}  # pod id -> connection held by ssh_session()
 
     def features(self) -> set:
@@ -619,12 +754,18 @@ class Lium:
         # alone does not say which one to fix.
         if resp.status_code == 401:
             raise LiumAuthError(f"Invalid API key ({key})" if key else "Invalid API key", **context)
+        if resp.status_code == 402 and context.get("code") in (None, "API_KEY_BUDGET_EXCEEDED"):
+            # the key's daily or total budget is reached (error.code
+            # API_KEY_BUDGET_EXCEEDED). A 402 for a Stripe card decline is not this.
+            raise budget_error(_response_error_message(resp), key=key, data=_error_data(resp), **context)
         if resp.status_code == 403:
             raise permission_error(_response_error_message(resp), key=key, **context)
         if resp.status_code == 404:
             raise LiumNotFoundError(f"Resource not found: {_response_error_message(resp)}", **context)
         if resp.status_code == 429:
             raise LiumRateLimitError("Rate limit exceeded", **context)
+        if resp.status_code == 402 and context.get("code") in CARD_TOPUP_ERROR_CODES:
+            raise card_topup_error(resp, **context)
         if 500 <= resp.status_code < 600:
             raise LiumServerError(f"Server error: {resp.status_code}", **context)
         raise LiumError(f"API error {resp.status_code}: {_response_error_message(resp)}", **context)
@@ -759,6 +900,10 @@ class Lium:
         if not isinstance(nvlink, bool):
             nvlink = (interconnect or {}).get("nvlink")
             nvlink = nvlink if isinstance(nvlink, bool) else None
+        # The backend's power-limit verdict and its watts; anything but a JSON boolean / number is unknown,
+        # so null (the platform could not judge the node) or a missing key reads as "cannot say", never "limited".
+        gpu_power_limited = executor_dict.get("gpu_power_limited")
+        gpu_power_limited = gpu_power_limited if isinstance(gpu_power_limited, bool) else None
 
         return ExecutorInfo(
             id=executor_dict.get("id", ""),
@@ -781,6 +926,9 @@ class Lium:
             available_gpu_count=_int_or_none(executor_dict, "available_gpu_count"),
             interconnect=interconnect,
             nvlink=nvlink,
+            gpu_power_limited=gpu_power_limited,
+            gpu_power_limit_w=_int_or_none(executor_dict, "gpu_power_limit_w"),
+            gpu_power_limit_default_w=_int_or_none(executor_dict, "gpu_power_limit_default_w"),
         )
 
     def list_ssh_keys(self) -> List[SSHKey]:
@@ -1713,13 +1861,19 @@ class Lium:
 
         return executors
 
-    def ps(self) -> List[PodInfo]:
+    def ps(self, *, api_key_id: Optional[str] = None) -> List[PodInfo]:
         """List active pods.
+
+        Args:
+            api_key_id: Only the pods rented through this API key (``GET /pods?api_key_id=…``,
+                server support pending). A server without the filter ignores the parameter and lists
+                every pod the caller can see.
 
         Returns:
             List of :class:`PodInfo` objects representing the caller's running pods.
         """
-        data = self._request("GET", "/pods").json()
+        params = {"api_key_id": api_key_id} if api_key_id else None
+        data = self._request("GET", "/pods", params=params).json()
 
         pods = []
         for d in data:
@@ -1759,9 +1913,40 @@ class Lium:
                 cluster_id=d.get("cluster_id"),
                 cluster_node_index=d.get("cluster_node_index"),
                 cluster_overlay_ip=d.get("cluster_overlay_ip"),
+                # the key that rented the pod (the server names it `api_key_id`; the pod row's own
+                # column is `created_by_api_key_id`); None for a session rent or an older server
+                api_key_id=_pod_api_key_id(d),
+                api_key_name=d.get("api_key_name"),
+                api_key_stamped="api_key_id" in d or "created_by_api_key_id" in d,
             ))
 
         return pods
+
+    def billing_statement(
+        self,
+        *,
+        start_day: Optional[str] = None,
+        end_day: Optional[str] = None,
+        api_key_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """The account's pod charges grouped by pod (``GET /billing/statement``), most recently billed first.
+
+        Every pod the account was charged for in the period — removed pods included — with per-UTC-day
+        rows; each pod's ``total`` is what the ledger debited. ``start_day`` / ``end_day`` are UTC billing
+        days (``YYYY-MM-DD``), both inclusive and optional. ``api_key_id`` keeps only the pods rented
+        through that key (the rows then carry ``api_key_name``); a server without the
+        filter ignores it. Returns the server's ``{"start_day", "end_day", "total", "pods": [...]}``.
+        A key needs the ``read`` scope.
+        """
+        params: Dict[str, Any] = {}
+        for name, value in (("start_day", start_day), ("end_day", end_day), ("api_key_id", api_key_id)):
+            if value:
+                params[name] = value
+        data = self._request("GET", "/billing/statement", params=params or None).json()
+        if not isinstance(data, dict):
+            return {"start_day": start_day, "end_day": end_day, "total": 0.0, "pods": []}
+        pods = data.get("pods")
+        return {**data, "pods": pods if isinstance(pods, list) else []}
 
     def down(self, pod: PodInfo) -> Dict[str, Any]:
         """Stop a pod.
@@ -2097,7 +2282,7 @@ class Lium:
         """Remove every member pod of a cluster with one ``DELETE /clusters/{cluster_id}``.
 
         Returns one ``{"pod", "huid", "name", "node_rank", "success", "message", "error"}`` per
-        member, in the order the server reports them (``huid`` is the short name ``lium rm`` accepts). The server (lium-platform#411) finds the members by the
+        member, in the order the server reports them (``huid`` is the short name ``lium rm`` accepts). The server finds the members by the
         cluster id, checks ownership and API-key scope on every one of them before the first
         delete, then tears them down one by one; a member that failed is reported with ``success``
         false and its error text while the others are still removed, so nothing is left billing by
@@ -3453,7 +3638,7 @@ class Lium:
             if not grant["success"]:
                 # `flock -w 30` gives up silently (exit 1) when another cp holds the lock
                 detail = grant["stderr"].strip() or f"exit {grant.get('exit_code')} (another copy may hold {self.TRANSFER_KEY_LOCK})"
-                raise LiumError(f"Could not authorise the transfer key on pod {dst_pod.name or dst_pod.huid}: {detail}")
+                raise LiumError(f"Could not authorize the transfer key on pod {dst_pod.name or dst_pod.huid}: {detail}")
             authorized = True
 
             # The source pod must verify the destination the way this client does: the grant above went
@@ -3501,7 +3686,7 @@ class Lium:
                     dst_pod,
                     revoke,
                     consequence=(
-                        f"the transfer key '{marker}' is still authorised on pod "
+                        f"the transfer key '{marker}' is still authorized on pod "
                         f"{dst_pod.name or dst_pod.huid}; revoke it with: "
                         f"lium exec {dst_pod.huid} {shlex.quote(revoke)}"
                     ),
@@ -4261,7 +4446,7 @@ class Lium:
         cursor: Optional[str] = None,
         limit: int = 100,
     ) -> Dict[str, Any]:
-        """One page of the account audit log, newest first (``GET /account/audit``, lium-platform DAH-3245).
+        """One page of the account audit log, newest first (``GET /account/audit``).
 
         One entry per request that changed something on the account — a pod created, restarted or
         deleted, a key created or revoked, a login, a top-up requested, a setting or a workspace member
@@ -4331,6 +4516,90 @@ class Lium:
             "crypto_network": crypto_network,
         }
         return self._request("POST", "/tmc-pay/create-invoice", json=payload).json()
+
+    def topup_card(
+        self,
+        amount_usd: float,
+        payment_method_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Top up the balance from a saved card, with no browser (``POST /payments/topup``;
+        not released — behind a platform switch the team turns on).
+
+        The card must already be saved on the account (a card top-up on the Billing page
+        saves it). The charge is made off-session; the balance is credited by the same
+        Stripe webhook that credits a Checkout top-up, usually within seconds, so
+        :meth:`balance` may lag this call briefly. The key must hold the ``billing``
+        scope (or be a browser session); today's ``read`` / ``rent`` / ``manage`` keys are
+        refused with :class:`LiumPermissionError`.
+
+        Every call carries an idempotency key — yours, or a fresh ``uuid4`` when you pass
+        none — so the request is posted once and a repeat with the same key returns the
+        first charge instead of making a second one. The key used is in the result (and on
+        :class:`LiumChargeOutcomeUnknownError`) as ``idempotency_key``.
+
+        Args:
+            amount_usd: At least $10, the card form's minimum; at most $999,999.99.
+            payment_method_id: A saved card's ``pm_…`` id; omitted, the default card (or the
+                only saved one).
+            idempotency_key: Repeat the call with the same key and amount within 24 h and
+                the first charge (or its status, while it is still ``processing``) is returned
+                instead of a second one being made. Omitted: the SDK makes one.
+
+        Returns:
+            ``{"status": "succeeded", "payment_intent_id", "transaction_id", "idempotency_key",
+            "amount_usd", "card": {"brand", "last4"}}``. ``status`` is ``"processing"`` (HTTP 202)
+            when Stripe has not finished confirming. A 202 that includes a ``payment_intent_id``
+            is a taken charge (the CLI treats it as success, exit 0). A 202 with
+            ``payment_intent_id`` ``None`` is unknown — the platform's own call to Stripe timed
+            out after the charge; the charge may never have happened. Treat that case as
+            unknown, not as success: the balance settles by webhook when the charge is real;
+            a repeat with the same key returns the same transaction and its current status,
+            never a second charge. Do not repeat the call without the key.
+
+        Raises:
+            LiumCardTopUpError: the bank wants a confirmation (``CARD_AUTHENTICATION_REQUIRED``,
+                see ``dashboard_url``), declined the card (``CARD_DECLINED``), or no card is
+                saved / none is the default. Nothing was charged.
+            LiumChargeOutcomeUnknownError: the answer was lost (timeout, dropped connection,
+                5xx) after the charge was posted — it may have gone through. Check the balance
+                before trying again; ``idempotency_key`` on the error repeats it safely.
+                A 5xx whose code is ``STRIPE_UNAVAILABLE`` or ``STRIPE_REFUSED`` is a
+                :class:`LiumServerError` instead: nothing was charged.
+        """
+        if not math.isfinite(amount_usd):
+            raise LiumError("amount_usd must be a finite number of dollars (at least 10).")
+        key = idempotency_key or uuid.uuid4().hex
+        payload: Dict[str, Any] = {"amount_usd": amount_usd, "idempotency_key": key}
+        if payment_method_id:
+            payload["payment_method_id"] = payment_method_id
+        try:
+            body = self._request("POST", "/payments/topup", json=payload).json()
+        except LiumServerError as exc:
+            # retrieve/list 502s, or a Stripe refusal before processing: the card was not touched
+            if exc.code in CARD_TOPUP_NOT_CHARGED_CODES:
+                raise
+            raise LiumChargeOutcomeUnknownError(
+                "The charge may have gone through: the API did not answer after the top-up was posted. "
+                "Check the balance before trying again; a repeat with the same idempotency_key and "
+                "the same amount returns the same charge instead of making a second one.",
+                idempotency_key=key,
+                code="charge_outcome_unknown",
+                request_id=getattr(exc, "request_id", None),
+            ) from exc
+        except requests.RequestException as exc:
+            # Stripe charges before it answers: a lost answer after the POST is not "nothing happened"
+            raise LiumChargeOutcomeUnknownError(
+                "The charge may have gone through: the API did not answer after the top-up was posted. "
+                "Check the balance before trying again; a repeat with the same idempotency_key and "
+                "the same amount returns the same charge instead of making a second one.",
+                idempotency_key=key,
+                code="charge_outcome_unknown",
+                request_id=getattr(exc, "request_id", None),
+            ) from exc
+        # the key the charge was made under, whether or not the server echoes it back
+        body.setdefault("idempotency_key", key)
+        return body
 
     def volumes(self) -> List[VolumeInfo]:
         """List all volumes for the current user.
