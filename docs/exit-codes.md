@@ -117,7 +117,9 @@ Codes raised by the shared error handler (any command can produce them) when the
 Commands add their own codes for the failures only they can have — for example
 `up` raises `node_selection_failed`, `template_failed`, `jupyter_install_failed`,
 `unreadable_dockerfile`; `exec` raises `unreadable_script`; `rm` raises
-`removal_failed`; `fund` raises `transfer_failed`; `topup card` (not released yet) passes on the platform's own
+`removal_failed`; `fund` raises `transfer_failed`, `netuid_not_accepted` (2: `--netuid` names a subnet whose alpha
+Lium does not accept right now; `data` carries `netuid` and the `accepted` list) and `netuid_needs_alpha` (2: `--netuid`
+without `--alpha`); `topup card` (not released yet) passes on the platform's own
 `CARD_AUTHENTICATION_REQUIRED`, `CARD_DECLINED`, `NO_SAVED_CARD` and
 `NO_DEFAULT_CARD` (3: the
 API refused the charge and the balance did not move; `data` carries `dashboard_url`, the bank's

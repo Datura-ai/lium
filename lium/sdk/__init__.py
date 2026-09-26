@@ -1,6 +1,6 @@
 """Public SDK exports."""
 
-from .client import AlphaQuote, Lium, pod_ssh_command
+from .client import AlphaQuote, AlphaSubnet, AlphaSubnets, Lium, pod_ssh_command
 from .config import Config
 from .decorators import machine
 from .exceptions import (
@@ -55,6 +55,8 @@ __all__ = [
     "WorkspaceInfo",
     "WorkspaceMember",
     "AlphaQuote",
+    "AlphaSubnet",
+    "AlphaSubnets",
     "Config",
     "ExecutorInfo",
     "PodInfo",

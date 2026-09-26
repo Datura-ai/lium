@@ -5,6 +5,7 @@ from decimal import Decimal, ROUND_DOWN
 from typing import Optional
 
 import click
+from rich.markup import escape
 
 from lium.sdk import Lium, LiumError
 from lium.cli import ui
@@ -146,11 +147,14 @@ def _alpha_fund(
     hotkey: Optional[str],
     yes: bool,
     json_output: bool,
+    requested_netuid: Optional[int],
 ) -> None:
     """Fund the Lium account with free alpha via ``transfer_stake``.
 
     The amount is denominated in USD: ``GET /balance/convert/alpha`` quotes both the
-    alpha amount to move and the subnet ``netuid`` to move it on, and
+    alpha amount to move and the subnet ``netuid`` to move it on (``requested_netuid``,
+    checked against ``GET /balance/alpha/subnets``, or the pay API's
+    primary subnet when none is given), and
     ``GET /wallet/company/`` supplies the destination coldkey. All three values are
     resolved from pay-tao-api-v2 ONCE at the top of the flow — never hardcoded — so a
     rotated netuid/address cannot silently send alpha into a black hole. Any API
@@ -216,6 +220,30 @@ def _alpha_fund(
     # asking for the coldkey password.
     lium = Lium()
 
+    # A requested subnet is checked against the accepted set before the password
+    # prompt, so a subnet Lium does not take never costs the user an unlock.
+    subnet_label = None
+    if requested_netuid is not None:
+        accepted = ui.load("Checking accepted subnets", lambda: lium.alpha_subnets())
+        subnet = accepted.get(requested_netuid)
+        if subnet is None:
+            raise CliFailure(
+                "netuid_not_accepted",
+                f"Alpha from subnet {requested_netuid} is not accepted for payment right "
+                f"now. Accepted netuids: {', '.join(str(n) for n in accepted.netuids)}",
+                EXIT_CONFIGURATION_ERROR,
+                data={"netuid": requested_netuid, "accepted": list(accepted.netuids)},
+                hint=(
+                    "Pick an accepted netuid, or drop --netuid to pay from Lium's "
+                    "primary subnet (the list follows pool liquidity and can change)"
+                    if accepted.primary in accepted.netuids
+                    else "Pick an accepted netuid (the list follows pool liquidity "
+                    "and can change)"
+                ),
+            )
+        if subnet.name:
+            subnet_label = f"netuid {requested_netuid}, {subnet.name}"
+
     # Ask for the coldkey password here, outside every spinner — registration and the
     # transfer both sign with it, and a prompt raised under ui.load lands glued to a
     # frozen spinner line, which reads as a hung command.
@@ -256,8 +284,17 @@ def _alpha_fund(
         raise LiumError(
             "pay API returned the caller's own coldkey as the funding address; aborting"
         )
-    quote = ui.load("Quoting alpha", lambda: lium.convert_alpha(usd_amount))
+    quote = ui.load(
+        "Quoting alpha",
+        lambda: lium.convert_alpha(usd_amount, netuid=requested_netuid),
+    )
+    if requested_netuid is not None and quote.netuid != requested_netuid:
+        raise LiumError(
+            f"pay API quoted netuid {quote.netuid} for a netuid {requested_netuid} "
+            "request; aborting"
+        )
     netuid = quote.netuid
+    subnet_label = subnet_label or f"netuid {netuid}"
 
     # Decimal -> Balance: floor the quoted alpha at integer rao with ROUND_DOWN BEFORE
     # set_unit, so we never transfer more than quoted (keeps the free+fee gate exact).
@@ -288,7 +325,8 @@ def _alpha_fund(
 
     if not json_output:
         ui.info(f"Destination (Lium coldkey): {funding_address}")
-        ui.info(f"Free alpha (netuid {netuid}): {free}")
+        # Subnet names are set on-chain by their owners; ui.confirm escapes its own text.
+        ui.info(f"Free alpha ({escape(subnet_label)}): {free}")
         if fee_modeled:
             ui.info(f"Movement fee: {fee}")
         ui.info(_USD_CAVEAT)
@@ -299,7 +337,7 @@ def _alpha_fund(
     if not json_output and not yes:
         if not ui.confirm(
             f"Fund account with ~${usd_amount} USD = {alpha_amount} alpha "
-            f"(netuid {netuid}) from {hotkey} -> {funding_address}?",
+            f"({subnet_label}) from {hotkey} -> {funding_address}?",
             default=False,
         ):
             return
@@ -308,7 +346,7 @@ def _alpha_fund(
     # value resolved at the top (value-vs-value, no constant). The TRANSFERRED amount
     # stays the Phase-A confirmed amount_bal — the re-fetch only guards netuid drift,
     # it never re-derives a new (possibly larger) signed amount.
-    fresh_quote = lium.convert_alpha(usd_amount)
+    fresh_quote = lium.convert_alpha(usd_amount, netuid=requested_netuid)
     if fresh_quote.netuid != netuid:
         raise LiumError(
             f"netuid changed mid-flight: resolved {netuid} but re-fetch returned "
@@ -372,7 +410,7 @@ def _alpha_fund(
 @click.option("--wallet", "-w", help="Bittensor wallet name to fund from")
 @click.option("--amount", "-a", help="Amount to fund with (TAO; USD when --alpha)")
 @click.option(
-    "--alpha", is_flag=True, default=False, help="Fund with free Subnet-51 alpha stake"
+    "--alpha", is_flag=True, default=False, help="Fund with free alpha stake"
 )
 @click.option(
     "--hotkey",
@@ -380,6 +418,13 @@ def _alpha_fund(
     default=None,
     help="Origin hotkey the alpha is staked under — SS58 address or wallet hotkey "
     "name (required with --alpha)",
+)
+@click.option(
+    "--netuid",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Subnet whose alpha to pay with (only with --alpha); must be one Lium accepts. "
+    "Default: Lium's primary subnet",
 )
 @click.option(
     "--json", "json_output", is_flag=True, default=False, help="Print machine-readable JSON"
@@ -391,10 +436,11 @@ def fund_command(
     amount: Optional[str],
     alpha: bool,
     hotkey: Optional[str],
+    netuid: Optional[int],
     json_output: bool,
     yes: bool,
 ):
-    """Fund your Lium account with TAO (or Subnet-51 alpha) from a Bittensor wallet.
+    """Fund your Lium account with TAO or free alpha from your wallet.
 
     \b
     Examples:
@@ -404,8 +450,16 @@ def fund_command(
       lium fund --alpha -k <hotkey-ss58> -a 25        # -a is USD when --alpha
       lium fund --alpha -w default -k myhotkey -a 25  # -k may be a wallet hotkey name
       lium fund --alpha -k <hotkey-ss58> -a 25 -y --json
+      lium fund --alpha -k <hotkey-ss58> -a 25 --netuid 64  # alpha from subnet 64
     """
+    if netuid is not None and not alpha:
+        raise CliFailure(
+            "netuid_needs_alpha",
+            "--netuid picks the subnet for an alpha payment; add --alpha "
+            "(-a is then USD, not TAO)",
+            EXIT_CONFIGURATION_ERROR,
+        )
     if alpha:
-        _alpha_fund(wallet, amount, hotkey, yes, json_output)
+        _alpha_fund(wallet, amount, hotkey, yes, json_output, netuid)
     else:
         _legacy_tao_fund(wallet, amount, yes)
