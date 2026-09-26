@@ -79,6 +79,50 @@ class SaveApiKeyAction:
         return ActionResult(ok=True, data={"already_configured": False})
 
 
+class CheckSavedApiKeyAction:
+    """Ask the API whether the saved key still works, before init trusts it.
+
+    Keys minted by a login expire (365 days by default) and can be revoked; a dead saved key used to
+    make every later ``lium init`` say "already saved" and never log in again. ``data["status"]``:
+    ``valid``, ``rejected`` (401, or a 403 that is not a balance/budget/scope refusal — those still
+    mean the server knows the key) or ``unreachable`` (no answer, or an answer not about the key).
+    """
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    def execute(self, ctx: dict) -> ActionResult:
+        import requests
+
+        from lium.sdk import Lium, LiumAuthError, LiumError
+        from lium.sdk.config import Config
+        from lium.sdk.exceptions import (
+            LiumBudgetExceededError,
+            LiumInsufficientBalanceError,
+            LiumPermissionError,
+            LiumScopeError,
+        )
+
+        client = Lium(Config(
+            api_key=self.api_key,
+            api_key_source=f"config:{config.get_config_path()}",
+            base_url=os.getenv("LIUM_BASE_URL", Config.base_url),
+            base_pay_url=os.getenv("LIUM_PAY_URL", Config.base_pay_url),
+        ), source="cli")
+        try:
+            client.balance()
+        except (LiumInsufficientBalanceError, LiumBudgetExceededError, LiumScopeError):
+            return ActionResult(ok=True, data={"status": "valid"})
+        except (LiumAuthError, LiumPermissionError) as e:
+            return ActionResult(ok=False, data={"status": "rejected"}, error=str(e))
+        except (LiumError, requests.RequestException) as e:
+            return ActionResult(
+                ok=False, data={"status": "unreachable"},
+                error=f"Could not check the saved API key against {client.config.base_url}: {e}",
+            )
+        return ActionResult(ok=True, data={"status": "valid"})
+
+
 class RequestAuthUrlAction:
     """Request auth URL and print it (step 1 of headless auth)."""
 

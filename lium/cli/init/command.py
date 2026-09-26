@@ -9,9 +9,17 @@ from rich.markup import escape
 from lium.cli import ui
 from lium.cli.interactive import is_interactive
 from lium.cli.settings import config
-from lium.cli.utils import CliFailure, EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, EXIT_GENERAL_ERROR, handle_errors
+from lium.cli.utils import (
+    CliFailure,
+    EXIT_API_ERROR,
+    EXIT_CONFIGURATION_ERROR,
+    EXIT_GENERAL_ERROR,
+    EXIT_PERMISSION_DENIED,
+    handle_errors,
+)
 from lium.sdk.config import API_KEY_ENV_VAR, API_KEY_SECTION_ENV_VAR, Config
 from .actions import (
+    CheckSavedApiKeyAction,
     SaveApiKeyAction,
     SetupApiKeyAction,
     RequestAuthUrlAction,
@@ -32,6 +40,10 @@ _FLAG_KEY_HINTS = {
     "api_unreachable": "Nothing was saved; check the network (or LIUM_BASE_URL) and run the same command again",
     "empty_api_key": "Nothing was saved; --api-key needs the key itself (an unset shell variable expands to nothing)",
 }
+SAVED_KEY_REJECTED_HINT = (
+    "Run 'lium init' at a terminal to log in again, or 'lium init --api-key <key>' "
+    f"(create one at {KEYS_URL}); without a browser: 'lium init --force --no-browser', then 'lium init --session <ID>'"
+)
 
 
 @click.command("init")
@@ -41,10 +53,12 @@ _FLAG_KEY_HINTS = {
               help="Print auth URL instead of opening browser (step 1 of headless auth).")
 @click.option("--session", default=None,
               help="Verify auth session and save API key (step 2 of headless auth).")
+@click.option("--force", is_flag=True, default=False,
+              help="Discard the saved API key and log in again, even if the key still works.")
 @click.option("--json", "json_output", is_flag=True,
               help="Print the result as machine-readable JSON (with --api-key or LIUM_API_KEY; the browser flows print for a person).")
 @handle_errors
-def init_command(api_key: str | None, no_browser: bool, session: str | None, json_output: bool):
+def init_command(api_key: str | None, no_browser: bool, session: str | None, force: bool, json_output: bool):
     """Initialize Lium CLI configuration.
 
     Sets up API key and SSH key configuration. With --api-key (or LIUM_API_KEY
@@ -56,6 +70,11 @@ def init_command(api_key: str | None, no_browser: bool, session: str | None, jso
       lium init                       # opens browser for auth
       lium init --no-browser          # prints auth URL + session ID
       lium init --session <ID>        # verifies session and saves API key
+      lium init --force               # discards the saved key and logs in again
+    \b
+    A saved key is checked first: when the API refuses it (expired or
+    revoked) `lium init` discards it and logs in again; without a terminal
+    it exits 6 (saved_key_rejected) instead of opening a browser.
     \b
     Without a terminal on stdin (or with LIUM_NONINTERACTIVE=1) `lium init`
     behaves like `--no-browser`. Scripts can skip init entirely by setting
@@ -114,6 +133,13 @@ def init_command(api_key: str | None, no_browser: bool, session: str | None, jso
         _report("env", ssh_path, json_output)
         return
 
+    saved_key = config.get("api.api_key")
+    if saved_key and force:
+        config.unset("api.api_key")
+        ui.info("Discarded the saved API key (--force). Starting a new login…")
+    elif saved_key:
+        _recheck_saved_key(saved_key, relogin_without_browser=bool(session or no_browser))
+
     # Step 2: verify a pending session
     if session:
         verify_action = VerifySessionAction(session_id=session)
@@ -144,6 +170,31 @@ def init_command(api_key: str | None, no_browser: bool, session: str | None, jso
 
     ssh_path = _setup_ssh()
     _report("config" if api_result.data.get("already_configured") else "browser", ssh_path, json_output)
+
+
+def _recheck_saved_key(saved_key: str, relogin_without_browser: bool) -> None:
+    """Discard the saved key when the API refuses it, so the login below runs instead of "already saved".
+
+    An unreachable API keeps the key: a network blip must not throw away a working credential. Without a
+    terminal (and without --session / --no-browser, which log in without a browser) nobody can finish a
+    browser login, so the caller gets ``saved_key_rejected`` with exit 6 and the key stays as it was.
+    """
+    check = CheckSavedApiKeyAction(saved_key).execute({})
+    status = check.data.get("status")
+    if status == "valid":
+        return
+    if status == "unreachable":
+        ui.warning(f"{check.error}. Keeping the saved key; 'lium init --force' logs in again anyway.")
+        return
+    if not relogin_without_browser and not is_interactive():
+        raise CliFailure(
+            "saved_key_rejected",
+            f"The saved API key has expired or was revoked ({check.error}); a new login is required.",
+            EXIT_PERMISSION_DENIED,
+            hint=SAVED_KEY_REJECTED_HINT,
+        )
+    ui.warning("Your saved API key has expired or was revoked. Starting a new login…")
+    config.unset("api.api_key")
 
 
 def _env_key_name() -> str | None:

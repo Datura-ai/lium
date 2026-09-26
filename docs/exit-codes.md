@@ -15,7 +15,7 @@ mirrors it and a unit test keeps the two in step.
 | 3 | `EXIT_API_ERROR` | The API refused or failed the call (5xx, 404 on a resource, rate limit, any other non-2xx). |
 | 4 | `EXIT_SSH_ERROR` | ssh could not connect, the pod has no SSH endpoint yet, or no ssh client is installed. |
 | 5 | `EXIT_POD_NOT_FOUND` | The pod, cluster or fabric named on the command line does not exist (`lium clusters rm`: also a cluster the API answered 404 for). |
-| 6 | `EXIT_PERMISSION_DENIED` | The account is not allowed to do this: unverified account, insufficient balance, an API key without the scope (403); an API key over its budget (402). Overloaded by `topup card` (not released yet) for "outcome unknown": the answer to the charge was lost (`charge_outcome_unknown`) or the platform answered 202 without a `payment_intent_id` (`charge_pending`) — a person must check the balance before the command runs again. A 202 with a `payment_intent_id` is success (exit 0). A script branching on the exit code alone cannot tell these from a 403; `error.code` in the JSON envelope does. |
+| 6 | `EXIT_PERMISSION_DENIED` | The account is not allowed to do this: unverified account, insufficient balance, an API key without the scope (403); an API key over its budget (402). Overloaded by `topup card` (not released yet) for "outcome unknown": the answer to the charge was lost (`charge_outcome_unknown`) or the platform answered 202 without a `payment_intent_id` (`charge_pending`) — a person must check the balance before the command runs again. A 202 with a `payment_intent_id` is success (exit 0). Also `lium init` without a terminal when the saved API key is refused (401, or a 403 that is not a balance, budget or scope refusal: expired or revoked): saved credentials rejected, a new login is required (`saved_key_rejected`). A script branching on the exit code alone cannot tell these from a 403; `error.code` in the JSON envelope does. |
 
 `lium exec` exits with the remote command's own exit status, so `lium exec pod
 "cmd" && next` behaves like `cmd && next` would on the pod. Usage errors caught
@@ -132,7 +132,9 @@ answer, `status: processing`, the key and the amount included, and a repeat with
 same amount within 24 h shows the charge's
 status without making a second one); `init` raises `api_unreachable` (3, the
 key passed with `--api-key` was not checked) and `empty_api_key` (2), and its `invalid_api_key` hint says
-nothing was saved. They follow the same envelope
+nothing was saved; `init` also raises `saved_key_rejected` (6: the saved key was refused and no terminal
+can finish a browser login; the key is left as it was, and the hint names `lium init --api-key <key>` and
+`lium init --force --no-browser` then `lium init --session <ID>`). They follow the same envelope
 and use the exit code of their family from the table above. Where re-running
 the command would not be safe the hint says so: `jupyter_install_failed` from
 `up` points at `lium update <pod> --jupyter` (the pod exists and bills), and
