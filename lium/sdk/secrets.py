@@ -1,8 +1,7 @@
-"""Renter secrets: named values for pods, kept out of templates, argv and listings (DAH-1482).
+"""Renter secrets: named values for pods, kept out of templates, argv and listings.
 
 Experimental and off by default: nothing here is reachable unless ``LIUM_SECRETS_ENABLED=1``. The
-lium-platform endpoints are not built yet; this client is written against the API shape below, which
-the backend half is expected to implement:
+server endpoints are not live yet; this client is written against the API shape below:
 
 - ``GET /secrets`` -> ``[{"name": str, "updated_at": str}]`` — never a value.
 - ``PUT /secrets/{name}`` with the body :func:`encrypt_for_upload` returns -> ``{"name", "updated_at"}``;
@@ -66,7 +65,7 @@ def validate_secret_names(names: Optional[Iterable[str]]) -> List[str]:
 def encrypt_for_upload(name: str, value: str) -> Dict[str, str]:
     """The request body that carries one secret value to the server; every upload goes through here.
 
-    TODO(DAH-1482 client-side encryption): today the value is sent as-is over TLS (``encryption: none``).
+    TODO(client-side encryption): today the value is sent as-is over TLS (``encryption: none``).
     The client-side encryption half replaces this body with ciphertext and names its scheme in
     ``encryption``; no caller needs to change.
     """

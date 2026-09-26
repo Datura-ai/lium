@@ -1,4 +1,4 @@
-"""DAH-1482: `lium secrets` and `Lium.secrets` — a value only ever travels on stdin or a hidden prompt and
+"""`lium secrets` and `Lium.secrets` — a value only ever travels on stdin or a hidden prompt and
 through `encrypt_for_upload`; listings carry names and times, never values; with LIUM_SECRETS_ENABLED
 unset the CLI and the rent payloads are exactly today's."""
 
@@ -311,3 +311,154 @@ def test_bare_secrets_still_lists(fake):
     result = _run(["secrets"])
     assert result.exit_code == 0, result.output
     assert "HF_TOKEN" in result.output
+
+
+# --- secret_names on Lium.rent and the `lium up` rent hand-off ---------------------------------
+
+def _rent_node(node_id="exec-1"):
+    return {
+        "id": node_id, "machine_name": "NVIDIA H100 NVL", "price_per_gpu": 1.2, "gpu_count": 1,
+        "available_gpu_count": 1, "location": {"country": "DE", "country_code": "DE"},
+        "effective_download_speed_mbps": 900.0, "effective_upload_speed_mbps": 500.0,
+        "specs": {"gpu": {"count": 1, "details": [{"name": "NVIDIA H100 NVL", "capacity": 81559}]},
+                  "cpu": {"count": 32}, "available_port_count": 10, "sysbox_runtime": False},
+    }
+
+
+def _rent_backend(server_side):
+    body = {"started_at": "2026-09-06T00:00:00+00:00", "uptime_seconds": 1}
+    if server_side:
+        body["features"] = ["rent_by_spec"]
+    responses.add(responses.GET, f"{BASE}/version", json=body)
+    responses.add(responses.GET, f"{BASE}/pods", json=[])
+    responses.add(responses.GET, f"{BASE}/machines", json=[{"name": "NVIDIA H100 NVL"}])
+    responses.add(responses.GET, f"{BASE}/executors", json=[_rent_node()])
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", json={
+        "success": True, "dry_run": False, "pod_id": "pod-1", "template_id": "tpl", "price_per_hour": 1.2,
+        "selected_executor": _rent_node(), "candidates": 1, "attempts": 1,
+    })
+    responses.add(responses.POST, f"{BASE}/executors/exec-1/rent", json={"id": "pod-1"})
+
+
+def _rent_posts():
+    return [json.loads(c.request.body) for c in responses.calls
+            if c.request.method == "POST" and "/rent" in c.request.url]
+
+
+@responses.activate
+@pytest.mark.parametrize("server_side", [True, False], ids=["rent-by-spec", "client-side"])
+def test_sdk_rent_sends_secret_names_and_never_a_value(client, server_side):
+    _rent_backend(server_side)
+
+    client.rent(gpu_type="H100", name="p", template_id="tpl", ssh_keys=[KEY], secret_names=["HF_TOKEN", "WANDB", "HF_TOKEN"])
+
+    (sent,) = _rent_posts()
+    assert sent["secret_names"] == ["HF_TOKEN", "WANDB"]
+    assert VALUE not in json.dumps(sent)
+
+
+@responses.activate
+@pytest.mark.parametrize("server_side", [True, False], ids=["rent-by-spec", "client-side"])
+def test_sdk_rent_without_secrets_sends_no_secret_key(client, server_side):
+    _rent_backend(server_side)
+
+    client.rent(gpu_type="H100", name="p", template_id="tpl", ssh_keys=[KEY])
+
+    (sent,) = _rent_posts()
+    assert "secret_names" not in sent
+
+
+@responses.activate
+def test_sdk_rent_with_the_flag_off_refuses_before_any_request(client, monkeypatch):
+    monkeypatch.delenv("LIUM_SECRETS_ENABLED")
+
+    with pytest.raises(LiumError, match="LIUM_SECRETS_ENABLED=1"):
+        client.rent(gpu_type="H100", ssh_keys=[KEY], secret_names=["HF_TOKEN"])
+    assert len(responses.calls) == 0
+
+
+class RecordingLium:
+    def __init__(self):
+        self.calls = []
+
+    def rent(self, **kwargs):
+        self.calls.append(("rent", kwargs))
+        return SimpleNamespace(pod={"id": "pod-1"}, executor=kwargs, price_per_hour=1.0, gpu_count=1)
+
+    def up(self, **kwargs):
+        self.calls.append(("up", kwargs))
+        return {"id": "pod-1"}
+
+
+@pytest.mark.parametrize("spec", [{"gpu_type": "H100", "gpu_count": 1}, None], ids=["rent-by-spec", "node"])
+@pytest.mark.parametrize("secret_names", [["HF_TOKEN"], []], ids=["secret", "no-secret"])
+def test_rent_action_hands_over_names_only_and_nothing_when_unset(spec, secret_names):
+    from lium.cli.up.actions import RentPodAction
+
+    lium = RecordingLium()
+    executor = SimpleNamespace(id="exec-1", price_per_gpu=1.0, price_per_hour=1.0, gpu_count=1)
+    result = RentPodAction().execute({
+        "lium": lium, "executor": executor, "spec": spec, "template": SimpleNamespace(id="tpl"),
+        "name": "p", "secret_names": secret_names,
+    })
+
+    assert result.ok
+    ((method, kwargs),) = lium.calls
+    assert method == ("rent" if spec else "up")
+    if secret_names:
+        assert kwargs["secret_names"] == ["HF_TOKEN"]
+    else:
+        assert "secret_names" not in kwargs
+
+
+def test_lium_up_secret_reaches_the_rent_as_a_name(monkeypatch):
+    from lium.sdk import ExecutorInfo, RentResult
+
+    node = ExecutorInfo(
+        id="id-thrifty-node-bb", huid="thrifty-node-bb", machine_name="NVIDIA GeForce RTX 4090", gpu_type="RTX4090",
+        gpu_count=1, price_per_hour=0.30, price_per_gpu=0.30, location={"country": "Germany", "country_code": "DE"},
+        specs={}, status="available", docker_in_docker=False, ip="1.2.3.4", effective_download_speed_mbps=900.0,
+    )
+
+    class Ready:
+        workspaces = SimpleNamespace(current=lambda: None)
+
+        def __init__(self):
+            self.rents = []
+
+        def supports(self, feature):
+            return feature == "rent_by_spec"
+
+        def rent(self, **kwargs):
+            self.rents.append(kwargs)
+            pod = None if kwargs.get("dry_run") else {"id": "pod-uuid-1", "name": kwargs["name"]}
+            return RentResult(executor=node, price_per_hour=0.30, template_id="tpl-default", candidates=1,
+                              pod=pod, attempts=1, dry_run=bool(kwargs.get("dry_run")), server_side=True)
+
+        def get_template(self, template_id):
+            return SimpleNamespace(id=template_id, name="pytorch")
+
+        def get_deployment_estimate(self, executor_id, template_id):
+            return {}
+
+        def ps(self):
+            return [SimpleNamespace(id="pod-uuid-1", huid="thrifty-node-bb", name="thrifty-node-bb", gpu_count=1,
+                                    status="RUNNING", ssh_cmd="ssh root@pod.example", ports={"22": 10022})]
+
+        def wait_ready(self, pod, *, timeout=None, poll_interval=None, on_poll=None):
+            return self.ps()[0]
+
+    made = []
+    monkeypatch.setattr(up_command, "Lium", lambda *a, **k: made.append(Ready()) or made[-1])
+    monkeypatch.setattr(up_command, "ensure_config", lambda: None)
+    monkeypatch.setenv("LIUM_SECRETS_ENABLED", "1")
+
+    with_secret = CliRunner().invoke(cli, ["up", "--gpu", "RTX4090", "-y", "--no-ssh", "--secret", "HF_TOKEN"])
+    without = CliRunner().invoke(cli, ["up", "--gpu", "RTX4090", "-y", "--no-ssh"])
+
+    assert with_secret.exit_code == 0 and without.exit_code == 0, with_secret.output + without.output
+    rent_with = [r for r in made[0].rents if not r.get("dry_run")]
+    rent_without = [r for r in made[1].rents if not r.get("dry_run")]
+    assert [r["secret_names"] for r in rent_with] == [["HF_TOKEN"]]
+    assert all("secret_names" not in r for r in rent_without)
+    assert {k: v for k, v in rent_with[0].items() if k != "secret_names"} == rent_without[0]

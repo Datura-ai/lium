@@ -1,4 +1,4 @@
-"""Secrets command group (experimental, DAH-1482)."""
+"""Secrets command group (experimental)."""
 
 from .command import secrets_command
 

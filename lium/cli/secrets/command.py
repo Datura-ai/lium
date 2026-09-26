@@ -1,4 +1,4 @@
-"""`lium secrets`: named values delivered to pods as files, never as env vars or argv (DAH-1482).
+"""`lium secrets`: named values delivered to pods as files, never as env vars or argv.
 
 Experimental: hidden, and refused, unless LIUM_SECRETS_ENABLED=1.
 """
