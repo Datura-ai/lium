@@ -4,8 +4,9 @@ import json
 import re
 import shutil
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Iterator, Optional, Tuple
 
 import click
 from rich import box
@@ -13,12 +14,26 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 
-from ..utils import console, handle_errors, timed_step_status
+from ..interactive import is_interactive
+from ..utils import console, console_on_stderr, handle_errors, json_output_requested, timed_step_status
 
 _SS58_HOTKEY = r"[1-9A-HJ-NP-Za-km-z]{40,60}"  # the shape `lium mine -k` validates and `mine status` refuses
 
 if TYPE_CHECKING:
     from . import mine_register
+
+
+class HostStepError(Exception):
+    """A failed install step with a stable ``host.*`` code (``lium mine --json``); the message is what text mode prints."""
+
+    def __init__(self, code: str, message: str, **data):
+        super().__init__(message)
+        self.code = code
+        self.data = data
+
+
+class _InputRequired(Exception):
+    """A value `lium mine` would have asked for, with nobody to answer (no terminal, --json, EOF)."""
 
 
 # --------------------------
@@ -144,15 +159,17 @@ def _clone_or_update_repo(target_dir: Path, branch: str):
 
 def _check_prereqs():
     if not _exists("nvidia-smi"):
-        raise Exception("NVIDIA GPU driver not found (nvidia-smi missing)")
+        raise HostStepError("host.nvidia_driver_missing", "NVIDIA GPU driver not found (nvidia-smi missing)")
 
     _run("nvidia-smi --query-gpu=name --format=csv,noheader")
 
     if not _exists("nvidia-container-cli"):
-        raise Exception("NVIDIA Container Toolkit not found (required for Docker GPU access)")
+        raise HostStepError(
+            "host.nvidia_container_toolkit_missing", "NVIDIA Container Toolkit not found (required for Docker GPU access)"
+        )
 
     if not _exists("docker"):
-        raise Exception("Docker not found")
+        raise HostStepError("host.docker_missing", "Docker not found")
 
     _run("docker info")
 
@@ -363,9 +380,13 @@ def _check_ports_free(ports: dict[str, int], executor_dir: Optional[Path] = None
             continue
         owner = _listening_process(port)
         who = f" ({owner})" if owner else ""
-        raise Exception(
+        raise HostStepError(
+            "host.port_in_use",
             f"Port {port} ({label}) is already in use on this host{who}. "
-            "Free it or pick another port (run `lium mine` without --auto to choose ports)."
+            "Free it or pick another port (run `lium mine` without --auto to choose ports).",
+            port=port,
+            label=label,
+            owner=owner or None,
         )
 
 
@@ -426,9 +447,10 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180):
                 return
         time.sleep(3)
     diag = _compose_diagnostics(executor_dir)
-    raise Exception(
+    raise HostStepError(
+        "host.executor_unhealthy",
         f"Node health check timed out after {wait_secs}s."
-        + (f"\n{diag}" if diag else "")
+        + (f"\n{diag}" if diag else ""),
     )
 
 def _apply_env_overrides(
@@ -456,6 +478,14 @@ def _apply_env_overrides(
         set_or_append("RENTING_PORT_RANGE", rng)
     env_f.write_text("\n".join(content) + "\n")
 
+def _ask(label: str, **kwargs) -> str:
+    """``Prompt.ask``; an EOF (stdin closed mid-answer) is ``_InputRequired``, not a traceback."""
+    try:
+        return Prompt.ask(label, **kwargs)
+    except EOFError as e:
+        raise _InputRequired(label) from e
+
+
 def _gather_inputs(
     hotkey: Optional[str],
     auto: bool,
@@ -481,14 +511,14 @@ def _gather_inputs(
         console.print("• [cyan]Renting port range[/cyan] → optional, used only if your firewall limits outbound ports.\n")
         
         if not hotkey:
-            hotkey = Prompt.ask("Miner hotkey SS58 address")
+            hotkey = _ask("Miner hotkey SS58 address")
         else:
             console.print(f"Miner hotkey SS58 address: [yellow]{hotkey}[/yellow]\n")
         answers["hotkey"] = hotkey or ""
 
         def ask_port(label, default):
             while True:
-                v = Prompt.ask(label, default=str(default))
+                v = _ask(label, default=str(default))
                 if not v:  # Allow empty for optional ports
                     return ""
                 if v.isdigit() and 1 <= int(v) <= 65535:
@@ -502,10 +532,10 @@ def _gather_inputs(
         answers["ssh_port"] = ask_port("Node SSH port (used by validator to SSH into the container)", 2200)
         
         # Optional ports
-        ssh_public = Prompt.ask("Public SSH port (optional, only if behind NAT and forwarding a different port)", default="")
+        ssh_public = _ask("Public SSH port (optional, only if behind NAT and forwarding a different port)", default="")
         answers["ssh_public_port"] = ssh_public if ssh_public and ssh_public.isdigit() else ""
         
-        answers["port_range"] = Prompt.ask("Renting port range (optional, e.g. 2000-2005 or 2000,2001). Leave empty if all ports open", default="")
+        answers["port_range"] = _ask("Renting port range (optional, e.g. 2000-2005 or 2000,2001). Leave empty if all ports open", default="")
 
     return answers
 
@@ -590,12 +620,13 @@ def _validate_executor(extra_args=None, on_check=None):
 
     result = _preflight_verdict(out)
     if result is None:
-        raise Exception(
+        raise HostStepError(
+            "host.preflight_no_verdict",
             "Preflight image produced no verdict (exit %s):\n%s"
-            % (proc.returncode, "\n".join(err_tail)[-2000:])
+            % (proc.returncode, "\n".join(err_tail)[-2000:]),
         )
     if not result.get("passed", False):
-        raise Exception(result.get("message", ""))
+        raise HostStepError("host.preflight_failed", result.get("message", ""), verdict=result)
 
 
 def _preflight_verdict(stdout: str) -> Optional[dict]:
@@ -665,6 +696,80 @@ def _mine_status(args: list[str], hotkey: Optional[str] = None) -> int:
     return int(code or 0)
 
 
+class _Progress:
+    """Step lines: the spinner in text mode; one NDJSON ``{"event": "step", …}`` per change on stderr under --json."""
+
+    def __init__(self, json_mode: bool, total: int):
+        self.json = json_mode
+        self.total = total
+        self.current: Optional[str] = None
+
+    def event(self, event: str, **fields) -> None:
+        if self.json:
+            click.echo(json.dumps({"event": event, **fields}, sort_keys=True), err=True)
+
+    @contextmanager
+    def step(self, n: int, label, code: str) -> Iterator[None]:
+        self.current = code
+        if not self.json:
+            with timed_step_status(n, self.total, label):
+                yield
+            return
+        started = time.monotonic()
+        base = {"step": n, "total": self.total, "code": code, "message": str(label)}
+        self.event("step", status="started", **base)
+        try:
+            yield
+        except Exception as e:
+            self.event("step", status="failed", elapsed_s=round(time.monotonic() - started, 1),
+                       error_code=getattr(e, "code", None) or code, **base)
+            raise
+        self.event("step", status="done", elapsed_s=round(time.monotonic() - started, 1), **base)
+
+
+_HOST_HINTS = {
+    "host.nvidia_driver_missing": "Install the NVIDIA driver so `nvidia-smi` works, then re-run.",
+    "host.nvidia_container_toolkit_missing": "Install the NVIDIA Container Toolkit (nvidia-container-cli), then re-run.",
+    "host.docker_missing": "Install Docker with the compose plugin, then re-run.",
+    "host.port_in_use": "Free the port or re-run `lium mine` in a terminal without --auto to choose other ports.",
+    "host.executor_unhealthy": "Read the compose status and log tail in the message; fix the cause and re-run.",
+    "host.preflight_no_verdict": "Re-run; if it repeats, run the preflight image by hand to see its output.",
+    "host.preflight_failed": "The verdict in data names the failed check; fix it and re-run.",
+}
+
+
+def _json_failure(code: str, message: str, exit_code: int, hint: str = "", data: Optional[dict] = None) -> int:
+    """Print the --json failure envelope on stdout; return the exit code."""
+    from ..utils import error_envelope
+
+    click.echo(json.dumps(error_envelope(code, message, exit_code, data or None, hint or None), sort_keys=True))
+    return exit_code
+
+
+def _input_required(label: str, json_mode: bool) -> int:
+    message = f"`lium mine` needs a value for '{label}' and there is no terminal to ask"
+    hint = "Pass -k HOTKEY (or --register TOKEN) with --auto, or run in a terminal."
+    if json_mode:
+        return _json_failure("input.input_required", message, 2, hint, {"field": label})
+    click.echo(f"Error: {message}. {hint}", err=True)
+    return 2
+
+
+def _register_result(code: int, report: dict) -> int:
+    """The --json envelope for the end of `--register`; returns the exit code (not-listed is 11, as the map says)."""
+    if code == 0:
+        click.echo(json.dumps({"ok": True, "data": report}, sort_keys=True))
+        return 0
+    if report.get("error_code"):
+        return _json_failure(report["error_code"], report.get("message", ""), 1, report.get("hint", ""), report)
+    status = str(report.get("status") or "")
+    if code == 1:
+        return _json_failure(f"node.{status.lower()}" if status else "host.register_failed",
+                             report.get("message", ""), 1, report.get("fix", ""), report)
+    return _json_failure("node.not_listed_yet", report.get("message", ""), 11,
+                         "The node stays registered; poll `lium provider node status <id> --json`.", report)
+
+
 # --------------------------
 # CLI
 # --------------------------
@@ -672,7 +777,14 @@ def _mine_status(args: list[str], hotkey: Optional[str] = None) -> int:
 @click.option("--hotkey", "-k", help="Miner hotkey SS58 address (for `mine status`: the wallet hotkey name)")
 @click.option("--dir", "-d", "dir_", default="compute-subnet", help="Target directory")
 @click.option("--branch", "-b", default="main")
-@click.option("--auto", "-a", is_flag=True)
+@click.option(
+    "--auto",
+    "-a",
+    is_flag=True,
+    help="Take the default ports (service 8080, SSH 2200) without asking; needs -k (or --register). "
+    "Without a terminal, or with --json, nothing is asked either: the defaults are taken and a missing -k is "
+    "input.input_required (exit 2).",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Show the plan banner")
 # not click's eager --help: `lium mine status --help` must reach the status command below, not this one's help
 @click.option("--help", "help_", is_flag=True, help="Show this message and exit.")
@@ -703,6 +815,13 @@ def _mine_status(args: list[str], hotkey: Optional[str] = None) -> int:
     "does not know the reported name). Only with --register.",
 )
 @click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="For agents: one JSON result on stdout ({ok, data} or {ok: false, error: {code, message, hint, exit_code}}), "
+    "progress as one JSON object per line on stderr, never a prompt. LIUM_OUTPUT=json does the same.",
+)
+@click.option(
     "--wait",
     "wait_minutes",
     type=click.IntRange(0, 24 * 60),
@@ -713,7 +832,7 @@ def _mine_status(args: list[str], hotkey: Optional[str] = None) -> int:
 )
 @click.pass_context
 @handle_errors
-def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token, portal_url, price, gpu_type, wait_minutes):
+def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token, portal_url, price, gpu_type, json_output, wait_minutes):
     """Set up this host as a Lium provider node: clone, configure, start and validate the executor.
 
     Before `docker compose up`, the service and SSH ports are checked on this host: a port
@@ -730,16 +849,42 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     status is polled every 15 s until it is listed (exit 0), the portal names something to fix
     (OFFLINE or VALIDATION_FAILED, exit 1), or --wait minutes pass (exit 2). The node page URL is
     printed in every case.
+
+    With --json each step is a line on stderr, {"event": "step", "step", "total", "code": "host.<step>",
+    "status": "started|done|failed", …}, and stdout carries one result: the node's endpoint, GPU and the
+    portal add command, or the failure with the step's code (host.port_in_use, host.docker_missing,
+    host.preflight_failed, …; exit 1). Under --json, --register exits 11 (node.not_listed_yet) where the
+    text mode exits 2.
     """
+    json_mode = bool(json_output) or json_output_requested()
     if ctx.args and ctx.args[0] == "status":
         # `lium mine` is the provider's first command; `lium mine status <node>` is where they look
         # next, so it is the same command as `lium provider node status` (auth from `--hotkey`/`-k`
         # anywhere on the line, else LIUM_PROVIDER_HOTKEY / ~/.lium/config.ini). Extra args are
         # otherwise the validator's.
-        raise SystemExit(_mine_status(ctx.args[1:] + (["--help"] if help_ else []), hotkey=hotkey))
+        extra = (["--help"] if help_ else []) + (["--json"] if json_output else [])
+        raise SystemExit(_mine_status(ctx.args[1:] + extra, hotkey=hotkey))
     if help_:
         click.echo(ctx.get_help())
         raise SystemExit(0)   # not ctx.exit(): handle_errors would report click's Exit as an unexpected error
+    if not json_mode:
+        raise SystemExit(_run_mine(ctx, hotkey, dir_, branch, auto, verbose, register_token, portal_url, price,
+                                   gpu_type, wait_minutes, json_mode=False))
+    # the step events are the narration under --json: stderr stays one JSON object per line
+    quiet = console.quiet
+    console.quiet = True
+    try:
+        with console_on_stderr():
+            code = _run_mine(ctx, hotkey, dir_, branch, auto, verbose, register_token, portal_url, price,
+                             gpu_type, wait_minutes, json_mode=True)
+    finally:
+        console.quiet = quiet
+    raise SystemExit(code)
+
+
+def _run_mine(ctx, hotkey, dir_, branch, auto, verbose, register_token, portal_url, price, gpu_type, wait_minutes,
+              *, json_mode: bool) -> int:
+    """The install (and, with a register token, the registration); returns the exit code."""
     from . import mine_register as reg
 
     if verbose:
@@ -761,15 +906,19 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
         try:
             token = reg.parse_register_token(register_token)
         except reg.RegisterError as e:
+            if json_mode:
+                return _json_failure("input.register_token_invalid", str(e), 2,
+                                     "Copy a fresh command from the portal's Add Node page.")
             from rich.markup import escape
 
             console.error(f"❌ {escape(str(e))}")
-            raise SystemExit(1)
+            return 1
         if hotkey and hotkey != token.node_hotkey:
-            console.error(
-                "❌ --hotkey differs from what the register token says this node reports under; drop -k, the token decides."
-            )
-            raise SystemExit(1)
+            message = "--hotkey differs from what the register token says this node reports under; drop -k, the token decides."
+            if json_mode:
+                return _json_failure("input.hotkey_conflicts_with_token", message, 2, "Drop -k.")
+            console.error(f"❌ {message}")
+            return 1
         # what the executor reports under: the account's own key, or the portal's for an account without one
         # (lium-platform#294) — the SS58 check in _setup_executor_env applies to this value, not to the account id
         hotkey = token.node_hotkey
@@ -781,25 +930,34 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 "If registration fails with an expired token, copy a fresh command from the portal."
             )
 
-    answers = _gather_inputs(hotkey, auto)
+    if not auto and (json_mode or not is_interactive()):
+        # nobody to answer the port questions: the defaults, as --auto takes them; the hotkey has no default
+        if not hotkey:
+            return _input_required("Miner hotkey SS58 address", json_mode)
+        auto = True
+    try:
+        answers = _gather_inputs(hotkey, auto)
+    except _InputRequired as e:
+        return _input_required(str(e), json_mode)
     target_dir = Path(dir_).absolute()
 
     TOTAL_STEPS = 8 if token else 6
+    progress = _Progress(json_mode, TOTAL_STEPS)
 
     try:
-        with timed_step_status(1, TOTAL_STEPS, "Ensuring repository"):
+        with progress.step(1, "Ensuring repository", "host.repo"):
             _clone_or_update_repo(target_dir, branch)
 
-        with timed_step_status(2, TOTAL_STEPS, "Installing node tools"):
+        with progress.step(2, "Installing node tools", "host.tools"):
             _install_executor_tools(target_dir)
 
-        with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
+        with progress.step(3, "Checking prerequisites", "host.prereqs"):
             _check_prereqs()
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.
         preflight_pull = _start_preflight_pull()
 
-        with timed_step_status(4, TOTAL_STEPS, "Configuring environment"):
+        with progress.step(4, "Configuring environment", "host.env"):
             executor_dir = target_dir / "neurons" / "executor"
             if not executor_dir.exists():
                 raise Exception(f"Node directory not found at {executor_dir}")
@@ -823,7 +981,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             # with no explanation. Catch it here, before the 3-minute wait.
             _check_ports_free(_host_ports_from_answers(answers), executor_dir)
 
-        with timed_step_status(5, TOTAL_STEPS, "Starting node"):
+        with progress.step(5, "Starting node", "host.start"):
             _start_executor(executor_dir)
 
         console.dim(
@@ -831,27 +989,33 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             "work-proof and VerifyX (RAM, disk throughput, network). Typically 2–4 minutes."
         )
         step6 = _StepMessage("Validating node")
-        with timed_step_status(6, TOTAL_STEPS, step6):
+        with progress.step(6, step6, "host.validate"):
             if preflight_pull.poll() is None:
                 step6.detail = "pulling preflight image"
                 preflight_pull.wait()
 
             def _show_check(name: str) -> None:
                 step6.detail = name
+                progress.event("check", step=6, name=name)
 
             # Pass any extra arguments to the validator
             _validate_executor(ctx.args if ctx.args else None, on_check=_show_check)
 
     except Exception as e:
+        if json_mode:
+            code = getattr(e, "code", None) or f"{progress.current}_failed"
+            return _json_failure(code, str(e), 1, _HOST_HINTS.get(code, ""),
+                                 {"step": progress.current, **getattr(e, "data", {})})
         # the message carries tool output verbatim (compose `ps -a`, log tails, a stderr tail): escaped, or a
         # `[type=…]` / `[/x]` token in it is Rich markup — eaten, or a MarkupError in place of the diagnosis
         from rich.markup import escape
 
         console.error(f"❌ {escape(str(e))}")
-        raise SystemExit(1)   # a failed step is a failed command: mine.sh and scripts read the exit code
+        return 1   # a failed step is a failed command: mine.sh and scripts read the exit code
 
     if token:
-        raise SystemExit(_register_and_wait(
+        report: dict = {}
+        code = _register_and_wait(
             token,
             executor_dir=executor_dir,
             portal_url=portal_url,
@@ -859,7 +1023,10 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             gpu_type_override=gpu_type,
             wait_minutes=wait_minutes,
             total_steps=TOTAL_STEPS,
-        ))
+            report=report,
+            progress=progress,
+        )
+        return _register_result(code, report) if json_mode else code
 
     # Get executor details for summary
     gpu_info = _get_gpu_info()
@@ -867,6 +1034,24 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     
     # Get the external port from answers
     external_port = answers.get("external_port", "8080")
+    add_command = _provider_add_command(gpu_info, public_ip, external_port)
+    if json_mode:
+        from urllib.parse import urlencode
+
+        add_url = "https://provider.lium.io/nodes?" + urlencode({
+            "action": "add", "gpu_type": gpu_info.get("gpu_type", "Unknown"), "ip_address": public_ip,
+            "port": external_port, "gpu_count": gpu_info.get("gpu_count", 0),
+        })
+        click.echo(json.dumps({"ok": True, "data": {
+            "endpoint": f"{public_ip}:{external_port}",
+            "gpu_type": gpu_info.get("gpu_type"),
+            "gpu_count": gpu_info.get("gpu_count"),
+            "directory": str(executor_dir),
+            "hotkey": answers.get("hotkey") or None,
+            "add_url": add_url,
+            "add_command": add_command,
+        }}, sort_keys=True))
+        return 0
     
     console.success("\n✨ Node setup complete!")
     console.print()
@@ -900,8 +1085,9 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     console.print("\n[bold cyan]Register this node in the Provider Portal:[/bold cyan]")
     console.print(f"[yellow]{add_url}[/yellow]\n")
     console.print("[bold cyan]…or from this terminal:[/bold cyan]")
-    console.print(f"[yellow]{_provider_add_command(gpu_info, public_ip, external_port)}[/yellow]")
+    console.print(f"[yellow]{add_command}[/yellow]")
     console.dim(_registration_note())
+    return 0
 
 
 def _register_and_wait(
@@ -913,16 +1099,24 @@ def _register_and_wait(
     gpu_type_override: Optional[str],
     wait_minutes: int,
     total_steps: int,
+    report: Optional[dict] = None,
+    progress: Optional[_Progress] = None,
 ) -> int:
-    """Steps 7–8 of `lium mine --register`: add the node to the account, then watch its status. Returns the exit code."""
+    """Steps 7–8 of `lium mine --register`: add the node to the account, then watch its status. Returns the exit code.
+
+    ``report`` is filled with what --json prints (node id, address, GPU, price, status, message).
+    """
     from rich.markup import escape
 
     from . import mine_register as reg
 
+    report = {} if report is None else report
+    progress = progress or _Progress(False, total_steps)
     http = reg.build_http(portal_url, token.token)
     node_url = f"{reg.portal_web_url(portal_url)}/nodes"
+    report["node_url"] = node_url
     try:
-        with timed_step_status(7, total_steps, "Registering node in the portal"):
+        with progress.step(7, "Registering node in the portal", "host.register"):
             inventory = reg.read_gpu_inventory(_run)
             gpu_type = gpu_type_override or inventory.gpu_type
             port = reg.executor_port(executor_dir)
@@ -938,10 +1132,16 @@ def _register_and_wait(
                 price_per_gpu=price_per_gpu,
             )
     except Exception as e:   # RegisterError, a portal error, nvidia-smi exiting non-zero, an unreadable .env: same shape as steps 1–6
+        report.update(error_code="host.register_failed", message=str(e),
+                      hint="The install is done; fix the cause and re-run the same command.")
         console.error(f"❌ {escape(str(e))}")
         return 1
 
+    report.update(node_id=record.node_id, endpoint=f"{ip}:{port}", gpu_type=gpu_type,
+                  gpu_count=inventory.gpu_count, price_per_gpu=price_per_gpu,
+                  already_registered=record.already_registered)
     if record.node_id is None:
+        report["message"] = "Node added; it is not in the node list yet."
         # the add went through; the list did not show it within ~30 s — nothing to poll, nothing failed, but the node
         # is registered and not listed, which docs/exit-codes.md says is exit 2
         console.success(escape(
@@ -951,6 +1151,7 @@ def _register_and_wait(
         return 2
 
     node_url = f"{node_url}/{record.node_id}"
+    report["node_url"] = node_url
     if record.already_registered:
         # the portal's record, not this run's values, is what stands: name only the address
         console.success(escape(f"\n✨ Node already in the portal at {ip}:{port}"))
@@ -962,23 +1163,36 @@ def _register_and_wait(
     console.print(f"[yellow]{escape(node_url)}[/yellow]")
     fix = reg.opt_in_fix(token, portal_url)
     if fix:
+        report["opt_in_fix"] = fix
         console.warning(escape(fix))
     if wait_minutes == 0:
+        report["message"] = "Node added; not waiting for the validator (--wait 0)."
         return 0
 
     console.print(escape(f"\n● [8/{total_steps}] Waiting for the validator (up to {wait_minutes} min; Ctrl-C leaves the node registered)"))
+    progress.event("step", step=8, total=total_steps, code="host.wait_listed", status="started",
+                   message=f"Waiting for the validator (up to {wait_minutes} min)")
+
+    def _on_change(s, t) -> None:
+        progress.event("node_status", node_id=record.node_id, status=s.status, message=reg.status_line(s, t))
+        console.print(escape(reg.status_line(s, t)))
+
     started = time.monotonic()
     try:
         final = reg.wait_until_listed(
             http,
             record.node_id,
             timeout_s=wait_minutes * 60,
-            on_change=lambda s, t: console.print(escape(reg.status_line(s, t))),
+            on_change=_on_change,
         )
     except KeyboardInterrupt:
-        console.print(escape(f"\nStopped watching; the node stays registered: {node_url}"))
+        report["message"] = f"Stopped watching; the node stays registered: {node_url}"
+        console.print(escape(f"\n{report['message']}"))
         return 2
     message, code = reg.result_summary(final, node_url=node_url, waited_s=time.monotonic() - started)
+    report.update(status=final.status, listed=bool(final.listed), message=message, fix=final.fix or "")
+    progress.event("step", step=8, total=total_steps, code="host.wait_listed",
+                   status="done" if code == 0 else "failed", message=message)
     if code == 0:
         console.success(message)
     elif code == 1:

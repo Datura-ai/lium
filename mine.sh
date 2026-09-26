@@ -96,8 +96,9 @@ install_lium() {
         hash -r
     fi
 
-    # Install lium-cli using uv tool (isolated environment in ~/.local/bin)
-    run_with_timer "Installing lium-cli" uv tool install lium.io
+    # Install lium-cli using uv tool (isolated environment in ~/.local/bin). The provider extra: the next
+    # command a provider runs is `lium provider ...`, which needs the chain stack the plain install leaves out.
+    run_with_timer "Installing lium-cli" uv tool install 'lium.io[provider]'
 
     # CRITICAL: Reset bash hash table to find the new command
     hash -r
