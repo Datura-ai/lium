@@ -152,7 +152,8 @@ def test_node_list_driver_below_minimum_prints_a_blocking_panel_with_the_fix(por
     assert "BLOCKING e-1 · 8×H100 · 203.0.113.10:8080" in text
     assert "✗ NVIDIA driver below the network minimum" in text
     assert "measured 550.54.15 · required 580.65.06 or newer" in text
-    assert "Fix: Upgrade the NVIDIA driver on this node to 580.65.06 or newer, reboot, then restart the executor" in text
+    assert "Fix: First click Pause New Rentals on the node in the provider portal" in text
+    assert "Then upgrade the NVIDIA driver on this node to 580.65.06 or newer, reboot, then restart the executor" in text
     assert "Secure listing: 1 unmet requirement" in text
     assert re.search(r"1\s+BLOCKED\s+e-1", result.output)
     assert re.search(r"2\s+AVAILABLE\s+e-2", result.output)
@@ -245,8 +246,9 @@ def test_node_list_json_carries_the_same_list(portal_for):
             "measured": "550.54.15",
             "required": "580.65.06 or newer",
             "fix": (
-                "Upgrade the NVIDIA driver on this node to 580.65.06 or newer, reboot, "
-                "then restart the executor (`docker compose up -d` in neurons/executor)."
+                f"{_blocking.DRAIN_FIRST} Then upgrade the NVIDIA driver on this node to 580.65.06 or newer, "
+                "reboot, then restart the executor (`docker compose up -d` in neurons/executor). "
+                f"{_blocking.RESUME_AFTER}"
             ),
             "secure": True,
             "gating": True,
@@ -282,7 +284,7 @@ def test_provider_status_counts_blocked_nodes_at_the_top(portal_for, monkeypatch
     assert lines[1].startswith("✗ 1 of 2 nodes BLOCKED")
     text = _flat(result.output)
     assert "BLOCKING e-1" in text
-    assert "Fix: Upgrade the NVIDIA driver on this node to 580.65.06 or newer" in text
+    assert "Then upgrade the NVIDIA driver on this node to 580.65.06 or newer" in text
 
 
 def test_provider_status_json_carries_the_count_and_the_list(portal_for, monkeypatch):
@@ -1105,3 +1107,59 @@ def test_a_power_cap_reason_under_sysbox_says_to_restart_docker_after_draining()
 
     assert "sysbox" in entry["fix"] and "sudo systemctl restart docker" in entry["fix"]
     assert "no rental runs" in entry["fix"]
+
+
+# every CLI-built fix that stops the host's pods starts with the portal catalog's pause step
+@pytest.mark.parametrize(
+    "code, context",
+    [
+        ("nvidia_driver_below_minimum", {"nvidia_driver_version": "550.54.15"}),
+        ("sysbox_not_enabled", {}),
+        ("insufficient_disk_for_vram", {"required_disk_gb": 1280}),
+        ("insufficient_disk_for_vram", {}),
+        ("flagship_without_ncu_or_split", {}),
+        ("cannot_apply_gpu_power_cap", {"nvidiactl_owner_uid": "65534"}),
+    ],
+    ids=["driver", "sysbox", "disk", "disk-without-context", "profiling", "power-cap-under-sysbox"],
+)
+def test_a_no_rentals_fallback_fix_pauses_new_rentals_first_and_resumes_after(code, context):
+    [entry] = fallback_reasons(_node(), [{"code": code, "context": context}])
+
+    assert "no_rentals" in entry["requires"]
+    fix = _flat(entry["fix"])
+    assert "click Pause New Rentals on the node in the provider portal and wait until no rental runs on the host" in fix
+    assert fix.endswith(_blocking.RESUME_AFTER)
+
+
+def test_a_fix_without_no_rentals_gets_no_pause_step():
+    [entry] = fallback_reasons(_node(), [{"code": "port_limited_remainder", "context": {}}])
+
+    assert "Pause New Rentals" not in entry["fix"]
+
+
+def test_the_sysbox_power_cap_fix_keeps_sysbox_as_a_named_runtime_and_drops_it_from_a_custom_compose():
+    [entry] = fallback_reasons(_node(), [{"code": "cannot_apply_gpu_power_cap", "context": {"nvidiactl_owner_uid": "65534"}}])
+
+    fix = _flat(entry["fix"])
+    assert "Keep sysbox-runc as a named runtime" in fix
+    assert "drop `runtime: sysbox-runc` from your own compose if it sets one" in fix
+
+
+@pytest.mark.parametrize("entry", [AVAILABILITY_ENTRY, LAST_ERROR_ENTRY], ids=["availability", "last_error"])
+def test_a_served_reachability_or_last_error_reason_with_empty_requires_is_requires_unknown(portal_for, entry):
+    assert entry["requires"] == [] and "requires_unknown" not in entry
+    portal_for(_Portal(node=_node(blocking_reasons=[dict(entry)])))
+
+    [served] = json.loads(_run("--json", "node", "get", "e-1").stdout)["data"]["blocking_reasons"]
+
+    assert served == {**entry, "requires_unknown": True}
+    assert _blocking.normalise(entry)["requires_unknown"] is True
+
+
+def test_a_served_reason_keeps_its_own_requires_unknown_and_an_idle_pay_one_gets_none(portal_for):
+    said_known = {**LAST_ERROR_ENTRY, "requires_unknown": False}
+    portal_for(_Portal(node=_node(blocking_reasons=[dict(said_known), dict(DRIVER_GATING)])))
+
+    served = json.loads(_run("--json", "node", "get", "e-1").stdout)["data"]["blocking_reasons"]
+
+    assert served == [said_known, DRIVER_GATING]

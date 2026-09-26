@@ -221,7 +221,11 @@ lium provider node status "$NODE" --json --watch --until-clear --timeout 1800
 lium provider node status "$NODE" --json --watch --fail-on-blocked
 ```
 
-A reason whose `requires` lists `reboot` (or a fix that needs `sudo` on a host you do not control) is a step for a person: stop and hand it over. `no_rentals` means the fix stops every pod on the host, so it waits until no rental runs. The same goes for `"requires_unknown": true`: the CLI built that reason itself (a node marked `"blocking_reasons_source": "cli_fallback"`) from a code whose needs nobody has listed, so `requires` is empty without meaning "nothing".
+A reason whose `requires` lists `reboot` (or a fix that needs `sudo` on a host you do not control) is a step for a person: stop and hand it over.
+
+`no_rentals` means the fix stops every pod on the host: pause new rentals first (the portal's Pause New Rentals, or the provider CLI's `node pause`, which is coming with the next CLI release), wait until no rental runs, apply the fix, then resume rentals. An agent that cannot pause the node hands the step over.
+
+`requires_unknown: true` means stop and hand over to a person; do not act. The CLI sets it on a reason whose needs nobody has listed: one it built itself (a node marked `"blocking_reasons_source": "cli_fallback"`), or a reachability or last-error reason the portal sent with an empty `requires`.
 
 ## See also
 

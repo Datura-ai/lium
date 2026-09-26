@@ -88,6 +88,14 @@ FALLBACK_REQUIRES: dict[str, tuple[str, ...]] = {
 }
 # /dev/nvidiactl owned by the user namespace's nobody: the node container runs under sysbox.
 _SYSBOX_NAMESPACE_UID = "65534"
+# The portal catalog's first step for a ``no_rentals`` fix, word for word, and the step after it.
+DRAIN_FIRST = (
+    "First click Pause New Rentals on the node in the provider portal and wait until "
+    "no rental runs on the host (on a partly rented node, until its rented GPUs are "
+    "free): this stops every pod on the host, and a pod killed under a rental costs "
+    "you a penalty."
+)
+RESUME_AFTER = "Once the fix is done, resume new rentals on the node."
 
 
 def _under_sysbox(context: Mapping[str, Any]) -> bool:
@@ -101,8 +109,21 @@ def _with_requires(entry: dict[str, Any], context: Mapping[str, Any] | None = No
     if code not in FALLBACK_REQUIRES:
         return {**entry, "requires": [], "requires_unknown": True}
     if code == "cannot_apply_gpu_power_cap" and _under_sysbox(context or {}):
-        return {**entry, "requires": list(_DOCKER_RESTART)}
-    return {**entry, "requires": list(FALLBACK_REQUIRES[code])}
+        requires = list(_DOCKER_RESTART)
+    else:
+        requires = list(FALLBACK_REQUIRES[code])
+    fix = str(entry.get("fix") or "")
+    if "no_rentals" in requires and "Pause New Rentals" not in fix:
+        fix = f"{DRAIN_FIRST} Then {fix[:1].lower()}{fix[1:]} {RESUME_AFTER}"
+    return {**entry, "fix": fix, "requires": requires}
+
+
+def _requires_unknown(entry: Mapping[str, Any]) -> bool:
+    """Whether nobody has said what the reason's fix needs. The portal's catalog fills ``requires`` only
+    for idle-pay reasons: a reachability or last-error reason sent with an empty one is unknown too."""
+    if "requires_unknown" in entry:
+        return bool(entry["requires_unknown"])
+    return str(entry.get("kind") or "idle_pay") != "idle_pay" and not entry.get("requires")
 
 # Listing states the provider chose; the node is hidden on purpose, not blocked.
 # Hidden reasons that stop nothing: the provider's own choice (a pause, a reclaim) or the shape of a
@@ -172,7 +193,8 @@ def _idle_pay_entry(code: str, context: Mapping[str, Any], message: str | None, 
         fix = (
             "Open the profiling counters (NVreg_RestrictProfilingToAdminUsers=0, then reboot), or set a "
             f"minimum GPU count below the full node (`lium provider node min-gpu set {node} <n>`), "
-            "or run the executor in a confidential VM."
+            "or run the executor in a confidential VM. Before the reboot: "
+            f"{DRAIN_FIRST[0].lower()}{DRAIN_FIRST[1:]} {RESUME_AFTER}"
         )
     elif code == "cannot_apply_gpu_power_cap":
         title = "Executor cannot set a GPU power limit"
@@ -183,9 +205,13 @@ def _idle_pay_entry(code: str, context: Mapping[str, Any], message: str | None, 
         )
         if _under_sysbox(ctx):
             fix = (
-                "The executor container runs under sysbox (/dev/nvidiactl owned by uid 65534). Remove the "
-                '"default-runtime": "sysbox-runc" line from /etc/docker/daemon.json, pause new rentals and '
-                "wait until no rental runs on the host, then `sudo systemctl restart docker`."
+                f"/dev/nvidiactl owned by uid {_SYSBOX_NAMESPACE_UID} means the executor container runs under "
+                "sysbox, which it must not (pods need it, the executor container does not). Keep sysbox-runc "
+                'as a named runtime but remove any "default-runtime": "sysbox-runc" line from '
+                "/etc/docker/daemon.json (`grep -n default-runtime /etc/docker/daemon.json` shows it), and "
+                "drop `runtime: sysbox-runc` from your own compose if it sets one. Restarting Docker to apply "
+                f"it: {DRAIN_FIRST[0].lower()}{DRAIN_FIRST[1:]} Then `sudo systemctl restart docker`. "
+                f"{RESUME_AFTER}"
             )
     elif code == "outdated_executor_image":
         title = "Executor image is outdated"
@@ -357,7 +383,7 @@ def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
         "fix_command": _first(entry, "fix_command"),
         "verify_command": _first(entry, "verify_command"),
         "requires": [str(r) for r in requires] if isinstance(requires, list) else [],
-        "requires_unknown": bool(entry.get("requires_unknown")),
+        "requires_unknown": _requires_unknown(entry),
         "docs_url": _first(entry, "docs_url"),
         "secure": bool(secure),
         "gating": gating,
@@ -413,7 +439,8 @@ def attach(rows: Iterable[Any], idle_by_node: Mapping[str, list[Mapping[str, Any
     """Give every node dict without a portal ``blocking_reasons`` the list rebuilt from the fallback sources.
 
     A portal entry without ``gating`` gets the legacy fallback's ``gating`` and
-    ``gating_source: cli_legacy_fallback`` so a ``--json`` reader sees the same verdict the panel prints.
+    ``gating_source: cli_legacy_fallback`` so a ``--json`` reader sees the same verdict the panel prints;
+    a reachability or last-error entry with an empty ``requires`` gets ``requires_unknown: true``.
     """
     for row in rows:
         if not isinstance(row, dict):
@@ -423,6 +450,8 @@ def attach(rows: Iterable[Any], idle_by_node: Mapping[str, list[Mapping[str, Any
                 if isinstance(entry, dict) and entry.get("gating") is None:
                     entry["gating"] = normalise(entry)["gating"]
                     entry["gating_source"] = "cli_legacy_fallback"
+                if isinstance(entry, dict) and "requires_unknown" not in entry and _requires_unknown(entry):
+                    entry["requires_unknown"] = True
             continue
         node_id = str(row.get("id") or row.get("executor_id") or "")
         row["blocking_reasons"] = fallback_reasons(row, (idle_by_node or {}).get(node_id, ()))
