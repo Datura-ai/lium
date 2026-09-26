@@ -36,6 +36,9 @@ _BOOT_TIMEOUT = 300
 # A warm pod is removed server-side this long after its `keep_warm` window, should the
 # caller never come back to remove it.
 _WARM_MARGIN = timedelta(minutes=2)
+# The TTL armed at the start of a call is armed again before the run only when setup took
+# longer than this; a minute out of the 15 min margin leaves the run its window.
+_REARM_AFTER_SECONDS = 60
 
 # Pods kept alive between calls, by `_warm_key`. Shared by every decorated function in
 # the process so two functions with the same machine spec share one pod.
@@ -411,12 +414,16 @@ def _warm_key(spec: str, template_id: Optional[str]) -> str:
     return hashlib.sha1(f"{count}x{gpu}|{template_id or ''}".encode()).hexdigest()[:8]
 
 
-def _schedule_removal(sdk: Lium, pod, delay: timedelta, say) -> None:
-    """Server-side safety net: the pod goes away even if this process does not."""
+def _schedule_removal(sdk: Lium, pod, delay: timedelta, say) -> Optional[float]:
+    """Server-side safety net: the pod goes away even if this process does not.
+
+    Returns when it was armed (``time.monotonic()``), None when the call failed."""
     try:
         sdk.schedule_termination(_pod_ref(pod), termination_time=(datetime.now(timezone.utc) + delay).isoformat())
     except Exception as exc:  # noqa: BLE001 — a missing TTL must not fail the call
         say(f"warning: could not schedule pod removal ({exc}); remove it yourself if this process dies")
+        return None
+    return time.monotonic()
 
 
 def _future_time(iso: Optional[str]) -> Optional[str]:
@@ -433,8 +440,14 @@ def _future_time(iso: Optional[str]) -> Optional[str]:
 
 
 def _find_warm(sdk: Lium, key: str, say):
-    """A pod this process (or an earlier one, by name) left warm for this machine spec."""
+    """A pod this process (or an earlier one, by name) left warm for this machine spec.
+
+    A pod this process still holds an open SSH connection to is up: it is used without
+    listing the account's pods again."""
     warm = _WARM.get(key)
+    has_open_connection = getattr(warm.sdk, "has_open_connection", None) if warm else None
+    if callable(has_open_connection) and has_open_connection(warm.pod):
+        return warm
     live = {p.id: p for p in sdk.ps() if p.status.upper() == "RUNNING" and p.ssh_cmd}
     if warm and warm.pod.id in live:
         return warm
@@ -574,7 +587,7 @@ def machine(
                 warm = _find_warm(sdk, key, say) if cleanup else None
                 if warm:
                     sdk, pod_info, executor, hourly = warm.sdk, warm.pod, warm.executor, warm.hourly
-                    _schedule_removal(sdk, pod_info, ttl, say)  # re-arm: this call may run up to `timeout`
+                    armed_at = _schedule_removal(sdk, pod_info, ttl, say)  # re-arm: this call may run up to `timeout`
                 else:
                     # Steps 1-2: rent the cheapest node renting "<count>x<gpu>" (its free GPUs, not the
                     # whole host; a fixed pod name lets the next run of the script find it)
@@ -586,7 +599,7 @@ def machine(
                         f"removal in {ttl.total_seconds() / 3600:.1f}h"
                     )
                     pod_info = pod_dict  # enough for cleanup (dict with id) until wait_ready returns
-                    _schedule_removal(sdk, pod_dict, ttl, say)
+                    armed_at = _schedule_removal(sdk, pod_dict, ttl, say)
 
                     # Wait for pod to be ready
                     pod_info = sdk.wait_ready(pod_dict, timeout=_BOOT_TIMEOUT)
@@ -628,8 +641,10 @@ def machine(
                         # relaying its output live (-u: no block buffering behind the ssh channel).
                         # The TTL armed at rent time has been running since `up()`; boot, upload and
                         # pip install may have eaten most of its 15 min margin, so it is armed again
-                        # here and the run gets its full window.
-                        _schedule_removal(sdk, pod_info, ttl, say)  # setup is done: give the run its full window
+                        # here and the run gets its full window. Armed under a minute ago (a warm pod,
+                        # a cached environment), the window is still whole and the request is skipped.
+                        if armed_at is None or time.monotonic() - armed_at > _REARM_AFTER_SECONDS:
+                            _schedule_removal(sdk, pod_info, ttl, say)
                         say("running")
                         run_cmd = f"{shlex.quote(venv_python)} -u {remote_runner}"
                         if timeout:
