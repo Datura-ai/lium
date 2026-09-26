@@ -315,7 +315,7 @@ _AVAILABLE_RE = re.compile(r"balance is " + _USD, re.I)
 def _response_error_code(response: requests.Response) -> Optional[str]:
     """The stable ``error.code`` of the platform's error body, when it sends one.
 
-    lium-platform#210 (DAH-3056) answers every 4xx/5xx with
+    The platform answers every 4xx/5xx with
     ``{"error": {"code", "message", "hint", "request_id"}, ...}``; older servers
     send ``error`` as a string or not at all, and then this is ``None``.
     """
@@ -377,7 +377,7 @@ def permission_error(
 
     ``code`` is the platform's structured ``error.code`` when the response carried
     one (:func:`_response_error_code`); it decides. Without it the message text
-    decides, which is what every server before lium-platform#210 sends. ``key``
+    decides, as it does for a server whose error body carries no code. ``key``
     (the API key's fingerprint and source) is appended so the message says which
     key the server refused. ``code`` and ``context`` (:func:`_error_context`'s
     hint/request_id) are carried on the exception.
@@ -2681,9 +2681,9 @@ class Lium:
         """``export NAME=value`` statements for ``env``, shell-quoted so each value
         reaches the pod byte-for-byte (spaces, quotes, ``$``, newlines).
 
-        Names must be valid shell identifiers (DAH-2894); anything else raises
-        :class:`ValueError` here rather than failing with an opaque
-        ``export: not a valid identifier`` on the pod.
+        Names must be valid shell identifiers; anything else raises
+        :class:`ValueError` here, before anything runs on the pod, and the
+        message names the variable.
         """
         exports = []
         for name, value in env.items():
