@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 
 import requests
 
@@ -21,7 +21,6 @@ from lium.provider.errors import (
     NET_UNREACHABLE,
     PORTAL_AUTH_EXPIRED,
     PORTAL_AUTH_INVALID,
-    PORTAL_CONTRACT_DRIFT,
     PORTAL_FORBIDDEN,
     PORTAL_NOT_FOUND,
     PORTAL_RATE_LIMIT,
@@ -149,6 +148,7 @@ class PortalHTTP:
                 f"could not reach the portal at {self.base_url}: {e}",
                 code=NET_UNREACHABLE,
                 legacy_code=PORTAL_SERVER_ERROR,
+                legacy_error=ProviderServerError(f"network error reaching portal: {e}", code=PORTAL_SERVER_ERROR),
                 cause=e,
                 context={"url": url, "method": method},
             ) from e
@@ -208,8 +208,15 @@ def _parse_response(
 
     coded = _coded_detail(body)
     if coded is not None:
-        raise _coded_error(status, coded, context)
+        try:
+            _raise_for_status(status, body, context)
+        except ProviderError as legacy:
+            raise _coded_error(status, coded, context, legacy) from None
+    _raise_for_status(status, body, context)
 
+
+def _raise_for_status(status: int, body: Any, context: dict[str, Any]) -> NoReturn:
+    """The UPPER_CASE error for a non-2xx answer, from its status alone."""
     if status == 401:
         raise ProviderAuthError(
             "portal rejected credentials",
@@ -278,33 +285,15 @@ def _coded_detail(body: Any) -> dict[str, Any] | None:
     return None
 
 
-def _legacy_code_for_status(status: int) -> str:
-    """The UPPER_CASE code an uncoded answer with this status gets: what a coded one replaces."""
-    if status == 401:
-        return PORTAL_AUTH_INVALID
-    if status == 403:
-        return PORTAL_FORBIDDEN
-    if status == 404:
-        return PORTAL_NOT_FOUND
-    if status in (419, 440):
-        return PORTAL_AUTH_EXPIRED
-    if status == 422:
-        return PORTAL_CONTRACT_DRIFT
-    if status == 429:
-        return PORTAL_RATE_LIMIT
-    if 400 <= status < 500:
-        return PORTAL_REQUEST_REJECTED
-    return PORTAL_SERVER_ERROR
-
-
-def _coded_error(status: int, detail: dict[str, Any], context: dict[str, Any]) -> ProviderError:
+def _coded_error(status: int, detail: dict[str, Any], context: dict[str, Any], legacy: ProviderError) -> ProviderError:
     """``portal.<detail.code>`` in snake_case (``EXECUTOR_NOT_FOUND`` -> ``portal.executor_not_found``); the class
-    and ``legacy_code`` still follow the status, so text mode exits as it did before the portal coded it."""
+    and ``legacy_code`` still follow the status, and ``legacy`` (the uncoded error for the same answer) is what text
+    mode prints, so text mode reads and exits as it did before the portal coded it."""
     code = "portal." + (re.sub(r"[^a-z0-9]+", "_", detail["code"].strip().lower()).strip("_") or "request_rejected")
     message = str(detail.get("message") or f"portal refused the request ({status})")
     extra = {k: v for k, v in detail.items() if k not in ("code", "message")}
     ctx = {**context, "portal_code": detail["code"].strip(), **({"detail": extra} if extra else {})}
-    kwargs = {"code": code, "context": ctx, "legacy_code": _legacy_code_for_status(status)}
+    kwargs = {"code": code, "context": ctx, "legacy_code": legacy.code, "legacy_error": legacy}
     if status in (401, 403, 419, 440):
         return ProviderAuthError(message, **kwargs)
     if status == 404:

@@ -157,7 +157,9 @@ progress, when a command has any, is one JSON object per line on stderr. `--json
   origin. `error.code` is the namespaced code and `error.legacy_code` the UPPER_CASE code it replaces
   (`PORTAL_REQUEST_REJECTED`, `PORTAL_NOT_FOUND`, …), so a script can still match the old name.
 - **In text mode** (no `--json`), every error keeps the exit status it had before the unified map, so
-  existing scripts don't break. The status follows the error's UPPER_CASE code:
+  existing scripts don't break, and stderr prints the UPPER_CASE code and the wording it always had
+  (`[PORTAL_SERVER_ERROR] network error reaching portal: …`, `[PORTAL_REQUEST_REJECTED] …`); the namespaced
+  codes appear only under `--json`. The status follows the error's UPPER_CASE code:
 
 | Old code | Text exit | `--json` code | `--json` exit |
 |----------|-----------|---------------|---------------|
@@ -187,12 +189,13 @@ progress, when a command has any, is one JSON object per line on stderr. `--json
   In text mode the persona gate prompts as it always has: off a terminal it reads the answer from stdin, so a
   piped `y` confirms, and a decline, EOF (Ctrl-D) or Ctrl-C exits 1. Under `--json`, `LIUM_OUTPUT=json` or
   `LIUM_NONINTERACTIVE=1` (agent mode) piped input is ignored: the gate fails with
-  `input.confirmation_required` (exit 2); use `--yes` or `LIUM_PROVIDER_ACK=1`. Ctrl-C under `--json` is
-  `input.interrupted` (exit 130).
+  `input.confirmation_required` (exit 2); use `--yes` or `LIUM_PROVIDER_ACK=1`. Ctrl-C at any point of a
+  `lium provider` command under `--json` is `input.interrupted` (exit 130); in text mode it is click's
+  `Aborted!` (exit 1), as it always was.
 
-  A `lium provider` code with no old equivalent (`input.confirmation_required`, `input.interrupted`,
-  `human.handoff_required`, `human.handoff_expired`, `portal.not_supported`) has `legacy_code: null` and exits
-  by the unified map in both modes.
+  A `lium provider` code with no old equivalent (`input.confirmation_required`, `human.handoff_required`,
+  `human.handoff_expired`, `portal.not_supported`) has `legacy_code: null` and exits by the unified map in both
+  modes; `input.interrupted` (also `legacy_code: null`) occurs only under `--json`.
 
 ### The unified exit map
 
@@ -257,11 +260,13 @@ Google sign-in is for people in the portal. An agent signs in with `LIUM_PROVIDE
 token with `lium provider token create` and hands it over.
 
 One-time human steps (`config connect-discord`, `portal confirm-email`) answer `human.handoff_required` (exit 12):
-one URL plus a short code for the person. `--wait` polls until the step is done (exit 0) or the code expires
+one URL plus a short code for the person. `config connect-discord` does so with `--wait` or in agent mode
+(`--json`, `LIUM_OUTPUT=json`, `LIUM_NONINTERACTIVE=1`); in text mode without `--wait` it opens the Discord
+authorization URL and waits, as it always has. `portal confirm-email` is new and uses the handoff in both modes. `--wait` polls until the step is done (exit 0) or the code expires
 (`human.handoff_expired`, exit 12); under `--json` the handoff is also one `{"event": "handoff", …}` line on stderr
 while it waits. The person enters the code in the portal, which then starts the step (the Discord consent, or the
 confirmation link mailed to the address). A portal that does not serve handoff sessions answers `portal.not_supported` (exit 3) with
-`data.legacy_flow: true` and `data.legacy_browser_url`, the old browser link; in a terminal `connect-discord`
+`data.legacy_flow: true` and `data.legacy_browser_url`, the old browser link; in text mode `connect-discord --wait`
 then runs the old browser flow.
 
 ### Old codes and their new names

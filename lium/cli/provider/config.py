@@ -21,6 +21,7 @@ import webbrowser
 
 import click
 
+from lium.cli.interactive import noninteractive_requested
 from lium.cli.provider._client import build_client
 from lium.cli.provider._handoff import run_handoff
 from lium.cli.provider._guards import (
@@ -199,34 +200,38 @@ def connect_discord(
 ) -> None:
     """Linking Discord is a one-time human step (it is required for idle pay's extra incentive).
 
-    The portal hands out one URL plus a short code: without --wait this is human.handoff_required
-    (exit 12) with data {step, handoff_url, code, expires_at, message_for_human}; relay
-    message_for_human to the person. With --wait the command polls until they are done (exit 0) or the
-    code expires (human.handoff_expired, exit 12). A portal without handoff sessions answers
-    portal.not_supported under --json, with the old browser URL in data.legacy_browser_url; in a terminal
-    the old browser flow runs.
+    In text mode without --wait this opens the Discord authorization URL and waits for the link, as it
+    always has. With --wait, or in agent mode (--json, LIUM_OUTPUT=json, LIUM_NONINTERACTIVE=1), the
+    portal hands out one URL plus a short code: without --wait this is human.handoff_required (exit 12)
+    with data {step, handoff_url, code, expires_at, message_for_human}; relay message_for_human to the
+    person. With --wait the command polls until they are done (exit 0) or the code expires
+    (human.handoff_expired, exit 12). A portal without handoff sessions answers portal.not_supported in
+    agent mode, with the old browser URL in data.legacy_browser_url; text mode with --wait then runs the
+    old browser flow.
     """
     require_hotkey(ctx, group="config")
     client = build_client(ctx)
-    try:
-        result = run_handoff(
-            client,
-            step="discord_link",
-            wait=wait,
-            timeout=timeout,
-            poll_interval=poll_interval,
-            json_mode=_json_mode(ctx),
-            legacy_url=client.create_discord_oauth_authorization_url,
-        )
-    except ProviderError as e:
-        if e.code != PORTAL_NOT_SUPPORTED or _json_mode(ctx):
-            ctx.exit(handle_provider_error(ctx, e))
+    agent_mode = _json_mode(ctx) or noninteractive_requested()
+    if wait or agent_mode:
+        try:
+            result = run_handoff(
+                client,
+                step="discord_link",
+                wait=wait,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                json_mode=_json_mode(ctx),
+                legacy_url=client.create_discord_oauth_authorization_url,
+            )
+        except ProviderError as e:
+            if e.code != PORTAL_NOT_SUPPORTED or agent_mode:
+                ctx.exit(handle_provider_error(ctx, e))
+                return
+            click.echo("The portal does not serve handoffs yet; using the browser link.", err=True)
+        else:
+            render(ctx, {**result, "discord_connected": True, "extra_incentive_eligible": True},
+                   summary="Discord connected; extra incentives enabled")
             return
-        click.echo("The portal does not serve handoffs yet; using the browser link.", err=True)
-    else:
-        render(ctx, {**result, "discord_connected": True, "extra_incentive_eligible": True},
-               summary="Discord connected; extra incentives enabled")
-        return
 
     try:
         authorization_url = client.create_discord_oauth_authorization_url()

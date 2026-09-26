@@ -341,7 +341,7 @@ def test_an_uncoded_portal_error_keeps_its_old_exit_status(portal) -> None:
     assert (err["code"], err["legacy_code"]) == ("portal.server_error", "PORTAL_SERVER_ERROR")
 
 
-def test_text_mode_prints_the_code_on_stderr(portal) -> None:
+def test_text_mode_prints_the_old_code_on_stderr(portal) -> None:
     result = run(closed_port_url(), "node", "listing")
     assert result.exit_code == 3, "text mode keeps the old exit of a refused connection (PORTAL_SERVER_ERROR)"
-    assert "[net.unreachable]" in result.stderr and result.stdout == ""
+    assert "[PORTAL_SERVER_ERROR]" in result.stderr and result.stdout == ""

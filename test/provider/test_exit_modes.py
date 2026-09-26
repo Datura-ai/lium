@@ -58,12 +58,12 @@ IDS = [c[3] for c in CODED]
 
 
 @pytest.mark.parametrize("route, args, status, portal_code, text_exit, json_exit, code, legacy", CODED, ids=IDS)
-def test_a_coded_refusal_keeps_its_old_exit_in_text_mode(portal, route, args, status, portal_code, text_exit,
+def test_a_coded_refusal_keeps_its_old_exit_and_label_in_text_mode(portal, route, args, status, portal_code, text_exit,
                                                          json_exit, code, legacy) -> None:
     portal.route(*route, refusal(portal_code), status=status)
     result = run(portal.url, *args)
     assert result.exit_code == text_exit, result.output
-    assert f"[{code}]" in result.stderr and result.stdout == ""
+    assert f"[{legacy}]" in result.stderr and f"[{code}]" not in result.stderr and result.stdout == ""
 
 
 @pytest.mark.parametrize("route, args, status, portal_code, text_exit, json_exit, code, legacy", CODED, ids=IDS)
@@ -108,10 +108,19 @@ def test_a_cli_input_error_exits_1_in_text_and_2_under_json(portal) -> None:
     assert json.loads(result.stdout)["error"]["legacy_code"] == "ARG_INVALID"
 
 
-def test_an_unreachable_portal_exits_3_in_text_and_4_under_json() -> None:
+def test_the_missing_hotkey_hint_is_the_old_one_in_text_and_names_the_token_under_json(portal) -> None:
+    env = {"LIUM_PROVIDER_TOKEN": ""}
+    text = run(portal.url, "node", "listing", env=env)
+    assert "[ARG_INVALID] node commands require --hotkey" in text.stderr and "LIUM_PROVIDER_TOKEN" not in text.stderr
+    error = json.loads(run(portal.url, "--json", "node", "listing", env=env).stdout)["error"]
+    assert "LIUM_PROVIDER_TOKEN" in error["hint"]
+
+
+def test_an_unreachable_portal_reads_and_exits_as_before_in_text_and_4_under_json() -> None:
     url = closed_port_url()
     result = run(url, "node", "listing")
-    assert result.exit_code == 3 and "[net.unreachable]" in result.stderr
+    assert result.exit_code == 3 and "[PORTAL_SERVER_ERROR] network error reaching portal: " in result.stderr
+    assert "hint: Portal 5xx." in result.stderr and "net.unreachable" not in result.stderr
     error = json.loads(run(url, "--json", "node", "listing").stdout)["error"]
     assert (error["code"], error["legacy_code"], error["exit_code"]) == ("net.unreachable", "PORTAL_SERVER_ERROR", 4)
 

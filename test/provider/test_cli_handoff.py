@@ -50,8 +50,8 @@ def portal(tmp_path, monkeypatch):
     stub.close()
 
 
-def run(portal: PortalStub, *args: str):
-    env = {"LIUM_PROVIDER_TOKEN": TOKEN, "LIUM_PROVIDER_ACK": "", "LIUM_OUTPUT": ""}
+def run(portal: PortalStub, *args: str, env: dict | None = None):
+    env = {"LIUM_PROVIDER_TOKEN": TOKEN, "LIUM_PROVIDER_ACK": "", "LIUM_OUTPUT": "", "LIUM_NONINTERACTIVE": "", **(env or {})}
     return CliRunner().invoke(provider_command, ["--portal-url", portal.url, *args], env=env)
 
 
@@ -81,11 +81,31 @@ def test_connect_discord_is_a_handoff_exit_12_with_the_url_and_code(portal) -> N
     assert portal.calls("GET") == []
 
 
-def test_connect_discord_in_a_terminal_prints_the_sentence_to_relay(portal) -> None:
+def test_connect_discord_in_text_mode_runs_the_browser_flow_with_no_handoff_request(portal) -> None:
     portal.route("POST", "/auth/handoffs", created(), status=201)
-    result = run(portal, "config", "connect-discord")
-    assert result.exit_code == 12
+    portal.route("GET", "/auth/me/discord/oauth-url", {"authorization_url": OAUTH_URL})
+    portal.route("GET", "/auth/me", {"discord_id": "123"})
+    result = run(portal, "config", "connect-discord", "--poll-interval", "0.1")
+    assert result.exit_code == 0, result.output
+    assert portal.calls() == [("GET", "/auth/me/discord/oauth-url"), ("GET", "/auth/me")]
+    assert "Discord connected" in result.stdout and "handoff" not in result.stderr
+
+
+def test_connect_discord_in_text_mode_with_wait_is_the_handoff(portal) -> None:
+    portal.route("POST", "/auth/handoffs", created(), status=201)
+    portal.route_sequence("GET", POLL_PATH, polled("completed"))
+    result = run(portal, "config", "connect-discord", "--wait", "--poll-interval", "0.1")
+    assert result.exit_code == 0, result.output
+    assert portal.calls() == [("POST", "/auth/handoffs"), ("GET", POLL_PATH)]
     assert HANDOFF["message_for_human"] in " ".join(result.stderr.split())
+
+
+@pytest.mark.parametrize("args, env", [(("--json",), {}), ((), {"LIUM_OUTPUT": "json"}), ((), {"LIUM_NONINTERACTIVE": "1"})])
+def test_connect_discord_in_agent_mode_is_the_handoff_exit_12(portal, args, env) -> None:
+    portal.route("POST", "/auth/handoffs", created(), status=201)
+    result = run(portal, *args, "config", "connect-discord", env=env)
+    assert result.exit_code == 12, result.output
+    assert portal.calls() == [("POST", "/auth/handoffs")]
 
 
 def test_connect_discord_wait_polls_until_the_person_is_done(portal) -> None:

@@ -174,6 +174,8 @@ class ProviderError(Exception):
         context: free-form ``dict[str, Any]``.
         legacy_code: the UPPER_CASE code a namespaced ``code`` replaces (``PORTAL_REQUEST_REJECTED`` for a
             coded 400); text mode exits by it, and ``--json`` shows it as ``legacy_code``.
+        legacy_error: the same failure as the CLI reported it before the namespaced code existed; text mode
+            prints its code, message and hint.
     """
 
     default_code: str = "PROVIDER_ERROR"
@@ -187,9 +189,11 @@ class ProviderError(Exception):
         cause: BaseException | None = None,
         context: dict[str, Any] | None = None,
         legacy_code: str | None = None,
+        legacy_error: ProviderError | None = None,
     ) -> None:
         self.code = code or self.default_code
         self.legacy_code = legacy_code
+        self.legacy_error = legacy_error
         self.message = message
         self.hint = hint if hint is not None else (_HINTS.get(self.code) or _HINTS.get(legacy_code or "", ""))
         self.cause = cause

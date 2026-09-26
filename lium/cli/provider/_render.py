@@ -226,10 +226,12 @@ def emit_error(ctx: click.Context, err: ProviderError) -> int:
             error["data"] = err.context
         click.echo(json.dumps({"ok": False, "error": error}, sort_keys=True, default=str))
     else:
-        prefix = click.style(f"[{err.code}]", fg="red", bold=True)
-        click.echo(f"{prefix} {err.message}", err=True)
-        if err.hint:
-            click.echo(f"  hint: {err.hint}", err=True)
+        # text mode prints the old UPPER_CASE label (and, where the old CLI worded it differently, its message)
+        shown = err.legacy_error or err
+        prefix = click.style(f"[{legacy_code_for(shown) or shown.code}]", fg="red", bold=True)
+        click.echo(f"{prefix} {shown.message}", err=True)
+        if shown.hint:
+            click.echo(f"  hint: {shown.hint}", err=True)
         if _debug_mode(ctx) and err.context:
             click.echo(f"  context: {err.context}", err=True)
     return code

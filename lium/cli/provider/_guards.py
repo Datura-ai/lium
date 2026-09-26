@@ -46,7 +46,9 @@ def require_hotkey(ctx: click.Context, *, group: str | None = None) -> None:
         ProviderError(
             f"{label} require --hotkey (or LIUM_PROVIDER_HOTKEY)",
             code=ARG_INVALID,
-            hint="Or set LIUM_PROVIDER_TOKEN, or sign in with `lium provider portal login --email <address>`.",
+            hint="Or set LIUM_PROVIDER_TOKEN, or sign in with `lium provider portal login --email <address>`."
+            if opts.get("json")
+            else None,
         ),
     )
 
