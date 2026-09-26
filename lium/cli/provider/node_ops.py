@@ -140,7 +140,7 @@ def resume(ctx: click.Context, node_id: str, pause_id: str | None) -> None:
 
     With --pause-id the command first reads the node: a portal whose `node get` has no `pause_id` field would
     ignore the id and resume anyway, so the command refuses there (portal.not_supported, exit 3) and sends
-    nothing. A malformed id is input.arg_invalid (exit 2 under --json, LIUM_OUTPUT=json or LIUM_NONINTERACTIVE=1)."""
+    no resume. A malformed id is input.arg_invalid (exit 2 under --json, LIUM_OUTPUT=json or LIUM_NONINTERACTIVE=1)."""
     require_hotkey(ctx, group="node")
     if pause_id is not None:
         try:
@@ -178,7 +178,7 @@ def _require_pause_id_support(client, node_id: str, pause_id: str) -> None:
         f"not resumed: this portal does not report pause ids, so it would resume node {node_id} whatever "
         "--pause-id says",
         code=PORTAL_NOT_SUPPORTED,
-        hint="Nothing was sent. Leave the node paused, or resume it without --pause-id only if you know "
+        hint="No resume was sent. Leave the node paused, or resume it without --pause-id only if you know "
         "the pause is yours.",
         context={"node_id": node_id, "pause_id": pause_id, "unsupported": "pause_id"},
     )

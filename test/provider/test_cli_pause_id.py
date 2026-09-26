@@ -246,11 +246,11 @@ def test_resume_without_a_pause_id_lifts_any_pause_without_reading_the_node(stub
 # --- an older portal: no pause_id anywhere ---------------------------------------------------
 
 
-def test_resume_with_a_pause_id_on_an_older_portal_refuses_and_sends_nothing(stub, older) -> None:
+def test_resume_with_a_pause_id_on_an_older_portal_refuses_and_sends_no_resume(stub, older) -> None:
     pause(stub)
     err = error(run(stub, "--json", "node", "resume", NODE, "--pause-id", str(uuid.uuid4()), "--yes"), 3)
     assert (err["code"], err["legacy_code"]) == ("portal.not_supported", None)
-    assert err["data"]["unsupported"] == "pause_id" and "Nothing was sent" in err["hint"]
+    assert err["data"]["unsupported"] == "pause_id" and "No resume was sent" in err["hint"]
     assert stub.calls()[-1] == ("GET", NODE_PATH) and ("DELETE", PAUSE_PATH) not in stub.calls()
     assert older.paused()
 

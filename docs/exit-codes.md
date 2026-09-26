@@ -244,7 +244,7 @@ for a 400 or 409, `PORTAL_FORBIDDEN` for a 403, `PORTAL_NOT_FOUND` for a 404, `P
 | `human.handoff_expired` | 12 | `--wait`: the code expired before the person finished, or the portal answers 404 for the handoff (`data.status: not_found`); run the command again for a new code. A poll the portal could not answer (5xx, 429, unreachable) is retried with backoff until `--timeout`. |
 | `auth.not_signed_in` | 6 | Any `lium provider` command that needs a sign-in, in agent mode, with no `LIUM_PROVIDER_TOKEN`, no hotkey and no live `portal login --email` session (`data.session_email` is the configured address when it has no live session); `lium mine status` too. The hint names all three ways in; `legacy_code` is `ARG_INVALID`. Plain text mode prints `ARG_INVALID` and exits 1 as before (`portal whoami` says "not signed in to the provider portal" with the same hint). `status`, `portal login`, `portal logout`, `config set-email` and `config set-password` need the hotkey itself and stay `input.arg_invalid` (exit 2), with a token or e-mail session too: the last two sign with the hotkey's wallet (plain text: the old `config commands require --hotkey` line, exit 1). |
 | `net.unreachable` | 4 | Connection refused, DNS failure or timeout reaching the portal. |
-| `portal.not_supported` | 3 | The portal answered 404/405 for a route this CLI knows (`lium provider token …` before the portal serves API tokens). Also `node resume --pause-id` when `node get` has no `pause_id` field: that portal would resume whatever the id, so nothing is sent (`data.unsupported: "pause_id"`, with `node_id` and `pause_id`). |
+| `portal.not_supported` | 3 | The portal answered 404/405 for a route this CLI knows (`lium provider token …` before the portal serves API tokens). Also `node resume --pause-id` when `node get` has no `pause_id` field: that portal would resume whatever the id, so no resume is sent (`data.unsupported: "pause_id"`, with `node_id` and `pause_id`). |
 | `portal.api_token_needs_session` | 6 | `lium provider token create`, `list` or `revoke` sent `LIUM_PROVIDER_TOKEN`; tokens are managed from a signed-in session only (hotkey or `portal login --email`). |
 | `portal.api_token_scope_missing` | 6 | `LIUM_PROVIDER_TOKEN` lacks the scope the call needs; `data.detail.required_scopes` names it. |
 | `portal.overview_not_for_custodied_account` | 6 | `lium provider idle-pay` on an account created with e-mail or Google: the portal serves its overview to hotkey accounts only (plain text mode: exit 2, as `PORTAL_FORBIDDEN`). |
@@ -300,7 +300,7 @@ is). A portal that does not send them gives `null` for both, never `false`. `nod
 `node resume <id> --pause-id <uuid>` resumes only while that pause is still the current one:
 
 - It reads the node first. When the record has no `pause_id` field the portal predates pause ids and would resume
-  whatever the id says, so the command sends nothing and fails with `portal.not_supported` (exit 3).
+  whatever the id says, so the command sends no resume and fails with `portal.not_supported` (exit 3).
 - A resume the portal refuses because the pause changed is `node.pause_id_mismatch` (exit 3; nothing changed,
   `data.current_pause_id` is the node's pause now). It exits 3 as the other portal refusals do: the refusal is the
   portal's, and the code, not the exit, tells it apart. Exit 10 stays for `node.blocked.*`.
