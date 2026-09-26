@@ -204,8 +204,8 @@ progress, when a command has any, is one JSON object per line on stderr. `--json
   `lium mine status`, which runs it: Ctrl-C exits 0 in every mode (a one-shot run prints nothing), as on `main`.
 
   A `lium provider` code with no old equivalent (`input.confirmation_required`, `human.handoff_required`,
-  `human.handoff_expired`, `portal.not_supported`, `node.pause_id_mismatch`) has `legacy_code: null` and exits by the
-  unified map in both modes; `input.interrupted` (also `legacy_code: null`) occurs only in agent mode.
+  `human.handoff_expired`, `portal.not_supported`, `node.pause_id_mismatch`, `node.resume_unverified`) has
+  `legacy_code: null` and exits by the unified map in both modes; `input.interrupted` (also `legacy_code: null`) occurs only in agent mode.
 
 ### The unified exit map
 
@@ -224,7 +224,7 @@ A namespaced code (`<namespace>.<snake_case>`) exits by this map (`unified_exit_
 | 7 | `EXIT_RETRYABLE` | A portal 429: retry after a pause. |
 | 10 | `EXIT_BLOCKED` | `node.blocked.<code>`: the portal refused the node change for a named reason. |
 | 11 | `EXIT_NOT_LISTED` | `node.not_listed_yet`: the node is registered and waited for, but not listed. |
-| 12 | `EXIT_HUMAN` | `human.*`: a person has to act (link Discord, confirm the e-mail) before the command can succeed; `data` says what to relay. |
+| 12 | `EXIT_HUMAN` | `human.*`: a person has to act (link Discord, confirm the e-mail) before the command can succeed; `data` says what to relay. Also `node.resume_unverified`: a person has to check the node. |
 | 130 | `EXIT_INTERRUPTED` | `input.interrupted`: Ctrl-C in agent mode. |
 
 A portal refusal whose body names `detail.code` is passed through as `portal.<code>`, the portal's code in
@@ -250,6 +250,7 @@ for a 400 or 409, `PORTAL_FORBIDDEN` for a 403, `PORTAL_NOT_FOUND` for a 404, `P
 | `portal.overview_not_for_custodied_account` | 6 | `lium provider idle-pay` on an account created with e-mail or Google: the portal serves its overview to hotkey accounts only (plain text mode: exit 2, as `PORTAL_FORBIDDEN`). |
 | `portal.<code>` | by status | The portal's own code in snake_case (`portal.node_rented`), passed through; `legacy_code` is the old code for its status. |
 | `node.not_found` | 5 | `node listing` / `idle-pay` named a node the account does not have. |
+| `node.resume_unverified` | 12 | `node resume --pause-id`: the portal answered the resume without a `pause_id` field, so it did not confirm the id check (an instance without pause ids, while the portal is rolled out); new rentals may have been resumed whatever the pause was. `data`: `node_id`, `pause_id`, `pause_id_checked: false`, `may_have_resumed: true`, `new_rentals_pause_requested_at`, `message_for_human`. Relay the message; do not pause or resume again on your own. Same exit in plain text mode. |
 | `node.pause_id_mismatch` | 3 | `node resume --pause-id`: the portal answered 409 `PAUSE_ID_MISMATCH` because the node's current pause is another one, or none (someone resumed, or resumed and paused again). Nothing changed. `data`: `node_id`, `pause_id` (the one given), `current_pause_id` (a UUID, or `null` when the node is not paused or its pause has no id), `status` 409, `portal_code`. Same exit in plain text mode. |
 | `node.not_listed_yet` | 11 | `lium mine --register` in agent mode: registered, not listed within `--wait`. |
 | `node.<status>` | 1 | `lium mine --json --register`: the portal names a fix (`node.offline`, `node.validation_failed`). |
@@ -284,8 +285,9 @@ for the account, as they scope to the local wallet's hotkey otherwise.
 `lium provider node listing [NODE_ID] --json` rows always carry `gpu_count` and `rented_gpu_count` (`null` when the
 portal does not send them). A node rented in part keeps `listing_state: "listed"` for its free GPUs, with
 `rented_gpu_count` above 0: check `rented_gpu_count`, not only `listing_state`, before anything that interrupts a rental.
-The rows also always carry `new_rentals_pause_requested_at` and `pause_id` (`null` when new rentals are taken, or the
-portal does not send them).
+The rows also always carry `new_rentals_pause_requested_at` and `pause_id` (`null` by default). A `null` `pause_id`
+proves no pause: new rentals are taken, the pause was set without an id, or the portal does not send it. Read
+`new_rentals_pause_requested_at` for whether new rentals are paused.
 
 New rentals already paused (`node pause`): the `node listing --json` row has `NEW_RENTALS_PAUSED` in
 `hidden_reasons[].code`, and `computed_status.status` is `PAUSING_NEW_RENTALS` while the current rental runs or
@@ -296,7 +298,7 @@ Whose pause it is: `node pause --json` answers `paused_by_this_call` and `pause_
 only when this call set the pause, and `pause_id` is then this call's own; on a node already paused it is `false` and
 `pause_id` is the existing pause's, which is `null` for a pause set without one (so a `null` never proves whose pause it
 is). A portal that does not send them gives `null` for both, never `false`. `node get --json` always carries `pause_id`
-(`null` by default); plain text `node get` prints the portal's fields as it always has.
+(`null` by default, with the same meaning as in the listing rows: no provable pause); plain text `node get` prints the portal's fields as it always has.
 `node resume <id> --pause-id <uuid>` resumes only while that pause is still the current one:
 
 - It reads the node first. When the record has no `pause_id` field the portal predates pause ids and would resume
@@ -306,6 +308,13 @@ is). A portal that does not send them gives `null` for both, never `false`. `nod
   portal's, and the code, not the exit, tells it apart. Exit 10 stays for `node.blocked.*`.
 - A malformed id (not a UUID locally, or a portal 422) is `input.arg_invalid` (exit 2) in agent mode, `ARG_INVALID`
   (exit 1) in plain text mode, like every other bad argument; a locally malformed id sends nothing.
+- A resume the portal answers without a `pause_id` field is `node.resume_unverified` (exit 12). While the portal is
+  rolled out, the node read can reach an instance that checks the id and the resume one that does not, which lifts
+  any pause and answers success. The command cannot tell whose pause was lifted, so it does not report success: `data`
+  has `node_id`, `pause_id`, `pause_id_checked: false`, `may_have_resumed: true`, the answer's
+  `new_rentals_pause_requested_at` and `message_for_human`. It exits 12, the map's "a person has to act" class, not 3:
+  exit 3 also covers portal failures an agent may retry, and here the node may already have changed, so the agent
+  relays `data.message_for_human` and leaves the node alone. Same exit in plain text mode.
 
 Without `--pause-id`, `node resume` lifts any pause, as before.
 

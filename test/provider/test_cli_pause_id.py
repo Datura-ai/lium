@@ -5,6 +5,7 @@
 `paused_by_this_call`; `DELETE …/new-rentals/pause?pause_id=` lifts the pause only while that id is the current one,
 else 409 `PAUSE_ID_MISMATCH` with `detail.current_pause_id`, changing nothing. `older=True` is a portal from before
 `pause_id`: no `pause_id` or `paused_by_this_call` anywhere, and the query parameter ignored (it resumes anyway).
+`older_resume=True` is the portal mid-rollout: the node read reaches an instance with pause ids, the resume an older one.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from click.testing import CliRunner
 
 from lium.cli.provider.command import provider_command
 from ._agent_mode import AGENT_SWITCHES, PLAIN_TEXT, read_error
-from ._portal_stub import PortalStub
+from ._portal_stub import PortalStub, closed_port_url
 
 TOKEN = "lpk_stub"
 NODE = "7c1f0e2a-0000-4000-8000-000000000001"
@@ -31,6 +32,7 @@ class PausePortal:
         self.pause_id: str | None = None
         self.requested_at: str | None = None
         self.reject_ids = False
+        self.older_resume = False
         stub.handle("POST", PAUSE_PATH, self._pause)
         stub.handle("DELETE", PAUSE_PATH, self._resume)
         stub.handle("GET", NODE_PATH, lambda _request: (200, self.node()))
@@ -81,9 +83,12 @@ class PausePortal:
 
     def _resume(self, request: dict) -> tuple[int, dict]:
         wanted = (request["query"].get("pause_id") or [None])[0]
-        if wanted is None or self.older:
+        if wanted is None or self.older or self.older_resume:
             self.owner_resumes()
-            return 200, self.node()
+            record = self.node()
+            if self.older_resume:
+                record.pop("pause_id")
+            return 200, record
         try:
             uuid.UUID(wanted)
             if self.reject_ids:
@@ -272,6 +277,71 @@ def test_plain_text_node_get_on_an_older_portal_adds_no_pause_id_row(stub, older
     assert "Pause Id" not in result.output and "New Rentals Pause Requested At" in result.output
 
 
+# --- the guard fails closed; a resume the portal does not confirm is not a success -----------
+
+
+@pytest.mark.parametrize(
+    ("status", "exit_code", "code"),
+    [(500, 3, "portal.server_error"), (404, 5, "portal.not_found")],
+    ids=["500", "404"],
+)
+def test_a_failed_node_read_sends_no_resume(stub, portal, status, exit_code, code) -> None:
+    own = pause(stub)["pause_id"]
+    stub.handle("GET", NODE_PATH, lambda _request: (status, {"detail": "no"}))
+    err = error(run(stub, "--json", "node", "resume", NODE, "--pause-id", own, "--yes"), exit_code)
+    assert err["code"] == code
+    assert ("DELETE", PAUSE_PATH) not in stub.calls() and portal.paused()
+
+
+def test_an_unreachable_portal_on_the_node_read_sends_no_resume(stub, monkeypatch) -> None:
+    resumes = []
+    monkeypatch.setattr("lium.provider.client.ProviderClient.resume_new_rentals", lambda *a, **k: resumes.append(a) or {})
+    result = CliRunner().invoke(
+        provider_command,
+        ["--portal-url", closed_port_url(), "--json", "node", "resume", NODE, "--pause-id", str(uuid.uuid4()), "--yes"],
+        env={"LIUM_PROVIDER_TOKEN": TOKEN, "LIUM_PROVIDER_ACK": "", **PLAIN_TEXT},
+    )
+    assert error(result, 4)["code"] == "net.unreachable"
+    assert resumes == []
+
+
+def test_a_resume_answered_without_pause_id_is_unverified_not_success(stub, portal) -> None:
+    own = pause(stub)["pause_id"]
+    portal.owner_resumes()
+    portal.owner_pauses()
+    portal.older_resume = True
+    err = error(run(stub, "--json", "node", "resume", NODE, "--pause-id", own, "--yes"), 12)
+    assert (err["code"], err["legacy_code"]) == ("node.resume_unverified", None)
+    data = err["data"]
+    assert (data["node_id"], data["pause_id"], data["pause_id_checked"], data["may_have_resumed"]) == (NODE, own, False, True)
+    assert data["new_rentals_pause_requested_at"] is None
+    assert data["message_for_human"].startswith(f"New rentals on {NODE} may have been resumed")
+    assert stub.requests[-1]["query"] == {"pause_id": [own]}
+    assert not portal.paused()
+
+
+@pytest.mark.parametrize("switch", AGENT_SWITCHES)
+def test_an_unverified_resume_exits_12_under_every_agent_switch(stub, portal, switch) -> None:
+    own = pause(stub)["pause_id"]
+    portal.older_resume = True
+    result = run_under(stub, switch, "node", "resume", NODE, "--pause-id", own, "--yes")
+    assert result.exit_code == 12, result.output
+    assert read_error(result, switch)[0] == "node.resume_unverified"
+
+
+def test_plain_text_unverified_resume_prints_the_code_and_exits_12(stub, portal) -> None:
+    own = pause(stub)["pause_id"]
+    portal.older_resume = True
+    result = run(stub, "node", "resume", NODE, "--pause-id", own, "--yes")
+    assert result.exit_code == 12, result.output
+    assert result.stderr.splitlines()[0].startswith(f"[node.resume_unverified] node {NODE}: the portal answered")
+
+
+def test_a_plain_resume_answered_without_pause_id_stays_a_success(stub, older) -> None:
+    older.owner_pauses()
+    ok(run(stub, "--json", "node", "resume", NODE, "--yes"))
+
+
 # --- one exit map for all three agent-mode switches, and plain text ----------------------------
 
 
@@ -328,3 +398,10 @@ def test_resume_help_documents_the_pause_id_flag() -> None:
     assert result.exit_code == 0
     flat = " ".join(result.output.split())
     assert "--pause-id UUID" in flat and "node.pause_id_mismatch (exit 3)" in flat and "portal.not_supported" in flat
+    assert "node.resume_unverified (exit 12" in flat
+
+
+@pytest.mark.parametrize("args", [("node", "get", "--help"), ("node", "listing", "--help")], ids=["get", "listing"])
+def test_help_says_a_null_pause_id_proves_no_pause(args) -> None:
+    flat = " ".join(CliRunner().invoke(provider_command, list(args)).output.split())
+    assert "A null `pause_id` proves no pause: new rentals are not paused, the pause was set without an id, or the portal does not send it" in flat

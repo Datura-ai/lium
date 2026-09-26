@@ -109,8 +109,9 @@ def list_nodes(
 @with_provider_overrides
 @click.pass_context
 def get_node(ctx: click.Context, node_id: str) -> None:
-    """The node's record as the portal has it. Under --json it always carries `pause_id` (null when new
-    rentals are not paused, or the portal does not send it)."""
+    """The node's record as the portal has it. Under --json it always carries `pause_id`. A null `pause_id`
+    proves no pause: new rentals are not paused, the pause was set without an id, or the portal does not send
+    it; `new_rentals_pause_requested_at` says whether new rentals are paused."""
     require_hotkey(ctx, group="node")
     client = build_client(ctx)
     try:

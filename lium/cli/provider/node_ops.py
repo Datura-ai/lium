@@ -23,7 +23,7 @@ from lium.cli.provider._client import build_client
 from lium.cli.provider._guards import handle_provider_error, require_hotkey, require_persona_ack
 from lium.cli.provider._overrides import with_provider_overrides
 from lium.cli.provider._render import fatal, render
-from lium.provider.errors import ARG_INVALID, PAUSE_ID_MISMATCH, PORTAL_NOT_SUPPORTED, ProviderError
+from lium.provider.errors import ARG_INVALID, PAUSE_ID_MISMATCH, PORTAL_NOT_SUPPORTED, RESUME_UNVERIFIED, ProviderError
 
 MINE_SH_URL = "https://raw.githubusercontent.com/Datura-ai/lium/main/mine.sh"
 TIERS = ("secure", "spot")
@@ -140,7 +140,11 @@ def resume(ctx: click.Context, node_id: str, pause_id: str | None) -> None:
 
     With --pause-id the command first reads the node: a portal whose `node get` has no `pause_id` field would
     ignore the id and resume anyway, so the command refuses there (portal.not_supported, exit 3) and sends
-    no resume. A malformed id is input.arg_invalid (exit 2 under --json, LIUM_OUTPUT=json or LIUM_NONINTERACTIVE=1)."""
+    no resume. A malformed id is input.arg_invalid (exit 2 under --json, LIUM_OUTPUT=json or LIUM_NONINTERACTIVE=1).
+
+    A resume answer without a `pause_id` field came from a portal instance that does not check the id (the portal
+    mid-rollout): the pause may have been lifted whatever its id, so the command answers node.resume_unverified
+    (exit 12, a person has to check the node) instead of success."""
     require_hotkey(ctx, group="node")
     if pause_id is not None:
         try:
@@ -156,6 +160,9 @@ def resume(ctx: click.Context, node_id: str, pause_id: str | None) -> None:
         body = client.resume_new_rentals(node_id, pause_id)
     except ProviderError as e:
         ctx.exit(handle_provider_error(ctx, _resume_error(e, node_id, pause_id)))
+        return
+    if pause_id is not None and not (isinstance(body, dict) and "pause_id" in body):
+        fatal(ctx, _resume_unverified(node_id, pause_id, body))
         return
     render(ctx, body, summary=f"node {node_id}: new rentals resumed")
 
@@ -181,6 +188,28 @@ def _require_pause_id_support(client, node_id: str, pause_id: str) -> None:
         hint="No resume was sent. Leave the node paused, or resume it without --pause-id only if you know "
         "the pause is yours.",
         context={"node_id": node_id, "pause_id": pause_id, "unsupported": "pause_id"},
+    )
+
+
+def _resume_unverified(node_id: str, pause_id: str, body) -> ProviderError:
+    """A `--pause-id` resume the portal answered without a `pause_id` field: it did not confirm the id check."""
+    requested_at = body.get("new_rentals_pause_requested_at") if isinstance(body, dict) else None
+    return ProviderError(
+        f"node {node_id}: the portal answered the resume without confirming it checked pause {pause_id}; "
+        "new rentals may have been resumed whatever the node's pause was",
+        code=RESUME_UNVERIFIED,
+        context={
+            "node_id": node_id,
+            "pause_id": pause_id,
+            "pause_id_checked": False,
+            "may_have_resumed": True,
+            "new_rentals_pause_requested_at": requested_at,
+            "message_for_human": (
+                f"New rentals on {node_id} may have been resumed: the portal did not confirm that the pause it lifted "
+                "was the one I set. If someone else had paused new rentals on this node, check it in the portal and "
+                "pause new rentals again if needed."
+            ),
+        },
     )
 
 
@@ -218,8 +247,9 @@ def listing(ctx: click.Context, node_id: str | None) -> None:
     `rented_gpu_count` of `gpu_count` GPUs are rented now: a node rented in part stays `listed` for its free
     GPUs, so check `rented_gpu_count` before anything that interrupts a rental.
 
-    Each row also carries `new_rentals_pause_requested_at` and `pause_id` (null when new rentals are not
-    paused, or the portal does not send them)."""
+    Each row also carries `new_rentals_pause_requested_at` and `pause_id`. A null `pause_id` proves no pause:
+    new rentals are not paused, the pause was set without an id, or the portal does not send it; read
+    `new_rentals_pause_requested_at` for whether new rentals are paused."""
     require_hotkey(ctx, group="node")
     client = build_client(ctx)
     try:
