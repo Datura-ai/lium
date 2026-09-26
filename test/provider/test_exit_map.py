@@ -65,8 +65,24 @@ def test_every_namespaced_code_is_documented(code):
     assert f"`{code}`" in DOC.read_text()
 
 
-def test_the_old_to_new_code_table_names_each_rename():
+def _section(title: str) -> str:
     doc = DOC.read_text()
-    table = doc[doc.index("### Old codes and their new names"):]
-    assert "| `PORTAL_SERVER_ERROR` (3) | `net.unreachable` (4)" in table
-    assert "`input.confirmation_required` (2)" in table
+    start = doc.index(title)
+    return doc[start:doc.index("\n#", start + len(title))]
+
+
+def test_each_documented_code_exits_as_the_doc_says():
+    rows = re.findall(r"^\|\s*`([a-z]+\.[a-z_]+)`\s*\|\s*(\d+)\s*\|", _section("### The unified exit map"), re.M)
+    assert len(rows) >= 8
+    wrong = {code: (int(doc_exit), unified_exit_code(code)) for code, doc_exit in rows
+             if unified_exit_code(code) != int(doc_exit)}
+    assert wrong == {}
+
+
+def test_the_old_to_new_table_matches_both_maps():
+    """Each `OLD (n)` must be the legacy map's exit and each `new (m)` the unified map's."""
+    rows = re.findall(r"^\|\s*`([A-Z_]+)` \((\d+)\)\s*\|\s*`([a-z]+\.[a-z_]+)` \((\d+)\)", _section("### Old codes and their new names"), re.M)
+    assert rows
+    for old, old_exit, new, new_exit in rows:
+        assert exit_code_for(ProviderError("x", code=old)) == int(old_exit), old
+        assert unified_exit_code(new) == int(new_exit), new

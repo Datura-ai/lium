@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Iterator, Optional, Tuple
 
 import click
 from rich import box
+from rich.markup import escape
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
@@ -909,15 +910,13 @@ def _run_mine(ctx, hotkey, dir_, branch, auto, verbose, register_token, portal_u
             if json_mode:
                 return _json_failure("input.register_token_invalid", str(e), 2,
                                      "Copy a fresh command from the portal's Add Node page.")
-            from rich.markup import escape
-
             console.error(f"❌ {escape(str(e))}")
             return 1
         if hotkey and hotkey != token.node_hotkey:
             message = "--hotkey differs from what the register token says this node reports under; drop -k, the token decides."
             if json_mode:
                 return _json_failure("input.hotkey_conflicts_with_token", message, 2, "Drop -k.")
-            console.error(f"❌ {message}")
+            console.error(f"❌ {escape(message)}")
             return 1
         # what the executor reports under: the account's own key, or the portal's for an account without one
         # (lium-platform#294) — the SS58 check in _setup_executor_env applies to this value, not to the account id
@@ -1008,8 +1007,6 @@ def _run_mine(ctx, hotkey, dir_, branch, auto, verbose, register_token, portal_u
                                  {"step": progress.current, **getattr(e, "data", {})})
         # the message carries tool output verbatim (compose `ps -a`, log tails, a stderr tail): escaped, or a
         # `[type=…]` / `[/x]` token in it is Rich markup — eaten, or a MarkupError in place of the diagnosis
-        from rich.markup import escape
-
         console.error(f"❌ {escape(str(e))}")
         return 1   # a failed step is a failed command: mine.sh and scripts read the exit code
 
@@ -1085,7 +1082,7 @@ def _run_mine(ctx, hotkey, dir_, branch, auto, verbose, register_token, portal_u
     console.print("\n[bold cyan]Register this node in the Provider Portal:[/bold cyan]")
     console.print(f"[yellow]{add_url}[/yellow]\n")
     console.print("[bold cyan]…or from this terminal:[/bold cyan]")
-    console.print(f"[yellow]{add_command}[/yellow]")
+    console.print(f"[yellow]{escape(add_command)}[/yellow]")   # the GPU name is nvidia-smi's text
     console.dim(_registration_note())
     return 0
 
@@ -1106,8 +1103,6 @@ def _register_and_wait(
 
     ``report`` is filled with what --json prints (node id, address, GPU, price, status, message).
     """
-    from rich.markup import escape
-
     from . import mine_register as reg
 
     report = {} if report is None else report

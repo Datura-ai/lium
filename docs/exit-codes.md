@@ -205,8 +205,7 @@ Provider auth without a wallet: `LIUM_PROVIDER_TOKEN` is sent as the Bearer toke
 
 The UPPER_CASE codes are still emitted with their old exit statuses (1 argument, 2 auth,
 3 portal, 5 SSH, 6 config, 7 token-cache race) so scripts keep working while they
-migrate. Where a failure already has a namespaced code, the old code is no longer raised
-for it:
+migrate. The failures below carry the namespaced code:
 
 | Old `code` (exit) | New `code` (exit) | When |
 |-------------------|-------------------|------|

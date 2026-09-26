@@ -41,13 +41,8 @@ def bearer_token(opts: Mapping[str, Any]) -> str | None:
     email = session_email()
     if not email:
         return None
-    try:
-        cached = TokenStore().load(email_session_key(email))
-    except Exception:
-        return None
-    if cached is None or cached.expired():
-        return None
-    return cached.token
+    cached = TokenStore().load(email_session_key(email))   # a corrupt or expired entry is None; a lock timeout is raised
+    return cached.token if cached is not None else None
 
 
 def build_client(ctx: click.Context) -> ProviderClient:
