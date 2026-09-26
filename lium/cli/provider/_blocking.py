@@ -45,7 +45,7 @@ LEGACY_GATING_CODES = frozenset(
 )
 
 # Idle-pay codes Secure does not require: shown as "Not eligible for idle pay: …" with a "No action: …" line,
-# never in the BLOCKING panel and never counted as blocked (``gating: false``). Same words as the portal.
+# never in the BLOCKING panel and never counted as blocked (``gating: false``). The CLI prints its own words for these two, not the portal's `fix`.
 NOT_GATED: dict[str, tuple[str, str]] = {
     "gpu_model_not_eligible_for_unrented_incentive": (
         "This GPU model is not in the idle-pay program",
