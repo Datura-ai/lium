@@ -136,10 +136,17 @@ def test_wait_for_credit_survives_any_odd_answer_after_a_payment(client, monkeyp
 
 
 @responses.activate
-def test_a_users_me_without_balance_is_unreadable_not_zero(client):
+def test_a_users_me_without_balance_never_counts_as_a_credit(client):
+    # balance() would read the missing field as 0: from a baseline of 0 that is no rise, but from a baseline of -1
+    # (a negative balance) it would end the wait as "credited" before any money landed
     responses.get(f"{API}/users/me", json={"id": "u1"})
+    responses.get(f"{API}/users/me", json={"id": "u1", "balance": 9.0})
+    clock = _Clock()
 
-    assert client.balance_or_none() is None
+    outcome = client.wait_for_credit(-1.0, timeout=10, interval=2, _clock=clock, _sleep=clock.sleep)
+
+    assert outcome == {"credited": True, "balance": 9.0, "seconds": 2.0}
+    assert len(responses.calls) == 2
 
 
 @responses.activate

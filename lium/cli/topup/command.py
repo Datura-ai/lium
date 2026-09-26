@@ -7,6 +7,7 @@ provider confirms the transfer — the transfer itself happens outside Lium.
 """
 
 import json
+import logging
 import math
 import os
 from typing import Optional
@@ -26,6 +27,8 @@ from lium.cli.utils import (
     CliFailure,
     handle_errors,
 )
+
+logger = logging.getLogger(__name__)
 
 BILLING_KEY_ENV_VAR = "LIUM_BILLING_API_KEY"
 BILLING_KEY_OPTION = "api.billing_api_key"
@@ -79,7 +82,10 @@ def read_balance(client: Lium) -> Optional[float]:
     try:
         reader = getattr(client, "balance_or_none", None) or client.balance
         return reader()
-    except Exception:
+    except Exception as exc:
+        # no session or transaction to roll back: one HTTP GET; the caller decides (baseline_or_fail refuses,
+        # a post-payment read reports None) and wait_for_credit polls again
+        logger.debug("balance read failed: %s", exc)
         return None
 
 
@@ -311,7 +317,7 @@ def link_command(amount: float, wait: float | None, json_output: bool):
     if wait:
         announce({**payload, "event": "handoff"}, json_output)
         if not json_output:
-            ui.info(f"Pay here: {link['url']}")
+            ui.info(f"Pay here: {escape(link['url'])}")
             ui.info(f"Waiting up to {wait:g} s for the payment…")
         credit = wait_for_credit_or_fail(client, baseline, wait, {"session_id": link.get("session_id")})
         if json_output:
@@ -324,7 +330,7 @@ def link_command(amount: float, wait: float | None, json_output: bool):
         click.echo(json.dumps(payload, sort_keys=True))
         return
     ui.success(f"Payment page for ${amount:,.2f}")
-    ui.info(f"URL: {link['url']}")
+    ui.info(f"URL: {escape(link['url'])}")
     ui.dim("Nothing is charged until someone pays there. 'lium topup wait' waits for the credit.")
 
 

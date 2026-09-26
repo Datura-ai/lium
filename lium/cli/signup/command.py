@@ -3,6 +3,7 @@
 import json
 
 import click
+from rich.markup import escape
 
 from lium.cli import ui
 from lium.cli.init.actions import SetupSshKeyAction
@@ -119,12 +120,12 @@ def signup_command(email: str | None, no_email: bool, display_name: str | None, 
     ui.dim("  Save it — it is the dashboard login at https://lium.io\n")
     ui.info("API key stored in ~/.lium/config.ini")
     if not ssh_result.ok:
-        ui.warning(f"SSH key not configured: {ssh_result.error}")
+        ui.warning(f"SSH key not configured: {escape(str(ssh_result.error))}")
     if billing_result is not None:
         if billing_result.ok:
             ui.info("Billing key (top-ups only) stored in ~/.lium/config.ini as billing_api_key")
         else:
-            ui.warning(f"Billing key not minted: {billing_result.error}")
+            ui.warning(f"Billing key not minted: {escape(str(billing_result.error))}")
 
     ui.print("")
     ui.info("Before the first rental:")
@@ -182,16 +183,16 @@ def _signup_without_email(billing_key: bool, json_output: bool) -> None:
         }, sort_keys=True))
         return
 
-    ui.success(f"Account created ({result.data.get('username') or 'no e-mail'})")
-    ui.print(f"\n  fingerprint: {result.data['fingerprint']}")
+    ui.success(f"Account created ({escape(str(result.data.get('username') or 'no e-mail'))})")
+    ui.print(f"\n  fingerprint: {escape(result.data['fingerprint'])}")
     ui.dim("  Save it — it is the only login at https://lium.io and cannot be recovered\n")
     ui.info("API key stored in ~/.lium/config.ini")
     if not ssh_result.ok:
-        ui.warning(f"SSH key not configured: {ssh_result.error}")
+        ui.warning(f"SSH key not configured: {escape(str(ssh_result.error))}")
     if billing_result is not None:
         if billing_result.ok:
             ui.info("Billing key (top-ups only) stored in ~/.lium/config.ini as billing_api_key")
         else:
-            ui.warning(f"Billing key not minted: {billing_result.error}")
+            ui.warning(f"Billing key not minted: {escape(str(billing_result.error))}")
     ui.print("")
-    ui.info(f"Next: {_credit_line(credit_granted)} Then 'lium ls' and 'lium up <node-id>'.")
+    ui.info(f"Next: {escape(_credit_line(credit_granted))} Then 'lium ls' and 'lium up <node-id>'.")
