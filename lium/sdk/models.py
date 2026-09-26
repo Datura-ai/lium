@@ -64,6 +64,14 @@ class ExecutorInfo(_Serializable):
     interconnect: Optional[Dict] = None
     # Every GPU pair on NVLink (an HGX board). False = PCIe and/or no peer-to-peer; None = unknown.
     nvlink: Optional[bool] = None
+    # A GPU on the node runs under 95 % of its default power limit, so a pod gets less than the card's
+    # stock power (the backend's verdict; `lium ls` marks it ↓W). False = every GPU at its default.
+    # None = the platform could not judge it (no default limit reported, or every reading is the
+    # temporary cap Lium's own Pearl job set).
+    gpu_power_limited: Optional[bool] = None
+    # The most reduced GPU's current and default power limit in watts; None with the verdict.
+    gpu_power_limit_w: Optional[int] = None
+    gpu_power_limit_default_w: Optional[int] = None
 
     @property
     def link(self) -> Optional[str]:
@@ -171,7 +179,7 @@ class PodInfo(_Serializable):
     # None when the API did not send it. ``executor`` describes the whole host, so
     # for a GPU-split rental (2 of the host's 8) this is the smaller number.
     gpu_count: Optional[int] = None
-    # The workspace the pod belongs to (lium-platform DAH-3030); None from a server without
+    # The workspace the pod belongs to; None from a server without
     # workspaces or for a pod from before them.
     workspace_id: Optional[str] = None
 
@@ -179,6 +187,15 @@ class PodInfo(_Serializable):
     cluster_id: Optional[str] = None
     cluster_node_index: Optional[int] = None
     cluster_overlay_ip: Optional[str] = None
+
+    # The API key that rented the pod (`api_key_id` / `api_key_name` on the /pods
+    # row); None for a pod rented from the browser or listed by a server without the fields.
+    api_key_id: Optional[str] = None
+    api_key_name: Optional[str] = None
+    # Whether the /pods row carried the key field at all (`api_key_id`, or the row's own
+    # `created_by_api_key_id`, which prod sends as null for a browser rental). False only from a
+    # server before per-key pods — the one case `ps --key` cannot tell one key's pods apart.
+    api_key_stamped: bool = False
 
     def eta_hint(self) -> Optional[str]:
         """One line for a pod that is still starting, e.g. ``est. ready in ~18 s (phase: pulling image)``.
@@ -477,7 +494,7 @@ class GpuStats(_Serializable):
 
 @dataclass
 class WorkspaceInfo:
-    """A workspace as the API describes it (lium-platform DAH-2975 / DAH-3030)."""
+    """A workspace (a team with roles and a billing owner) as the API describes it."""
 
     id: str
     name: str
@@ -503,6 +520,84 @@ class WorkspaceMember:
     joined_at: Optional[str] = None
 
 
+@dataclass
+class ApiKeyScope:
+    """One row of ``GET /keys/scopes``: what a scope lets a key do, in the server's words.
+
+    ``description`` is the one sentence next to the picker's checkbox, ``can`` the "what this key can do"
+    lines, ``route_families`` the routes it opens, ``default`` whether a key made without naming scopes gets it.
+    """
+
+    scope: str
+    description: str
+    title: str = ""
+    can: List[str] = field(default_factory=list)
+    route_families: List[str] = field(default_factory=list)
+    default: bool = False
+
+
+@dataclass
+class ApiKeyInfo:
+    """An API key row as ``GET /keys`` / ``POST /keys`` describe it.
+
+    The budget fields are USD, one per window — ``daily_budget_usd`` (a UTC day), ``monthly_budget_usd`` (a
+    UTC calendar month), ``max_budget_usd`` (the key's lifetime); ``spent_today_usd`` / ``spent_month_usd`` /
+    ``spent_total_usd`` are what the key's pods were billed in each; a budget is ``None`` when the key has none. ``pod_visibility`` is ``own``
+    (the key lists only the pods it rented) or ``account`` (every pod of the account); ``None`` from a server
+    before per-key budgets. ``key`` is the secret when the server sent it (``POST /keys`` always; the list rows on servers
+    that echo it): kept out of ``repr`` and of :meth:`to_dict`, so it is printed only where ``create`` prints it
+    once. ``raw`` is the server's row, for fields this class does not name.
+    """
+
+    id: str
+    name: str
+    scopes: List[str] = field(default_factory=list)
+    created_at: Optional[str] = None
+    last_used: Optional[str] = None
+    workspace_id: Optional[str] = None
+    daily_budget_usd: Optional[float] = None
+    monthly_budget_usd: Optional[float] = None
+    max_budget_usd: Optional[float] = None
+    spent_today_usd: Optional[float] = None
+    spent_month_usd: Optional[float] = None
+    spent_total_usd: Optional[float] = None
+    pod_visibility: Optional[str] = None
+    # active pods the key created, as the server counts them; None from a server before per-key budgets
+    pods_count: Optional[int] = None
+    key: Optional[str] = field(default=None, repr=False)
+    raw: Dict[str, Any] = field(default_factory=dict, repr=False)
+
+    def matches(self, name_or_id: str) -> bool:
+        """Whether ``name_or_id`` names this key: its id, or its name (case-insensitive)."""
+        return name_or_id == self.id or name_or_id.lower() == self.name.lower()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """The server's row without the key material, plus the normalised fields — what ``--json`` prints."""
+        data = {k: v for k, v in self.raw.items() if k != "key"}
+        for name in (
+            "id", "name", "scopes", "created_at", "last_used", "workspace_id", "daily_budget_usd",
+            "monthly_budget_usd", "max_budget_usd", "spent_today_usd", "spent_month_usd", "spent_total_usd",
+            "pod_visibility", "pods_count",
+        ):
+            data[name] = getattr(self, name)
+        return data
+
+
+@dataclass
+class ApiKeyRefusal:
+    """One row of ``GET /keys/{id}/refusals`` (server support pending): a request the key's budget
+    refused — when, which window was hit (``daily`` / ``monthly`` / ``max``), the route asked, the USD asked
+    for, and the budget and spend at the time. ``raw`` is the server's row."""
+
+    at: Optional[str] = None
+    window: Optional[str] = None
+    route: Optional[str] = None
+    amount_usd: Optional[float] = None
+    budget_usd: Optional[float] = None
+    spent_usd: Optional[float] = None
+    raw: Dict[str, Any] = field(default_factory=dict, repr=False)
+
+
 __all__ = [
     "ExecutorInfo",
     "PodInfo",
@@ -515,4 +610,7 @@ __all__ = [
     "GpuStats",
     "WorkspaceInfo",
     "WorkspaceMember",
+    "ApiKeyScope",
+    "ApiKeyInfo",
+    "ApiKeyRefusal",
 ]

@@ -6,12 +6,16 @@ from .decorators import machine
 from .exceptions import (
     ClusterNotListedError,
     LiumAuthError,
+    LiumBudgetExceededError,
+    LiumCardTopUpError,
+    LiumChargeOutcomeUnknownError,
     LiumError,
     LiumHostKeyError,
     LiumInsufficientBalanceError,
     LiumNotFoundError,
     LiumPermissionError,
     LiumRateLimitError,
+    LiumScopeError,
     LiumServerError,
     LiumSessionError,
     PodStartError,
@@ -19,6 +23,9 @@ from .exceptions import (
 )
 from .jobs import Job
 from .models import (
+    ApiKeyInfo,
+    ApiKeyRefusal,
+    ApiKeyScope,
     BackupConfig,
     BackupLog,
     Cluster,
@@ -35,11 +42,16 @@ from .models import (
     WorkspaceMember,
 )
 from .secrets import SecretInfo, SecretsClient
+from .api_keys import ApiKeysClient
 from .workspaces import WorkspacesClient
 from .result_codec import ResultEncodingError
 
 __all__ = [
     "Lium",
+    "ApiKeysClient",
+    "ApiKeyInfo",
+    "ApiKeyScope",
+    "ApiKeyRefusal",
     "WorkspacesClient",
     "SecretsClient",
     "SecretInfo",
@@ -63,6 +75,8 @@ __all__ = [
     "ClusterNotListedError",
     "LiumError",
     "LiumAuthError",
+    "LiumCardTopUpError",
+    "LiumChargeOutcomeUnknownError",
     "LiumRateLimitError",
     "LiumServerError",
     "LiumNotFoundError",
@@ -70,6 +84,8 @@ __all__ = [
     "PodStartError",
     "LiumHostKeyError",
     "LiumInsufficientBalanceError",
+    "LiumScopeError",
+    "LiumBudgetExceededError",
     "LiumSessionError",
     "RemoteExecutionError",
     "ResultEncodingError",

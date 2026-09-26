@@ -5,7 +5,8 @@ on:
   # Publishing a GitHub release on tag vX.Y.Z builds that tag and ships it: the version is the
   # tag (hatch-vcs, pyproject.toml), nothing in the tree is bumped (DAH-3225). Create it with
   # --prerelease: `latest` must not point at it until the assets are uploaded below, or install.sh
-  # and self-update see a release without binaries for ~3 min.
+  # and self-update see a release without binaries for ~3 min. PyPI is not uploaded here: publish-pypi.yml runs
+  # after this workflow succeeds and uploads the tag only when it is on main.
   release:
     types: [published]
   # A manual run only builds: no version input, nothing is published.
@@ -52,6 +53,10 @@ jobs:
 
     - name: Build package
       run: python -m build --sdist --wheel --outdir dist/
+
+    # PyPI refuses a distribution whose metadata it cannot render; find out here, before the release goes out
+    - name: Check the distributions' metadata
+      run: twine check --strict dist/*
 
     # a tag hatch-vcs cannot parse (v-less, extra suffix) would publish assets whose --version is not the release
     - name: Built version must equal the release tag
@@ -322,25 +327,3 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: gh release edit "$RELEASE_TAG" --prerelease=false --latest
-
-  approve-and-publish:
-    if: github.event_name == 'release'
-    needs: build-python
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      contents: read
-      id-token: write
-
-    steps:
-    - name: Download artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: python-dist
-        path: dist/
-
-    - name: Publish package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        verbose: true
-        print-hash: true
