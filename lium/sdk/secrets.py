@@ -37,15 +37,21 @@ def require_secrets_enabled() -> None:
 
 
 def invalid_secret_name_message(name: object) -> str:
-    """Why a name was refused, without repeating it: a rejected name may be a pasted value (`HF=hf_...`)."""
+    """Why a name was refused, repeating no part of it.
+
+    A rejected name may be a pasted value: `HF=hf_...`, or a base64 token whose `=` padding makes
+    everything before it look like a name. So the message never depends on more than whether an
+    `=` is present.
+    """
     if isinstance(name, str) and "=" in name:
-        prefix = name.split("=", 1)[0]
-        shown = f" ({prefix} followed by '=')" if SECRET_NAME_PATTERN.fullmatch(prefix) else ""
         return (
-            f"Secret names can't contain '='{shown}; pass the value separately "
-            "(lium secrets set NAME and enter the value when prompted)"
+            "Secret names can't contain '=' (the name was not shown: it may hold a value); pass the value "
+            "separately (lium secrets set NAME and enter the value when prompted)"
         )
-    return "Invalid secret name: letters, digits and _ only, not starting with a digit, at most 128"
+    return (
+        "Invalid secret name (not shown: it may hold a value): letters, digits and _ only, "
+        "not starting with a digit, at most 128"
+    )
 
 
 def validate_secret_name(name: str) -> str:

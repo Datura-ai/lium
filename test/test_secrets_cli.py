@@ -274,7 +274,7 @@ def test_a_pasted_name_value_is_refused_without_echoing_the_value(fake, up_ready
     assert result.exit_code == 2
     assert fake.set_calls == [] and fake.deleted == []
     assert VALUE not in printed
-    assert "can't contain '='" in printed and "HF_TOKEN followed by '='" in printed
+    assert "can't contain '='" in printed and "HF_TOKEN" not in printed
     if json_mode:
         assert json.loads(printed.strip().splitlines()[-1])["error"]["code"] == "invalid_arguments"
 
@@ -302,9 +302,70 @@ def test_sdk_refusal_never_contains_the_rejected_name(client, name):
         assert VALUE not in str(caught.value) and VALUE not in repr(caught.value)
 
 
-def test_a_valid_prefix_is_named_and_an_invalid_one_is_not():
-    assert "HF_TOKEN followed by '='" in sdk_secrets.invalid_secret_name_message("HF_TOKEN=x")
-    assert "followed by" not in sdk_secrets.invalid_secret_name_message("bad-name=x")
+def test_the_refusal_repeats_no_part_of_the_name():
+    assert sdk_secrets.invalid_secret_name_message(f"HF_TOKEN={VALUE}") == sdk_secrets.invalid_secret_name_message("x==")
+    assert sdk_secrets.invalid_secret_name_message(f"bad-{VALUE}") == sdk_secrets.invalid_secret_name_message("-")
+
+
+# A value pasted as the name, in the shapes that fooled a prefix check: base64 padding leaves a
+# name-shaped part before the first '='. Every marker below must be absent from all output.
+TOKEN = "Zm9vYmFyQmF6UXV4X2xvbmdfcmFuZG9tX3Rva2VuXzEyMzQ1Njc4OTA+c2VjcmV0/dmFsdWU"
+PADDED_SHAPES = {
+    "value==": (f"{VALUE}==", VALUE),
+    "value=": (f"{VALUE}=", VALUE),
+    "==": ("==", None),
+    "NAME=": (f"{VALUE}_NAME=", VALUE),
+    "token": (TOKEN, TOKEN),
+    "token==": (f"{TOKEN}==", TOKEN),
+    "HF=token=": (f"HF={TOKEN}=", TOKEN),
+}
+TOKEN_PARTS = [p for p in TOKEN.replace("+", "/").split("/") if len(p) >= 8]
+
+
+def _assert_nothing_leaks(text, marker):
+    if marker:
+        assert marker not in text
+        if marker == TOKEN:
+            assert not any(part in text for part in TOKEN_PARTS)
+
+
+@pytest.mark.parametrize("shape", PADDED_SHAPES, ids=list(PADDED_SHAPES))
+@pytest.mark.parametrize("command", ["set", "rm", "up", "up-second"])
+@pytest.mark.parametrize("json_mode", [False, True], ids=["text", "json"])
+def test_padded_or_bare_values_as_names_never_leak_from_the_cli(fake, up_ready, monkeypatch, shape, command, json_mode):
+    name, marker = PADDED_SHAPES[shape]
+    args = {
+        "set": ["secrets", "set", name],
+        "rm": ["secrets", "rm", name, "-y"],
+        "up": ["up", "exec-1", "--secret", name, "-y"],
+        "up-second": ["up", "exec-1", "--secret", "HF_TOKEN", "--secret", name, "-y"],
+    }[command]
+    if json_mode:
+        monkeypatch.setenv("LIUM_OUTPUT", "json")
+
+    result = CliRunner().invoke(cli, args, input="")
+    printed = _everything_printed(result)
+
+    assert result.exit_code == 2, printed
+    assert fake.set_calls == [] and fake.deleted == []
+    _assert_nothing_leaks(printed, marker)
+    if json_mode:
+        assert json.loads(printed.strip().splitlines()[-1])["error"]["code"] == "invalid_arguments"
+
+
+@pytest.mark.parametrize("shape", PADDED_SHAPES, ids=list(PADDED_SHAPES))
+def test_padded_or_bare_values_as_names_never_leak_from_the_sdk(client, shape):
+    name, marker = PADDED_SHAPES[shape]
+    calls = {
+        "set": lambda: client.secrets.set(name, "v"),
+        "delete": lambda: client.secrets.delete(name),
+        "up": lambda: client.up(executor_id="exec-1", template_id="tpl", ssh_keys=[KEY], secret_names=[name]),
+        "rent": lambda: client.rent(gpu_type="H100", ssh_keys=[KEY], secret_names=["HF_TOKEN", name]),
+    }
+    for label, call in calls.items():
+        with pytest.raises(ValueError) as caught:
+            call()
+        _assert_nothing_leaks(str(caught.value) + repr(caught.value), marker)
 
 
 def test_bare_secrets_still_lists(fake):
