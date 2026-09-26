@@ -17,11 +17,12 @@ from click.testing import CliRunner
 from rich.console import Console
 
 from lium.cli.provider import _blocking
-from lium.cli.provider._blocking import SECURE_GATING_CODES, fallback_reasons
+from lium.cli.provider._blocking import LEGACY_GATING_CODES, fallback_reasons
 from lium.cli.provider.command import provider_command
 from lium.provider.auth import LocalKeypairSigner
 from lium.provider.client import ProviderClient
 from lium.provider.token_store import TokenStore
+from lium.provider.errors import ProviderError
 
 
 def _node(node_id="e-1", *, status="AVAILABLE", **extra):
@@ -252,7 +253,8 @@ def test_node_list_json_carries_the_same_list(portal_for):
             "source": "idle_pay",
         }
     ]
-    assert rows["e-2"]["blocking_reasons"] == PORTAL_REASONS[:1]   # the portal's list, untouched
+    # the portal's list; an entry without `gating` (an older portal) gets the legacy verdict, marked
+    assert rows["e-2"]["blocking_reasons"] == [{**PORTAL_REASONS[0], "gating": True, "gating_source": "cli_legacy_fallback"}]
     assert "blocking_reasons_source" not in rows["e-2"]
     assert rows["e-3"]["blocking_reasons"] == []
 
@@ -305,7 +307,7 @@ def test_node_status_prints_the_panel_and_json_carries_the_list(portal_for):
 
     result = _run("--json", "node", "status", "e-1")
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["data"]["blocking_reasons"] == PORTAL_REASONS[:1]
+    assert json.loads(result.output)["data"]["blocking_reasons"] == [{**PORTAL_REASONS[0], "gating": True, "gating_source": "cli_legacy_fallback"}]
 
 
 def test_healthy_node_has_no_panel(portal_for):
@@ -318,9 +320,9 @@ def test_healthy_node_has_no_panel(portal_for):
 
 
 def test_secure_gating_codes_are_the_validators_node_level_codes():
-    assert "gpu_model_not_eligible_for_unrented_incentive" not in SECURE_GATING_CODES
-    assert "no_unrented_capacity_for_gpu_count" not in SECURE_GATING_CODES
-    assert len(SECURE_GATING_CODES) == 11
+    assert "gpu_model_not_eligible_for_unrented_incentive" not in LEGACY_GATING_CODES
+    assert "no_unrented_capacity_for_gpu_count" not in LEGACY_GATING_CODES
+    assert len(LEGACY_GATING_CODES) == 11
     # a healthy status ignores a stale last_error
     row = _node(computed_status={"status": "AVAILABLE", "last_error": {"title": "old", "remediation": "x"}})
     assert fallback_reasons(row) == []
@@ -620,3 +622,244 @@ def test_a_healthy_partly_rented_node_is_not_blocked(portal_for):
 
     result = _run("--json", "node", "get", "e-1")
     assert json.loads(result.output)["data"]["blocking_reasons"] == []
+
+
+# --- the agent contract: portal `gating`, the envelope, LIUM_OUTPUT, exit 10 -------------------------
+
+DRIVER_GATING = {
+    "kind": "idle_pay", "code": "nvidia_driver_below_minimum", "gating": True,
+    "message": "NVIDIA driver below the minimum", "measured": "550.54.15", "required": "580.65.06 or newer",
+    "fix": "Upgrade the NVIDIA driver on the host to 580.65.06 or newer, reboot the host, then restart the executor.",
+    "fix_command": "sudo apt-get install -y nvidia-driver-580 && sudo reboot",
+    "verify_command": "nvidia-smi --query-gpu=driver_version --format=csv,noheader",
+    "requires": ["sudo", "reboot"], "docs_url": "https://docs.lium.io/providers/nodes/quickstart",
+}
+
+
+class _SequencePortal(_Portal):
+    """``GET /executors/{id}`` answers with the next node of ``sequence`` (the last one repeats)."""
+
+    def __init__(self, sequence, **kw):
+        super().__init__(node=sequence[0], **kw)
+        self.sequence = list(sequence)
+
+    def get(self, path, *, params=None, auth=True):
+        if path.startswith("/executors/") and not path.endswith("/verification"):
+            self.gets.append(path)
+            node = self.sequence.pop(0) if len(self.sequence) > 1 else self.sequence[0]
+            return copy.deepcopy(node)
+        return super().get(path, params=params, auth=auth)
+
+
+class _FailingPortal(_Portal):
+    def get(self, path, *, params=None, auth=True):
+        raise ProviderError("no such node", code="PORTAL_NOT_FOUND")
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+        if len(self.sleeps) > 50:
+            raise AssertionError("the watch never stopped")
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    fake = _Clock()
+    monkeypatch.setattr("lium.cli.provider.node.time", fake)
+    return fake
+
+
+def _envelopes(stdout: str) -> list[dict]:
+    return [json.loads(line) for line in stdout.splitlines() if line.strip()]
+
+
+def test_the_portals_gating_decides_not_a_code_list_in_the_cli(portal_for):
+    new_code = {"kind": "idle_pay", "code": "some_new_validator_check", "gating": True,
+                "message": "A check the CLI has never heard of", "fix": "Do the new thing"}
+    price_off = {"kind": "idle_pay", "code": "price_above_market_p90_soft_limit", "gating": False,
+                 "message": "Price above the market soft limit", "fix": "No action: the portal does not gate on price"}
+    portal_for(_Portal(node=_node(blocking_reasons=[new_code, price_off])))
+
+    result = _run("node", "get", "e-1")
+
+    assert result.exit_code == 0, result.output
+    text = _flat(result.output)
+    assert "✗ A check the CLI has never heard of" in text
+    assert "Secure listing: 1 unmet requirement" in text and "• A check the CLI has never heard of" in text
+    assert "✗ Price above" not in text
+    assert "Not eligible for idle pay: price above the market soft limit" in text
+
+    result = _run("--json", "node", "get", "e-1")
+    assert json.loads(result.stdout)["data"]["blocking_reasons"] == [new_code, price_off]   # served, untouched
+
+
+def test_an_entry_without_gating_takes_the_legacy_fallback_and_says_so(portal_for):
+    old_portal = {"code": "some_new_validator_check", "message": "A check the CLI has never heard of", "fix": "x"}
+    portal_for(_Portal(node=_node(blocking_reasons=[old_portal])))
+
+    result = _run("--json", "node", "get", "e-1")
+
+    [entry] = json.loads(result.stdout)["data"]["blocking_reasons"]
+    assert entry == {**old_portal, "gating": True, "gating_source": "cli_legacy_fallback"}
+    text = _flat(_run("node", "get", "e-1").output)
+    assert "✗ A check the CLI has never heard of" in text
+    assert "Secure listing" not in text   # the legacy list does not know the code
+
+
+def test_a_provider_error_is_the_namespaced_envelope_on_stdout(portal_for):
+    portal_for(_FailingPortal())
+
+    result = _run("--json", "node", "get", "e-1")
+
+    assert result.exit_code == 3
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "ok": False,
+        "error": {
+            "code": "portal.not_found",
+            "legacy_code": "PORTAL_NOT_FOUND",
+            "message": "no such node",
+            "hint": "The portal returned 404 for that resource (wrong UUID or already removed).",
+            "exit_code": 3,
+            "context": {},
+        },
+    }
+
+
+def test_every_provider_error_code_is_namespaced_snake_case():
+    from lium.cli.provider._render import ERROR_CODES, error_code_for
+    from lium.provider import errors
+
+    upper = {v for k, v in vars(errors).items() if k.isupper() and isinstance(v, str) and v.isupper() and "_" in v}
+    assert upper <= set(ERROR_CODES)
+    namespaces = {"auth", "input", "portal", "net", "ssh", "host", "node"}
+    for code in upper:
+        namespace, _, name = error_code_for(code).partition(".")
+        assert namespace in namespaces and re.fullmatch(r"[a-z0-9_]+", name), code
+    assert error_code_for("node.blocked.sysbox_not_enabled") == "node.blocked.sysbox_not_enabled"
+
+
+def test_lium_output_json_is_the_same_as_the_json_flag(portal_for, monkeypatch):
+    portal_for(_Portal(node=_node(blocking_reasons=[DRIVER_GATING])))
+    monkeypatch.setenv("LIUM_OUTPUT", "json")
+
+    result = _run("node", "get", "e-1")
+
+    assert result.exit_code == 0, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is True and envelope["data"]["id"] == "e-1"
+    assert "BLOCKING" not in result.output
+
+    portal_for(_FailingPortal())
+    assert json.loads(_run("node", "get", "e-1").stdout)["error"]["code"] == "portal.not_found"
+
+
+def test_node_get_fail_on_blocked_exits_10_with_one_envelope(portal_for):
+    portal_for(_Portal(node=_node(blocking_reasons=[DRIVER_GATING])))
+
+    result = _run("--json", "node", "get", "e-1", "--fail-on-blocked")
+
+    assert result.exit_code == 10
+    [envelope] = _envelopes(result.stdout)
+    assert envelope["ok"] is False
+    error = envelope["error"]
+    assert (error["code"], error["exit_code"]) == ("node.blocked.nvidia_driver_below_minimum", 10)
+    assert error["hint"] == DRIVER_GATING["fix"]
+    assert error["data"]["id"] == "e-1" and error["data"]["blocking_reasons"] == [DRIVER_GATING]
+
+    result = _run("node", "get", "e-1", "--fail-on-blocked")
+    assert result.exit_code == 10
+    assert "BLOCKING e-1" in _flat(result.stdout)
+    assert "[node.blocked.nvidia_driver_below_minimum] node e-1 is blocked" in result.stderr
+
+    assert _run("node", "get", "e-1").exit_code == 0   # without the flag a blocked node still exits 0
+
+
+def test_fail_on_blocked_passes_a_clear_or_only_not_eligible_node(portal_for):
+    portal_for(_Portal(node=_node(blocking_reasons=[CATALOG_GPU_MODEL])))
+    assert _run("node", "get", "e-1", "--fail-on-blocked").exit_code == 0
+    portal_for(_Portal(node=_node()))
+    assert _run("--json", "node", "status", "e-1", "--fail-on-blocked").exit_code == 0
+
+
+def test_node_status_fail_on_blocked_exits_10(portal_for):
+    portal_for(_Portal(node=_node(blocking_reasons=[DRIVER_GATING])))
+
+    result = _run("--json", "node", "status", "e-1", "--fail-on-blocked")
+
+    assert result.exit_code == 10
+    [envelope] = _envelopes(result.stdout)
+    assert envelope["error"]["code"] == "node.blocked.nvidia_driver_below_minimum"
+    assert envelope["error"]["data"]["phase"] == "idle"   # the verification view, with its reasons
+    assert envelope["error"]["data"]["blocking_reasons"] == [DRIVER_GATING]
+
+
+def test_watch_until_clear_exits_0_once_the_node_is_clear(portal_for, clock):
+    blocked, clear = _node(blocking_reasons=[DRIVER_GATING]), _node(blocking_reasons=[])
+    portal_for(_SequencePortal([blocked, blocked, clear]))
+
+    result = _run("--json", "node", "status", "e-1", "--watch", "--until-clear", "--timeout", "600")
+
+    assert result.exit_code == 0, result.output
+    frames = _envelopes(result.stdout)
+    assert [f["ok"] for f in frames] == [True, True, True]
+    assert [len(f["data"]["blocking_reasons"]) for f in frames] == [1, 1, 0]
+    assert clock.sleeps == [5, 5]
+
+
+def test_watch_until_clear_exits_10_at_the_timeout(portal_for, clock):
+    portal_for(_SequencePortal([_node(blocking_reasons=[DRIVER_GATING])]))
+
+    result = _run("--json", "node", "status", "e-1", "--watch", "--until-clear", "--timeout", "12")
+
+    assert result.exit_code == 10
+    frames = _envelopes(result.stdout)
+    assert [f["ok"] for f in frames] == [True, True, True, False]
+    assert frames[-1]["error"]["code"] == "node.blocked.nvidia_driver_below_minimum"
+    assert clock.sleeps == [5, 5, 2]   # the last wait is cut to the deadline
+
+
+def test_plain_watch_ignores_a_clear_node_and_keeps_refreshing(portal_for, clock):
+    portal_for(_SequencePortal([_node(blocking_reasons=[])]))
+
+    def _interrupt(seconds):
+        clock.sleeps.append(seconds)
+        if len(clock.sleeps) == 3:
+            raise KeyboardInterrupt
+
+    clock.sleep = _interrupt
+
+    result = _run("--json", "node", "status", "e-1", "--watch")
+
+    assert result.exit_code == 0, result.output
+    assert len(_envelopes(result.stdout)) == 3
+
+
+def test_until_clear_needs_watch_and_timeout_needs_until_clear(portal_for):
+    portal_for(_Portal(node=_node()))
+
+    result = _run("--json", "node", "status", "e-1", "--until-clear")
+    assert result.exit_code == 1 and json.loads(result.stdout)["error"]["code"] == "input.arg_invalid"
+    result = _run("--json", "node", "status", "e-1", "--watch", "--timeout", "5")
+    assert result.exit_code == 1 and "--timeout needs --until-clear" in result.stdout
+
+
+def test_the_panel_prints_requires_and_the_verify_command(portal_for):
+    portal_for(_Portal(node=_node(blocking_reasons=[DRIVER_GATING])))
+
+    result = _run("node", "get", "e-1")
+
+    lines = [re.sub(r"[│\s]+$", "", re.sub(r"^[│\s]+", "", line)) for line in result.output.splitlines()]
+    assert "Requires: sudo · reboot" in lines
+    verify = lines.index("Verify:")
+    assert lines[verify + 1] == "nvidia-smi --query-gpu=driver_version --format=csv,noheader"
+    assert lines.index("sudo apt-get install -y nvidia-driver-580 && sudo reboot") < verify

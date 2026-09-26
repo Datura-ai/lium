@@ -4,7 +4,8 @@ Subcommands:
 
 - ``list``                    -- paginated node listing.
 - ``get <id>``                -- single node record.
-- ``status <id> [--watch]``   -- verification step in progress / last run timeline.
+- ``status <id> [--watch [--until-clear [--timeout N]]] [--fail-on-blocked]``
+                              -- verification step in progress / last run timeline.
 - ``add``                     -- queue a new node (calls /executors).
 - ``rm <id>``                 -- delete a node.
 - ``update-price <id>``       -- set price-per-GPU.
@@ -38,7 +39,7 @@ from lium.cli.provider._guards import (
     require_persona_ack,
 )
 from lium.cli.provider._overrides import with_provider_overrides
-from lium.cli.provider._render import fatal, render
+from lium.cli.provider._render import EXIT_NODE_BLOCKED, emit_node_blocked, fatal, render
 from lium.cli.provider._verification import render_text
 from lium.provider._shared_config import default_price_for_gpu, fetch_shared_config
 from lium.provider.errors import ARG_INVALID, ProviderError
@@ -116,11 +117,15 @@ def list_nodes(
         _blocking.print_not_eligible(rows, short=True)
 
 
+_FAIL_ON_BLOCKED_HELP = f"Exit {EXIT_NODE_BLOCKED} when the node has a gating blocking reason."
+
+
 @node_command.command("get", short_help="Show one node.")
 @click.argument("node_id", required=True)
+@click.option("--fail-on-blocked", is_flag=True, help=_FAIL_ON_BLOCKED_HELP)
 @with_provider_overrides
 @click.pass_context
-def get_node(ctx: click.Context, node_id: str) -> None:
+def get_node(ctx: click.Context, node_id: str, fail_on_blocked: bool) -> None:
     require_hotkey(ctx, group="node")
     client = build_client(ctx)
     try:
@@ -130,10 +135,16 @@ def get_node(ctx: click.Context, node_id: str) -> None:
         return
     if isinstance(body, dict):
         _attach_blocking(client, body)
+    reasons = _blocking.node_reasons(body) if isinstance(body, dict) else []
+    if fail_on_blocked and reasons and _json_mode(ctx):
+        ctx.exit(emit_node_blocked(ctx, node_id, reasons, body))
+        return
     render(ctx, body, summary=f"node {node_id}")
     if isinstance(body, dict) and not _json_mode(ctx):
         _blocking.print_panels([body])
         _blocking.print_not_eligible([body], short=False)
+    if fail_on_blocked and reasons:
+        ctx.exit(emit_node_blocked(ctx, node_id, reasons, body))
 
 
 @node_command.command("status", short_help="Verification progress of one node.")
@@ -144,6 +155,18 @@ def get_node(ctx: click.Context, node_id: str) -> None:
     help="Refresh until interrupted (Ctrl-C). In --json mode prints one object per refresh.",
 )
 @click.option(
+    "--until-clear",
+    is_flag=True,
+    help=f"With --watch: stop and exit 0 once no gating blocking reason is left (exit {EXIT_NODE_BLOCKED} at --timeout).",
+)
+@click.option(
+    "--timeout",
+    type=click.IntRange(min=1),
+    default=None,
+    help=f"Seconds --until-clear waits before it exits {EXIT_NODE_BLOCKED}; unset waits until clear.",
+)
+@click.option("--fail-on-blocked", is_flag=True, help=_FAIL_ON_BLOCKED_HELP)
+@click.option(
     "--interval",
     type=click.IntRange(min=2),
     default=5,
@@ -152,7 +175,15 @@ def get_node(ctx: click.Context, node_id: str) -> None:
 )
 @with_provider_overrides
 @click.pass_context
-def status_node(ctx: click.Context, node_id: str, watch: bool, interval: int) -> None:
+def status_node(
+    ctx: click.Context,
+    node_id: str,
+    watch: bool,
+    until_clear: bool,
+    timeout: int | None,
+    fail_on_blocked: bool,
+    interval: int,
+) -> None:
     """Which validator step the node is on, elapsed and estimated time left
     while a check runs; the last run's per-step timeline otherwise.
 
@@ -165,8 +196,13 @@ def status_node(ctx: click.Context, node_id: str, watch: bool, interval: int) ->
     the verdict itself lands when the validator publishes the cycle.
     """
     require_hotkey(ctx, group="node")
+    if until_clear and not watch:
+        fatal(ctx, ProviderError("--until-clear needs --watch", code=ARG_INVALID, hint="Re-run with --watch --until-clear."))
+    if timeout is not None and not until_clear:
+        fatal(ctx, ProviderError("--timeout needs --until-clear", code=ARG_INVALID, hint="Re-run with --watch --until-clear --timeout N."))
     client = build_client(ctx)
     json_mode = _json_mode(ctx)
+    deadline = time.monotonic() + timeout if timeout is not None else None
     # One guard around the whole loop: Ctrl-C exits 0 whether it lands during the fetch,
     # the print or the sleep (click would otherwise print "Aborted!" and exit 1 mid-fetch).
     try:
@@ -177,10 +213,15 @@ def status_node(ctx: click.Context, node_id: str, watch: bool, interval: int) ->
                 ctx.exit(handle_provider_error(ctx, e))
                 return
             node = _node_with_blocking(client, node_id)
+            reasons = _blocking.node_reasons(node) if node is not None else []
+            if isinstance(body, dict) and node is not None:
+                body = {**body, "blocking_reasons": node["blocking_reasons"]}
+            last = not watch or (until_clear and node is not None and not reasons)
+            timed_out = deadline is not None and not last and time.monotonic() >= deadline
+            fail = reasons and (timed_out or (last and fail_on_blocked))
             if json_mode:
-                if isinstance(body, dict) and node is not None:
-                    body = {**body, "blocking_reasons": node["blocking_reasons"]}
-                render(ctx, body)
+                if not fail:
+                    render(ctx, body)
             else:
                 if watch:
                     click.clear()
@@ -188,9 +229,17 @@ def status_node(ctx: click.Context, node_id: str, watch: bool, interval: int) ->
                 if node is not None:
                     _blocking.print_panels([node])
                     _blocking.print_not_eligible([node], short=False)
-            if not watch:
+            if fail:
+                ctx.exit(emit_node_blocked(ctx, node_id, reasons, body))
                 return
-            time.sleep(interval)
+            if last:
+                return
+            if timed_out:
+                unknown = [{"code": "", "title": "the node record did not come back, so nothing shows it clear"}]
+                ctx.exit(emit_node_blocked(ctx, node_id, unknown, body))
+                return
+            sleep = interval if deadline is None else max(0.0, min(interval, deadline - time.monotonic()))
+            time.sleep(sleep)
     except KeyboardInterrupt:
         return
 

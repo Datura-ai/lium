@@ -5,9 +5,10 @@ out of idle pay, each with its message, the measured and required value and the 
 the portal serves that list, it is rebuilt here from what the portal already returns: the
 validator's ``computed_status.last_error``, the listing's ``hidden_reasons`` and the idle-pay
 reasons of ``GET /miners/overview``. A node with any reason gets a red BLOCKING panel; ``--json``
-carries the same list under each node's ``blocking_reasons``. An entry with ``gating: false`` (an
-idle-pay code Secure does not require) blocks nothing: it prints as "Not eligible for idle pay: …"
-with its "No action: …" line.
+carries the same list under each node's ``blocking_reasons``. Whether a reason blocks is the portal's
+``gating``; an entry with ``gating: false`` (an idle-pay code Secure does not require) blocks nothing: it
+prints as "Not eligible for idle pay: …" with its "No action: …" line. Only an entry the portal sends
+without ``gating`` (a portal from before the field) is decided here, from the code: the legacy fallback.
 """
 
 from __future__ import annotations
@@ -24,10 +25,10 @@ from rich.text import Text
 from lium.cli.utils import console
 from lium.provider.errors import ProviderError
 
-# The validator's idle-pay codes (``ZeroIncentiveReason``) a Secure listing requires,
-# the portal's default gating list. Not listed on purpose: the two ``NOT_GATED`` codes below,
-# ``spot_tier`` and ``new_rentals_paused``.
-SECURE_GATING_CODES = frozenset(
+# Legacy fallback, for a portal that sends no ``gating``: the validator's idle-pay codes
+# (``ZeroIncentiveReason``) the portal gated Secure listing on before it served the field. Not listed on
+# purpose: the two ``NOT_GATED`` codes below, ``spot_tier`` and ``new_rentals_paused``.
+LEGACY_GATING_CODES = frozenset(
     {
         "nvidia_driver_below_minimum",
         "sysbox_not_enabled",
@@ -170,7 +171,7 @@ def _idle_pay_entry(code: str, context: Mapping[str, Any], message: str | None, 
         "measured": measured,
         "required": required,
         "fix": fix,
-        "secure": code in SECURE_GATING_CODES,
+        "secure": code in LEGACY_GATING_CODES,
         "gating": True,
         "source": "idle_pay",
     }
@@ -248,7 +249,7 @@ def fallback_reasons(row: Mapping[str, Any], idle_pay_reasons: Iterable[Mapping[
         if code in NOT_GATED:
             _add(_not_gated_entry(code))
             continue
-        if code not in SECURE_GATING_CODES:
+        if code not in LEGACY_GATING_CODES:
             continue
         context = idle.get("context") if isinstance(idle.get("context"), Mapping) else {}
         message = idle.get("message") or idle.get("message_for_miner")
@@ -264,17 +265,31 @@ def _first(entry: Mapping[str, Any], *keys: str) -> Any:
     return None
 
 
+def _legacy_gating(code: str) -> bool:
+    """Legacy fallback for an entry without ``gating``: every code blocks except the ``NOT_GATED`` two."""
+    return code not in NOT_GATED
+
+
 def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
     """One portal ``blocking_reasons`` entry as the fields the renderer prints.
 
-    ``secure`` falls back to the code's place in the gating list and ``gating`` to the code not being
-    ``NOT_GATED``; the portal serves ``secure_requirement`` and no ``gating``. Fields not named here
-    are not printed (``--json`` passes the portal's entry through unchanged).
+    ``gating`` is the portal's. ``secure`` (listed as an unmet Secure requirement) is the portal's
+    ``secure``/``secure_requirement``, else a gating idle-pay reason. An entry without ``gating`` takes
+    both from the code (``gating_source: cli_legacy_fallback``). Fields not named here are not printed.
     """
     code = str(_first(entry, "code", "reason_code") or "")
     code = _ALIASES.get(code, code)
     secure = _first(entry, "secure", "secure_requirement", "blocks_secure", "gates_secure")
-    gating = entry.get("gating")
+    served = None if entry.get("gating_source") == "cli_legacy_fallback" else entry.get("gating")
+    if served is not None:
+        gating = bool(served)
+        if secure is None:
+            secure = gating and str(entry.get("kind") or "idle_pay") == "idle_pay"
+    else:
+        gating = _legacy_gating(code)
+        if secure is None:
+            secure = code in LEGACY_GATING_CODES
+    requires = entry.get("requires")
     return {
         "code": code,
         "title": _first(entry, "title", "message") or code,
@@ -282,9 +297,12 @@ def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
         "required": _first(entry, "required", "required_value"),
         "fix": _first(entry, "fix", "exact_fix", "fix_text", "remediation") or "",
         "fix_command": _first(entry, "fix_command"),
+        "verify_command": _first(entry, "verify_command"),
+        "requires": [str(r) for r in requires] if isinstance(requires, list) else [],
         "docs_url": _first(entry, "docs_url"),
-        "secure": bool(secure) if secure is not None else code in SECURE_GATING_CODES,
-        "gating": bool(gating) if gating is not None else code not in NOT_GATED,
+        "secure": bool(secure),
+        "gating": gating,
+        "gating_source": "portal" if served is not None else "cli_legacy_fallback",
     }
 
 
@@ -332,9 +350,19 @@ def fetch_idle_pay_reasons(client: Any) -> dict[str, list[Mapping[str, Any]]]:
 
 
 def attach(rows: Iterable[Any], idle_by_node: Mapping[str, list[Mapping[str, Any]]] | None = None) -> None:
-    """Give every node dict without a portal ``blocking_reasons`` the list rebuilt from the fallback sources."""
+    """Give every node dict without a portal ``blocking_reasons`` the list rebuilt from the fallback sources.
+
+    A portal entry without ``gating`` gets the legacy fallback's ``gating`` and
+    ``gating_source: cli_legacy_fallback`` so a ``--json`` reader sees the same verdict the panel prints.
+    """
     for row in rows:
-        if not isinstance(row, dict) or isinstance(row.get("blocking_reasons"), list):
+        if not isinstance(row, dict):
+            continue
+        if isinstance(row.get("blocking_reasons"), list):
+            for entry in row["blocking_reasons"]:
+                if isinstance(entry, dict) and entry.get("gating") is None:
+                    entry["gating"] = normalise(entry)["gating"]
+                    entry["gating_source"] = "cli_legacy_fallback"
             continue
         node_id = str(row.get("id") or row.get("executor_id") or "")
         row["blocking_reasons"] = fallback_reasons(row, (idle_by_node or {}).get(node_id, ()))
@@ -375,6 +403,11 @@ def blocking_panel(row: Mapping[str, Any]) -> Panel | None:
             lines.append(Padding(Text.from_markup(f"[bold]Fix:[/] {escape(str(reason['fix']))}"), (0, 0, 0, 2)))
         if reason.get("fix_command"):
             lines.append(Padding(Text(str(reason["fix_command"]), style="bold"), (0, 0, 0, 4)))
+        if reason.get("requires"):
+            lines.append(Padding(Text.from_markup(f"[bold]Requires:[/] {escape(' · '.join(reason['requires']))}"), (0, 0, 0, 2)))
+        if reason.get("verify_command"):
+            lines.append(Padding(Text.from_markup("[bold]Verify:[/]"), (0, 0, 0, 2)))
+            lines.append(Padding(Text(str(reason["verify_command"]), style="bold"), (0, 0, 0, 4)))
         if reason.get("docs_url"):
             lines.append(Padding(Text(f"Docs: {reason['docs_url']}"), (0, 0, 0, 2)))
     secure = [r for r in reasons if r.get("secure")]
@@ -453,9 +486,9 @@ def print_not_eligible(rows: Iterable[Any], *, short: bool) -> int:
 
 
 __all__ = [
+    "LEGACY_GATING_CODES",
     "MIN_NVIDIA_DRIVER",
     "NOT_GATED",
-    "SECURE_GATING_CODES",
     "attach",
     "blocked_count",
     "blocking_panel",
