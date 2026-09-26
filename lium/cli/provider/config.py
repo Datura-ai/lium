@@ -6,7 +6,7 @@ Subcommands:
 - ``opt-in / opt-out``           -- toggle the lium.io central miner server.
 - ``set-email <email>``          -- update contact email.
 - ``set-password``               -- set password using signature authentication.
-- ``connect-discord``            -- start Discord OAuth linking.
+- ``connect-discord``            -- link Discord: a human handoff (URL + code), ``--wait`` to poll.
 - ``set-subscriptions``          -- machine-request notification subscriptions.
 
 Distinction from ``lium config`` (CLI-side ConfigManager) and
@@ -22,6 +22,7 @@ import webbrowser
 import click
 
 from lium.cli.provider._client import build_client
+from lium.cli.provider._handoff import run_handoff
 from lium.cli.provider._guards import (
     handle_provider_error,
     require_hotkey,
@@ -30,7 +31,7 @@ from lium.cli.provider._guards import (
 from lium.cli.provider._overrides import with_provider_overrides
 from lium.cli.provider._render import discord_incentive_warnings, render
 from lium.provider.client import discord_connected_from_profile, with_discord_eligibility
-from lium.provider.errors import ARG_INVALID, ProviderError
+from lium.provider.errors import ARG_INVALID, PORTAL_NOT_SUPPORTED, ProviderError
 
 
 @click.group("config")
@@ -161,19 +162,24 @@ def set_password(ctx: click.Context, new_password: str | None) -> None:
 
 @config_command.command(
     "connect-discord",
-    short_help="Start Discord OAuth linking for extra incentive eligibility.",
+    short_help="Link Discord (a one-time human step) for extra incentive eligibility.",
+)
+@click.option(
+    "--wait",
+    is_flag=True,
+    help="After the handoff is printed, poll until the person has linked Discord (exit 0) or the code "
+    "expires (human.handoff_expired, exit 12).",
 )
 @click.option(
     "--no-wait",
     is_flag=True,
-    help="Return immediately after printing the Discord authorization URL.",
+    help="Old browser flow only: return right after printing the Discord authorization URL.",
 )
 @click.option(
     "--timeout",
     type=click.IntRange(min=0),
-    default=120,
-    show_default=True,
-    help="Seconds to wait for Discord linking outside --no-wait.",
+    default=None,
+    help="Seconds to wait: with --wait, until the code expires by default; in the old browser flow, 120.",
 )
 @click.option(
     "--poll-interval",
@@ -186,45 +192,53 @@ def set_password(ctx: click.Context, new_password: str | None) -> None:
 @click.pass_context
 def connect_discord(
     ctx: click.Context,
+    wait: bool,
     no_wait: bool,
-    timeout: int,
+    timeout: int | None,
     poll_interval: float,
 ) -> None:
+    """Linking Discord is a one-time human step (it is required for idle pay's extra incentive).
+
+    The portal hands out one URL plus a short code: without --wait this is human.handoff_required
+    (exit 12) with data {step, handoff_url, code, expires_at, message_for_human}; relay
+    message_for_human to the person. With --wait the command polls until they are done (exit 0) or the
+    code expires (human.handoff_expired, exit 12). A portal without handoff sessions answers
+    portal.not_supported under --json, with the old browser URL in data.legacy_browser_url; in a terminal
+    the old browser flow runs.
+    """
     require_hotkey(ctx, group="config")
     client = build_client(ctx)
+    try:
+        result = run_handoff(
+            client,
+            step="discord_link",
+            wait=wait,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            json_mode=_json_mode(ctx),
+            legacy_url=client.create_discord_oauth_authorization_url,
+        )
+    except ProviderError as e:
+        if e.code != PORTAL_NOT_SUPPORTED or _json_mode(ctx):
+            ctx.exit(handle_provider_error(ctx, e))
+            return
+        click.echo("The portal does not serve handoffs yet; using the browser link.", err=True)
+    else:
+        render(ctx, {**result, "discord_connected": True, "extra_incentive_eligible": True},
+               summary="Discord connected; extra incentives enabled")
+        return
+
     try:
         authorization_url = client.create_discord_oauth_authorization_url()
         browser_opened = _open_authorization_url(authorization_url)
         discord_connected = _wait_for_discord_connection(
             client,
             no_wait=no_wait,
-            timeout=timeout,
+            timeout=120 if timeout is None else timeout,
             poll_interval=poll_interval,
         )
     except ProviderError as e:
         ctx.exit(handle_provider_error(ctx, e))
-        return
-
-    next_action = (
-        "discord_connected"
-        if discord_connected is True
-        else "open_authorization_url_and_complete_discord_oauth"
-    )
-    json_payload = {
-        "authorization_url": authorization_url,
-        "browser_opened": bool(browser_opened),
-        "discord_connected": discord_connected,
-        "extra_incentive_eligible": discord_connected
-        if discord_connected is not None
-        else None,
-        "next_action": next_action,
-    }
-    if _json_mode(ctx):
-        render(
-            ctx,
-            json_payload,
-            warnings=discord_incentive_warnings(discord_connected),
-        )
         return
 
     human_payload = {

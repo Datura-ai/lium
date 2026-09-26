@@ -52,6 +52,11 @@ LOGIN_EMAIL = "/auth/login-email"
 API_TOKENS = "/auth/api-tokens"
 API_TOKEN_BY_ID = "/auth/api-tokens/{token_id}"
 
+# Human handoffs: a step only a person can do (Discord OAuth, e-mail confirmation) as one URL plus a short code
+HANDOFFS = "/auth/handoffs"
+HANDOFF_BY_ID = "/auth/handoffs/{handoff_id}"
+EMAIL_VERIFY_CODE = "/auth/me/email/verify-code"
+
 # Earnings (public, by hotkey) and the signed-in provider's ledger
 PROVIDER_EARNINGS_DAILY = "/provider-earnings/{hotkey}/daily"
 PROVIDER_EMISSIONS_DAILY = "/provider-earnings/{hotkey}/emissions/daily"
@@ -76,6 +81,7 @@ __all__ = [
     "BILLING",
     "BILLING_BY_MINER",
     "DISCORD_OAUTH_URL",
+    "EMAIL_VERIFY_CODE",
     "ESTIMATED_REWARDS",
     "EXECUTOR_BY_ID",
     "EXECUTOR_MACHINE_ADDED",
@@ -89,6 +95,8 @@ __all__ = [
     "EXECUTOR_VERIFICATION",
     "EXECUTORS",
     "EXECUTORS_LISTING",
+    "HANDOFF_BY_ID",
+    "HANDOFFS",
     "LOGIN_EMAIL",
     "LOGIN_FLEXIBLE",
     "LOGOUT",

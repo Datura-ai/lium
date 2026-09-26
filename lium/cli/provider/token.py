@@ -23,7 +23,11 @@ SCOPES = ("read", "node", "tier", "register")
 
 @click.group("token")
 def token_command() -> None:
-    """Create, list and revoke provider API tokens (LIUM_PROVIDER_TOKEN)."""
+    """Create, list and revoke provider API tokens (LIUM_PROVIDER_TOKEN).
+
+    This is how an agent signs in. Google sign-in is for people in the portal; a person signed in
+    (hotkey, or `portal login --email`) creates the token here and hands it to the agent.
+    """
 
 
 @token_command.command("create", short_help="Create a scoped provider API token.")

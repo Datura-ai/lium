@@ -168,7 +168,7 @@ A namespaced code (`<namespace>.<snake_case>`) exits by this map (`unified_exit_
 | 7 | `EXIT_RETRYABLE` | A portal 429: retry after a pause. |
 | 10 | `EXIT_BLOCKED` | `node.blocked.<code>`: the portal refused the node change for a named reason. |
 | 11 | `EXIT_NOT_LISTED` | `node.not_listed_yet`: the node is registered and waited for, but not listed. |
-| 12 | `EXIT_HUMAN` | `human.*`: a person has to act (a browser step, a support ticket) before the command can succeed. |
+| 12 | `EXIT_HUMAN` | `human.*`: a person has to act (link Discord, confirm the e-mail) before the command can succeed; `data` says what to relay. |
 
 A portal refusal whose body names `detail.code` is passed through as `portal.<detail.code>`
 with `detail.message` as the message and the rest of `detail` in `error.data`.
@@ -179,6 +179,9 @@ with `detail.message` as the message and the rest of `detail` in `error.data`.
 | `input.input_required` | 2 | A prompt nobody can answer: `lium mine` without `-k` off a terminal, `portal login --email` without `LIUM_PROVIDER_PASSWORD` off a terminal. |
 | `input.register_token_invalid` | 2 | `lium mine --json --register` with an expired or unreadable token; nothing on the host was touched. |
 | `input.hotkey_conflicts_with_token` | 2 | `lium mine --json --register … -k` with a hotkey the token does not name. |
+| `input.code_invalid` | 2 | `lium provider portal confirm-email --code` with anything but 6 digits; nothing is sent. |
+| `human.handoff_required` | 12 | A one-time human step (`lium provider config connect-discord`, `lium provider portal confirm-email`). `data`: `step` (`discord_link`, `email_confirm`), `handoff_url`, `code`, `expires_at`, `message_for_human`. Relay `message_for_human` to the person, then re-run with `--wait`. With `--wait --timeout N`, also when N seconds pass first (`data.waited_s`). |
+| `human.handoff_expired` | 12 | `--wait`: the code expired before the person finished; run the command again for a new code. |
 | `net.unreachable` | 4 | Connection refused, DNS failure or timeout reaching the portal. |
 | `portal.not_supported` | 3 | The portal answered 404/405 for a route this CLI knows (`lium provider token …` before the portal serves API tokens). |
 | `portal.<detail.code>` | by status | The portal's own code, passed through. |
@@ -200,6 +203,16 @@ are taken anyway and a missing `-k` is `input.input_required`.
 Provider auth without a wallet: `LIUM_PROVIDER_TOKEN` is sent as the Bearer token when set;
 `lium provider portal login --email you@example.com` reads the password from `LIUM_PROVIDER_PASSWORD`
 (a hidden prompt on a terminal) and keeps the session for later commands (`LIUM_PROVIDER_EMAIL` picks the session).
+Google sign-in is for people in the portal. An agent signs in with `LIUM_PROVIDER_TOKEN`: a person signed in creates the
+token with `lium provider token create` and hands it over.
+
+One-time human steps (`config connect-discord`, `portal confirm-email`) answer `human.handoff_required` (exit 12):
+one URL plus a short code for the person. `--wait` polls until the step is done (exit 0) or the code expires
+(`human.handoff_expired`, exit 12); under `--json` the handoff is also one `{"event": "handoff", …}` line on stderr
+while it waits. `portal confirm-email --code 123456` submits the 6-digit code from the confirmation mail. A portal
+that does not serve handoff sessions (or e-mailed codes) answers `portal.not_supported` (exit 3) with
+`data.legacy_flow: true` and `data.legacy_browser_url`, the old browser link; in a terminal `connect-discord`
+then runs the old browser flow.
 
 ### Old codes and their new names
 
@@ -214,6 +227,7 @@ migrate. The failures below carry the namespaced code:
 | `ARG_INVALID` (1), or a prompt that hung | `input.confirmation_required` (2) | The persona gate without a terminal or under `--json`. A decline at the prompt stays `ARG_INVALID`. |
 | exit 2 (text, not listed) | `node.not_listed_yet` (11) | `lium mine --register`, under `--json` only. |
 | exit 1 (any `lium mine` step) | `host.*` (1) | Under `--json` only; text mode is unchanged. |
+| exit 0 with `authorization_url` | `human.handoff_required` (12), or `portal.not_supported` (3) with `data.legacy_browser_url` | `config connect-discord --json`. |
 
 Planned renames, not in effect yet: `PORTAL_AUTH_INVALID`/`PORTAL_AUTH_EXPIRED` → `auth.invalid`/`auth.expired` (6),
 `PORTAL_FORBIDDEN` → `auth.forbidden` (6), `PORTAL_RATE_LIMIT` → `portal.rate_limited` (7),

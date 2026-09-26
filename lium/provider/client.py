@@ -53,10 +53,13 @@ from lium.provider._routes import (
 from lium.provider._routes import (
     API_TOKEN_BY_ID,
     API_TOKENS,
+    EMAIL_VERIFY_CODE,
     EXECUTOR_NEW_RENTALS_PAUSE,
     EXECUTOR_TIER_ELIGIBILITY,
     EXECUTOR_UPDATE_TIER,
     EXECUTORS_LISTING,
+    HANDOFF_BY_ID,
+    HANDOFFS,
     LOGIN_EMAIL,
     PROVIDER_EARNINGS_DAILY,
     PROVIDER_EMISSIONS_DAILY,
@@ -860,6 +863,25 @@ class ProviderClient:
             lambda: self._http.delete(API_TOKEN_BY_ID.format(token_id=_safe_id(token_id, label="token_id")))
         )
 
+    def create_handoff(self, step: str) -> dict[str, Any]:
+        """``POST /auth/handoffs`` -- a one-time URL plus code a person opens to finish ``step``.
+
+        The answer has ``handoff_id``, ``handoff_url``, ``code``, ``expires_at`` and ``message_for_human``.
+        """
+        return _not_supported_call(
+            lambda: self._http.post(HANDOFFS, json_body={"step": step}), "human handoff sessions"
+        )
+
+    def get_handoff(self, handoff_id: str) -> dict[str, Any]:
+        """``GET /auth/handoffs/{id}`` -- ``status`` is ``pending``, ``claimed``, ``completed`` or ``expired``."""
+        return _unwrap(self._http.get(HANDOFF_BY_ID.format(handoff_id=_safe_id(handoff_id, label="handoff_id"))))
+
+    def verify_email_code(self, code: str) -> dict[str, Any]:
+        """``POST /auth/me/email/verify-code`` -- the 6-digit code e-mailed with the confirmation link."""
+        return _not_supported_call(
+            lambda: self._http.post(EMAIL_VERIFY_CODE, json_body={"code": code}), "e-mailed confirmation codes"
+        )
+
     # ------------------------------------------------------------------
     # Internals
 
@@ -984,21 +1006,25 @@ def email_session_key(email: str) -> str:
     return "email:" + email.strip().lower()
 
 
-def _api_tokens_call(call: Any) -> dict[str, Any]:
-    """Run a provider-API-token call; a portal without the routes (404/405 with no code of its own) is
-    ``portal.not_supported``, not a missing token."""
+def _not_supported_call(call: Any, feature: str) -> dict[str, Any]:
+    """Run a call to a route the portal may not serve yet; 404/405 with no code of its own is
+    ``portal.not_supported``, not a missing resource."""
     try:
         return _unwrap(call())
     except ProviderError as e:
         status = e.context.get("status")
         if status in (404, 405) and not e.code.startswith("portal."):
             raise ProviderError(
-                "this portal does not serve provider API tokens yet",
+                f"this portal does not serve {feature} yet",
                 code=PORTAL_NOT_SUPPORTED,
                 cause=e,
                 context={"status": status, "url": e.context.get("url")},
             ) from e
         raise
+
+
+def _api_tokens_call(call: Any) -> dict[str, Any]:
+    return _not_supported_call(call, "provider API tokens")
 
 
 def discord_connected_from_profile(profile: dict[str, Any] | None) -> bool | None:

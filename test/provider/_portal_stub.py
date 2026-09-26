@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlsplit
 
 class PortalStub:
     def __init__(self) -> None:
-        self.routes: dict[tuple[str, str], tuple[int, Any]] = {}
+        self.routes: dict[tuple[str, str], list[tuple[int, Any]]] = {}
         self.requests: list[dict[str, Any]] = []
         stub = self
 
@@ -34,7 +34,8 @@ class PortalStub:
                         "json": json.loads(raw) if raw else None,
                     }
                 )
-                status, body = stub.routes.get((self.command, parts.path), (404, {"detail": "Not Found"}))
+                answers = stub.routes.get((self.command, parts.path), [(404, {"detail": "Not Found"})])
+                status, body = answers.pop(0) if len(answers) > 1 else answers[0]
                 data = json.dumps(body).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -53,7 +54,11 @@ class PortalStub:
         self._thread.start()
 
     def route(self, method: str, path: str, body: Any, status: int = 200) -> None:
-        self.routes[(method, path)] = (status, body)
+        self.routes[(method, path)] = [(status, body)]
+
+    def route_sequence(self, method: str, path: str, *answers: tuple[int, Any]) -> None:
+        """Answer in turn; the last answer repeats."""
+        self.routes[(method, path)] = list(answers)
 
     def calls(self, method: str | None = None) -> list[tuple[str, str]]:
         return [(r["method"], r["path"]) for r in self.requests if method is None or r["method"] == method]

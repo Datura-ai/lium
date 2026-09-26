@@ -66,6 +66,8 @@ CONFIRMATION_REQUIRED = "input.confirmation_required"
 NET_UNREACHABLE = "net.unreachable"
 PORTAL_NOT_SUPPORTED = "portal.not_supported"
 NODE_NOT_LISTED = "node.not_listed_yet"
+HANDOFF_REQUIRED = "human.handoff_required"
+HANDOFF_EXPIRED = "human.handoff_expired"
 
 # The unified exit map (docs/exit-codes.md).
 EXIT_OK = 0
@@ -138,6 +140,8 @@ _HINTS: dict[str, str] = {
     INPUT_REQUIRED: "Pass the value as an option; no prompt is shown without a terminal or under --json.",
     CONFIRMATION_REQUIRED: "Re-run with --yes (or set LIUM_PROVIDER_ACK=1).",
     NET_UNREACHABLE: "Nothing answered at the portal URL. Check --portal-url / LIUM_PORTAL_URL and the network, then retry.",
+    HANDOFF_REQUIRED: "Relay data.message_for_human to the person, then re-run with --wait (or run it again once they are done).",
+    HANDOFF_EXPIRED: "The code expired before the person finished; run the command again for a new one.",
     PORTAL_NOT_SUPPORTED: "This portal does not serve that yet; sign in with `lium provider portal login` instead.",
 }
 
@@ -237,6 +241,8 @@ __all__ = [
     "EXIT_NOT_LISTED",
     "EXIT_OK",
     "EXIT_RETRYABLE",
+    "HANDOFF_EXPIRED",
+    "HANDOFF_REQUIRED",
     "HOTKEY_NOT_REGISTERED",
     "INPUT_REQUIRED",
     "INSTALLER_PARTIAL_FAIL",
