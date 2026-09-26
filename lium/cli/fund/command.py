@@ -44,7 +44,7 @@ _USD_CAVEAT = "credited USD valued at on-chain inclusion time; may differ from q
 
 
 def _legacy_tao_fund(wallet: Optional[str], amount: Optional[str], yes: bool) -> None:
-    """Run the Bittensor TAO funding flow."""
+    """Run the TAO funding flow."""
     try:
         import bittensor as bt
     except ImportError as e:
@@ -57,7 +57,7 @@ def _legacy_tao_fund(wallet: Optional[str], amount: Optional[str], yes: bool) ->
     if not wallet:
         default_wallet = config.get("funding.default_wallet", "default")
         wallet_name = ui.prompt(
-            "Bittensor wallet name", default=default_wallet, hint="pass --wallet"
+            "Wallet name", default=default_wallet, hint="pass --wallet"
         ).strip()
     else:
         wallet_name = wallet
@@ -122,7 +122,7 @@ def _legacy_tao_fund(wallet: Optional[str], amount: Optional[str], yes: bool) ->
             EXIT_GENERAL_ERROR,
         )
 
-    ui.info("Waiting for bittensor...")
+    ui.info("Sending the transfer...")
     ctx = {
         "bt": bt,
         "bt_wallet": bt_wallet,
@@ -184,7 +184,7 @@ def _alpha_fund(
     if not wallet:
         default_wallet = config.get("funding.default_wallet", "default")
         wallet = ui.prompt(
-            "Bittensor wallet name", default=default_wallet, hint="pass --wallet"
+            "Wallet name", default=default_wallet, hint="pass --wallet"
         ).strip()
 
     # Resolve and validate the origin hotkey. Accept either an SS58 address or a
@@ -369,10 +369,10 @@ def _alpha_fund(
 
 
 @click.command("fund")
-@click.option("--wallet", "-w", help="Bittensor wallet name to fund from")
+@click.option("--wallet", "-w", help="Name of the local wallet to fund from")
 @click.option("--amount", "-a", help="Amount to fund with (TAO; USD when --alpha)")
 @click.option(
-    "--alpha", is_flag=True, default=False, help="Fund with free Subnet-51 alpha stake"
+    "--alpha", is_flag=True, default=False, help="Fund with free alpha stake"
 )
 @click.option(
     "--hotkey",
@@ -394,7 +394,7 @@ def fund_command(
     json_output: bool,
     yes: bool,
 ):
-    """Fund your Lium account with TAO (or Subnet-51 alpha) from a Bittensor wallet.
+    """Fund your Lium account with TAO or free alpha from your wallet.
 
     \b
     Examples:

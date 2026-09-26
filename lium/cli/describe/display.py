@@ -239,7 +239,7 @@ def _format_ports(ports_section: dict) -> str:
 def _format_link(gpu: dict) -> str:
     """One line a renter can act on: the link class, the P2P verdict, the pair counts."""
     if gpu.get("link") is None:
-        return "— (not reported by the node's validator yet; run nvidia-smi topo -m on the pod)"
+        return "— (not reported by Lium's node checks yet; run nvidia-smi topo -m on the pod)"
     interconnect = gpu.get("interconnect") or {}
     parts = ["NVLink" if gpu["nvlink"] else "PCIe"]
     if gpu["nvlink"] and interconnect.get("nvlink_links"):

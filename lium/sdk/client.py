@@ -586,9 +586,8 @@ def _get_client_version() -> str:
 class AlphaQuote:
     """USD -> alpha quote from ``GET /balance/convert/alpha``.
 
-    ``netuid`` is the subnet the alpha must be transferred on (the same subnet the
-    pay-tao-api-v2 listener credits), so it — not a hardcoded constant — drives the
-    on-chain ``transfer_stake``.
+    ``netuid`` is the subnet the alpha transfer goes to. The API sets it, and the
+    transfer uses the value from the quote.
     """
 
     usd: Decimal           # echoes the API's ``original``
@@ -1073,7 +1072,7 @@ class Lium:
             wait: When ``True``, block until the pod is RUNNING with an SSH
                 endpoint and return it as a :class:`PodInfo`. The pod is billing
                 from the moment the rent call returns, so a timeout raises a
-                :class:`LiumError` that names the pod id rather than hiding it.
+                :class:`LiumError` that names the pod id.
             timeout: Seconds to wait for readiness when ``wait`` is set.
             gpu_count: Rent only this many of the node's GPUs (GPU splitting). ``None``
                 takes every GPU that is free on the node right now (the whole node when
@@ -1797,7 +1796,7 @@ class Lium:
                 backward compatible, so a node with a higher driver CUDA version satisfies the requirement.
             min_cpus: Optional minimum CPU thread count (``specs.cpu.count``). Nodes that report fewer
                 CPUs, or none, are excluded.
-            nvlink: ``True`` keeps only nodes whose validator saw every GPU pair on NVLink
+            nvlink: ``True`` keeps only nodes where Lium's node checks saw every GPU pair on NVLink
                 (:attr:`ExecutorInfo.nvlink`). Nodes with no verdict yet are excluded — a renter who asks
                 for NVLink must not be handed a PCIe box. ``False``/``None`` do not filter.
             min_download_mbps: Minimum Download in Mbps, judged on
@@ -1805,7 +1804,7 @@ class Lium:
                 Download). Nodes with no figure are excluded.
             view: ``"summary"`` (default) asks the API for the fields a listing reads — price, GPU/CPU/RAM/disk
                 headline specs, location, tier, network; an API that does not know the parameter returns the
-                full row. ``"full"`` asks for the whole validator scrape in :attr:`ExecutorInfo.specs` (docker
+                full row. ``"full"`` asks for the whole node-check scrape in :attr:`ExecutorInfo.specs` (docker
                 info, verified ports, per-GPU telemetry, checksums).
 
         Returns:
@@ -2917,7 +2916,7 @@ class Lium:
                 given value wins.
             workdir: Directory to ``cd`` into first.
             job_dir: Where the job files live (default ``/workspace/logs``, the
-                fast local volume rather than the encrypted ``/root``).
+                fast local volume).
             timeout: Seconds allowed for the launcher itself (not the job).
 
         Raises:
@@ -3014,9 +3013,9 @@ class Lium:
     def parse_gpu_stats(csv_text: str) -> List[GpuStats]:
         """Parse ``nvidia-smi --query-gpu=... --format=csv,noheader,nounits`` output.
 
-        ``[N/A]`` and ``[Not Supported]`` become ``None`` rather than failing
-        the whole reading; a GPU whose power sensor is missing still has a
-        utilisation figure worth showing.
+        ``[N/A]`` and ``[Not Supported]`` become ``None`` and the rest of the
+        reading is kept; a GPU whose power sensor is missing still has a
+        utilization figure worth showing.
         """
 
         def number(value: str) -> Optional[float]:
@@ -3048,7 +3047,7 @@ class Lium:
         return stats
 
     def gpu_stats(self, pod: PodInfo, *, timeout: float = 30) -> List[GpuStats]:
-        """Per-GPU utilisation, memory, temperature and power on a pod, via ``nvidia-smi``.
+        """Per-GPU utilization, memory, temperature and power on a pod, via ``nvidia-smi``.
 
         Raises:
             LiumError: when ``nvidia-smi`` failed or printed nothing usable.
@@ -3220,7 +3219,7 @@ class Lium:
     def pod_failure_cause(self, pod_id: str) -> Optional[str]:
         """What the backend recorded as the reason the pod failed or was closed, or ``None``.
 
-        The latest event carrying an ``error`` (a failed create or reboot: the validator's headline)
+        The latest event carrying an ``error`` (a failed create or reboot: the node's error headline)
         or a lifecycle ``reason``/``detail`` wins. Never raises — this is read on a failure path.
         """
         try:
@@ -3579,7 +3578,7 @@ class Lium:
         for the duration of the copy; the source runs ``rsync`` straight to the
         destination, and both halves are removed again whatever happened. The
         source pod's output never decides what the destination trusts: the key
-        the destination authorises is the one this client generated, and the
+        the destination authorizes is the one this client generated, and the
         revoke removes exactly that key. The source verifies the destination with
         the host key this client pinned for it (``~/.lium/known_hosts/<pod id>``,
         written by the grant connection), copied next to the transfer key; no pin
@@ -3759,7 +3758,7 @@ class Lium:
         ``cp`` run), not the comment: a line that lost its marker still goes.
         The scratch file carries the ``marker``, so two ``cp`` runs into the same
         pod never share one, and the result is written back with ``cat >``
-        (the way lium-io removes keys) rather than ``mv``: the file keeps its
+        (the way lium-io removes keys), so the file keeps its
         mode and a second run's half-written scratch file can never replace it.
         ``grep`` exits 1 when nothing is left to keep, which is fine; any other
         failure leaves authorized_keys untouched. The whole line runs under the
@@ -4060,15 +4059,15 @@ class Lium:
         return app_id
 
     def add_wallet(self, bt_wallet: Any) -> tuple[str, str]:
-        """Link a Bittensor wallet with the user account.
+        """Link your wallet to the user account.
 
         Args:
             bt_wallet: Wallet object exposing ``coldkey``/``coldkeypub`` for signing.
 
         Returns:
             ``(app_id, customer_id)`` parsed from the ``/tao/create-transfer``
-            redirect — surfaced so the alpha funding flow can reuse the same single
-            round-trip for company-wallet lookup instead of issuing a second POST.
+            redirect. The alpha funding flow reuses them for the company-wallet
+            lookup, so it makes one POST.
 
         Raises:
             LiumError: If verification or wallet polling fails.
@@ -4106,11 +4105,10 @@ class Lium:
     def convert_alpha(self, usd: Any) -> AlphaQuote:
         """Quote ``usd`` (USD) -> alpha via ``GET /balance/convert/alpha``.
 
-        The response carries both the alpha amount to transfer (``converted``) and
-        the subnet ``netuid`` the transfer must happen on. Hard-fails (no fallback)
-        on a pay-API error: ``_request`` maps 503 -> ``LiumServerError`` (a
-        ``LiumError``), so a down subtensor / unavailable alpha price aborts the
-        fund before any on-chain call.
+        The response carries the alpha amount to transfer (``converted``) and the
+        subnet ``netuid`` the transfer goes to. A pay-API error raises: ``_request``
+        maps 503 -> ``LiumServerError`` (a ``LiumError``), so an unavailable alpha
+        price stops the funding before any transfer is sent.
         """
         pay_headers = {"X-API-KEY": _PAY_API_KEY}
         resp = self._request(
@@ -4128,11 +4126,11 @@ class Lium:
         )
 
     def company_wallet(self, app_id: str) -> str:
-        """Resolve the Lium destination coldkey via ``GET /wallet/company/?app_id=``.
+        """Resolve the Lium deposit address via ``GET /wallet/company/?app_id=``.
 
-        Returns the company ``wallet_hash`` (the SS58 the pay-tao-api-v2 listener
-        credits). Hard-fails (no fallback): a 404 (app has no wallet) maps to
-        ``LiumNotFoundError`` (a ``LiumError``), aborting before any on-chain call.
+        Returns the company ``wallet_hash``, the SS58 address Lium credits deposits
+        to. A 404 (app has no wallet) raises ``LiumNotFoundError`` (a ``LiumError``)
+        before any transfer is sent.
         """
         resp = self._request(
             "GET",
@@ -4535,7 +4533,7 @@ class Lium:
 
         Every call carries an idempotency key — yours, or a fresh ``uuid4`` when you pass
         none — so the request is posted once and a repeat with the same key returns the
-        first charge instead of making a second one. The key used is in the result (and on
+        first charge, and the card is charged once. The key used is in the result (and on
         :class:`LiumChargeOutcomeUnknownError`) as ``idempotency_key``.
 
         Args:
@@ -4544,7 +4542,7 @@ class Lium:
                 only saved one).
             idempotency_key: Repeat the call with the same key and amount within 24 h and
                 the first charge (or its status, while it is still ``processing``) is returned
-                instead of a second one being made. Omitted: the SDK makes one.
+                and the card is charged once. Omitted: the SDK makes one.
 
         Returns:
             ``{"status": "succeeded", "payment_intent_id", "transaction_id", "idempotency_key",
@@ -4699,7 +4697,7 @@ class Lium:
         (:func:`lium.sdk.utils.spend_cap_deadline`) and schedules removal then —
         unless a removal is already scheduled earlier (a ``--ttl``), which stays,
         as ``lium up --budget --ttl`` keeps the earlier of the two. Client-side:
-        the pod keeps running if the schedule is cancelled or the price changes.
+        the pod keeps running if the schedule is canceled or the price changes.
 
         Args:
             pod: A running pod with ``created_at`` and an executor price.

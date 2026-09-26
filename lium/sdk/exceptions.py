@@ -56,7 +56,7 @@ class PodStartError(LiumError):
         pod: The last ``PodInfo`` seen for it, or ``None`` if it was never listed.
         status: The last status seen (upper-cased), or ``None`` if never listed.
         history: Every distinct status observed while waiting, in order.
-        cause: The failure the backend recorded for the pod (the validator's
+        cause: The failure the backend recorded for the pod (the error
             headline, e.g. ``Container creation failed due to ... (failure_step:
             ssh_connect)``), or ``None`` when it recorded nothing readable.
     """
@@ -232,7 +232,7 @@ class LiumChargeOutcomeUnknownError(LiumError):
     dropped connection, or a 5xx after the platform had already asked Stripe to charge. Stripe
     charges the card before it answers, so the charge **may have gone through**: check the balance
     (or the transactions) before trying again. A repeat with the same ``idempotency_key`` returns the
-    first charge instead of making a second one; the key is on the exception.
+    first charge, and the card is charged once; the key is on the exception.
     """
 
     def __init__(
