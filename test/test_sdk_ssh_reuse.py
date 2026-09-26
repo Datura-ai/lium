@@ -1,4 +1,4 @@
-"""`Lium` keeps one SSH connection per pod between calls (DAH-3797).
+"""`Lium` keeps one SSH connection per pod between calls.
 
 A new connection to a distant node is several round trips before a command can start;
 the second command to the same pod must open only a channel on the connection it has.

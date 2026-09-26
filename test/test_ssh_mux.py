@@ -1,4 +1,4 @@
-"""`lium exec` keeps one OpenSSH connection per pod across runs, and skips the pod list when it is up (DAH-3797)."""
+"""`lium exec` keeps one OpenSSH connection per pod across runs, and skips the pod list when it is up."""
 import os
 import shutil
 import subprocess

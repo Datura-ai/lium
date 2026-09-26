@@ -338,7 +338,7 @@ def test_the_ttl_is_re_armed_after_setup_so_the_run_gets_its_full_window(fake, m
 
 
 def test_a_setup_of_seconds_sends_no_second_ttl_before_the_run(fake, monkeypatch):
-    # DAH-3797: armed seconds ago, the window is whole; the second POST was a round trip per call for nothing
+    # armed seconds ago, the window is whole; the second POST was a round trip per call for nothing
     monkeypatch.setattr(D.time, "monotonic", _SetupClock(fake, setup_seconds=5))
     remote = D.machine(machine="A100", timeout=600)(double)
 
@@ -349,7 +349,7 @@ def test_a_setup_of_seconds_sends_no_second_ttl_before_the_run(fake, monkeypatch
 
 
 def test_a_warm_pod_this_process_is_still_connected_to_is_used_without_listing_pods(fake):
-    # DAH-3797: an open SSH connection to the pod proves it is up; GET /pods before every warm call is not needed
+    # an open SSH connection to the pod proves it is up; GET /pods before every warm call is not needed
     f = D.machine(machine="A100", keep_warm=300, timeout=600)(double)
     assert f(1) == 2
     listings = sum(1 for c in fake.calls if c[0] == "ps")

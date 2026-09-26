@@ -2732,8 +2732,8 @@ class Lium:
         """Keep one SSH connection to ``pod`` open for the whole block.
 
         Every :meth:`exec`, :meth:`stream_exec`, :meth:`upload` and :meth:`download`
-        inside it runs over this connection instead of paying a fresh TCP + SSH
-        handshake each (several seconds per call to a distant node). It is the
+        inside it runs over this connection, so the TCP + SSH handshake (several
+        seconds to a distant node) is paid once for the whole block. It is the
         connection the client keeps for the pod between calls, so it stays open
         after the block too (until :meth:`close`); with ``LIUM_SSH_REUSE=0`` it is
         a connection of its own, closed when the block ends.
