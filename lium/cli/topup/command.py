@@ -37,6 +37,10 @@ def workspace_requested() -> bool:
     return bool(os.getenv("LIUM_WORKSPACE") or config.get("workspaces.active"))
 
 
+def rent_key_from_environment() -> bool:
+    return bool(os.getenv("LIUM_API_KEY") or os.getenv("LIUM_API_API_KEY"))
+
+
 def billing_client() -> Lium:
     """The client for money routes: the `billing` key when one is set (LIUM_BILLING_API_KEY, then
     `[api] billing_api_key`, which `lium signup --billing-key` writes), else the usual key.
@@ -47,7 +51,9 @@ def billing_client() -> Lium:
         return Lium()
     key = os.getenv(BILLING_KEY_ENV_VAR)
     source = f"env:{BILLING_KEY_ENV_VAR}"
-    if not key:
+    if not key and not rent_key_from_environment():
+        # the saved billing key goes with the saved rent key (one signup, one account); an exported
+        # rent key may be another account's, so its money goes through that key instead
         key = config.get(BILLING_KEY_OPTION)
         source = config.get_source(BILLING_KEY_OPTION) or f"config:{config.get_config_path()} [api] billing_api_key"
     if not key:
@@ -108,10 +114,10 @@ def wait_for_credit_or_fail(client: Lium, baseline: float, wait: float, extra: d
             "credit_not_seen",
             f"The balance did not rise above ${baseline:,.2f} within {wait:g} s.",
             EXIT_API_ERROR,
-            data={**extra, "charged": False, "balance_before": baseline, "balance": outcome["balance"],
+            data={**extra, "charged": None, "balance_before": baseline, "balance": outcome["balance"],
                   "waited_seconds": outcome["seconds"]},
-            hint=f"If the payment was made, keep waiting with '{resume}'; check 'lium balance --json' before "
-                 "paying again.",
+            hint=f"Not known whether money moved: a payment may be made and its credit still on the way. Keep "
+                 f"waiting with '{resume}'; check 'lium balance --json' before paying again.",
         )
     return {"credited": True, "balance_before": baseline, "balance": outcome["balance"],
             "seconds_to_credit": outcome["seconds"]}

@@ -4692,9 +4692,10 @@ class Lium:
             elapsed = _clock() - start
             if balance is not None and balance > baseline + CREDIT_EPSILON_USD:
                 return {"credited": True, "balance": balance, "seconds": round(elapsed, 1)}
-            if elapsed + interval > timeout:
+            if elapsed >= timeout:
                 return {"credited": False, "balance": balance, "seconds": round(elapsed, 1)}
-            _sleep(interval)
+            # the last sleep fits the time left, so the final read happens at the deadline
+            _sleep(min(interval, timeout - elapsed))
 
     def volumes(self) -> List[VolumeInfo]:
         """List all volumes for the current user.

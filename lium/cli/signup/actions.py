@@ -76,6 +76,16 @@ def _select_minted_key(api_keys: list) -> str | None:
 
 def refuse_if_key_configured() -> ActionResult | None:
     # a second account would be unreachable — nothing here can switch between keys
+    for option, what in ((FINGERPRINT_OPTION, "an earlier account's fingerprint (its only login)"),
+                         (BILLING_KEY_OPTION, "an earlier account's billing key")):
+        if config.get(option):
+            return ActionResult(
+                ok=False,
+                data={},
+                error=f"~/.lium/config.ini already holds {what} as {option}. Keep a copy "
+                      f"('lium config get {option}' shows it masked; the file has it in full), then "
+                      f"'lium config unset {option}' and sign up again.",
+            )
     if not config.get("api.api_key"):
         return None
     if os.environ.get("LIUM_API_KEY"):

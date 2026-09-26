@@ -213,6 +213,8 @@ class _FakeLium:
 def fake_lium(monkeypatch):
     fake = type("FakeLium", (_FakeLium,), {"made_with": [], "balances": [0.0], "charged": [], "log": []})
     monkeypatch.delenv("LIUM_WORKSPACE", raising=False)
+    monkeypatch.delenv("LIUM_API_KEY", raising=False)
+    monkeypatch.delenv("LIUM_API_API_KEY", raising=False)
     monkeypatch.setattr(topup_module, "Lium", fake)
     monkeypatch.delenv("LIUM_BILLING_API_KEY", raising=False)
     monkeypatch.setattr(topup_module.config, "get", lambda key, default=None: None)
@@ -279,7 +281,8 @@ def test_link_wait_timeout_is_credit_not_seen_exit_3_with_the_session(fake_lium)
     assert envelope["error"]["code"] == "credit_not_seen"
     assert envelope["data"]["session_id"] == "cs_test_a1"
     assert envelope["data"]["balance_before"] == 0.0
-    assert envelope["data"]["charged"] is False
+    assert envelope["data"]["charged"] is None
+    assert "Not known whether money moved" in envelope["error"]["hint"]
     assert "lium topup wait --above 0.00" in envelope["error"]["hint"]
 
 
@@ -597,3 +600,60 @@ def test_config_get_masks_the_fingerprint_harder_than_a_key():
     from lium.cli.config.get.command import mask_value
 
     assert mask_value(FP, "account.fingerprint") == "***WXYZ"
+
+
+
+def test_wait_for_credit_reads_once_more_at_the_deadline(client, monkeypatch):
+    readings = iter([0.0, 10.0])
+    monkeypatch.setattr(client, "balance_or_none", lambda: next(readings))
+    clock = _Clock()
+
+    outcome = client.wait_for_credit(0.0, timeout=1, interval=2, _clock=clock, _sleep=clock.sleep)
+
+    assert outcome == {"credited": True, "balance": 10.0, "seconds": 1.0}
+
+
+def test_an_exported_rent_key_is_not_paired_with_the_saved_billing_key(fake_lium, monkeypatch):
+    monkeypatch.setenv("LIUM_API_KEY", "sk_other_account")
+    monkeypatch.setattr(topup_module.config, "get",
+                        lambda key, default=None: "sk_saved_billing" if key == "api.billing_api_key" else None)
+
+    result = CliRunner().invoke(cli, ["topup", "link", "-a", "10", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert "sk_saved_billing" not in fake_lium.made_with
+
+
+def test_an_exported_billing_key_still_pays_next_to_an_exported_rent_key(fake_lium, monkeypatch):
+    monkeypatch.setenv("LIUM_API_KEY", "sk_rent")
+    monkeypatch.setenv("LIUM_BILLING_API_KEY", "sk_billing_env")
+
+    result = CliRunner().invoke(cli, ["topup", "link", "-a", "10", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert "sk_billing_env" in fake_lium.made_with
+
+
+@pytest.mark.parametrize("option", ["account.fingerprint", "api.billing_api_key"])
+@pytest.mark.parametrize("args", [["--no-email"], ["--email", "a@example.com"]])
+def test_signup_never_overwrites_an_earlier_accounts_login_or_money_key(monkeypatch, signup_env, option, args):
+    signup_env[option] = "earlier-value-0000"
+    calls = _fingerprint_server(monkeypatch, _Response(200, {"fingerprint": FP, "api_key": "sk_new"}))
+
+    result = CliRunner().invoke(cli, ["signup", *args, "--json"])
+
+    assert result.exit_code != 0
+    assert option in _envelope(result)["error"]["message"]
+    assert signup_env[option] == "earlier-value-0000"
+    assert calls == []
+
+
+def test_a_half_failed_no_email_signup_keeps_the_fingerprint_out_of_the_message(monkeypatch, signup_env):
+    _fingerprint_server(monkeypatch, _Response(200, {"fingerprint": FP, "api_key": None}),
+                        keys_list=[], keys_post=_Response(500))
+
+    result = CliRunner().invoke(cli, ["signup", "--no-email", "--json"])
+
+    envelope = _envelope(result)
+    assert envelope["data"]["fingerprint"] == FP
+    assert FP not in envelope["error"]["message"]

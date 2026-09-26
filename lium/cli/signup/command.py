@@ -143,7 +143,8 @@ def _signup_without_email(billing_key: bool, json_output: bool) -> None:
             # the account exists and the fingerprint is its only login: hand it over even on failure
             raise CliFailure(
                 "signup_failed",
-                f"{result.error} Fingerprint: {fingerprint}",
+                f"{result.error} The account's fingerprint (its only login) is in data.fingerprint and "
+                "saved as [account] fingerprint in ~/.lium/config.ini.",
                 data={"fingerprint": fingerprint, "user_id": result.data.get("user_id")},
             )
         raise CliFailure("signup_failed", result.error)
