@@ -41,6 +41,7 @@ from .models import (
     WorkspaceInfo,
     WorkspaceMember,
 )
+from .secrets import SecretInfo, SecretsClient
 from .api_keys import ApiKeysClient
 from .workspaces import WorkspacesClient
 from .result_codec import ResultEncodingError
@@ -52,6 +53,8 @@ __all__ = [
     "ApiKeyScope",
     "ApiKeyRefusal",
     "WorkspacesClient",
+    "SecretsClient",
+    "SecretInfo",
     "WorkspaceInfo",
     "WorkspaceMember",
     "AlphaQuote",
