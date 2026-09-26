@@ -379,8 +379,12 @@ class ProviderClient:
         """The scope for a default listing. When the signer cannot be materialised
         (no local wallet for ``--hotkey``), refuse instead of silently falling back
         to the portal's global view — that fallback is the very confusion DAH-2935
-        removes (a zero-node account reading 1,538 rows as its own)."""
+        removes (a zero-node account reading 1,538 rows as its own). Signed in by
+        a provider token or an e-mail session, the scope is the hotkey ``/auth/me``
+        names for the account."""
         hotkey = self._safe_hotkey()
+        if hotkey is None and self._api_token:
+            return self.own_hotkey()
         if hotkey is None:
             raise ProviderError(
                 f"cannot resolve the ss58 address of hotkey {self.hotkey!r} (no local wallet)",

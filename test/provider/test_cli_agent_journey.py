@@ -374,6 +374,71 @@ def test_whoami_in_text_mode_signed_in_nowhere_says_so_with_the_old_label_and_ex
     assert portal.requests == []
 
 
+# --- which sign-in wins: token > hotkey > e-mail session ------------------------------------------
+
+
+@pytest.fixture
+def wallet(monkeypatch, fake_signer):
+    """``--hotkey hk`` signs with ``fake_signer``; its portal session is already in the token store."""
+    from lium.provider.client import ProviderClient
+
+    monkeypatch.setattr(ProviderClient, "_default_signer", lambda self: fake_signer)
+    TokenStore().save(fake_signer.ss58_address, "hotkey-session", provider_id="m-1")
+    return fake_signer
+
+
+def test_the_provider_token_wins_over_the_hotkey(portal, wallet) -> None:
+    portal.route("GET", "/auth/me", detail_response(ME))
+    data = ok(run(portal, "--json", "--hotkey", "hk", "portal", "whoami"))
+    assert data["auth_method"] == "token"
+    assert {r["authorization"] for r in portal.requests} == {f"Bearer {TOKEN}"}
+
+
+def test_the_hotkey_wins_over_an_email_session(portal, wallet) -> None:
+    _email_session()
+    portal.route("GET", "/auth/me", detail_response(ME))
+    env = {"LIUM_PROVIDER_TOKEN": "", "LIUM_PROVIDER_EMAIL": SESSION_EMAIL}
+    data = ok(run(portal, "--json", "--hotkey", "hk", "portal", "whoami", env=env))
+    assert data["auth_method"] == "hotkey"
+    assert {r["authorization"] for r in portal.requests} == {"Bearer hotkey-session"}
+
+
+def test_the_hotkey_wins_over_an_email_session_in_text_mode_too(portal, wallet) -> None:
+    _email_session()
+    portal.route("GET", "/auth/me", detail_response(ME))
+    env = {"LIUM_PROVIDER_TOKEN": "", "LIUM_PROVIDER_EMAIL": SESSION_EMAIL}
+    result = run(portal, "--hotkey", "hk", "portal", "whoami", env=env)
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines()[0] == "portal session active"
+    assert "Auth Method" not in result.output
+    assert {r["authorization"] for r in portal.requests} == {"Bearer hotkey-session"}
+
+
+# --- node list / billing list scope to the account's hotkey without a wallet ----------------------
+
+LIST_ENVELOPE = {"data": [], "total": 0, "page": 1, "limit": 20}
+
+
+@pytest.mark.parametrize("args, path", [(("node", "list"), "/executors"), (("billing", "list"), "/billing")])
+def test_default_lists_signed_in_by_token_scope_to_the_hotkey_auth_me_names(portal, args, path) -> None:
+    portal.route("GET", "/auth/me", detail_response(ME))
+    portal.route("GET", path, LIST_ENVELOPE)
+    ok(run(portal, "--json", *args))
+    listed = [r for r in portal.requests if r["path"] == path]
+    assert len(listed) == 1 and listed[0]["query"]["miner_hotkey"] == [HOTKEY]
+
+
+@pytest.mark.parametrize("args, path", [(("node", "list"), "/executors"), (("billing", "list"), "/billing")])
+def test_default_lists_signed_in_by_an_email_session_scope_to_the_hotkey_auth_me_names(portal, args, path) -> None:
+    _email_session()
+    portal.route("GET", "/auth/me", detail_response(ME))
+    portal.route("GET", path, LIST_ENVELOPE)
+    ok(run(portal, "--json", *args, env={"LIUM_PROVIDER_TOKEN": "", "LIUM_PROVIDER_EMAIL": SESSION_EMAIL}))
+    listed = [r for r in portal.requests if r["path"] == path]
+    assert len(listed) == 1 and listed[0]["query"]["miner_hotkey"] == [HOTKEY]
+    assert listed[0]["authorization"] == "Bearer session-stub"
+
+
 # --- provider API tokens ------------------------------------------------------------------------
 
 
