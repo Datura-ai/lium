@@ -574,7 +574,7 @@ exits 2 (`empty_api_key`); none of them saves anything, and the hint says so. Wi
 `lium init` skips the browser, sets up the SSH key and says the key is coming from the environment — the SSH path
 is written to the file, the key is not; `--api-key` warns when a key is also exported (`env_key` in the JSON).
 
-Login keys expire (365 days by default) and can be revoked, so `lium init` next to a saved key checks it against
+Login keys can expire or be revoked, so `lium init` next to a saved key checks it against
 `/users/me` first. When the API rejects it (401, or a 403 saying the key's workspace is gone or its creator left it) the normal login runs
 (`Your saved API key has expired or was revoked. Starting a new login…`); without a terminal no browser is opened
 and `lium init` exits 6 (`saved_key_rejected`). Any other 403 (a blocked account, a firewall page), a 429, a 5xx or

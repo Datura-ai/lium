@@ -95,7 +95,7 @@ _DEAD_KEY_403 = re.compile(r"belongs to a workspace that is gone|no longer a mem
 class CheckSavedApiKeyAction:
     """Ask the API whether the saved key still works, before init trusts it.
 
-    Keys minted by a login expire (365 days by default) and can be revoked; a dead saved key used to
+    Login keys can expire or be revoked; a dead saved key used to
     make every later ``lium init`` say "already saved" and never log in again. ``data["status"]``:
     ``valid`` (including balance/budget/scope refusals: the server knows the key), ``rejected`` (401, or
     a 403 that says the key's workspace is gone or its creator left it — a new login is the fix),
