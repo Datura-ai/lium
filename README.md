@@ -575,11 +575,13 @@ exits 2 (`empty_api_key`); none of them saves anything, and the hint says so. Wi
 is written to the file, the key is not; `--api-key` warns when a key is also exported (`env_key` in the JSON).
 
 Login keys expire (365 days by default) and can be revoked, so `lium init` next to a saved key checks it against
-`/users/me` first. A key the API refuses (401, or a 403 that is not a balance, budget or scope refusal) is
-discarded and the normal login runs (`Your saved API key has expired or was revoked. Starting a new login…`);
-without a terminal no browser is opened and `lium init` exits 6 (`saved_key_rejected`) with the key left in place.
-An API that cannot be reached keeps the key and says the check did not get through. `lium init --force` discards
-the saved key and logs in again even when it still works.
+`/users/me` first. When the API rejects it (401, or a 403 saying the key's workspace is gone or its creator left it) the normal login runs
+(`Your saved API key has expired or was revoked. Starting a new login…`); without a terminal no browser is opened
+and `lium init` exits 6 (`saved_key_rejected`). Any other 403 (a blocked account, a firewall page), a 429, a 5xx or
+no answer keeps the key with a warning. `lium init --force` logs in again even when the key still works, and
+`lium init --session <ID>` exchanges the session even next to a saved key. The saved key is replaced only once the
+new login has produced a key (the config file is written to a temporary file and renamed over the old one), so an
+aborted browser login or an unapproved session leaves the old key in place.
 
 SSH host keys of pods are pinned on first use under `~/.lium/known_hosts/<pod-id>`
 (`lium ssh`, `lium up`, and the SDK's `exec`, `stream_exec`, `rsync`). `reboot`, `edit`,
