@@ -106,7 +106,7 @@ def list_nodes(
     blocking = isinstance(rows, list) and not all_miners
     if blocking:
         # the overview is the signed-in provider's own: another provider's nodes get no idle-pay reasons
-        own = miner_hotkey is None
+        own = miner_hotkey is None or miner_hotkey == client._safe_hotkey()
         idle = _blocking.fetch_idle_pay_reasons(client) if own and _blocking.needs_fallback(rows) else {}
         _blocking.attach(rows, idle)
         summary_parts.append(f"blocked={_blocking.blocked_count(rows)}")

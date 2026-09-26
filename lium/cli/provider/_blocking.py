@@ -65,7 +65,9 @@ _ALIASES = {
 MIN_NVIDIA_DRIVER = "580.65.06"
 
 # Listing states the provider chose; the node is hidden on purpose, not blocked.
-_PROVIDER_CHOSEN_HIDDEN = frozenset({"NEW_RENTALS_PAUSED", "RECLAIMING"})
+# Hidden reasons that stop nothing: the provider's own choice (a pause, a reclaim) or the shape of a
+# healthy partial rental (the free GPUs cannot be offered alone). Every other one stops the node renting.
+_NOT_BLOCKING_HIDDEN = frozenset({"NEW_RENTALS_PAUSED", "RECLAIMING", "WHOLE_HOST_ONLY", "SPLIT_MINIMUM_NOT_MET"})
 _HEALTHY_STATUSES = frozenset({"AVAILABLE", "RENTED"})
 
 _HIDDEN_FIXES: dict[str, str] = {
@@ -222,7 +224,7 @@ def fallback_reasons(row: Mapping[str, Any], idle_pay_reasons: Iterable[Mapping[
         if not isinstance(hidden, Mapping):
             continue
         code = str(hidden.get("code") or "")
-        if not code or code in _PROVIDER_CHOSEN_HIDDEN:
+        if not code or code in _NOT_BLOCKING_HIDDEN:
             continue
         message = str(hidden.get("message") or code)
         _add(
@@ -263,7 +265,12 @@ def _first(entry: Mapping[str, Any], *keys: str) -> Any:
 
 
 def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
-    """One portal ``blocking_reasons`` entry in the renderer's field names; unknown names pass through."""
+    """One portal ``blocking_reasons`` entry as the fields the renderer prints.
+
+    ``secure`` falls back to the code's place in the gating list and ``gating`` to the code not being
+    ``NOT_GATED``; the portal serves ``secure_requirement`` and no ``gating``. Fields not named here
+    are not printed (``--json`` passes the portal's entry through unchanged).
+    """
     code = str(_first(entry, "code", "reason_code") or "")
     code = _ALIASES.get(code, code)
     secure = _first(entry, "secure", "secure_requirement", "blocks_secure", "gates_secure")
@@ -274,6 +281,8 @@ def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
         "measured": _first(entry, "measured", "measured_value"),
         "required": _first(entry, "required", "required_value"),
         "fix": _first(entry, "fix", "exact_fix", "fix_text", "remediation") or "",
+        "fix_command": _first(entry, "fix_command"),
+        "docs_url": _first(entry, "docs_url"),
         "secure": bool(secure) if secure is not None else code in SECURE_GATING_CODES,
         "gating": bool(gating) if gating is not None else code not in NOT_GATED,
     }
@@ -364,6 +373,10 @@ def blocking_panel(row: Mapping[str, Any]) -> Panel | None:
             lines.append(Padding(Text(" · ".join(figures)), (0, 0, 0, 2)))
         if reason.get("fix"):
             lines.append(Padding(Text.from_markup(f"[bold]Fix:[/] {escape(str(reason['fix']))}"), (0, 0, 0, 2)))
+        if reason.get("fix_command"):
+            lines.append(Padding(Text(str(reason["fix_command"]), style="bold"), (0, 0, 0, 4)))
+        if reason.get("docs_url"):
+            lines.append(Padding(Text(f"Docs: {reason['docs_url']}"), (0, 0, 0, 2)))
     secure = [r for r in reasons if r.get("secure")]
     if secure and str(row.get("tier") or "secure").lower() != "spot":
         noun = "requirement" if len(secure) == 1 else "requirements"
@@ -399,7 +412,19 @@ def print_panels(rows: Iterable[Any]) -> int:
 
 
 def _lower_first(text: str) -> str:
+    """``This GPU model…`` -> ``this GPU model…``; a title that opens with an acronym (``GPU model…``) stays."""
+    if len(text) > 1 and not text[1].islower():
+        return text
     return text[:1].lower() + text[1:]
+
+
+def _no_action(reason: Mapping[str, Any]) -> str:
+    fix = str(reason.get("fix") or "")
+    if fix.startswith("No action"):
+        return fix
+    if reason.get("code") in NOT_GATED:
+        return NOT_GATED[reason["code"]][1]
+    return f"No action: {fix}" if fix else ""
 
 
 def print_not_eligible(rows: Iterable[Any], *, short: bool) -> int:
@@ -422,8 +447,8 @@ def print_not_eligible(rows: Iterable[Any], *, short: bool) -> int:
             continue
         for reason in reasons:
             console.print(Text.from_markup(f"[bold]Not eligible for idle pay:[/] {escape(_lower_first(str(reason['title'])))}"))
-            if reason.get("fix"):
-                console.print(Padding(Text(str(reason["fix"])), (0, 0, 0, 2)))
+            if _no_action(reason):
+                console.print(Padding(Text(_no_action(reason)), (0, 0, 0, 2)))
     return nodes
 
 

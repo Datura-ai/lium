@@ -467,3 +467,156 @@ def test_node_status_shows_a_portal_gating_false_entry_as_not_eligible(portal_fo
     assert GPU_LINE in plain and GPU_ACTION in plain
     assert "BLOCKING" not in plain
     assert _red_lines(ansi) == []
+
+
+# lium-platform#887 at 759f35e9, `test/snapshots/blocking_reasons_catalog.json`: the portal's real entries.
+# No `gating` key; `secure_requirement` comes from the portal's gating-codes setting.
+P887_DRIVER = {
+    "code": "nvidia_driver_below_minimum", "docs_url": "https://docs.lium.io/providers/nodes/quickstart",
+    "fix": "Upgrade the NVIDIA driver on the host to 580.65.06 or newer (on Ubuntu, for example `sudo apt-get install -y nvidia-driver-580`), reboot the host, then restart the executor. The next validator cycle checks it again; rented nodes are exempt until their rental ends.",
+    "fix_command": "nvidia-smi --query-gpu=driver_version --format=csv,noheader && cd neurons/executor && docker compose up -d",
+    "kind": "idle_pay", "measured": "550.54.15",
+    "message": "NVIDIA driver 550.54.15 is below the network minimum 580.65.06: no idle pay.",
+    "required": "580.65.06 or newer", "secure_requirement": True, "title": "NVIDIA driver below the minimum",
+}
+P887_SYSBOX = {
+    "code": "sysbox_not_enabled", "docs_url": "https://docs.lium.io/providers/nodes/sysbox",
+    "fix": "Install sysbox with the Lium setup script (it checks the host first and prints the fix for each FIX line), then restart the executor.",
+    "fix_command": "curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-io/main/neurons/executor/nvidia_docker_sysbox_setup.sh | sudo bash",
+    "kind": "idle_pay", "measured": "no sysbox-runc runtime", "message": "The node does not run the sysbox runtime: no idle pay.",
+    "required": "sysbox-runc runtime", "secure_requirement": True, "title": "Sysbox runtime missing",
+}
+P887_GPU_MODEL = {
+    "code": "gpu_model_not_eligible_for_unrented_incentive", "docs_url": None,
+    "fix": "Nothing to fix on the node: rent it out to earn.", "fix_command": None, "kind": "idle_pay", "measured": None,
+    "message": "This GPU model is not part of the idle-pay program: it earns only when rented.", "required": None,
+    "secure_requirement": False, "title": "GPU model outside the idle-pay program",
+}
+P887_NO_ROOM = {
+    "code": "no_unrented_capacity_for_gpu_count", "docs_url": None,
+    "fix": "Nothing to fix on the node: the fleet cap changes with the market. Rent it out to earn.", "fix_command": None,
+    "kind": "idle_pay", "measured": None,
+    "message": "The idle-pay program has no capacity for this GPU model and count this cycle: it earns only when rented.",
+    "required": None, "secure_requirement": False, "title": "No idle-pay capacity for this GPU count",
+}
+# the price code taken out of the portal's gating-codes setting: still a reason, not a Secure requirement
+P887_PRICE_NOT_GATED = {
+    "code": "price_above_market_p90_soft_limit", "docs_url": "https://docs.lium.io/providers/portal/managing-nodes",
+    "fix": "Lower the node's price to $2.75/GPU/h or below on the node's page in the provider portal.", "fix_command": None,
+    "kind": "idle_pay", "measured": "$3.2/GPU/h", "message": "The price ($3.2/GPU/h) is above the market soft limit: no idle pay.",
+    "required": "at most $2.75/GPU/h", "secure_requirement": False, "title": "Price above the market soft limit",
+}
+
+
+def test_p887_entries_print_fix_command_docs_link_and_secure_requirements(portal_for):
+    portal_for(_Portal(node=_node(blocking_reasons=[P887_DRIVER, P887_SYSBOX, P887_PRICE_NOT_GATED])))
+
+    result = _run("node", "get", "e-1")
+
+    assert result.exit_code == 0, result.output
+    text = _flat(result.output)
+    assert "✗ Sysbox runtime missing measured no sysbox-runc runtime · required sysbox-runc runtime" in text
+    fix = text.index("Fix: Install sysbox with the Lium setup script")
+    command = text.index("nvidia_docker_sysbox_setup.sh | sudo bash")
+    docs = text.index("Docs: https://docs.lium.io/providers/nodes/sysbox")
+    assert fix < command < docs
+    assert "nvidia-smi --query-gpu=driver_version --format=csv,noheader && cd neurons/executor && docker compose up -d" in text
+    assert "Docs: https://docs.lium.io/providers/nodes/quickstart" in text
+    # secure_requirement decides, not the code: the price stays a reason but is no Secure requirement
+    assert "✗ Price above the market soft limit" in text
+    secure_block = text.split("Secure listing:")[1]
+    assert secure_block.startswith(" 2 unmet requirements")
+    assert "• Price above the market soft limit" not in secure_block
+
+
+def test_p887_command_sits_on_its_own_line_under_fix(portal_for):
+    portal_for(_Portal(node=_node(blocking_reasons=[P887_DRIVER])))
+
+    result = _run("node", "get", "e-1")
+
+    lines = [re.sub(r"[│\s]+$", "", re.sub(r"^[│\s]+", "", line)) for line in result.output.splitlines()]
+    assert "nvidia-smi --query-gpu=driver_version --format=csv,noheader && cd neurons/executor && docker compose up" in " ".join(lines)
+    command_row = next(i for i, line in enumerate(lines) if line.startswith("nvidia-smi --query-gpu"))
+    assert any(line.startswith("Fix: Upgrade the NVIDIA driver") for line in lines[:command_row])
+
+
+def test_p887_not_gated_entries_without_a_gating_key_are_not_eligible_not_blocked(portal_for, ansi_console):
+    portal_for(_Portal(nodes=[_node("e-2", blocking_reasons=[P887_GPU_MODEL, P887_NO_ROOM])]))
+
+    result = _run("node", "list")
+
+    assert result.exit_code == 0, result.output
+    assert "blocked=0" in result.output
+    assert "BLOCKED" not in result.output
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", ansi_console.getvalue())
+    assert "BLOCKING" not in plain
+    # a title that opens with an acronym keeps its capitals
+    assert (
+        "◦ e-2: not eligible for idle pay (GPU model outside the idle-pay program; "
+        "no idle-pay capacity for this GPU count); no action needed"
+    ) in plain
+    assert _red_lines(ansi_console.getvalue()) == []
+
+
+def test_p887_not_gated_entry_prints_its_title_as_sent_with_a_no_action_line(portal_for, ansi_console):
+    portal_for(_Portal(node=_node("e-2", blocking_reasons=[P887_GPU_MODEL])))
+
+    result = _run("node", "get", "e-2")
+
+    assert result.exit_code == 0, result.output
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", ansi_console.getvalue())
+    assert "Not eligible for idle pay: GPU model outside the idle-pay program" in plain
+    assert "gPU" not in plain
+    assert GPU_ACTION in plain
+
+
+def test_p887_secure_requirement_on_a_spot_node_is_no_secure_listing_line(portal_for):
+    portal_for(_Portal(node=_node(tier="spot", blocking_reasons=[P887_DRIVER])))
+
+    result = _run("node", "get", "e-1")
+
+    assert result.exit_code == 0, result.output
+    text = _flat(result.output)
+    assert "✗ NVIDIA driver below the minimum" in text
+    assert "Secure listing" not in text
+
+
+def test_node_list_miner_hotkey_own_reads_the_overview_and_another_does_not(portal_for):
+    portal = portal_for(_Portal(nodes=[_node("e-1")], overview=DRIVER_OVERVIEW))
+
+    result = _run("node", "list", "--miner-hotkey", "5FakeHotkey")   # the fake signer's own ss58
+    assert result.exit_code == 0, result.output
+    assert "/miners/overview" in portal.gets
+    assert "blocked=1" in result.output
+    assert "BLOCKING e-1" in _flat(result.output)
+
+    portal.gets.clear()
+    result = _run("node", "list", "--miner-hotkey", "5SomeoneElse")
+    assert result.exit_code == 0, result.output
+    assert "/miners/overview" not in portal.gets   # the overview is the signed-in provider's, not theirs
+    assert "blocked=0" in result.output
+    assert "BLOCKING" not in result.output
+
+
+def test_a_healthy_partly_rented_node_is_not_blocked(portal_for):
+    node = _node(
+        "e-1",
+        status="RENTED",
+        rented=True,
+        rented_gpu_count=4,
+        listing_state="rented",
+        hidden_reasons=[
+            {"code": "WHOLE_HOST_ONLY", "message": "The free GPUs are not listed: this host rents only as a whole host"},
+            {"code": "SPLIT_MINIMUM_NOT_MET", "message": "The free GPUs are below the node's minimum GPU count"},
+        ],
+    )
+    portal_for(_Portal(nodes=[node], node=node))
+
+    result = _run("node", "list")
+    assert result.exit_code == 0, result.output
+    assert "blocked=0" in result.output
+    assert "BLOCKING" not in result.output
+    assert re.search(r"1\s+RENTED\s+e-1", result.output)
+
+    result = _run("--json", "node", "get", "e-1")
+    assert json.loads(result.output)["data"]["blocking_reasons"] == []
