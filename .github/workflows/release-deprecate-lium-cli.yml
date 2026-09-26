@@ -7,7 +7,9 @@ jobs:
   build-and-publish:
     name: Build and publish lium-cli deprecation stub
     runs-on: ubuntu-latest
-    environment: release
+    # PyPI's (pending) trusted publisher names this file and the `pypi` environment, which admits only `main`, so this
+    # runs by hand from main and nowhere else (RELEASING.md "Who can publish")
+    environment: pypi
     permissions:
       contents: read
       id-token: write
@@ -16,20 +18,24 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
 
     - name: Install build dependencies
-      run: pip install build
+      run: pip install build twine
 
     - name: Build stub package
       working-directory: stubs/lium-cli
       run: python -m build --sdist --wheel --outdir dist/
 
+    - name: Check the distributions' metadata
+      run: twine check --strict stubs/lium-cli/dist/*
+
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
+        attestations: true
         packages-dir: stubs/lium-cli/dist/
         verbose: true
         print-hash: true

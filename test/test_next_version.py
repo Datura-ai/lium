@@ -610,7 +610,10 @@ def test_release_workflow_checks_the_tag_before_the_build() -> None:
         "RELEASE_BODY": "${{ github.event.release.body }}"
     }, "the notes go through env, never into the script text"
     assert 'python3 scripts/next_version.py --check "$RELEASE_TAG" --release-notes' in check["run"]
-    for publishing_job in ("release-assets", "approve-and-publish"):
-        needs = workflow["jobs"][publishing_job]["needs"]
-        needs = [needs] if isinstance(needs, str) else needs
-        assert "build-python" in needs, f"{publishing_job} publishes only after the check"
+    needs = workflow["jobs"]["release-assets"]["needs"]
+    needs = [needs] if isinstance(needs, str) else needs
+    assert "build-python" in needs, "release-assets publishes only after the check"
+    publish = yaml.safe_load((RELEASE_WORKFLOW.parent / "publish-pypi.yml").read_text())
+    assert "github.event.workflow_run.conclusion == 'success'" in publish["jobs"]["build"]["if"], (
+        "PyPI uploads only after release.yml, check included, succeeded"
+    )
