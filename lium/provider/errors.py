@@ -4,7 +4,8 @@ Every external failure surface (portal HTTP, SSH, wallet materialisation) is
 mapped onto a stable code with an actionable hint, so an agent driving the
 CLI can branch on machine-readable values rather than log strings.
 
-Exit-code mapping (used by ``lium/cli/provider/_render.py``):
+Exit-code mapping (used by ``lium/cli/provider/_render.py``). The UPPER_CASE
+codes keep the old provider map while scripts migrate:
 
     0  success
     1  user error (bad arg)
@@ -13,6 +14,10 @@ Exit-code mapping (used by ``lium/cli/provider/_render.py``):
     5  SSH error
     6  config error
     7  token-cache contention (PORTAL_AUTH_REFRESH_RACE)
+
+A namespaced snake_case code (``input.confirmation_required``, ``net.unreachable``,
+``portal.<the portal's detail.code>``) exits by the unified map instead
+(:func:`unified_exit_code`, ``docs/exit-codes.md``).
 
 Each error code is exported as a string constant so callers can do::
 
@@ -54,6 +59,61 @@ PORTS_INVALID = "PORTS_INVALID"
 ARG_INVALID = "ARG_INVALID"
 CONFIG_MISSING = "CONFIG_MISSING"
 
+# Namespaced codes (snake_case, never renamed once shipped). A portal refusal that names its own
+# ``detail.code`` is raised as ``portal.<that code>``.
+INPUT_REQUIRED = "input.input_required"
+CONFIRMATION_REQUIRED = "input.confirmation_required"
+NET_UNREACHABLE = "net.unreachable"
+PORTAL_NOT_SUPPORTED = "portal.not_supported"
+NODE_NOT_LISTED = "node.not_listed_yet"
+
+# The unified exit map (docs/exit-codes.md).
+EXIT_OK = 0
+EXIT_GENERAL = 1
+EXIT_INPUT = 2
+EXIT_API = 3
+EXIT_NETWORK = 4
+EXIT_NOT_FOUND = 5
+EXIT_AUTH = 6
+EXIT_RETRYABLE = 7
+EXIT_BLOCKED = 10
+EXIT_NOT_LISTED = 11
+EXIT_HUMAN = 12
+
+_NAMESPACE_EXITS: dict[str, int] = {
+    "input": EXIT_INPUT,
+    "human": EXIT_HUMAN,
+    "auth": EXIT_AUTH,
+    "net": EXIT_NETWORK,
+    "ssh": EXIT_NETWORK,
+    "host": EXIT_GENERAL,
+    "portal": EXIT_API,
+}
+
+
+def unified_exit_code(code: str, status: int | None = None) -> int:
+    """The unified-map exit status of a namespaced code; ``status`` is the portal's HTTP status, if any."""
+    if code.startswith("node.blocked"):
+        return EXIT_BLOCKED
+    if code == NODE_NOT_LISTED:
+        return EXIT_NOT_LISTED
+    if code == PORTAL_NOT_SUPPORTED:
+        return EXIT_API
+    leaf = code.rsplit(".", 1)[-1]
+    not_found = leaf == "not_found" or leaf.endswith("_not_found")
+    if code.startswith("portal."):
+        if status in (401, 403, 419, 440):
+            return EXIT_AUTH
+        if status == 404 or not_found:
+            return EXIT_NOT_FOUND
+        if status == 429:
+            return EXIT_RETRYABLE
+        return EXIT_API
+    if not_found:
+        return EXIT_NOT_FOUND
+    return _NAMESPACE_EXITS.get(code.split(".", 1)[0], EXIT_GENERAL)
+
+
 # Default hint table -- keep human and short. Empty string => no hint.
 _HINTS: dict[str, str] = {
     WALLET_NOT_FOUND: "Run `btcli wallet new_coldkey` then `btcli wallet new_hotkey`, or check --coldkey/--hotkey names.",
@@ -75,6 +135,10 @@ _HINTS: dict[str, str] = {
     PORTS_INVALID: "Use the form HTTP=8080,SSH=2200,RANGE=2000-2005 with positive integers.",
     ARG_INVALID: "Check the argument value and consult --help.",
     CONFIG_MISSING: "Run `lium init` or set the missing config value.",
+    INPUT_REQUIRED: "Pass the value as an option; no prompt is shown without a terminal or under --json.",
+    CONFIRMATION_REQUIRED: "Re-run with --yes (or set LIUM_PROVIDER_ACK=1).",
+    NET_UNREACHABLE: "Nothing answered at the portal URL. Check --portal-url / LIUM_PORTAL_URL and the network, then retry.",
+    PORTAL_NOT_SUPPORTED: "This portal does not serve that yet; sign in with `lium provider portal login` instead.",
 }
 
 
@@ -160,9 +224,26 @@ class ProviderConfigError(ProviderError):
 __all__ = [
     "ARG_INVALID",
     "CONFIG_MISSING",
+    "CONFIRMATION_REQUIRED",
     "EXECUTOR_UUID_MISMATCH",
+    "EXIT_API",
+    "EXIT_AUTH",
+    "EXIT_BLOCKED",
+    "EXIT_GENERAL",
+    "EXIT_HUMAN",
+    "EXIT_INPUT",
+    "EXIT_NETWORK",
+    "EXIT_NOT_FOUND",
+    "EXIT_NOT_LISTED",
+    "EXIT_OK",
+    "EXIT_RETRYABLE",
     "HOTKEY_NOT_REGISTERED",
+    "INPUT_REQUIRED",
     "INSTALLER_PARTIAL_FAIL",
+    "NET_UNREACHABLE",
+    "NODE_NOT_LISTED",
+    "PORTAL_NOT_SUPPORTED",
+    "unified_exit_code",
     "ProviderAuthError",
     "ProviderConfigError",
     "ProviderError",

@@ -43,11 +43,15 @@ from lium.provider.errors import (
     PORTAL_REQUEST_REJECTED,
     PORTAL_SERVER_ERROR,
     PORTS_INVALID,
+    EXECUTOR_UUID_MISMATCH,
+    INSTALLER_PARTIAL_FAIL,
     SSH_AUTH_FAILED,
     SSH_UNREACHABLE,
+    UUID_NOT_FOUND,
     WALLET_NOT_FOUND,
     ProviderError,
 )
+from lium.provider.errors import unified_exit_code
 from lium.provider.models import ProviderStatus
 
 
@@ -86,8 +90,51 @@ _EXIT_CODES: dict[str, int] = {
 }
 
 
+# A node with a gating blocking reason under ``--fail-on-blocked`` or ``--until-clear``.
+EXIT_NODE_BLOCKED = 10
+
+# The namespaced snake_case code each provider error carries in ``--json``; the UPPER_CASE code it
+# replaces stays in the envelope as ``legacy_code``. Never rename a code once shipped.
+ERROR_CODES: dict[str, str] = {
+    WALLET_NOT_FOUND: "auth.wallet_not_found",
+    HOTKEY_NOT_REGISTERED: "auth.hotkey_not_registered",
+    PORTAL_AUTH_EXPIRED: "auth.expired",
+    PORTAL_AUTH_INVALID: "auth.invalid",
+    PORTAL_AUTH_REFRESH_RACE: "auth.refresh_race",
+    PORTAL_FORBIDDEN: "auth.forbidden",
+    PORTAL_CONTRACT_DRIFT: "portal.contract_drift",
+    PORTAL_NOT_FOUND: "portal.not_found",
+    PORTAL_SERVER_ERROR: "portal.server_error",
+    PORTAL_RATE_LIMIT: "portal.rate_limited",
+    PORTAL_REQUEST_REJECTED: "portal.request_rejected",
+    SSH_UNREACHABLE: "ssh.unreachable",
+    SSH_AUTH_FAILED: "ssh.auth_failed",
+    INSTALLER_PARTIAL_FAIL: "host.installer_partial_fail",
+    EXECUTOR_UUID_MISMATCH: "host.executor_uuid_mismatch",
+    UUID_NOT_FOUND: "host.uuid_not_found",
+    PORTS_INVALID: "input.ports_invalid",
+    ARG_INVALID: "input.arg_invalid",
+    CONFIG_MISSING: "input.config_missing",
+}
+
+
+def error_code_for(code: str) -> str:
+    """The namespaced code for a provider error code; a code already namespaced passes through."""
+    if "." in code:
+        return code
+    if code in ERROR_CODES:
+        return ERROR_CODES[code]
+    for prefix, namespace in (("PORTAL_AUTH_", "auth"), ("PORTAL_", "portal"), ("SSH_", "ssh")):
+        if code.startswith(prefix):
+            return f"{namespace}.{code[len(prefix):].lower()}"
+    return f"general.{code.lower()}"
+
+
 def exit_code_for(err: ProviderError) -> int:
     """Map a :class:`ProviderError` to its CLI exit status."""
+    if "." in err.code:
+        # a namespaced code exits by the unified map; the UPPER_CASE ones keep the old statuses while scripts migrate
+        return unified_exit_code(err.code, err.context.get("status"))
     return _EXIT_CODES.get(err.code, 1)
 
 
@@ -151,8 +198,17 @@ def emit_error(ctx: click.Context, err: ProviderError) -> int:
     """Format a :class:`ProviderError` and return its exit code."""
     code = exit_code_for(err)
     if _json_mode(ctx):
-        envelope = {"ok": False, "error": err.to_dict()}
-        click.echo(json.dumps(envelope, sort_keys=True, default=str), err=True)
+        error = {
+            "code": error_code_for(err.code),
+            "legacy_code": err.code,
+            "message": err.message,
+            "hint": err.hint,
+            "exit_code": code,
+            "context": err.context,
+        }
+        if err.context:
+            error["data"] = err.context
+        click.echo(json.dumps({"ok": False, "error": error}, sort_keys=True, default=str))
     else:
         prefix = click.style(f"[{err.code}]", fg="red", bold=True)
         click.echo(f"{prefix} {err.message}", err=True)

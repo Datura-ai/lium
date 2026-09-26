@@ -2,13 +2,15 @@
 
 Two gates that every spend-affecting subcommand needs:
 
-- ``require_hotkey`` -- ensures a hotkey is resolvable from
-  ``--hotkey`` / ``LIUM_PROVIDER_HOTKEY`` / ``provider.hotkey`` config.
-  Read-only commands also use this so they fail fast with a clear hint.
-- ``require_persona_ack`` -- forwards to ``enforce_persona_gate`` from
-  ``command.py`` so a fresh shell prompts once for confirmation before any
-  irreversible portal mutation. ``--yes`` / ``LIUM_PROVIDER_ACK=1`` /
-  per-shell ack short-circuit silently.
+- ``require_hotkey`` -- ensures the portal can be signed in to: a hotkey
+  resolvable from ``--hotkey`` / ``LIUM_PROVIDER_HOTKEY`` / ``provider.hotkey``
+  config, or a bearer token (``LIUM_PROVIDER_TOKEN``, or the session of
+  ``portal login --email``). Read-only commands also use this so they fail
+  fast with a clear hint.
+- ``require_persona_ack`` -- asks for confirmation once per user before any
+  irreversible portal mutation. ``--yes`` / ``LIUM_PROVIDER_ACK=1`` / an
+  earlier ack short-circuit silently; under ``--json`` or without a terminal
+  it fails with ``input.confirmation_required`` (exit 2) instead of asking.
 
 Centralising these here removes the same 5-line guard repeated across
 ``node.py``, ``config.py``, ``sync.py``, ``queries.py``.
@@ -22,19 +24,20 @@ from __future__ import annotations
 
 import click
 
-from lium.cli.provider._persona import confirm_persona
+from lium.cli.provider._client import bearer_token
+from lium.cli.provider._persona import ConfirmationRequired, confirm_persona
 from lium.cli.provider._render import emit_error, fatal
-from lium.provider.errors import ARG_INVALID, ProviderError
+from lium.provider.errors import ARG_INVALID, CONFIRMATION_REQUIRED, ProviderError
 
 
 def require_hotkey(ctx: click.Context, *, group: str | None = None) -> None:
-    """Exit with a clear ARG_INVALID if no hotkey is configured.
+    """Exit with a clear ARG_INVALID if neither a hotkey nor a bearer token is configured.
 
     ``group`` (optional) is folded into the message so the user knows
     which subgroup needs it.
     """
     opts = (ctx.obj or {}).get("provider_opts") or {}
-    if opts.get("hotkey"):
+    if opts.get("hotkey") or bearer_token(opts):
         return
     label = f"{group} commands" if group else "this command"
     fatal(
@@ -42,24 +45,33 @@ def require_hotkey(ctx: click.Context, *, group: str | None = None) -> None:
         ProviderError(
             f"{label} require --hotkey (or LIUM_PROVIDER_HOTKEY)",
             code=ARG_INVALID,
+            hint="Or set LIUM_PROVIDER_TOKEN, or sign in with `lium provider portal login --email <address>`.",
         ),
     )
 
 
 def require_persona_ack(ctx: click.Context) -> None:
-    """Run the persona gate before any spend-affecting subcommand.
-
-    Mirrors :func:`lium.cli.provider.command.enforce_persona_gate` but lives
-    here to avoid a circular import (the subgroup modules in turn import
-    ``command.py`` only via the umbrella).
-    """
+    """Run the persona gate before any spend-affecting subcommand."""
     opts = (ctx.obj or {}).get("provider_opts") or {}
-    ok = confirm_persona(
-        ctx,
-        coldkey=opts.get("coldkey"),
-        hotkey=opts.get("hotkey"),
-        yes_flag=bool(opts.get("yes")),
-    )
+    try:
+        ok = confirm_persona(
+            ctx,
+            coldkey=opts.get("coldkey"),
+            hotkey=opts.get("hotkey"),
+            yes_flag=bool(opts.get("yes")),
+            json_mode=bool(opts.get("json")),
+        )
+    except ConfirmationRequired as e:
+        fatal(
+            ctx,
+            ProviderError(
+                f"confirmation required before a spend-affecting command ({e})",
+                code=CONFIRMATION_REQUIRED,
+                hint="Re-run with --yes, or set LIUM_PROVIDER_ACK=1 once for this agent's environment.",
+                context={"flag": "--yes", "env": "LIUM_PROVIDER_ACK=1"},
+            ),
+        )
+        return
     if ok:
         return
     fatal(

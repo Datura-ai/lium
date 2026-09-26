@@ -17,6 +17,7 @@ from typing import Any, Callable
 import requests
 
 from lium.provider.errors import (
+    NET_UNREACHABLE,
     PORTAL_AUTH_EXPIRED,
     PORTAL_AUTH_INVALID,
     PORTAL_FORBIDDEN,
@@ -140,9 +141,15 @@ class PortalHTTP:
                 code=PORTAL_REQUEST_REJECTED,
                 context={"url": url, "method": method},
             ) from e
+        except (requests.ConnectionError, requests.Timeout) as e:
+            # nothing answered (refused, DNS, unroutable, timed out): not a portal fault, and not a 5xx to report
+            raise ProviderError(
+                f"could not reach the portal at {self.base_url}: {e}",
+                code=NET_UNREACHABLE,
+                cause=e,
+                context={"url": url, "method": method},
+            ) from e
         except requests.RequestException as e:
-            # Network-level failure: with_retry will retry; on the final
-            # attempt the exception bubbles up. Wrap into ProviderError.
             raise ProviderServerError(
                 f"network error reaching portal: {e}",
                 code=PORTAL_SERVER_ERROR,
@@ -195,6 +202,10 @@ def _parse_response(
         return {"data": body}
 
     context = {"url": url, "method": method, "status": status, "body": body}
+
+    coded = _coded_detail(body)
+    if coded is not None:
+        raise _coded_error(status, coded, context)
 
     if status == 401:
         raise ProviderAuthError(
@@ -254,6 +265,29 @@ def _parse_response(
         code=PORTAL_SERVER_ERROR,
         context=context,
     )
+
+
+def _coded_detail(body: Any) -> dict[str, Any] | None:
+    """The portal's ``detail`` when it names a stable ``code`` (``{"message", "code", …}``), else None."""
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, dict) and isinstance(detail.get("code"), str) and detail["code"].strip():
+        return detail
+    return None
+
+
+def _coded_error(status: int, detail: dict[str, Any], context: dict[str, Any]) -> ProviderError:
+    """``portal.<detail.code>``, as the portal named it; the class still follows the status (a 401 stays an auth error)."""
+    code = "portal." + detail["code"].strip()
+    message = str(detail.get("message") or f"portal refused the request ({status})")
+    extra = {k: v for k, v in detail.items() if k not in ("code", "message")}
+    ctx = {**context, **({"detail": extra} if extra else {})}
+    if status in (401, 403, 419, 440):
+        return ProviderAuthError(message, code=code, context=ctx)
+    if status == 404:
+        return ProviderNotFoundError(message, code=code, context=ctx)
+    if 500 <= status < 600:
+        return ProviderServerError(message, code=code, context=ctx)
+    return ProviderError(message, code=code, context=ctx)
 
 
 def _portal_detail(body: Any) -> str:

@@ -188,12 +188,50 @@ def test_400_is_a_rejected_request_with_the_portals_reason(body, expected) -> No
     )
 
 
-def test_network_error_raises_provider_server_error() -> None:
+def test_a_portal_nothing_answers_at_is_net_unreachable_not_a_server_error() -> None:
     http, _ = _make_http(requests.ConnectionError("dns blew up"))
+    with pytest.raises(ProviderError) as exc:
+        http.get("/anything")
+    assert not isinstance(exc.value, ProviderServerError)
+    assert exc.value.code == "net.unreachable"
+    assert "dns blew up" in exc.value.message and "https://portal.example.com" in exc.value.message
+
+
+def test_a_read_timeout_is_net_unreachable() -> None:
+    http, _ = _make_http(requests.ReadTimeout("read timed out"))
+    with pytest.raises(ProviderError) as exc:
+        http.get("/anything")
+    assert exc.value.code == "net.unreachable"
+
+
+def test_any_other_transport_failure_stays_a_server_error() -> None:
+    http, _ = _make_http(requests.exceptions.ChunkedEncodingError("broken chunk"))
     with pytest.raises(ProviderServerError) as exc:
         http.get("/anything")
     assert exc.value.code == PORTAL_SERVER_ERROR
-    assert "dns blew up" in exc.value.message
+
+
+@pytest.mark.parametrize(
+    ("status", "cls"),
+    [(400, ProviderError), (401, ProviderAuthError), (403, ProviderAuthError), (404, ProviderNotFoundError), (503, ProviderServerError)],
+)
+def test_the_portal_detail_code_is_passed_through_as_portal_code(status, cls) -> None:
+    body = {"detail": {"message": "Node must be rented before pausing new rentals.", "code": "node_not_rented", "blocker": "rented"}}
+    http, _ = _make_http(_FakeResponse(status, body))
+    with pytest.raises(cls) as exc:
+        http.post("/executors/e-1/new-rentals/pause")
+    assert exc.value.code == "portal.node_not_rented"
+    assert exc.value.message == "Node must be rented before pausing new rentals."
+    assert exc.value.context["status"] == status
+    assert exc.value.context["detail"] == {"blocker": "rented"}
+
+
+def test_a_detail_without_a_code_keeps_the_old_flattened_error() -> None:
+    http, _ = _make_http(_FakeResponse(400, {"detail": {"gpu_type": "Unsupported gpu type."}}))
+    with pytest.raises(ProviderError) as exc:
+        http.get("/anything")
+    assert exc.value.code == PORTAL_REQUEST_REJECTED
+    assert "gpu_type: Unsupported gpu type." in exc.value.message
 
 
 def test_base_url_strips_trailing_slash() -> None:

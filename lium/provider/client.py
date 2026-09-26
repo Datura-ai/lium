@@ -41,6 +41,7 @@ from lium.provider._routes import (
     MACHINES,
     ME,
     MINER_OPT_IN,
+    MINERS_OVERVIEW,
     SET_EMAIL,
     SET_MACHINE_REQUEST_SUBSCRIPTION,
     SET_PASSWORD,
@@ -49,12 +50,26 @@ from lium.provider._routes import (
     UPDATE_GPU,
     UPDATE_PRICE,
 )
+from lium.provider._routes import (
+    API_TOKEN_BY_ID,
+    API_TOKENS,
+    EXECUTOR_NEW_RENTALS_PAUSE,
+    EXECUTOR_TIER_ELIGIBILITY,
+    EXECUTOR_UPDATE_TIER,
+    EXECUTORS_LISTING,
+    LOGIN_EMAIL,
+    PROVIDER_EARNINGS_DAILY,
+    PROVIDER_EMISSIONS_DAILY,
+    PROVIDER_LEDGER_DAILY,
+    REGISTER_TOKEN,
+)
 from lium.provider.auth import LocalKeypairSigner, Signer, build_login_payload
 from lium.provider.chain_stack import missing_chain_stack_message
 from lium.provider.errors import (
     ARG_INVALID,
     PORTAL_AUTH_EXPIRED,
     PORTAL_AUTH_INVALID,
+    PORTAL_NOT_SUPPORTED,
     ProviderAuthError,
     ProviderConfigError,
     ProviderError,
@@ -95,6 +110,9 @@ class ProviderClient:
         signer: optional custom :class:`Signer`. v1 default is
             ``LocalKeypairSigner`` constructed lazily from the wallet at
             ``~/.bittensor/wallets/<coldkey>/hotkeys/<hotkey>``.
+        api_token: a bearer token sent on every call instead of the hotkey's
+            session: a provider API token (``lpk_…``, ``LIUM_PROVIDER_TOKEN``)
+            or the session of ``login_email``. No wallet is needed with one.
     """
 
     def __init__(
@@ -106,12 +124,14 @@ class ProviderClient:
         token_store: TokenStore | None = None,
         http: PortalHTTP | None = None,
         signer: Signer | None = None,
+        api_token: str | None = None,
     ) -> None:
-        if signer is None and hotkey is None:
-            raise ValueError("ProviderClient requires either signer= or hotkey=")
+        if signer is None and hotkey is None and api_token is None:
+            raise ValueError("ProviderClient requires signer=, hotkey= or api_token=")
         self.coldkey = coldkey
         self.hotkey = hotkey
         self.portal_url = (portal_url or DEFAULT_PORTAL_URL).rstrip("/")
+        self._api_token = api_token or None
         self._signer: Signer | None = signer
         self._token_store = token_store or TokenStore()
         self._cached_token: CachedToken | None = None
@@ -121,6 +141,17 @@ class ProviderClient:
             base_url=self.portal_url,
             token_provider=self._current_token,
         )
+
+    @classmethod
+    def signed_out(
+        cls,
+        *,
+        portal_url: str | None = None,
+        token_store: TokenStore | None = None,
+        http: PortalHTTP | None = None,
+    ) -> "ProviderClient":
+        """A client with no credential yet, for :meth:`login_email`."""
+        return cls(portal_url=portal_url, token_store=token_store, http=http, api_token="")
 
     # ------------------------------------------------------------------
     # Public API
@@ -193,7 +224,8 @@ class ProviderClient:
         try:
             self.whoami()
         except ProviderAuthError as e:
-            if e.code in (PORTAL_AUTH_INVALID, PORTAL_AUTH_EXPIRED):
+            # a coded 401 (``portal.<code>``) ends the session as much as the plain one
+            if e.code in (PORTAL_AUTH_INVALID, PORTAL_AUTH_EXPIRED) or e.context.get("status") in (401, 419, 440):
                 self._cached_token = None
                 return True
         except ProviderError as e:
@@ -492,6 +524,17 @@ class ProviderClient:
             EXECUTOR_BY_ID.format(id=_safe_id(node_id, label="node_id"))
         )
 
+    def provider_overview(self) -> dict[str, Any]:
+        """``GET /miners/overview`` -- the signed-in provider's Overview page in one call.
+
+        Returns the unwrapped object; ``node_rows[].idle_pay_reasons`` carries the
+        validator's reasons an idle node earned nothing in its last cycle.
+        """
+        body = self._http.get(MINERS_OVERVIEW)
+        if isinstance(body, dict) and isinstance(body.get("data"), dict):
+            return body["data"]
+        return body if isinstance(body, dict) else {}
+
     def get_node_verification(self, node_id: str) -> dict[str, Any]:
         """``GET /executors/{id}/verification`` -- which validator step the
         node is on, elapsed and estimated time left while a check runs; the
@@ -702,6 +745,122 @@ class ProviderClient:
         return self._http.get(ESTIMATED_REWARDS, params=params or None)
 
     # ------------------------------------------------------------------
+    # Agent-facing provider journey: register token, tier, pause, listing,
+    # earnings, ledger, e-mail sign-in and provider API tokens.
+
+    def create_register_token(self) -> dict[str, Any]:
+        """``POST /executors/register-token`` -- a one-hour token that can only add a node to this account
+        (``lium mine --register <token>``). ``{token, issued_at, expires_at}``."""
+        return self._http.post(REGISTER_TOKEN)
+
+    def tier_change_eligibility(self, node_id: str) -> dict[str, Any]:
+        """``GET /executors/{id}/tier-change-eligibility`` -- ``{allowed, blockers: [{code, message}]}``."""
+        return _unwrap(self._http.get(
+            EXECUTOR_TIER_ELIGIBILITY.format(id=_safe_id(node_id, label="node_id"))
+        ))
+
+    def update_tier(self, node_id: str, tier: str) -> dict[str, Any]:
+        """``POST /executors/{id}/update-tier`` with ``{tier}`` (``secure`` or ``spot``)."""
+        return _unwrap(self._http.post(
+            EXECUTOR_UPDATE_TIER.format(id=_safe_id(node_id, label="node_id")),
+            json_body={"tier": tier},
+        ))
+
+    def pause_new_rentals(self, node_id: str) -> dict[str, Any]:
+        """``POST /executors/{id}/new-rentals/pause`` -- take no new rental once the current one ends."""
+        return self._http.post(EXECUTOR_NEW_RENTALS_PAUSE.format(id=_safe_id(node_id, label="node_id")))
+
+    def resume_new_rentals(self, node_id: str) -> dict[str, Any]:
+        """``DELETE /executors/{id}/new-rentals/pause`` -- take new rentals again."""
+        return self._http.delete(EXECUTOR_NEW_RENTALS_PAUSE.format(id=_safe_id(node_id, label="node_id")))
+
+    def nodes_listing(self) -> list[dict[str, Any]]:
+        """``GET /executors/listing`` -- each own node against the public listing: ``listing_state``
+        (rented, listed, hidden, offline, validating) and the ``hidden_reasons`` that keep it out."""
+        body = self._http.get(EXECUTORS_LISTING)
+        rows = body.get("data") if isinstance(body, dict) else body
+        return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+    def earnings_daily(
+        self,
+        hotkey: str,
+        *,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        node_ids: list[str] | None = None,
+        emissions: bool = False,
+    ) -> dict[str, Any]:
+        """``GET /provider-earnings/{hotkey}/daily`` (rentals) or ``…/emissions/daily`` (incentive), one row per UTC day."""
+        route = PROVIDER_EMISSIONS_DAILY if emissions else PROVIDER_EARNINGS_DAILY
+        params: dict[str, Any] = {}
+        if date_from:
+            params["from"] = date_from
+        if date_to:
+            params["to"] = date_to
+        if node_ids:
+            params["executor_ids"] = [_safe_id(n, label="node_id") for n in node_ids]
+        return _unwrap(self._http.get(route.format(hotkey=_safe_hotkey_segment(hotkey, label="hotkey")), params=params or None))
+
+    def ledger_daily(self, *, date_from: str | None = None, date_to: str | None = None) -> dict[str, Any]:
+        """``GET /provider-ledger/daily`` -- the signed-in provider's ledger rows, one per UTC day and kind."""
+        params = {k: v for k, v in (("from", date_from), ("to", date_to)) if v}
+        return _unwrap(self._http.get(PROVIDER_LEDGER_DAILY, params=params or None))
+
+    def own_hotkey(self) -> str:
+        """The account's hotkey: the local wallet's ss58, else what ``/auth/me`` says (e-mail or token sign-in)."""
+        if self._signer is not None or self.hotkey is not None:
+            hotkey = self._safe_hotkey()
+            if hotkey:
+                return hotkey
+        me = self.whoami()
+        hotkey = me.get("miner_hotkey") if isinstance(me, dict) else None
+        if not isinstance(hotkey, str) or not hotkey:
+            raise ProviderError(
+                "the portal did not say which hotkey this account uses",
+                code=ARG_INVALID,
+                hint="Pass --miner-hotkey <ss58>.",
+            )
+        return hotkey
+
+    def login_email(self, email: str, password: str) -> dict[str, Any]:
+        """``POST /auth/login-email`` -- sign in to an account created with e-mail and password.
+
+        The session is kept in the token store under ``email:<address>`` (the account may have
+        no key of its own) and used as this client's bearer token. Returns ``{miner, token}``.
+        """
+        body = self._http.post(LOGIN_EMAIL, json_body={"email": email, "password": password}, auth=False)
+        token = body.get("token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not token:
+            raise ProviderAuthError(
+                "portal returned an unexpected login response shape",
+                code=PORTAL_AUTH_INVALID,
+                context={"body": _summarise_body(body)},
+            )
+        miner = body.get("miner") if isinstance(body.get("miner"), dict) else {}
+        with_refresh_retry(
+            lambda: self._token_store.save(email_session_key(email), token, provider_id=str(miner.get("id") or "") or None)
+        )
+        self._api_token = token
+        return body
+
+    def create_api_token(self, *, name: str, scopes: list[str], expires_days: int | None = None) -> dict[str, Any]:
+        """``POST /auth/api-tokens`` -- a provider API token (``lpk_…``); the secret is in this answer only."""
+        payload: dict[str, Any] = {"name": name, "scopes": scopes}
+        if expires_days is not None:
+            payload["expires_in_days"] = expires_days
+        return _api_tokens_call(lambda: self._http.post(API_TOKENS, json_body=payload))
+
+    def list_api_tokens(self) -> dict[str, Any]:
+        """``GET /auth/api-tokens`` -- the account's tokens (never their secrets)."""
+        return _api_tokens_call(lambda: self._http.get(API_TOKENS))
+
+    def revoke_api_token(self, token_id: str) -> dict[str, Any]:
+        """``DELETE /auth/api-tokens/{id}``."""
+        return _api_tokens_call(
+            lambda: self._http.delete(API_TOKEN_BY_ID.format(token_id=_safe_id(token_id, label="token_id")))
+        )
+
+    # ------------------------------------------------------------------
     # Internals
 
     def _current_token(self) -> str | None:
@@ -711,6 +870,8 @@ class ProviderClient:
         token when one is cached AND not expired -- expired tokens are
         treated as "no token" so the caller gets a clean 401 path.
         """
+        if self._api_token:
+            return self._api_token
         if self._cached_token is not None and not self._cached_token.expired():
             return self._cached_token.token
         # Try a cache load without a network round-trip. We need the signer's
@@ -809,6 +970,35 @@ def _summarise_body(body: Any, *, max_chars: int = 240) -> str:
     """Truncate a response body for inclusion in error context."""
     text = repr(body)
     return text if len(text) <= max_chars else text[:max_chars] + "..."
+
+
+def _unwrap(body: Any) -> dict[str, Any]:
+    """The inner object of an ``ApiResponse``/``DetailResponse`` (``{success, data}``) the transport left wrapped."""
+    if isinstance(body, dict) and isinstance(body.get("data"), dict) and "total" not in body:
+        return body["data"]
+    return body if isinstance(body, dict) else {"data": body}
+
+
+def email_session_key(email: str) -> str:
+    """The token-store key of an e-mail sign-in (an account without a key of its own has no ss58 to key it by)."""
+    return "email:" + email.strip().lower()
+
+
+def _api_tokens_call(call: Any) -> dict[str, Any]:
+    """Run a provider-API-token call; a portal without the routes (404/405 with no code of its own) is
+    ``portal.not_supported``, not a missing token."""
+    try:
+        return _unwrap(call())
+    except ProviderError as e:
+        status = e.context.get("status")
+        if status in (404, 405) and not e.code.startswith("portal."):
+            raise ProviderError(
+                "this portal does not serve provider API tokens yet",
+                code=PORTAL_NOT_SUPPORTED,
+                cause=e,
+                context={"status": status, "url": e.context.get("url")},
+            ) from e
+        raise
 
 
 def discord_connected_from_profile(profile: dict[str, Any] | None) -> bool | None:

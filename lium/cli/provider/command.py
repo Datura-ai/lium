@@ -14,6 +14,12 @@ Subcommands:
   between the portal and the central miner.
 - ``lium provider {billing,machine-request,machine}``
   -- read-only history queries.
+- ``lium provider {earnings,idle-pay,ledger}`` -- earnings per day, idle pay
+  per node, the account's ledger.
+- ``lium provider token {create,list,revoke}`` -- provider API tokens
+  (``LIUM_PROVIDER_TOKEN`` is sent as the bearer token when set).
+- ``lium provider node {register-token,tier,pause,resume,listing}`` -- the
+  node steps an agent needs besides ``add``.
 
 Hotkey registration on SN51 is handled directly by ``btcli subnet register``;
 the CLI persists ``--coldkey``/``--hotkey`` via ``lium config set
@@ -25,9 +31,12 @@ from __future__ import annotations
 
 import click
 
-from lium.cli.provider._persona import confirm_persona
-from lium.cli.provider._render import emit_error, fatal
+from lium.cli.provider._guards import require_persona_ack
+from lium.cli.provider._render import emit_error
 from lium.cli.provider.config import config_command
+from lium.cli.provider.earnings import earnings_command, idle_pay_command, ledger_command
+from lium.cli.provider.node_ops import register_node_ops
+from lium.cli.provider.token import token_command
 from lium.cli.provider.node import node_command
 from lium.cli.provider.portal import portal_command
 from lium.cli.provider.queries import (
@@ -38,6 +47,7 @@ from lium.cli.provider.queries import (
 from lium.cli.provider.status import status_command
 from lium.cli.provider.sync import sync_command
 from lium.cli.settings import ConfigManager
+from lium.cli.utils import json_output_requested
 from lium.provider.errors import ProviderError
 
 
@@ -68,7 +78,7 @@ from lium.provider.errors import ProviderError
     "--json",
     "json_mode",
     is_flag=True,
-    help="Emit machine-readable JSON output (one envelope per command).",
+    help="Emit machine-readable JSON output (one envelope per command). LIUM_OUTPUT=json does the same.",
 )
 @click.option(
     "--debug",
@@ -120,7 +130,7 @@ def provider_command(
         "coldkey": coldkey or cfg.get("provider.coldkey"),
         "hotkey": hotkey or cfg.get("provider.hotkey"),
         "portal_url": portal_url or cfg.get("provider.portal_url"),
-        "json": json_mode,
+        "json": json_mode or json_output_requested(),
         "debug": debug,
         "yes": yes_flag,
         "dry_run": dry_run,
@@ -147,6 +157,11 @@ provider_command.add_command(sync_command, name="sync")
 provider_command.add_command(billing_command, name="billing")
 provider_command.add_command(machine_request_command, name="machine-request")
 provider_command.add_command(machine_command, name="machine")
+provider_command.add_command(earnings_command, name="earnings")
+provider_command.add_command(idle_pay_command, name="idle-pay")
+provider_command.add_command(ledger_command, name="ledger")
+provider_command.add_command(token_command, name="token")
+register_node_ops(node_command)
 
 
 # Re-exported for symmetry with other CLI subgroups.
@@ -160,24 +175,11 @@ def enforce_persona_gate(ctx: click.Context) -> None:
 
     Called as the first action of any subcommand that takes a spend-affecting
     or otherwise-irreversible action (register, node mutations,
-    install). If the user declines, exits with ``ARG_INVALID`` exit code.
+    install). If the user declines, exits with ``ARG_INVALID`` exit code; when
+    nobody can answer (``--json``, no terminal, EOF) with
+    ``input.confirmation_required`` (exit 2).
     """
-    opts = (ctx.obj or {}).get("provider_opts") or {}
-    ok = confirm_persona(
-        ctx,
-        coldkey=opts.get("coldkey"),
-        hotkey=opts.get("hotkey"),
-        yes_flag=bool(opts.get("yes")),
-    )
-    if not ok:
-        fatal(
-            ctx,
-            ProviderError(
-                "persona confirmation declined; aborting spend-affecting command",
-                code="ARG_INVALID",
-                hint="Re-run with --yes or set LIUM_PROVIDER_ACK=1.",
-            ),
-        )
+    require_persona_ack(ctx)
 
 
 __all__ = ["enforce_persona_gate", "handle_provider_error", "provider_command"]
