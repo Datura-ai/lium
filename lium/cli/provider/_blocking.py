@@ -67,6 +67,43 @@ _ALIASES = {
 # The validator's ``get_min_driver_multiplier``: the lowest driver that earns idle pay.
 MIN_NVIDIA_DRIVER = "580.65.06"
 
+# What the fix of each idle-pay code needs from whoever runs it, the values the portal's catalog serves
+# as ``requires``. A driver change, a reboot or a Docker restart stops every pod on the host: ``no_rentals``.
+_HOST_DOWNTIME = ("sudo", "reboot", "no_rentals")
+_DOCKER_RESTART = ("sudo", "no_rentals")
+FALLBACK_REQUIRES: dict[str, tuple[str, ...]] = {
+    "nvidia_driver_below_minimum": _HOST_DOWNTIME,
+    "sysbox_not_enabled": _DOCKER_RESTART,
+    "insufficient_disk_for_vram": _DOCKER_RESTART,
+    "flagship_without_ncu_or_split": _HOST_DOWNTIME,
+    "cannot_apply_gpu_power_cap": (),   # _DOCKER_RESTART when the node container runs under sysbox
+    "outdated_executor_image": (),
+    "provider_discord_not_connected": (),
+    "price_above_market_p90_soft_limit": (),
+    "banned_network_abuse": (),
+    "miner_default_job": (),
+    "port_limited_remainder": ("sudo",),
+    "gpu_model_not_eligible_for_unrented_incentive": (),
+    "no_unrented_capacity_for_gpu_count": (),
+}
+# /dev/nvidiactl owned by the user namespace's nobody: the node container runs under sysbox.
+_SYSBOX_NAMESPACE_UID = "65534"
+
+
+def _under_sysbox(context: Mapping[str, Any]) -> bool:
+    return str(context.get("nvidiactl_owner_uid") or "") == _SYSBOX_NAMESPACE_UID
+
+
+def _with_requires(entry: dict[str, Any], context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """``entry`` with the ``requires`` of its code. A code the catalog does not know gets ``requires: []``
+    and ``requires_unknown: true``: nobody has said what its fix needs, so an agent hands it to a person."""
+    code = entry["code"]
+    if code not in FALLBACK_REQUIRES:
+        return {**entry, "requires": [], "requires_unknown": True}
+    if code == "cannot_apply_gpu_power_cap" and _under_sysbox(context or {}):
+        return {**entry, "requires": list(_DOCKER_RESTART)}
+    return {**entry, "requires": list(FALLBACK_REQUIRES[code])}
+
 # Listing states the provider chose; the node is hidden on purpose, not blocked.
 # Hidden reasons that stop nothing: the provider's own choice (a pause, a reclaim) or the shape of a
 # healthy partial rental (the free GPUs cannot be offered alone). Every other one stops the node renting.
@@ -144,6 +181,12 @@ def _idle_pay_entry(code: str, context: Mapping[str, Any], message: str | None, 
             "Run `docker compose pull && docker compose up -d` in neurons/executor; a custom compose "
             "needs `privileged: true` on the executor container."
         )
+        if _under_sysbox(ctx):
+            fix = (
+                "The executor container runs under sysbox (/dev/nvidiactl owned by uid 65534). Remove the "
+                '"default-runtime": "sysbox-runc" line from /etc/docker/daemon.json, pause new rentals and '
+                "wait until no rental runs on the host, then `sudo systemctl restart docker`."
+            )
     elif code == "outdated_executor_image":
         title = "Executor image is outdated"
         measured = ctx.get("observed_digest")
@@ -167,7 +210,7 @@ def _idle_pay_entry(code: str, context: Mapping[str, Any], message: str | None, 
         if ctx.get("required_port_count") is not None:
             required = f"{_num(ctx['required_port_count'])} free ports"
         fix = "Open more ports on the node, or wait for the rental to end."
-    return {
+    entry = {
         "code": code,
         "title": title,
         "measured": measured,
@@ -177,11 +220,12 @@ def _idle_pay_entry(code: str, context: Mapping[str, Any], message: str | None, 
         "gating": True,
         "source": "idle_pay",
     }
+    return _with_requires(entry, ctx)
 
 
 def _not_gated_entry(code: str) -> dict[str, Any]:
     title, fix = NOT_GATED[code]
-    return {
+    entry = {
         "code": code,
         "title": title,
         "measured": None,
@@ -191,6 +235,7 @@ def _not_gated_entry(code: str) -> dict[str, Any]:
         "gating": False,
         "source": "idle_pay",
     }
+    return _with_requires(entry)
 
 
 def fallback_reasons(row: Mapping[str, Any], idle_pay_reasons: Iterable[Mapping[str, Any]] = ()) -> list[dict[str, Any]]:
@@ -211,17 +256,19 @@ def fallback_reasons(row: Mapping[str, Any], idle_pay_reasons: Iterable[Mapping[
         err = computed.get("last_error")
         if isinstance(err, Mapping):
             _add(
-                {
-                    "code": err.get("reason_code") or "LAST_ERROR",
-                    "kind": "last_error",
-                    "title": err.get("title") or err.get("message") or "Validator check failed",
-                    "measured": None,
-                    "required": None,
-                    "fix": err.get("remediation") or err.get("message") or "",
-                    "secure": False,
-                    "gating": True,
-                    "source": "last_error",
-                }
+                _with_requires(
+                    {
+                        "code": err.get("reason_code") or "LAST_ERROR",
+                        "kind": "last_error",
+                        "title": err.get("title") or err.get("message") or "Validator check failed",
+                        "measured": None,
+                        "required": None,
+                        "fix": err.get("remediation") or err.get("message") or "",
+                        "secure": False,
+                        "gating": True,
+                        "source": "last_error",
+                    }
+                )
             )
 
     for hidden in row.get("hidden_reasons") or []:
@@ -232,16 +279,18 @@ def fallback_reasons(row: Mapping[str, Any], idle_pay_reasons: Iterable[Mapping[
             continue
         message = str(hidden.get("message") or code)
         _add(
-            {
-                "code": code,
-                "title": message,
-                "measured": None,
-                "required": None,
-                "fix": _HIDDEN_FIXES.get(code, message).replace("<id>", node_id or "<id>"),
-                "secure": False,
-                "gating": True,
-                "source": "hidden_reason",
-            }
+            _with_requires(
+                {
+                    "code": code,
+                    "title": message,
+                    "measured": None,
+                    "required": None,
+                    "fix": _HIDDEN_FIXES.get(code, message).replace("<id>", node_id or "<id>"),
+                    "secure": False,
+                    "gating": True,
+                    "source": "hidden_reason",
+                }
+            )
         )
 
     for idle in idle_pay_reasons or []:
@@ -308,6 +357,7 @@ def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
         "fix_command": _first(entry, "fix_command"),
         "verify_command": _first(entry, "verify_command"),
         "requires": [str(r) for r in requires] if isinstance(requires, list) else [],
+        "requires_unknown": bool(entry.get("requires_unknown")),
         "docs_url": _first(entry, "docs_url"),
         "secure": bool(secure),
         "gating": gating,

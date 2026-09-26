@@ -250,6 +250,7 @@ def test_node_list_json_carries_the_same_list(portal_for):
             ),
             "secure": True,
             "gating": True,
+            "requires": ["sudo", "reboot", "no_rentals"],
             "source": "idle_pay",
         }
     ]
@@ -451,6 +452,7 @@ def test_json_carries_the_not_eligible_reasons_with_gating_false(portal_for):
         "fix": GPU_ACTION,
         "secure": False,
         "gating": False,
+        "requires": [],
         "source": "idle_pay",
     }
     assert reasons[1]["fix"] == ROOM_ACTION and reasons[1]["gating"] is False
@@ -1046,3 +1048,60 @@ def test_a_fallback_last_error_carries_kind_last_error(portal_for):
     assert error["code"] == "node.blocked.last_error"
     assert error["data"]["blocking_reasons_source"] == "cli_fallback"
     assert error["data"]["blocking_reasons"][0]["kind"] == "last_error"
+
+
+# the portal catalog's `requires` for the codes the CLI builds reasons for itself
+@pytest.mark.parametrize(
+    "code, context, expected",
+    [
+        ("nvidia_driver_below_minimum", {"nvidia_driver_version": "550.54.15"}, ["sudo", "reboot", "no_rentals"]),
+        ("sysbox_not_enabled", {}, ["sudo", "no_rentals"]),
+        ("insufficient_disk_for_vram", {"total_disk_gb": 500, "required_disk_gb": 1280}, ["sudo", "no_rentals"]),
+        ("flagship_without_ncu_or_split", {}, ["sudo", "reboot", "no_rentals"]),
+        ("cannot_apply_gpu_power_cap", {"nvidiactl_owner_uid": "0"}, []),
+        ("cannot_apply_gpu_power_cap", {"nvidiactl_owner_uid": "65534"}, ["sudo", "no_rentals"]),
+        ("outdated_executor_image", {}, []),
+        ("port_limited_remainder", {}, ["sudo"]),
+        ("gpu_model_not_eligible_for_unrented_incentive", {}, []),
+    ],
+    ids=["driver", "sysbox", "disk", "profiling", "power-cap", "power-cap-under-sysbox", "image", "ports", "not-gated"],
+)
+def test_a_fallback_idle_pay_reason_carries_the_catalogs_requires(code, context, expected):
+    [entry] = fallback_reasons(_node(), [{"code": code, "context": context}])
+
+    assert entry["requires"] == expected
+    assert "requires_unknown" not in entry
+
+
+def test_a_fallback_reason_with_a_code_the_catalog_does_not_know_says_requires_unknown():
+    node = _node(
+        status="VALIDATION_FAILED",
+        computed_status={
+            "status": "VALIDATION_FAILED",
+            "last_error": {"title": "Network too slow", "reason_code": "VERIFYX_FAILED_NETWORK_SPEED_TOO_SLOW"},
+        },
+        hidden_reasons=[{"code": "DISK_TOO_FULL", "message": "Hidden from renters: disk 95% used"}],
+    )
+
+    reasons = fallback_reasons(node)
+
+    assert [r["code"] for r in reasons] == ["VERIFYX_FAILED_NETWORK_SPEED_TOO_SLOW", "DISK_TOO_FULL"]
+    assert all(r["requires"] == [] and r["requires_unknown"] is True for r in reasons)
+    assert [_blocking.normalise(r)["requires_unknown"] for r in reasons] == [True, True]
+
+
+def test_a_fallback_node_prints_and_serves_the_requires(portal_for):
+    portal_for(_Portal(node=_node("e-1"), overview=DRIVER_OVERVIEW))
+
+    result = _run("--json", "node", "get", "e-1")
+    [entry] = json.loads(result.stdout)["data"]["blocking_reasons"]
+    assert entry["requires"] == ["sudo", "reboot", "no_rentals"]
+
+    assert "Requires: sudo · reboot · no_rentals" in _flat(_run("node", "get", "e-1").output)
+
+
+def test_a_power_cap_reason_under_sysbox_says_to_restart_docker_after_draining():
+    [entry] = fallback_reasons(_node(), [{"code": "cannot_apply_gpu_power_cap", "context": {"nvidiactl_owner_uid": "65534"}}])
+
+    assert "sysbox" in entry["fix"] and "sudo systemctl restart docker" in entry["fix"]
+    assert "no rental runs" in entry["fix"]
