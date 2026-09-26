@@ -21,16 +21,16 @@ import webbrowser
 
 import click
 
-from lium.cli.interactive import noninteractive_requested
 from lium.cli.provider._client import build_client
 from lium.cli.provider._handoff import run_handoff
 from lium.cli.provider._guards import (
     handle_provider_error,
     require_hotkey,
     require_persona_ack,
+    require_wallet_hotkey,
 )
 from lium.cli.provider._overrides import with_provider_overrides
-from lium.cli.provider._render import discord_incentive_warnings, render
+from lium.cli.provider._render import agent_mode, discord_incentive_warnings, render
 from lium.provider.client import discord_connected_from_profile, with_discord_eligibility
 from lium.provider.errors import ARG_INVALID, PORTAL_NOT_SUPPORTED, ProviderError
 
@@ -109,9 +109,9 @@ def opt_out(ctx: click.Context) -> None:
 @with_provider_overrides
 @click.pass_context
 def set_email(ctx: click.Context, email: str) -> None:
-    require_hotkey(ctx, group="config")
+    require_wallet_hotkey(ctx, command="config set-email")
     require_persona_ack(ctx)
-    client = build_client(ctx)
+    client = build_client(ctx, wallet_only=True)
     try:
         body = client.set_email(email)
     except ProviderError as e:
@@ -133,14 +133,15 @@ def set_email(ctx: click.Context, email: str) -> None:
 @with_provider_overrides
 @click.pass_context
 def set_password(ctx: click.Context, new_password: str | None) -> None:
-    require_hotkey(ctx, group="config")
+    require_wallet_hotkey(ctx, command="config set-password")
     if not new_password:
-        if _json_mode(ctx):
+        if agent_mode(ctx):
             ctx.exit(
                 handle_provider_error(
                     ctx,
                     ProviderError(
-                        "config set-password requires --password or LIUM_PROVIDER_NEW_PASSWORD under --json",
+                        "config set-password requires --password or LIUM_PROVIDER_NEW_PASSWORD "
+                        "(no prompt under --json, LIUM_OUTPUT=json or LIUM_NONINTERACTIVE=1)",
                         code=ARG_INVALID,
                     ),
                 )
@@ -152,7 +153,7 @@ def set_password(ctx: click.Context, new_password: str | None) -> None:
             confirmation_prompt=True,
         )
 
-    client = build_client(ctx)
+    client = build_client(ctx, wallet_only=True)
     try:
         body = client.set_password(new_password)
     except ProviderError as e:
@@ -206,9 +207,9 @@ def connect_discord(
     # portal.not_supported in agent mode, and text mode with --wait falls back to the browser flow.
     require_hotkey(ctx, group="config")
     client = build_client(ctx)
-    agent_mode = _json_mode(ctx) or noninteractive_requested()
+    agent = agent_mode(ctx)
     fallback_url = None
-    if wait or agent_mode:
+    if wait or agent:
         explicit_timeout = ctx.get_parameter_source("timeout") is not click.core.ParameterSource.DEFAULT
         try:
             result = run_handoff(
@@ -221,7 +222,7 @@ def connect_discord(
                 legacy_url=client.create_discord_oauth_authorization_url,
             )
         except ProviderError as e:
-            if e.code != PORTAL_NOT_SUPPORTED or agent_mode:
+            if e.code != PORTAL_NOT_SUPPORTED or agent:
                 ctx.exit(handle_provider_error(ctx, e))
                 return
             click.echo("The portal does not serve handoffs yet; using the browser link.", err=True)

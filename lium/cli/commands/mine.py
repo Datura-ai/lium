@@ -660,7 +660,7 @@ def _mine_status(args: list[str], hotkey: Optional[str] = None) -> int:
         from lium.cli.provider._render import emit_error
         from lium.provider.errors import ARG_INVALID, ProviderError
 
-        own_ctx.obj = {"provider_opts": {"json": bool(group_args)}}
+        own_ctx.obj = {"provider_opts": {"json": bool(group_args) or json_output_requested()}}
         return emit_error(own_ctx, ProviderError(
             "--hotkey for 'lium mine status' is the wallet hotkey name the portal is signed in with "
             "(as for 'lium provider -k'), not the SS58 address 'lium mine' takes",
@@ -843,8 +843,8 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     With --json each step is a line on stderr, {"event": "step", "step", "total", "code": "host.<step>",
     "status": "started|done|failed", …}, and stdout carries one result: the node's endpoint, GPU and the
     portal add command, or the failure with the step's code (host.port_in_use, host.docker_missing,
-    host.preflight_failed, …; exit 1). Under --json, --register exits 11 (node.not_listed_yet) where the
-    text mode exits 2.
+    host.preflight_failed, …; exit 1). Under --json or LIUM_NONINTERACTIVE=1, --register exits 11
+    (node.not_listed_yet) where the plain text mode exits 2.
     """
     json_mode = bool(json_output) or json_output_requested()
     if ctx.args and ctx.args[0] == "status":
@@ -877,6 +877,8 @@ def _run_mine(ctx, hotkey, dir_, branch, auto, verbose, register_token, portal_u
     """The install (and, with a register token, the registration); returns the exit code."""
     from . import mine_register as reg
 
+    # LIUM_NONINTERACTIVE=1 with text output exits by the same map as --json (docs/exit-codes.md)
+    agent = json_mode or noninteractive_requested()
     if verbose:
         _show_setup_summary(register=bool(register_token))   # keep the banner only when asked
 
@@ -900,13 +902,13 @@ def _run_mine(ctx, hotkey, dir_, branch, auto, verbose, register_token, portal_u
                 return _json_failure("input.register_token_invalid", str(e), 2,
                                      "Copy a fresh command from the portal's Add Node page.")
             console.error(f"❌ {escape(str(e))}")
-            return 1
+            return 2 if agent else 1
         if hotkey and hotkey != token.node_hotkey:
             message = "--hotkey differs from what the register token says this node reports under; drop -k, the token decides."
             if json_mode:
                 return _json_failure("input.hotkey_conflicts_with_token", message, 2, "Drop -k.")
             console.error(f"❌ {escape(message)}")
-            return 1
+            return 2 if agent else 1
         # what the executor reports under: the account's own key, or the portal's for an account without one;
         # the SS58 check in _setup_executor_env applies to this value, not to the account id
         hotkey = token.node_hotkey
@@ -918,7 +920,7 @@ def _run_mine(ctx, hotkey, dir_, branch, auto, verbose, register_token, portal_u
                 "If registration fails with an expired token, copy a fresh command from the portal."
             )
 
-    if not auto and (json_mode or noninteractive_requested()):
+    if not auto and agent:
         # agent mode asks nothing: the port defaults, as --auto takes them; the hotkey has no default
         if not hotkey:
             return _input_required("Miner hotkey SS58 address", json_mode)
@@ -1009,7 +1011,9 @@ def _run_mine(ctx, hotkey, dir_, branch, auto, verbose, register_token, portal_u
             report=report,
             progress=progress,
         )
-        return _register_result(code, report) if json_mode else code
+        if json_mode:
+            return _register_result(code, report)
+        return 11 if agent and code == 2 else code
 
     # Get executor details for summary
     gpu_info = _get_gpu_info()

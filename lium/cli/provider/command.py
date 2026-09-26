@@ -32,7 +32,7 @@ from __future__ import annotations
 import click
 
 from lium.cli.provider._guards import require_persona_ack
-from lium.cli.provider._render import emit_error
+from lium.cli.provider._render import agent_mode, emit_error
 from lium.cli.provider.config import config_command
 from lium.cli.provider.earnings import earnings_command, idle_pay_command, ledger_command
 from lium.cli.provider.node_ops import register_node_ops
@@ -56,8 +56,8 @@ class _ProviderGroup(click.Group):
         try:
             return super().invoke(ctx)
         except KeyboardInterrupt:
-            # text mode: click's own "Aborted!" and exit 1, as before
-            if not ((ctx.obj or {}).get("provider_opts") or {}).get("json"):
+            # plain text mode: click's own "Aborted!" and exit 1, as before
+            if not agent_mode(ctx):
                 raise
             err = ProviderError("stopped: interrupted", code=INTERRUPTED, hint="Re-run the command; check what it changed first.")
             ctx.exit(emit_error(ctx, err))

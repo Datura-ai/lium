@@ -13,6 +13,7 @@ from lium.provider.auth import LocalKeypairSigner
 from lium.provider.client import ProviderClient
 from lium.provider.errors import ProviderError, ProviderNotFoundError
 from lium.provider.token_store import TokenStore
+from ._agent_mode import AGENT_SWITCHES, PLAIN_TEXT, read_error
 
 
 class _Portal:
@@ -47,7 +48,7 @@ def patched_build_client(
     monkeypatch, fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
 ):
     def _factory(portal: _Portal):
-        def _builder(ctx):
+        def _builder(ctx, **_kw):
             return ProviderClient(
                 signer=fake_signer,
                 token_store=tmp_token_store,
@@ -240,6 +241,19 @@ def test_config_set_password_posts_signature_payload(
     assert auth is False
     assert payload["new_password"] == "change-me-8+"
     assert payload["message"].isdigit()
+
+
+@pytest.mark.parametrize("switch", AGENT_SWITCHES)
+def test_config_set_password_without_a_password_is_input_arg_invalid_in_agent_mode(patched_build_client, switch) -> None:
+    portal = _Portal(post_body={"data": {}})
+    patched_build_client(portal)
+    flags, env = switch
+    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", *flags, "config", "set-password"],
+                                env={**PLAIN_TEXT, **env}, input="pw-123456\npw-123456\n")
+    assert result.exit_code == 2, result.output
+    assert read_error(result, switch)[0] == "input.arg_invalid"
+    assert "New password" not in result.output
+    assert portal.posts == []
 
 
 def test_config_set_password_json_requires_password(patched_build_client) -> None:

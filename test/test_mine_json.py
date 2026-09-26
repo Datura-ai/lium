@@ -10,10 +10,12 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from lium.cli.commands import mine
 from lium.cli.commands import mine_register as reg
+from provider._agent_mode import AGENT_SWITCHES, PLAIN_TEXT
 from test_mine_register import HOTKEY, _Portal, _Resp, _http, _listing, _status, _stub_host, _token, _wait_no_sleep
 
 
@@ -187,6 +189,61 @@ def test_json_register_not_listed_is_exit_eleven(monkeypatch, tmp_path: Path) ->
     body = json.loads(result.stdout)
     assert body["error"]["code"] == "node.not_listed_yet" and body["error"]["exit_code"] == 11
     assert body["data"]["endpoint"] == "203.0.113.7:8080"
+
+
+def _not_listed_portal(monkeypatch) -> None:
+    monkeypatch.setattr(reg, "FIND_NODE_RETRY_S", 0.0)
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued"}}))
+    portal.on("GET", "/executors", _Resp(200, {"data": []}))
+    monkeypatch.setattr(reg, "build_http", lambda url, token: _http(portal))
+
+
+def _mine_agent(switch, args: list[str]):
+    flags, env = switch
+    return _invoke([*flags, *args], env={**PLAIN_TEXT, **env})
+
+
+@pytest.mark.parametrize("switch", AGENT_SWITCHES)
+def test_a_bad_register_token_exits_2_under_every_agent_switch_and_1_in_plain_text(monkeypatch, switch) -> None:
+    calls = _no_clone(monkeypatch)
+    args = ["--register", _token(exp=int(time.time()) - 5)]
+    assert _mine_agent(switch, args).exit_code == 2
+    assert _invoke(args, env=PLAIN_TEXT).exit_code == 1
+    assert calls == []
+
+
+@pytest.mark.parametrize("switch", AGENT_SWITCHES)
+def test_a_hotkey_the_token_does_not_name_exits_2_under_every_agent_switch_and_1_in_plain_text(monkeypatch, switch) -> None:
+    calls = _no_clone(monkeypatch)
+    args = ["--register", _token(exp=int(time.time()) + 3600, node_hotkey=HOTKEY), "-k", "5Other"]
+    assert _mine_agent(switch, args).exit_code == 2
+    assert _invoke(args, env=PLAIN_TEXT).exit_code == 1
+    assert calls == []
+
+
+@pytest.mark.parametrize("switch", AGENT_SWITCHES)
+def test_registered_not_listed_exits_11_under_every_agent_switch(monkeypatch, tmp_path: Path, switch) -> None:
+    target, _ = _stub_host(monkeypatch, tmp_path)
+    _not_listed_portal(monkeypatch)
+    result = _mine_agent(switch, ["--register", _token(exp=int(time.time()) + 3600), "--dir", str(target)])
+    assert result.exit_code == 11, result.output
+
+
+def test_registered_not_listed_exits_2_in_plain_text_as_before(monkeypatch, tmp_path: Path) -> None:
+    target, _ = _stub_host(monkeypatch, tmp_path)
+    _not_listed_portal(monkeypatch)
+    result = _invoke(["--register", _token(exp=int(time.time()) + 3600), "--dir", str(target)], env=PLAIN_TEXT)
+    assert result.exit_code == 2, result.output
+
+
+@pytest.mark.parametrize("switch", AGENT_SWITCHES)
+def test_mine_status_with_an_ss58_as_the_hotkey_name_exits_2_under_every_agent_switch(switch) -> None:
+    flags, env = switch
+    result = _invoke(["status", "node-1", "-k", HOTKEY, *flags], env={**PLAIN_TEXT, **env})
+    assert result.exit_code == 2, result.output
+    plain = _invoke(["status", "node-1", "-k", HOTKEY], env=PLAIN_TEXT)
+    assert plain.exit_code == 1 and plain.stderr.startswith("[ARG_INVALID] ")
 
 
 def test_mine_status_json_is_passed_on(monkeypatch) -> None:

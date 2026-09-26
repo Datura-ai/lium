@@ -62,14 +62,18 @@ def auth_method(opts: Mapping[str, Any]) -> str | None:
     return None
 
 
-def build_client(ctx: click.Context) -> ProviderClient:
-    """Construct ``ProviderClient`` from the resolved opts in ``ctx.obj``."""
+def build_client(ctx: click.Context, *, wallet_only: bool = False) -> ProviderClient:
+    """Construct ``ProviderClient`` from the resolved opts in ``ctx.obj``.
+
+    ``wallet_only`` drops the bearer token, for the commands that sign with the hotkey's wallet whatever
+    else is set (``config set-email``, ``config set-password``).
+    """
     opts = (ctx.obj or {}).get("provider_opts") or {}
     return ProviderClient(
         coldkey=opts.get("coldkey"),
         hotkey=opts.get("hotkey"),
         portal_url=opts.get("portal_url"),
-        api_token=bearer_token(opts),
+        api_token=None if wallet_only else bearer_token(opts),
     )
 
 

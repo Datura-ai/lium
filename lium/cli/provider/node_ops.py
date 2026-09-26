@@ -99,7 +99,11 @@ def tier_set(ctx: click.Context, node_id: str, tier: str) -> None:
 @click.pass_context
 def pause(ctx: click.Context, node_id: str) -> None:
     """Pause new rentals on a rented node; the current rental runs on. The portal refuses an idle node
-    (`portal.node_not_rented`)."""
+    (`portal.node_not_rented`).
+
+    Already paused: `node get --json` has `new_rentals_pause_requested_at` set, and in `node listing --json`
+    `computed_status.status` is PAUSING_NEW_RENTALS (the rental still runs) or NEW_RENTALS_PAUSED, with
+    NEW_RENTALS_PAUSED in `hidden_reasons[].code`."""
     require_hotkey(ctx, group="node")
     require_persona_ack(ctx)
     client = build_client(ctx)

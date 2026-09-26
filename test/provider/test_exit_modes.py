@@ -1,7 +1,8 @@
 """One exit map per output mode (``docs/exit-codes.md``), end to end against a local portal stub.
 
-Text mode keeps the exit statuses scripts already rely on, for every error; under ``--json`` (or
-``LIUM_OUTPUT=json``) every error exits by the unified map, whatever its origin. A refusal the portal
+Plain text mode keeps the exit statuses scripts already rely on, for every error; in agent mode (``--json``,
+``LIUM_OUTPUT=json`` or ``LIUM_NONINTERACTIVE=1``, whichever is set) every error exits by the unified map,
+whatever its origin. A refusal the portal
 codes is ``portal.<code>`` in snake_case, with the UPPER_CASE code it replaces kept as ``legacy_code``.
 """
 
@@ -13,6 +14,7 @@ import pytest
 from click.testing import CliRunner
 
 from lium.cli.provider.command import provider_command
+from ._agent_mode import AGENT_SWITCHES, PLAIN_TEXT, prints_json, read_error
 from ._portal_stub import PortalStub, closed_port_url
 
 TOKEN = "lpk_stub"
@@ -29,8 +31,13 @@ def portal(tmp_path, monkeypatch):
 
 
 def run(url: str, *args: str, env: dict | None = None):
-    base = {"LIUM_PROVIDER_TOKEN": TOKEN, "LIUM_PROVIDER_ACK": "", "LIUM_OUTPUT": ""}
+    base = {"LIUM_PROVIDER_TOKEN": TOKEN, "LIUM_PROVIDER_ACK": "", **PLAIN_TEXT}
     return CliRunner().invoke(provider_command, ["--portal-url", url, *args], env={**base, **(env or {})})
+
+
+def run_agent(url: str, switch, *args: str, env: dict | None = None):
+    flags, switch_env = switch
+    return run(url, *flags, *args, env={**switch_env, **(env or {})})
 
 
 def refusal(code: str, message: str = "refused") -> dict:
@@ -96,15 +103,17 @@ def test_text_debug_shows_mains_context_without_the_new_keys(portal) -> None:
     assert error["data"]["portal_code"] == "NODE_RENTED"
 
 
+@pytest.mark.parametrize("switch", AGENT_SWITCHES)
 @pytest.mark.parametrize("route, args, status, portal_code, text_exit, json_exit, code, legacy", CODED, ids=IDS)
-def test_a_coded_refusal_exits_by_the_unified_map_under_json(portal, route, args, status, portal_code, text_exit,
-                                                            json_exit, code, legacy) -> None:
+def test_a_coded_refusal_exits_by_the_unified_map_in_agent_mode(portal, route, args, status, portal_code, text_exit,
+                                                               json_exit, code, legacy, switch) -> None:
     portal.route(*route, refusal(portal_code), status=status)
-    for result in (run(portal.url, "--json", *args), run(portal.url, *args, env={"LIUM_OUTPUT": "json"})):
-        assert result.exit_code == json_exit, result.output
+    result = run_agent(portal.url, switch, *args)
+    assert result.exit_code == json_exit, result.output
+    assert read_error(result, switch)[0] == code
+    if prints_json(switch):
         error = json.loads(result.stdout)["error"]
-        assert (error["code"], error["legacy_code"], error["exit_code"]) == (code, legacy, json_exit)
-        assert error["data"]["portal_code"] == portal_code
+        assert error["legacy_code"] == legacy and error["data"]["portal_code"] == portal_code
 
 
 # Errors that were UPPER_CASE before the unified map: text keeps the old status, --json the unified one.
@@ -118,25 +127,28 @@ UNCODED = [
 ]
 
 
+@pytest.mark.parametrize("switch", AGENT_SWITCHES)
 @pytest.mark.parametrize("answer, legacy, code, text_exit, json_exit", UNCODED, ids=[u[1] for u in UNCODED])
-def test_an_uncoded_error_exits_old_in_text_and_unified_under_json(portal, answer, legacy, code, text_exit,
-                                                                  json_exit) -> None:
+def test_an_uncoded_error_exits_old_in_plain_text_and_unified_in_agent_mode(portal, answer, legacy, code, text_exit,
+                                                                           json_exit, switch) -> None:
     status, body = answer
     portal.route("GET", "/executors/listing", body, status=status)
-    assert run(portal.url, "node", "listing").exit_code == text_exit
-    result = run(portal.url, "--json", "node", "listing")
+    text = run(portal.url, "node", "listing")
+    assert text.exit_code == text_exit and text.stderr.startswith(f"[{legacy}] ")
+    result = run_agent(portal.url, switch, "node", "listing")
     assert result.exit_code == json_exit, result.output
-    error = json.loads(result.stdout)["error"]
-    assert (error["code"], error["legacy_code"], error["exit_code"]) == (code, legacy, json_exit)
+    assert read_error(result, switch)[0] == code
+    if prints_json(switch):
+        assert json.loads(result.stdout)["error"]["legacy_code"] == legacy
 
 
-def test_no_sign_in_exits_1_in_text_and_6_under_json(portal) -> None:
+@pytest.mark.parametrize("switch", AGENT_SWITCHES)
+def test_no_sign_in_exits_1_in_plain_text_and_6_in_agent_mode(portal, switch) -> None:
     env = {"LIUM_PROVIDER_TOKEN": ""}
     assert run(portal.url, "node", "listing", env=env).exit_code == 1
-    result = run(portal.url, "--json", "node", "listing", env=env)
+    result = run_agent(portal.url, switch, "node", "listing", env=env)
     assert result.exit_code == 6
-    error = json.loads(result.stdout)["error"]
-    assert (error["code"], error["legacy_code"]) == ("auth.not_signed_in", "ARG_INVALID")
+    assert read_error(result, switch)[0] == "auth.not_signed_in"
 
 
 def test_the_missing_hotkey_hint_is_the_old_one_in_text_and_names_the_token_under_json(portal) -> None:
@@ -156,4 +168,18 @@ def test_an_unreachable_portal_reads_and_exits_as_before_in_text_and_4_under_jso
     assert debug.endswith(f"  context: {{'url': '{url}/executors/listing', 'method': 'GET'}}\n"), debug
     error = json.loads(run(url, "--json", "node", "listing").stdout)["error"]
     assert (error["code"], error["legacy_code"], error["exit_code"]) == ("net.unreachable", "PORTAL_SERVER_ERROR", 4)
+
+
+@pytest.mark.parametrize("switch", AGENT_SWITCHES)
+def test_an_unreachable_portal_is_net_unreachable_exit_4_under_every_agent_switch(switch) -> None:
+    result = run_agent(closed_port_url(), switch, "node", "listing")
+    assert result.exit_code == 4, result.output
+    assert read_error(result, switch)[0] == "net.unreachable"
+
+
+def test_lium_noninteractive_text_prints_the_namespaced_code_not_mains_label(portal) -> None:
+    portal.route("GET", "/executors/listing", {"detail": "Not Found"}, status=404)
+    result = run(portal.url, "node", "listing", env={"LIUM_NONINTERACTIVE": "1"})
+    assert result.exit_code == 5 and result.stdout == ""
+    assert result.stderr.startswith("[portal.not_found] ") and "PORTAL_NOT_FOUND" not in result.stderr
 

@@ -28,6 +28,7 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
+from lium.cli.interactive import noninteractive_requested
 from lium.cli.utils import console
 from lium.provider.errors import (
     ARG_INVALID,
@@ -140,10 +141,11 @@ def legacy_code_for(err: ProviderError) -> str | None:
 def exit_code_for(err: ProviderError, *, json_mode: bool = False) -> int:
     """Map a :class:`ProviderError` to its CLI exit status (``docs/exit-codes.md``).
 
-    Under ``--json`` every error exits by the unified map, whatever its origin. Text mode keeps the old
-    statuses so existing scripts do not break: an error with an UPPER_CASE code (its own, or the one a
-    namespaced code replaces) exits as that code always did; only codes with no old equivalent use the
-    unified map there.
+    ``json_mode`` means agent mode (``--json``, ``LIUM_OUTPUT=json`` or ``LIUM_NONINTERACTIVE=1``; see
+    :func:`agent_mode`): every error exits by the unified map, whatever its origin. Plain text mode keeps
+    the old statuses so existing scripts do not break: an error with an UPPER_CASE code (its own, or the
+    one a namespaced code replaces) exits as that code always did; only codes with no old equivalent use
+    the unified map there.
     """
     status = err.context.get("status")
     if json_mode:
@@ -152,6 +154,14 @@ def exit_code_for(err: ProviderError, *, json_mode: bool = False) -> int:
     if legacy is not None:
         return _EXIT_CODES.get(legacy, 1)
     return unified_exit_code(err.code, status)
+
+
+def agent_mode(ctx: click.Context) -> bool:
+    """Whether an agent drives this run: ``--json``, ``LIUM_OUTPUT=json`` or ``LIUM_NONINTERACTIVE=1``.
+
+    All three switches select the same exit map and the same errors; only the output format differs.
+    """
+    return _json_mode(ctx) or noninteractive_requested()
 
 
 def render(
@@ -212,7 +222,7 @@ def render(
 
 def emit_error(ctx: click.Context, err: ProviderError) -> int:
     """Format a :class:`ProviderError` and return its exit code."""
-    code = exit_code_for(err, json_mode=_json_mode(ctx))
+    code = exit_code_for(err, json_mode=agent_mode(ctx))
     if _json_mode(ctx):
         error = {
             "code": error_code_for(err.code),
@@ -225,15 +235,20 @@ def emit_error(ctx: click.Context, err: ProviderError) -> int:
         if err.context:
             error["data"] = err.context
         click.echo(json.dumps({"ok": False, "error": error}, sort_keys=True, default=str))
+        return code
+    if agent_mode(ctx):
+        # the label is the namespaced code, so it matches the exit status
+        shown, label = err, error_code_for(err.code)
     else:
-        # text mode prints the old UPPER_CASE label (and, where the old CLI worded it differently, its message)
+        # plain text prints the old UPPER_CASE label (and, where the old CLI worded it differently, its message)
         shown = err.legacy_error or err
-        prefix = click.style(f"[{legacy_code_for(shown) or shown.code}]", fg="red", bold=True)
-        click.echo(f"{prefix} {shown.message}", err=True)
-        if shown.hint:
-            click.echo(f"  hint: {shown.hint}", err=True)
-        if _debug_mode(ctx) and shown.context:
-            click.echo(f"  context: {shown.context}", err=True)
+        label = legacy_code_for(shown) or shown.code
+    prefix = click.style(f"[{label}]", fg="red", bold=True)
+    click.echo(f"{prefix} {shown.message}", err=True)
+    if shown.hint:
+        click.echo(f"  hint: {shown.hint}", err=True)
+    if _debug_mode(ctx) and shown.context:
+        click.echo(f"  context: {shown.context}", err=True)
     return code
 
 

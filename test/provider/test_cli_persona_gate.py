@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import click
+import pytest
 from click.testing import CliRunner
 
 from lium.cli.provider._persona import (
@@ -14,6 +15,7 @@ from lium.cli.provider._persona import (
     is_acked,
     mark_acked,
 )
+from ._agent_mode import AGENT_SWITCHES, read_error
 
 
 def _persona() -> PersonaContext:
@@ -274,6 +276,16 @@ def test_ctrl_c_under_json_is_input_interrupted_exit_130(monkeypatch, fake_signe
     assert result.exit_code == 130, result.output
     error = json.loads(result.stdout)["error"]
     assert (error["code"], error["exit_code"], error["legacy_code"]) == ("input.interrupted", 130, None)
+
+
+@pytest.mark.parametrize("switch", AGENT_SWITCHES)
+def test_ctrl_c_is_input_interrupted_exit_130_under_every_agent_switch(monkeypatch, fake_signer, tmp_token_store,
+                                                                       switch) -> None:
+    flags, env = switch
+    result, _ = _node_rm(monkeypatch, fake_signer, tmp_token_store, [*flags, "node", "rm", "e-1", "--yes"], env=env,
+                         on_delete=_ctrl_c)
+    assert result.exit_code == 130, result.output
+    assert read_error(result, switch)[0] == "input.interrupted"
 
 
 def test_ctrl_c_in_text_mode_aborts_with_exit_1_as_before(monkeypatch, fake_signer, tmp_token_store) -> None:
