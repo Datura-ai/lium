@@ -372,6 +372,7 @@ def test_up_command_reads_dockerfile_and_forwards_content(monkeypatch, tmp_path)
     monkeypatch.setattr(up_command, "RentPodAction", _FakeRentPod)
     monkeypatch.setattr(up_command, "WaitReadyAction", _FakeWaitReady)
     monkeypatch.setattr(up_command, "PrepareSSHAction", _FakePrepareSSH)
+    monkeypatch.setattr("lium.cli.ssh.command.wait_for_ssh_banner", lambda *a, **k: ActionResult(ok=True, data={}))
     monkeypatch.setattr("lium.cli.ssh.command.ssh_session_connected", lambda *a, **k: True)
 
     # Act
