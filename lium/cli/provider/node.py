@@ -39,7 +39,12 @@ from lium.cli.provider._guards import (
     require_persona_ack,
 )
 from lium.cli.provider._overrides import with_provider_overrides
-from lium.cli.provider._render import EXIT_NODE_BLOCKED, emit_node_blocked, fatal, render
+from lium.cli.provider._render import (
+    EXIT_NODE_BLOCKED,
+    emit_node_blocked,
+    fatal,
+    render,
+)
 from lium.cli.provider._verification import render_text
 from lium.provider._shared_config import default_price_for_gpu, fetch_shared_config
 from lium.provider.errors import ARG_INVALID, ProviderError
@@ -165,7 +170,11 @@ def get_node(ctx: click.Context, node_id: str, fail_on_blocked: bool) -> None:
     default=None,
     help=f"Seconds --until-clear waits before it exits {EXIT_NODE_BLOCKED}; unset waits until clear.",
 )
-@click.option("--fail-on-blocked", is_flag=True, help=_FAIL_ON_BLOCKED_HELP)
+@click.option(
+    "--fail-on-blocked",
+    is_flag=True,
+    help=f"{_FAIL_ON_BLOCKED_HELP} With plain --watch: exit {EXIT_NODE_BLOCKED} at the first blocked refresh.",
+)
 @click.option(
     "--interval",
     type=click.IntRange(min=2),
@@ -218,7 +227,8 @@ def status_node(
                 body = {**body, "blocking_reasons": node["blocking_reasons"]}
             last = not watch or (until_clear and node is not None and not reasons)
             timed_out = deadline is not None and not last and time.monotonic() >= deadline
-            fail = reasons and (timed_out or (last and fail_on_blocked))
+            # plain --watch never reaches `last`: --fail-on-blocked there stops at the first blocked refresh
+            fail = reasons and (timed_out or (fail_on_blocked and (last or not until_clear)))
             if json_mode:
                 if not fail:
                     render(ctx, body)

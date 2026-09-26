@@ -213,6 +213,7 @@ def fallback_reasons(row: Mapping[str, Any], idle_pay_reasons: Iterable[Mapping[
             _add(
                 {
                     "code": err.get("reason_code") or "LAST_ERROR",
+                    "kind": "last_error",
                     "title": err.get("title") or err.get("message") or "Validator check failed",
                     "measured": None,
                     "required": None,
@@ -299,6 +300,7 @@ def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
     requires = entry.get("requires")
     return {
         "code": code,
+        "kind": str(entry.get("kind") or "idle_pay"),
         "title": _first(entry, "title", "message") or code,
         "measured": _first(entry, "measured", "measured_value"),
         "required": _first(entry, "required", "required_value"),

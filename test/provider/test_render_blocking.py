@@ -21,8 +21,8 @@ from lium.cli.provider._blocking import LEGACY_GATING_CODES, fallback_reasons
 from lium.cli.provider.command import provider_command
 from lium.provider.auth import LocalKeypairSigner
 from lium.provider.client import ProviderClient
-from lium.provider.token_store import TokenStore
 from lium.provider.errors import ProviderError
+from lium.provider.token_store import TokenStore
 
 
 def _node(node_id="e-1", *, status="AVAILABLE", **extra):
@@ -916,3 +916,47 @@ def test_an_idle_pay_reason_with_gating_false_is_not_eligible_and_no_panel(porta
     assert "BLOCKING" not in plain
     assert "◦ e-1: not eligible for idle pay (GPU model outside the idle-pay program); no action needed" in plain
     assert _run("node", "get", "e-1", "--fail-on-blocked").exit_code == 0
+
+
+def test_plain_watch_with_fail_on_blocked_exits_10_at_the_first_blocked_refresh(portal_for, clock):
+    portal_for(_SequencePortal([_node(blocking_reasons=[]), _node(blocking_reasons=[DRIVER_GATING])]))
+
+    result = _run("--json", "node", "status", "e-1", "--watch", "--fail-on-blocked")
+
+    assert result.exit_code == 10
+    frames = _envelopes(result.stdout)
+    assert [f["ok"] for f in frames] == [True, False]
+    assert frames[-1]["error"]["code"] == "node.blocked.nvidia_driver_below_minimum"
+    assert clock.sleeps == [5]
+
+
+# the portal builds a last error's code as `reason_code or title`
+LAST_ERROR_WITHOUT_REASON_CODE = {**LAST_ERROR_ENTRY, "code": "GPU verification failed"}
+
+
+def test_a_last_error_without_reason_code_is_node_blocked_last_error(portal_for):
+    portal_for(_Portal(node=_node(blocking_reasons=[LAST_ERROR_WITHOUT_REASON_CODE])))
+
+    result = _run("--json", "node", "get", "e-1", "--fail-on-blocked")
+
+    assert result.exit_code == 10
+    error = json.loads(result.stdout)["error"]
+    assert error["code"] == "node.blocked.last_error"
+    assert "GPU verification failed" in error["message"]
+
+    result = _run("node", "get", "e-1", "--fail-on-blocked")
+    assert "[node.blocked.last_error] node e-1 is blocked: GPU verification failed" in result.stderr
+
+
+def test_a_blocked_code_never_holds_a_space():
+    from lium.cli.provider._render import _code_token
+
+    assert _code_token({"code": "PORT_UNREACHABLE", "kind": "availability"}) == "PORT_UNREACHABLE"
+    assert _code_token({"code": "GPU verification failed", "kind": "last_error"}) == "last_error"
+    assert _code_token({"code": "Port 8080 not reachable!", "kind": "availability"}) == "port_8080_not_reachable"
+
+
+def test_an_unmapped_error_code_falls_back_to_the_general_namespace():
+    from lium.cli.provider._render import error_code_for
+
+    assert error_code_for("SOMETHING_NEW") == "general.something_new"

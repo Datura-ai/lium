@@ -19,6 +19,7 @@ identical.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from typing import Any, Callable, Iterable, Mapping
 
@@ -220,10 +221,11 @@ def emit_node_blocked(ctx: click.Context, node_id: str, reasons: list[Mapping[st
     """Report a node held back by gating ``reasons`` and return :data:`EXIT_NODE_BLOCKED`.
 
     ``--json`` gets one error envelope, ``node.blocked.<first reason's code>``, with the command's
-    result under ``error.data``; the text mode has already printed the BLOCKING panel.
+    result under ``error.data``; the text mode has already printed the BLOCKING panel. The code
+    never holds a space: see :func:`_code_token`.
     """
     first = reasons[0]
-    code = f"node.blocked.{first['code']}" if first.get("code") else "node.blocked"
+    code = f"node.blocked.{_code_token(first)}" if first.get("code") else "node.blocked"
     message = f"node {node_id} is blocked: " + "; ".join(str(r.get("title") or r.get("code")) for r in reasons)
     hint = str(first.get("fix") or "")
     if _json_mode(ctx):
@@ -238,6 +240,21 @@ def emit_node_blocked(ctx: click.Context, node_id: str, reasons: list[Mapping[st
     else:
         click.echo(f"{click.style(f'[{code}]', fg='red', bold=True)} {message}", err=True)
     return EXIT_NODE_BLOCKED
+
+
+_CODE_TOKEN = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _code_token(reason: Mapping[str, Any]) -> str:
+    """The reason's code as one token. The portal sends a last error without ``reason_code`` with its
+    title as the code (``GPU verification failed``): that becomes ``last_error``, any other such code
+    its snake_case slug. The text stays in the envelope's ``message``."""
+    code = str(reason.get("code") or "")
+    if _CODE_TOKEN.fullmatch(code):
+        return code
+    if reason.get("kind") == "last_error":
+        return "last_error"
+    return re.sub(r"[^a-z0-9]+", "_", code.lower()).strip("_") or "unknown"
 
 
 def emit_warning(ctx: click.Context, code: str, message: str) -> None:
