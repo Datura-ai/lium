@@ -5,7 +5,7 @@ One page for an LLM agent (or any unattended script) that has to rent a GPU pod,
 The rules of the road:
 
 1. **Authenticate from the environment.** `LIUM_API_KEY` wins over `~/.lium/config.ini`. Never run `lium init` from an agent.
-2. **Ask for JSON.** `--format json` on `ls`/`ps`, `--json` on `exec`/`describe`/`balance`: the result is on stdout and the exit code says whether it worked. On any of them a runtime error is one JSON object on stderr (`LIUM_OUTPUT=json` switches that on for every command); a usage error is click's plain text with exit 2 (§2).
+2. **Ask for JSON.** `--format json` on `ls`/`ps`, `--json` on `exec`/`describe`/`balance`: the result is on stdout and the exit code says whether it worked. On any of them a runtime error is one JSON object on stderr, the last line of stderr under `--wait` (`LIUM_OUTPUT=json` switches that on for every command); a usage error is click's plain text with exit 2 (§2).
 3. **Never let a command wait for a human.** Pass `--yes` to anything that would confirm (`up`, `rm`); `reboot` never asks.
 4. **Always give a pod a lifetime** (`--ttl`) and always remove it when finished, including on failure.
 
@@ -46,7 +46,7 @@ SSH: the CLI and SDK use `LIUM_SSH_KEY_PATH` if set, else `[ssh] key_path` in `~
 
 Success: the JSON result is on **stdout**, exit code 0.
 
-Failure on a renter command that takes `--json` (`up`, `exec`, `describe`, `balance`, `whoami`, `audit`, `cp`, `init`; `fund`, `signup`, `topup currencies`, `topup create`, `topup link`, `topup wait`, `topup card`, `keys create`, `keys list`, `keys show`, `keys scopes`, `keys budget`, `workspaces list` and `workspaces members` too): stdout is empty, **stderr** holds one JSON object, the exit code is non-zero:
+Failure on a renter command that takes `--json` (`up`, `exec`, `describe`, `balance`, `whoami`, `audit`, `cp`, `init`; `fund`, `signup`, `topup currencies`, `topup create`, `topup link`, `topup wait`, `topup card`, `keys create`, `keys list`, `keys show`, `keys scopes`, `keys budget`, `workspaces list` and `workspaces members` too): stdout is empty, the error is one JSON object on **stderr**, the exit code is non-zero. Under `--wait` (`topup link`, `topup create`, `topup card`) stderr first carries the progress line (`"event": "handoff"`, `"invoice_created"` or `"charged"`) and the error object is the **last line**: parse the last line of stderr, not the whole stream. After a card charge that timed out (`credit_not_seen`, exit 6, `data.charged: true`), retry `topup card` only with that last line's `data.idempotency_key`, which returns the same charge:
 
 ```json
 {"ok": false, "error": {"code": "pod_not_found", "message": "No pods match targets: train-1", "hint": "Run 'lium ps' to list pods; a name, huid, id or 1-based index is accepted", "exit_code": 5}}

@@ -55,6 +55,13 @@ The envelope goes to **stderr**, stdout is left empty, and the process exits
 with `exit_code`. On success stdout carries the result JSON. Read both streams;
 do not `2>/dev/null`.
 
+Under `--wait` (`topup link`, `topup create`, `topup card`), stderr first
+carries the progress line (`"event": "handoff"`, `"invoice_created"` or
+`"charged"`) and the envelope is the **last line** of stderr. Parse the last
+line, not the whole stream: after a card charge that timed out
+(`credit_not_seen`, exit 6, `data.charged: true`), that line's
+`data.idempotency_key` is the only safe way to retry `topup card`.
+
 `lium up --json` acts before it answers, so its progress lines (the node
 picked, the rent, the wait, the price prompt) go to stderr and stdout holds
 exactly one document, the bare payload, as `ps`, `describe` and `rm --format
@@ -148,10 +155,11 @@ the detail the hints promise.
 ```bash
 set -o pipefail
 if ! out=$(LIUM_OUTPUT=json lium ps --format json 2>err.json); then
-  code=$(jq -r .error.code err.json)
-  hint=$(jq -r .error.hint err.json)
+  err=$(tail -n 1 err.json)   # the envelope is the last line of stderr
+  code=$(jq -r .error.code <<<"$err")
+  hint=$(jq -r .error.hint <<<"$err")
   echo "lium failed: $code — $hint" >&2
-  exit $(jq -r .error.exit_code err.json)
+  exit $(jq -r .error.exit_code <<<"$err")
 fi
 echo "$out" | jq '.[0].huid'
 ```
@@ -164,7 +172,7 @@ proc = subprocess.run(
     capture_output=True, text=True, env={**os.environ, "LIUM_OUTPUT": "json"},
 )
 if proc.returncode != 0:
-    error = json.loads(proc.stderr)["error"]
+    error = json.loads(proc.stderr.strip().splitlines()[-1])["error"]   # the envelope is the last line
     raise RuntimeError(f"{error['code']}: {error['message']} ({error['hint']})")
 pods = json.loads(proc.stdout)
 ```
