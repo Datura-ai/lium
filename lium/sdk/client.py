@@ -344,6 +344,11 @@ CARD_TOPUP_ERROR_CODES = frozenset(
 # before processing). A 5xx without one of these still means the charge may have gone through.
 CARD_TOPUP_NOT_CHARGED_CODES = frozenset({"STRIPE_UNAVAILABLE", "STRIPE_REFUSED"})
 
+CHECKOUT_SUCCESS_URL = "https://lium.io/billing?success=true"
+CHECKOUT_CANCEL_URL = "https://lium.io/billing"
+# below the smallest top-up by far, above float noise in the balance the API returns
+CREDIT_EPSILON_USD = 0.005
+
 
 def card_topup_error(response: requests.Response, **context: Optional[str]) -> LiumCardTopUpError:
     """The exception for a card top-up 402: the server's sentence as the message, and the fields
@@ -4600,6 +4605,81 @@ class Lium:
         # the key the charge was made under, whether or not the server echoes it back
         body.setdefault("idempotency_key", key)
         return body
+
+    def topup_checkout_link(
+        self,
+        amount_usd: float,
+        success_url: str = CHECKOUT_SUCCESS_URL,
+        cancel_url: str = CHECKOUT_CANCEL_URL,
+    ) -> Dict[str, Any]:
+        """Open a Stripe Checkout page that tops up this account by card (``POST /stripe/create-checkout-session``).
+
+        Nothing is charged by this call: whoever opens ``url`` enters a card (and passes the bank's
+        3-D Secure check, if it asks) and the balance is credited by Stripe's webhook once the payment
+        succeeds. This is how an agent with no card of its own asks a person to pay; the card is saved on
+        the account, so later top-ups can use :meth:`topup_card` where the platform allows it. The key
+        must hold the ``billing`` scope (or be a browser session); a ``read`` / ``rent`` / ``manage`` key
+        is refused with :class:`LiumPermissionError`.
+
+        Args:
+            amount_usd: At least $10, the platform's top-up minimum.
+            success_url: Where Checkout sends the payer after paying.
+            cancel_url: Where Checkout sends the payer on cancel.
+
+        Returns:
+            ``{"url", "session_id", "amount_usd", "expires_at"}``; ``expires_at`` is a Unix time, or
+            ``None`` when the server does not send it.
+        """
+        if not math.isfinite(amount_usd):
+            raise LiumError("amount_usd must be a finite number of dollars (at least 10).")
+        body = self._request(
+            "POST",
+            "/stripe/create-checkout-session",
+            json={"amount": amount_usd, "success_url": success_url, "cancel_url": cancel_url, "mode": "payment"},
+        ).json()
+        if not isinstance(body, dict) or not body.get("url"):
+            raise LiumServerError("The server answered the checkout request without a payment page URL.")
+        return {
+            "url": body["url"],
+            "session_id": body.get("id"),
+            "amount_usd": amount_usd,
+            "expires_at": body.get("expires_at"),
+        }
+
+    def wait_for_credit(
+        self,
+        baseline: float,
+        timeout: float = 600,
+        interval: float = 2.0,
+        *,
+        _clock: Callable[[], float] = time.monotonic,
+        _sleep: Callable[[float], None] = time.sleep,
+    ) -> Dict[str, Any]:
+        """Poll the balance until it rises above ``baseline`` (a top-up landed) or ``timeout`` seconds pass.
+
+        Card and crypto top-ups are credited by the payment provider's webhook, so the call that starts
+        a payment returns before the money is on the balance. Read :meth:`balance` before starting the
+        payment and pass it as ``baseline``. A balance read that fails is retried on the next tick; the
+        pods' own billing can lower the balance meanwhile, so a top-up smaller than what the account's
+        running pods burn in ``interval`` seconds may be missed.
+
+        Returns:
+            ``{"credited": bool, "balance": float | None, "seconds": float}``: ``credited`` is ``False``
+            when the time ran out; ``balance`` is the last one read (``None`` if none could be read).
+        """
+        start = _clock()
+        balance: Optional[float] = None
+        while True:
+            try:
+                balance = self.balance()
+            except (LiumError, requests.RequestException):
+                pass
+            elapsed = _clock() - start
+            if balance is not None and balance > baseline + CREDIT_EPSILON_USD:
+                return {"credited": True, "balance": balance, "seconds": round(elapsed, 1)}
+            if elapsed + interval > timeout:
+                return {"credited": False, "balance": balance, "seconds": round(elapsed, 1)}
+            _sleep(interval)
 
     def volumes(self) -> List[VolumeInfo]:
         """List all volumes for the current user.

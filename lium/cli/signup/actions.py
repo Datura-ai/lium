@@ -16,6 +16,8 @@ PASSWORD_ALPHABET = string.ascii_letters + string.digits + "!@#$%^&*-_"
 PASSWORD_LENGTH = 20
 REQUEST_TIMEOUT = 30
 MINTED_KEY_NAME = "Default"
+BILLING_KEY_NAME = "agent-billing"
+BILLING_KEY_OPTION = "api.billing_api_key"
 DEFAULT_BASE_URL = "https://lium.io/api"
 
 
@@ -194,3 +196,55 @@ class SignupAction:
         if isinstance(detail, dict):
             detail = "; ".join(f"{k}: {v}" for k, v in detail.items())
         return str(detail) if detail else f"Signup failed with HTTP {response.status_code}."
+
+
+class MintBillingKeyAction:
+    """Mint a key holding only the `billing` scope for a new account and keep it as ``[api] billing_api_key``.
+
+    A key that pays is not a key that rents: the server grants `billing` alone and only to a signed-in
+    session (``POST /keys``), so this logs in with the password the account was just made with. The key can
+    open card payment pages and crypto invoices and read the balance; it reaches no pods.
+    """
+
+    def __init__(self, email: str, password: str):
+        self.email = email
+        self.password = password
+
+    def execute(self, ctx: dict) -> ActionResult:
+        try:
+            login_response = request_same_origin(
+                _send,
+                "POST",
+                f"{base_url()}/users/login",
+                json={"email": self.email, "password": self.password},
+                timeout=REQUEST_TIMEOUT,
+            )
+            if login_response.status_code >= 400:
+                return ActionResult(ok=False, data={}, error=f"login failed with HTTP {login_response.status_code}")
+            token = _json_object(login_response).get("token")
+            if not token:
+                return ActionResult(ok=False, data={}, error="login returned no session token")
+            key_response = request_same_origin(
+                _send,
+                "POST",
+                f"{base_url()}/keys",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"name": BILLING_KEY_NAME, "scopes": ["billing"]},
+                timeout=REQUEST_TIMEOUT,
+            )
+        except (requests.RequestException, LiumError) as e:
+            return ActionResult(ok=False, data={}, error=f"billing key request failed: {e}")
+
+        body = _json_object(key_response)
+        if key_response.status_code >= 400:
+            detail = body.get("detail") or body.get("message") or (body.get("error") or {}).get("message")
+            return ActionResult(ok=False, data={}, error=str(detail or f"HTTP {key_response.status_code}"))
+        if body.get("scopes") not in (None, ["billing"]):
+            # never keep a key as the money key when the server widened or changed its scopes
+            return ActionResult(ok=False, data={}, error=f"the server minted scopes {body.get('scopes')}, not ['billing']")
+        key = body.get("key") or body.get("api_key")
+        if not key:
+            return ActionResult(ok=False, data={}, error="the server returned no key")
+
+        config.set(BILLING_KEY_OPTION, key)
+        return ActionResult(ok=True, data={"billing_api_key": key, "billing_api_key_id": body.get("id")})
