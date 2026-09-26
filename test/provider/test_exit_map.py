@@ -21,6 +21,7 @@ DOC = Path(__file__).resolve().parents[2] / "docs" / "exit-codes.md"
         ("ssh.unreachable", None, 4),
         ("host.port_in_use", None, 1),
         ("auth.expired", None, 6),
+        ("auth.not_signed_in", None, 6),
         ("human.browser_step", None, 12),
         ("human.handoff_required", None, 12),
         ("human.handoff_expired", None, 12),
@@ -94,7 +95,7 @@ def test_every_unified_exit_is_documented(name):
     "code", [errors.INPUT_REQUIRED, errors.CONFIRMATION_REQUIRED, errors.NET_UNREACHABLE,
              errors.PORTAL_NOT_SUPPORTED, errors.NODE_NOT_LISTED, "host.port_in_use", "input.register_token_invalid",
              errors.HANDOFF_REQUIRED, errors.HANDOFF_EXPIRED, errors.API_TOKEN_NEEDS_SESSION, errors.API_TOKEN_SCOPE_MISSING,
-             errors.INTERRUPTED, errors.OVERVIEW_NOT_FOR_CUSTODIED_ACCOUNT],
+             errors.INTERRUPTED, errors.OVERVIEW_NOT_FOR_CUSTODIED_ACCOUNT, errors.NOT_SIGNED_IN],
 )
 def test_every_namespaced_code_is_documented(code):
     assert f"`{code}`" in DOC.read_text()

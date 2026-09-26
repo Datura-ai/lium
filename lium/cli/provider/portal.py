@@ -7,8 +7,16 @@ import os
 import click
 
 from lium.cli.commands.mine_register import portal_web_url
-from lium.cli.interactive import is_interactive
-from lium.cli.provider._client import build_client
+from lium.cli.interactive import is_interactive, noninteractive_requested
+from lium.cli.provider._client import (
+    AUTH_EMAIL_SESSION,
+    AUTH_HOTKEY,
+    AUTH_TOKEN,
+    PROVIDER_TOKEN_ENV,
+    auth_method,
+    build_client,
+    session_email,
+)
 from lium.cli.provider._guards import require_hotkey
 from lium.cli.provider._handoff import run_handoff
 from lium.cli.provider._overrides import with_provider_overrides
@@ -20,7 +28,7 @@ from lium.cli.provider._render import (
 )
 from lium.cli.settings import ConfigManager
 from lium.provider.client import ProviderClient, discord_connected_from_profile
-from lium.provider.errors import ARG_INVALID, INPUT_REQUIRED, ProviderError
+from lium.provider.errors import ARG_INVALID, INPUT_REQUIRED, NOT_SIGNED_IN, ProviderError
 
 PASSWORD_ENV = "LIUM_PROVIDER_PASSWORD"
 
@@ -239,11 +247,21 @@ def logout(ctx: click.Context) -> None:
     )
 
 
+_AUTH_LABELS = {
+    AUTH_TOKEN: f"API token ({PROVIDER_TOKEN_ENV})",
+    AUTH_HOTKEY: "hotkey",
+    AUTH_EMAIL_SESSION: "e-mail session",
+}
+
+
 @portal_command.command("whoami", short_help="Call /auth/me with the cached token.")
 @with_provider_overrides
 @click.pass_context
 def whoami(ctx: click.Context) -> None:
     opts = (ctx.obj or {}).get("provider_opts") or {}
+    if opts.get("json") or noninteractive_requested():
+        _whoami_agent(ctx, opts)
+        return
     if not opts.get("hotkey"):
         ctx.exit(
             emit_error(
@@ -263,6 +281,41 @@ def whoami(ctx: click.Context) -> None:
         return
     summary = "portal session active"
     render(ctx, body, summary=summary)
+
+
+def _whoami_agent(ctx: click.Context, opts) -> None:
+    """`whoami` under --json, LIUM_OUTPUT=json or LIUM_NONINTERACTIVE=1: any sign-in works, and `auth_method` says
+    which one was used: `token` (LIUM_PROVIDER_TOKEN), `hotkey`, or `email_session` (`portal login --email`), first
+    match in that order. With none, `auth.not_signed_in` (exit 6 under --json). Text mode still needs --hotkey."""
+    method = auth_method(opts)
+    if method is None:
+        email = session_email()
+        fatal(
+            ctx,
+            ProviderError(
+                f"not signed in to the provider portal (the e-mail session for {email} has ended)"
+                if email
+                else "not signed in to the provider portal",
+                code=NOT_SIGNED_IN,
+                legacy_code=ARG_INVALID,
+                hint=f"Set {PROVIDER_TOKEN_ENV} to a provider API token, or run "
+                f"`lium provider portal login --email {email or '<address>'}` with the password in {PASSWORD_ENV}, "
+                "or pass --hotkey (or LIUM_PROVIDER_HOTKEY) for a wallet on this machine.",
+                context={"session_email": email} if email else None,
+            ),
+        )
+        return
+    client = build_client(ctx)
+    try:
+        body = client.whoami()
+    except ProviderError as e:
+        ctx.exit(emit_error(ctx, e))
+        return
+    render(
+        ctx,
+        {**(body if isinstance(body, dict) else {}), "auth_method": method},
+        summary=f"portal session active (signed in by {_AUTH_LABELS[method]})",
+    )
 
 
 __all__ = ["portal_command"]

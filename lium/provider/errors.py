@@ -65,6 +65,7 @@ INPUT_REQUIRED = "input.input_required"
 CONFIRMATION_REQUIRED = "input.confirmation_required"
 INTERRUPTED = "input.interrupted"
 AUTH_REFRESH_RACE = "auth.refresh_race"
+NOT_SIGNED_IN = "auth.not_signed_in"
 NET_UNREACHABLE = "net.unreachable"
 PORTAL_NOT_SUPPORTED = "portal.not_supported"
 NODE_NOT_LISTED = "node.not_listed_yet"
@@ -275,6 +276,7 @@ __all__ = [
     "INTERRUPTED",
     "NET_UNREACHABLE",
     "NODE_NOT_LISTED",
+    "NOT_SIGNED_IN",
     "OVERVIEW_NOT_FOR_CUSTODIED_ACCOUNT",
     "PORTAL_NOT_SUPPORTED",
     "unified_exit_code",

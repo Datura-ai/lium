@@ -134,7 +134,10 @@ def resume(ctx: click.Context, node_id: str) -> None:
 @click.pass_context
 def listing(ctx: click.Context, node_id: str | None) -> None:
     """`listing_state` (rented, listed, hidden, offline, validating) and the `hidden_reasons` that keep a
-    node off the listing. With NODE_ID only that node; a node that is not yours is `node.not_found` (exit 5)."""
+    node off the listing. With NODE_ID only that node; a node that is not yours is `node.not_found` (exit 5).
+
+    `rented_gpu_count` of `gpu_count` GPUs are rented now: a node rented in part stays `listed` for its free
+    GPUs, so check `rented_gpu_count` before anything that interrupts a rental."""
     require_hotkey(ctx, group="node")
     client = build_client(ctx)
     try:
@@ -144,7 +147,8 @@ def listing(ctx: click.Context, node_id: str | None) -> None:
         return
     if node_id is None:
         listed = sum(1 for r in rows if r.get("listing_state") == "listed")
-        render(ctx, rows, summary=f"node listing: nodes={len(rows)}, listed={listed}")
+        with_renter = sum(1 for r in rows if (r.get("rented_gpu_count") or 0) > 0)
+        render(ctx, rows, summary=f"node listing: nodes={len(rows)}, listed={listed}, with a renter={with_renter}")
         return
     row = next((r for r in rows if str(r.get("id")) == node_id), None)
     if row is None:
@@ -157,7 +161,10 @@ def listing(ctx: click.Context, node_id: str | None) -> None:
             ),
         )
         return
-    render(ctx, row, summary=f"node {node_id}: {row.get('listing_state')}")
+    summary = f"node {node_id}: {row.get('listing_state')}"
+    if row.get("rented_gpu_count") is not None and row.get("gpu_count"):
+        summary += f", {row['rented_gpu_count']}/{row['gpu_count']} GPUs rented"
+    render(ctx, row, summary=summary)
 
 
 def register_node_ops(group: click.Group) -> None:

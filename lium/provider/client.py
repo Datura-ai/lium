@@ -778,10 +778,16 @@ class ProviderClient:
 
     def nodes_listing(self) -> list[dict[str, Any]]:
         """``GET /executors/listing`` -- each own node against the public listing: ``listing_state``
-        (rented, listed, hidden, offline, validating) and the ``hidden_reasons`` that keep it out."""
+        (rented, listed, hidden, offline, validating) and the ``hidden_reasons`` that keep it out.
+
+        Every row has ``gpu_count`` and ``rented_gpu_count`` (None when the portal did not send them): a node
+        rented in part is ``listed`` with ``rented_gpu_count`` above 0, so ``listing_state`` alone does not say
+        whether a renter is on it."""
         body = self._http.get(EXECUTORS_LISTING)
         rows = body.get("data") if isinstance(body, dict) else body
-        return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+        if not isinstance(rows, list):
+            return []
+        return [{"gpu_count": None, "rented_gpu_count": None, **r} for r in rows if isinstance(r, dict)]
 
     def earnings_daily(
         self,

@@ -12,6 +12,8 @@ import pytest
 from click.testing import CliRunner
 
 from lium.cli.provider.command import provider_command
+from lium.provider.client import email_session_key
+from lium.provider.token_store import TokenStore
 from ._portal_stub import PortalStub, closed_port_url, detail_response
 
 TOKEN = "lpk_stub"
@@ -134,14 +136,45 @@ def test_pausing_an_idle_node_is_portal_node_not_rented(portal) -> None:
     assert error(run(portal, "--json", "node", "pause", NODE, "--yes"), 3)["code"] == "portal.node_not_rented"
 
 
+def _listing_row(node_id: str, state: str, *, gpus: int = 8, rented: int = 0, reasons: list | None = None) -> dict:
+    """One row of the portal's ``GET /executors/listing``, as it answers today."""
+    return {
+        "id": node_id,
+        "listing_state": state,
+        "hidden_reasons": reasons or [],
+        "gpu_count": gpus,
+        "rented_gpu_count": rented,
+        "rented_since": "2026-09-26T08:00:00Z" if rented else None,
+        "computed_status": None,
+    }
+
+
 def test_listing_shows_each_nodes_state_and_hidden_reasons(portal) -> None:
     rows = [
-        {"id": NODE, "listing_state": "hidden", "hidden_reasons": ["price_above_p90"]},
-        {"id": "other", "listing_state": "listed", "hidden_reasons": []},
+        _listing_row(NODE, "hidden", reasons=[{"code": "price_above_p90", "message": "Price above the p90"}]),
+        _listing_row("other", "listed"),
     ]
     portal.route("GET", "/executors/listing", rows)
     assert ok(run(portal, "--json", "node", "listing")) == rows
     assert ok(run(portal, "--json", "node", "listing", NODE)) == rows[0]
+
+
+def test_listing_shows_a_partly_rented_node_as_listed_with_its_rented_gpus(portal) -> None:
+    portal.route("GET", "/executors/listing", [_listing_row(NODE, "listed", gpus=8, rented=2), _listing_row("idle", "listed")])
+    one = ok(run(portal, "--json", "node", "listing", NODE))
+    assert (one["listing_state"], one["rented_gpu_count"], one["gpu_count"]) == ("listed", 2, 8)
+
+    text = run(portal, "node", "listing", NODE)
+    assert text.exit_code == 0, text.output
+    assert f"node {NODE}: listed, 2/8 GPUs rented" in text.output
+    assert "nodes=2, listed=2, with a renter=1" in run(portal, "node", "listing").output
+
+
+def test_listing_from_a_portal_without_gpu_counts_says_they_are_unknown(portal) -> None:
+    portal.route("GET", "/executors/listing", [{"id": NODE, "listing_state": "listed", "hidden_reasons": []}])
+    one = ok(run(portal, "--json", "node", "listing", NODE))
+    assert one["rented_gpu_count"] is None and one["gpu_count"] is None
+    assert run(portal, "node", "listing", NODE).output.splitlines()[0] == f"node {NODE}: listed"
 
 
 def test_listing_a_node_that_is_not_yours_is_node_not_found_exit_5(portal) -> None:
@@ -249,6 +282,76 @@ def test_a_wrong_password_is_an_auth_error(portal) -> None:
     assert err["legacy_code"] == "PORTAL_AUTH_INVALID"
     assert "LIUM_PROVIDER_PASSWORD" in err["hint"] and "Token rejected" not in err["hint"]
     assert err["message"] == "the portal refused this e-mail and password"
+
+
+# --- portal whoami: any sign-in in agent mode ---------------------------------------------------
+
+ME = {"miner_id": "m-1", "miner_hotkey": HOTKEY, "email": "agent@example.invalid", "custody": None}
+SESSION_EMAIL = "agent@example.invalid"
+
+
+def _email_session(token: str = "session-stub") -> None:
+    TokenStore().save(email_session_key(SESSION_EMAIL), token, provider_id="m-1")
+
+
+def test_whoami_with_the_provider_token_says_token(portal) -> None:
+    portal.route("GET", "/auth/me", detail_response(ME))
+    data = ok(run(portal, "--json", "portal", "whoami"))
+    assert data == {**ME, "auth_method": "token"}
+    assert portal.requests[0]["authorization"] == f"Bearer {TOKEN}"
+
+
+def test_whoami_with_an_email_session_says_email_session(portal) -> None:
+    _email_session()
+    portal.route("GET", "/auth/me", detail_response(ME))
+    env = {"LIUM_PROVIDER_TOKEN": "", "LIUM_PROVIDER_EMAIL": SESSION_EMAIL}
+    data = ok(run(portal, "--json", "portal", "whoami", env=env))
+    assert data["auth_method"] == "email_session" and data["email"] == SESSION_EMAIL
+    assert portal.requests[0]["authorization"] == "Bearer session-stub"
+
+
+def test_whoami_prefers_the_provider_token_over_an_email_session(portal) -> None:
+    _email_session()
+    portal.route("GET", "/auth/me", detail_response(ME))
+    data = ok(run(portal, "--json", "portal", "whoami", env={"LIUM_PROVIDER_EMAIL": SESSION_EMAIL}))
+    assert data["auth_method"] == "token"
+    assert portal.requests[0]["authorization"] == f"Bearer {TOKEN}"
+
+
+def test_whoami_signed_in_nowhere_is_auth_not_signed_in_exit_6(portal) -> None:
+    err = error(run(portal, "--json", "portal", "whoami", env={"LIUM_PROVIDER_TOKEN": ""}), 6)
+    assert (err["code"], err["legacy_code"]) == ("auth.not_signed_in", "ARG_INVALID")
+    assert "LIUM_PROVIDER_TOKEN" in err["hint"] and "portal login --email" in err["hint"] and "--hotkey" in err["hint"]
+    assert portal.requests == []
+
+
+def test_whoami_after_the_email_session_ended_names_the_address(portal) -> None:
+    env = {"LIUM_PROVIDER_TOKEN": "", "LIUM_PROVIDER_EMAIL": SESSION_EMAIL}
+    err = error(run(portal, "--json", "portal", "whoami", env=env), 6)
+    assert err["code"] == "auth.not_signed_in" and SESSION_EMAIL in err["message"]
+    assert f"portal login --email {SESSION_EMAIL}" in err["hint"] and err["data"] == {"session_email": SESSION_EMAIL}
+
+
+def test_whoami_with_a_refused_token_is_the_portals_auth_error(portal) -> None:
+    portal.route("GET", "/auth/me", {"detail": {"message": "Token revoked", "code": "token_revoked"}}, status=401)
+    assert error(run(portal, "--json", "portal", "whoami"), 6)["code"] == "portal.token_revoked"
+
+
+def test_whoami_noninteractive_text_names_the_sign_in(portal) -> None:
+    portal.route("GET", "/auth/me", detail_response(ME))
+    result = run(portal, "portal", "whoami", env={"LIUM_NONINTERACTIVE": "1"})
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines()[0] == "portal session active (signed in by API token (LIUM_PROVIDER_TOKEN))"
+
+
+def test_whoami_in_text_mode_without_a_hotkey_still_refuses_as_before(portal) -> None:
+    result = run(portal, "portal", "whoami")
+    assert result.exit_code == 1
+    assert result.stderr == (
+        "[ARG_INVALID] portal whoami requires --hotkey (or LIUM_PROVIDER_HOTKEY)\n"
+        "  hint: Check the argument value and consult --help.\n"
+    )
+    assert portal.requests == []
 
 
 # --- provider API tokens ------------------------------------------------------------------------

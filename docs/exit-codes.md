@@ -232,6 +232,7 @@ for a 400 or 409, `PORTAL_FORBIDDEN` for a 403, `PORTAL_NOT_FOUND` for a 404, `P
 | `input.hotkey_conflicts_with_token` | 2 | `lium mine --json --register … -k` with a hotkey the token does not name. |
 | `human.handoff_required` | 12 | A one-time human step (`lium provider config connect-discord`, `lium provider portal confirm-email`). `data`: `step` (`discord_link`, `email_confirm`), `handoff_url`, `code`, `expires_at`, `message_for_human`. Relay `message_for_human` to the person, then re-run with `--wait`. With `--wait --timeout N`, also when N seconds pass first (`data.waited_s`). |
 | `human.handoff_expired` | 12 | `--wait`: the code expired before the person finished, or the portal answers 404 for the handoff (`data.status: not_found`); run the command again for a new code. A poll the portal could not answer (5xx, 429, unreachable) is retried with backoff until `--timeout`. |
+| `auth.not_signed_in` | 6 | `lium provider portal whoami` in agent mode with no `LIUM_PROVIDER_TOKEN`, no hotkey and no live `portal login --email` session (`data.session_email` names a session that has ended). The hint names all three ways in. Text mode keeps the old refusal (`ARG_INVALID`, exit 1). |
 | `net.unreachable` | 4 | Connection refused, DNS failure or timeout reaching the portal. |
 | `portal.not_supported` | 3 | The portal answered 404/405 for a route this CLI knows (`lium provider token …` before the portal serves API tokens). |
 | `portal.api_token_needs_session` | 6 | `lium provider token create`, `list` or `revoke` sent `LIUM_PROVIDER_TOKEN`; tokens are managed from a signed-in session only (hotkey or `portal login --email`). |
@@ -258,6 +259,16 @@ Provider auth without a wallet: `LIUM_PROVIDER_TOKEN` is sent as the Bearer toke
 (a hidden prompt on a terminal) and keeps the session for later commands (`LIUM_PROVIDER_EMAIL` picks the session).
 Google sign-in is for people in the portal. An agent signs in with `LIUM_PROVIDER_TOKEN`: a person signed in creates the
 token with `lium provider token create` and hands it over.
+
+When more than one is set, a command signs in with the first of: `LIUM_PROVIDER_TOKEN`, the hotkey (`--hotkey`,
+`LIUM_PROVIDER_HOTKEY` or `provider.hotkey`), the `portal login --email` session. In agent mode (`--json`,
+`LIUM_OUTPUT=json`, `LIUM_NONINTERACTIVE=1`) `lium provider portal whoami` works with any of them and adds
+`auth_method` to the account fields of `/auth/me` (`miner_id`, `miner_hotkey`, `email`, …): `token`, `hotkey` or
+`email_session`, the one used; with none it is `auth.not_signed_in` (exit 6). Text mode needs the hotkey as it always has.
+
+`lium provider node listing [NODE_ID] --json` rows always carry `gpu_count` and `rented_gpu_count` (`null` when the
+portal does not send them). A node rented in part keeps `listing_state: "listed"` for its free GPUs, with
+`rented_gpu_count` above 0: check `rented_gpu_count`, not only `listing_state`, before anything that interrupts a rental.
 
 One-time human steps (`config connect-discord`, `portal confirm-email`) answer `human.handoff_required` (exit 12):
 one URL plus a short code for the person. `config connect-discord` does so with `--wait` or in agent mode

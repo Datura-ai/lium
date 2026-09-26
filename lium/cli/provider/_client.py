@@ -45,6 +45,23 @@ def bearer_token(opts: Mapping[str, Any]) -> str | None:
     return cached.token if cached is not None else None
 
 
+AUTH_TOKEN = "token"
+AUTH_HOTKEY = "hotkey"
+AUTH_EMAIL_SESSION = "email_session"
+
+
+def auth_method(opts: Mapping[str, Any]) -> str | None:
+    """Which credential this invocation signs in with, by the order above: ``token``, ``hotkey``,
+    ``email_session``, or None when there is none (an e-mail session that has ended counts as none)."""
+    if (os.environ.get(PROVIDER_TOKEN_ENV) or "").strip():
+        return AUTH_TOKEN
+    if opts.get("hotkey"):
+        return AUTH_HOTKEY
+    if bearer_token(opts):
+        return AUTH_EMAIL_SESSION
+    return None
+
+
 def build_client(ctx: click.Context) -> ProviderClient:
     """Construct ``ProviderClient`` from the resolved opts in ``ctx.obj``."""
     opts = (ctx.obj or {}).get("provider_opts") or {}
@@ -56,4 +73,14 @@ def build_client(ctx: click.Context) -> ProviderClient:
     )
 
 
-__all__ = ["PROVIDER_EMAIL_ENV", "PROVIDER_TOKEN_ENV", "bearer_token", "build_client", "session_email"]
+__all__ = [
+    "AUTH_EMAIL_SESSION",
+    "AUTH_HOTKEY",
+    "AUTH_TOKEN",
+    "PROVIDER_EMAIL_ENV",
+    "PROVIDER_TOKEN_ENV",
+    "auth_method",
+    "bearer_token",
+    "build_client",
+    "session_email",
+]
