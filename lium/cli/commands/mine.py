@@ -918,8 +918,8 @@ def _run_mine(ctx, hotkey, dir_, branch, auto, verbose, register_token, portal_u
                 return _json_failure("input.hotkey_conflicts_with_token", message, 2, "Drop -k.")
             console.error(f"❌ {escape(message)}")
             return 1
-        # what the executor reports under: the account's own key, or the portal's for an account without one
-        # (lium-platform#294) — the SS58 check in _setup_executor_env applies to this value, not to the account id
+        # what the executor reports under: the account's own key, or the portal's for an account without one;
+        # the SS58 check in _setup_executor_env applies to this value, not to the account id
         hotkey = token.node_hotkey
         auto = True
         left = token.seconds_left()

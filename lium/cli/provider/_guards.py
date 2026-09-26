@@ -67,13 +67,17 @@ def require_persona_ack(ctx: click.Context) -> None:
             ProviderError(
                 f"confirmation required before a spend-affecting command ({e})",
                 code=CONFIRMATION_REQUIRED,
+                legacy_code=ARG_INVALID,
                 hint="Re-run with --yes, or set LIUM_PROVIDER_ACK=1 once for this agent's environment.",
                 context={"flag": "--yes", "env": "LIUM_PROVIDER_ACK=1"},
             ),
         )
         return
     except Interrupted as e:
-        fatal(ctx, ProviderError(f"stopped: {e}", code=INTERRUPTED, hint="Nothing was sent to the portal."))
+        fatal(
+            ctx,
+            ProviderError(f"stopped: {e}", code=INTERRUPTED, legacy_code=ARG_INVALID, hint="Nothing was sent to the portal."),
+        )
         return
     if ok:
         return

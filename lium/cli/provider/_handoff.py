@@ -101,7 +101,19 @@ def run_handoff(
             failures += 1
             pause = min(poll_interval * 2 ** (failures - 1), MAX_BACKOFF_S)
             if clock() + pause > deadline:
-                raise
+                if timeout is None:
+                    raise
+                raise ProviderError(
+                    data["message_for_human"],
+                    code=HANDOFF_REQUIRED,
+                    cause=e,
+                    context={
+                        **data,
+                        "status": "unknown",
+                        "waited_s": round(clock() - started, 1),
+                        "last_error": {"code": e.code, "message": e.message, "status": e.context.get("status")},
+                    },
+                ) from e
             sleep(pause)
             continue
         failures = 0

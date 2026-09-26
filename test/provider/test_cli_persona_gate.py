@@ -171,7 +171,7 @@ def test_eof_at_the_prompt_is_no_answer_not_a_crash(tmp_path: Path) -> None:
     assert "stdin closed" in seen["raised"]
 
 
-def test_ctrl_c_at_the_prompt_stops_the_command_with_exit_130(tmp_path: Path, monkeypatch) -> None:
+def test_ctrl_c_at_the_prompt_stops_the_command_as_input_interrupted(tmp_path: Path, monkeypatch) -> None:
     import builtins
 
     from lium.cli.provider.command import provider_command
@@ -187,8 +187,25 @@ def test_ctrl_c_at_the_prompt_stops_the_command_with_exit_130(tmp_path: Path, mo
         provider_command, ["--portal-url", "http://127.0.0.1:9", "node", "pause", "7c1f0e2a-0000-4000-8000-000000000001"],
         env=env,
     )
-    assert result.exit_code == 130, result.output
+    assert result.exit_code == 1, "text mode keeps the old ARG_INVALID exit"
     assert "[input.interrupted]" in result.stderr and "stdin closed" not in result.stderr
+
+
+def test_the_gate_errors_exit_1_in_text_and_2_or_130_under_json() -> None:
+    from lium.cli.provider._render import exit_code_for, legacy_code_for
+    from lium.provider.errors import ARG_INVALID, CONFIRMATION_REQUIRED, INTERRUPTED, ProviderError
+
+    for code, json_exit in ((CONFIRMATION_REQUIRED, 2), (INTERRUPTED, 130)):
+        err = ProviderError("x", code=code, legacy_code=ARG_INVALID)
+        assert (exit_code_for(err), exit_code_for(err, json_mode=True)) == (1, json_exit), code
+        assert legacy_code_for(err) == ARG_INVALID
+
+
+def test_the_real_gate_error_carries_arg_invalid_as_its_legacy_code(monkeypatch, fake_signer, tmp_token_store) -> None:
+    import json
+
+    result, portal = _node_rm(monkeypatch, fake_signer, tmp_token_store, ["node", "rm", "e-1"], env={"LIUM_OUTPUT": "json"})
+    assert json.loads(result.stdout)["error"]["legacy_code"] == "ARG_INVALID"
 
 
 def test_an_ack_covers_every_process_of_the_user_not_one_parent_pid(tmp_path: Path, monkeypatch) -> None:
@@ -244,7 +261,7 @@ def test_a_mutation_under_json_without_yes_is_confirmation_required_exit_2(monke
 
 def test_a_mutation_behind_a_pipe_is_refused_in_text_mode_too(monkeypatch, fake_signer, tmp_token_store) -> None:
     result, portal = _node_rm(monkeypatch, fake_signer, tmp_token_store, ["node", "rm", "e-1"], env={"LIUM_OUTPUT": ""})
-    assert result.exit_code == 2, result.output
+    assert result.exit_code == 1, "text mode keeps the old ARG_INVALID exit"
     assert "input.confirmation_required" in result.stderr
     assert portal.deletes == []
 

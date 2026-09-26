@@ -216,7 +216,7 @@ def emit_error(ctx: click.Context, err: ProviderError) -> int:
     if _json_mode(ctx):
         error = {
             "code": error_code_for(err.code),
-            "legacy_code": legacy_code_for(err) or err.code,
+            "legacy_code": legacy_code_for(err),
             "message": err.message,
             "hint": err.hint,
             "exit_code": code,

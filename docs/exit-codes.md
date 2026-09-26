@@ -161,18 +161,36 @@ progress, when a command has any, is one JSON object per line on stderr. `--json
 
 | Old code | Text exit | `--json` code | `--json` exit |
 |----------|-----------|---------------|---------------|
-| `ARG_INVALID` | 1 | `input.arg_invalid` | 2 |
+| `ARG_INVALID` | 1 | `input.arg_invalid`; `input.confirmation_required` and `input.interrupted` (130) at the persona gate | 2 |
+| `PORTS_INVALID` | 1 | `input.ports_invalid` | 2 |
+| `HOTKEY_NOT_REGISTERED` | 1 | `auth.hotkey_not_registered` | 6 |
 | `PORTAL_REQUEST_REJECTED` | 1 | `portal.request_rejected`, or the portal's own `portal.<code>` | 3 |
-| `PORTAL_AUTH_INVALID` | 2 | `auth.invalid` | 6 |
+| `PORTAL_AUTH_INVALID` | 2 | `auth.invalid`, or `portal.<code>` | 6 |
+| `PORTAL_AUTH_EXPIRED` | 2 | `auth.expired`, or `portal.<code>` | 6 |
+| `WALLET_NOT_FOUND` | 2 | `auth.wallet_not_found` | 5 |
 | `PORTAL_FORBIDDEN` | 2 | `auth.forbidden`, or `portal.<code>` | 6 |
+| `PORTAL_SERVER_ERROR` | 3 | `portal.server_error`, or `net.unreachable` (4) | 3 |
 | `PORTAL_NOT_FOUND` | 3 | `portal.not_found`, or `portal.<code>` | 5 |
+| `PORTAL_CONTRACT_DRIFT` | 3 | `portal.contract_drift` | 3 |
 | `PORTAL_RATE_LIMIT` | 3 | `portal.rate_limited`, or `portal.<code>` | 7 |
-| `PORTAL_SERVER_ERROR` | 3 | `portal.server_error`, `net.unreachable` (4) | 3 |
 | `SSH_UNREACHABLE` | 5 | `ssh.unreachable` | 4 |
+| `SSH_AUTH_FAILED` | 5 | `ssh.auth_failed` | 4 |
 | `CONFIG_MISSING` | 6 | `input.config_missing` | 2 |
+| `PORTAL_AUTH_REFRESH_RACE` | 7 | `auth.refresh_race`: another process holds the token cache; retry | 7 |
+| `INSTALLER_PARTIAL_FAIL` | 1 | `host.installer_partial_fail` | 1 |
+| `EXECUTOR_UUID_MISMATCH` | 1 | `host.executor_uuid_mismatch` | 1 |
+| `UUID_NOT_FOUND` | 1 | `host.uuid_not_found` | 5 |
 
-  A code new with the unified map and with no old equivalent (`input.confirmation_required`,
-  `human.handoff_required`, `portal.not_supported`, `input.interrupted`) exits by the unified map in both modes.
+  The same applies to `lium mine status --json`, which prints the provider envelope (an SS58 given as the hotkey
+  name is `ARG_INVALID`: 1 in text, 2 under `--json`).
+
+  The persona gate asks only when a person can answer. Off a terminal, under `--json`, or at EOF (Ctrl-D) it
+  fails with `input.confirmation_required` and Ctrl-C at the prompt is `input.interrupted`; both exit 1 in text
+  mode (their `legacy_code` is `ARG_INVALID`, as a decline was). A piped `y` does not confirm: pass `--yes` or set
+  `LIUM_PROVIDER_ACK=1`.
+
+  A `lium provider` code with no old equivalent (`human.handoff_required`, `human.handoff_expired`,
+  `portal.not_supported`) has `legacy_code: null` and exits by the unified map in both modes.
 
 ### The unified exit map
 
@@ -254,14 +272,12 @@ with the old one as `legacy_code`; the exits on the right are the `--json` ones:
 |-------------------|-------------------|------|
 | `PORTAL_SERVER_ERROR` (3) | `net.unreachable` (4) | Connection refused, DNS failure, timeout. A 5xx stays `PORTAL_SERVER_ERROR`. |
 | `PORTAL_REQUEST_REJECTED` (1), `PORTAL_FORBIDDEN` (2), `PORTAL_NOT_FOUND` (3), `PORTAL_RATE_LIMIT` (3) | `portal.<code>` (3, 6, 5, 7) | The portal's body named `detail.code` (`node rm` on a rented node, the `node add` refusals). Text mode keeps the old exit. |
-| `ARG_INVALID` (1), or a prompt that hung | `input.confirmation_required` (2) | The persona gate without a terminal or under `--json`. A decline at the prompt stays `ARG_INVALID`. |
+| `ARG_INVALID` (1), or a piped answer | `input.confirmation_required` (2) | The persona gate off a terminal, under `--json`, or at EOF (Ctrl-D). Text mode still exits 1. A piped `y` does not confirm: pass `--yes` or set `LIUM_PROVIDER_ACK=1`. A decline at the prompt stays `ARG_INVALID`. |
+| `ARG_INVALID` (1) | `input.interrupted` (130) | Ctrl-C at the persona prompt; text mode still exits 1. |
+| `PORTAL_AUTH_REFRESH_RACE` (7) | `auth.refresh_race` (7) | Another process holds the token cache; retry. |
 | exit 2 (text, not listed) | `node.not_listed_yet` (11) | `lium mine --register`, under `--json` only. |
 | exit 1 (any `lium mine` step) | `host.*` (1) | Under `--json` only; text mode is unchanged. |
 | exit 0 with `authorization_url` | `human.handoff_required` (12), or `portal.not_supported` (3) with `data.legacy_browser_url` | `config connect-discord --json`: exit 3 until the portal serves handoff sessions. |
-
-Planned renames, not in effect yet: `PORTAL_AUTH_INVALID`/`PORTAL_AUTH_EXPIRED` → `auth.invalid`/`auth.expired` (6),
-`PORTAL_FORBIDDEN` → `auth.forbidden` (6), `PORTAL_RATE_LIMIT` → `portal.rate_limited` (7),
-`SSH_UNREACHABLE`/`SSH_AUTH_FAILED` → `ssh.unreachable`/`ssh.auth_failed` (4), `CONFIG_MISSING` → `input.config_missing` (2).
 
 ## Programmatic use
 

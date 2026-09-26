@@ -27,6 +27,7 @@ DOC = Path(__file__).resolve().parents[2] / "docs" / "exit-codes.md"
         ("portal.api_token_needs_session", None, 6),
         ("portal.overview_not_for_custodied_account", None, 6),
         ("input.interrupted", None, 130),
+        ("auth.refresh_race", None, 7),
         ("portal.api_token_scope_missing", None, 6),
         ("node.not_found", None, 5),
         ("node.not_listed_yet", None, 11),
@@ -65,6 +66,19 @@ def test_the_which_map_table_matches_both_modes():
     for old, text_exit, json_exit in rows:
         err = ProviderError("x", code=old)
         assert (exit_code_for(err), exit_code_for(err, json_mode=True)) == (int(text_exit), int(json_exit)), old
+
+
+def test_every_legacy_code_has_a_row_in_the_which_map_table():
+    from lium.cli.provider._render import _EXIT_CODES, ERROR_CODES
+
+    documented = set(re.findall(r"^\|\s*`([A-Z_]+)`\s*\|\s*\d+\s*\|", _section("### Which exit map applies"), re.M))
+    assert set(_EXIT_CODES) | set(ERROR_CODES) <= documented, sorted((set(_EXIT_CODES) | set(ERROR_CODES)) - documented)
+
+
+def test_a_token_cache_race_is_retryable_under_json():
+    err = ProviderError("x", code=errors.PORTAL_AUTH_REFRESH_RACE)
+    assert (exit_code_for(err), exit_code_for(err, json_mode=True)) == (7, 7)
+    assert unified_exit_code(errors.AUTH_REFRESH_RACE) == 7
 
 
 @pytest.mark.parametrize(

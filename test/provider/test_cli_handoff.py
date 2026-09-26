@@ -75,6 +75,7 @@ def test_connect_discord_is_a_handoff_exit_12_with_the_url_and_code(portal) -> N
         "message_for_human": HANDOFF["message_for_human"],
     }
     assert error["message"] == HANDOFF["message_for_human"]
+    assert error["legacy_code"] is None
     post = portal.requests[0]
     assert post["json"] == {"step": "discord_link"} and post["authorization"] == f"Bearer {TOKEN}"
     assert portal.calls("GET") == []
@@ -116,12 +117,14 @@ def test_connect_discord_wait_rides_out_a_portal_blip(portal) -> None:
     assert data["done"] is True and len(portal.calls("GET")) == 3
 
 
-def test_connect_discord_wait_gives_up_on_a_portal_that_stays_down_at_the_timeout(portal) -> None:
+def test_connect_discord_wait_at_the_timeout_on_a_failing_portal_is_still_handoff_required(portal) -> None:
     portal.route("POST", "/auth/handoffs", created(), status=201)
     portal.route("GET", POLL_PATH, {"detail": {"code": "handoff_unavailable", "message": "Try again."}}, status=503)
     args = ("--json", "config", "connect-discord", "--wait", "--poll-interval", "0.1", "--timeout", "1")
-    error = envelope(run(portal, *args), 3)["error"]
-    assert error["code"] == "portal.handoff_unavailable" and len(portal.calls("GET")) >= 2
+    error = envelope(run(portal, *args), 12)["error"]
+    assert error["code"] == "human.handoff_required" and len(portal.calls("GET")) >= 2
+    assert error["data"]["code"] == "ANNH-BD65" and "waited_s" in error["data"]
+    assert error["data"]["last_error"] == {"code": "portal.handoff_unavailable", "message": "Try again.", "status": 503}
 
 
 def test_a_handoff_the_portal_no_longer_knows_has_expired(portal) -> None:

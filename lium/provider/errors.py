@@ -64,6 +64,7 @@ CONFIG_MISSING = "CONFIG_MISSING"
 INPUT_REQUIRED = "input.input_required"
 CONFIRMATION_REQUIRED = "input.confirmation_required"
 INTERRUPTED = "input.interrupted"
+AUTH_REFRESH_RACE = "auth.refresh_race"
 NET_UNREACHABLE = "net.unreachable"
 PORTAL_NOT_SUPPORTED = "portal.not_supported"
 NODE_NOT_LISTED = "node.not_listed_yet"
@@ -102,6 +103,8 @@ def unified_exit_code(code: str, status: int | None = None) -> int:
     """The unified-map exit status of a namespaced code; ``status`` is the portal's HTTP status, if any."""
     if code == INTERRUPTED:
         return EXIT_INTERRUPTED
+    if code == AUTH_REFRESH_RACE:
+        return EXIT_RETRYABLE
     if code.startswith("node.blocked"):
         return EXIT_BLOCKED
     if code == NODE_NOT_LISTED:
@@ -244,6 +247,7 @@ __all__ = [
     "API_TOKEN_NEEDS_SESSION",
     "API_TOKEN_SCOPE_MISSING",
     "ARG_INVALID",
+    "AUTH_REFRESH_RACE",
     "CONFIG_MISSING",
     "CONFIRMATION_REQUIRED",
     "EXECUTOR_UUID_MISMATCH",
