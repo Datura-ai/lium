@@ -24,7 +24,7 @@ from rich.text import Text
 from lium.cli.utils import console
 from lium.provider.errors import ProviderError
 
-# The validator's idle-pay codes (lium-io ``ZeroIncentiveReason``) a Secure listing requires,
+# The validator's idle-pay codes (``ZeroIncentiveReason``) a Secure listing requires,
 # the portal's default gating list. Not listed on purpose: the two ``NOT_GATED`` codes below,
 # ``spot_tier`` and ``new_rentals_paused``.
 SECURE_GATING_CODES = frozenset(
@@ -61,7 +61,7 @@ _ALIASES = {
     "no_unrented_capacity": "no_unrented_capacity_for_gpu_count",
 }
 
-# lium-io ``incentive/default.py::get_min_driver_multiplier``: the lowest driver that earns idle pay.
+# The validator's ``get_min_driver_multiplier``: the lowest driver that earns idle pay.
 MIN_NVIDIA_DRIVER = "580.65.06"
 
 # Listing states the provider chose; the node is hidden on purpose, not blocked.

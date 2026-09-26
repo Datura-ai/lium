@@ -469,9 +469,9 @@ def test_node_status_shows_a_portal_gating_false_entry_as_not_eligible(portal_fo
     assert _red_lines(ansi) == []
 
 
-# lium-platform#887 at 759f35e9, `test/snapshots/blocking_reasons_catalog.json`: the portal's real entries.
-# No `gating` key; `secure_requirement` comes from the portal's gating-codes setting.
-P887_DRIVER = {
+# Entries as the portal's blocking-reasons catalog serves them: no `gating` key; `secure_requirement`
+# comes from the portal's gating-codes setting.
+CATALOG_DRIVER = {
     "code": "nvidia_driver_below_minimum", "docs_url": "https://docs.lium.io/providers/nodes/quickstart",
     "fix": "Upgrade the NVIDIA driver on the host to 580.65.06 or newer (on Ubuntu, for example `sudo apt-get install -y nvidia-driver-580`), reboot the host, then restart the executor. The next validator cycle checks it again; rented nodes are exempt until their rental ends.",
     "fix_command": "nvidia-smi --query-gpu=driver_version --format=csv,noheader && cd neurons/executor && docker compose up -d",
@@ -479,20 +479,20 @@ P887_DRIVER = {
     "message": "NVIDIA driver 550.54.15 is below the network minimum 580.65.06: no idle pay.",
     "required": "580.65.06 or newer", "secure_requirement": True, "title": "NVIDIA driver below the minimum",
 }
-P887_SYSBOX = {
+CATALOG_SYSBOX = {
     "code": "sysbox_not_enabled", "docs_url": "https://docs.lium.io/providers/nodes/sysbox",
     "fix": "Install sysbox with the Lium setup script (it checks the host first and prints the fix for each FIX line), then restart the executor.",
     "fix_command": "curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-io/main/neurons/executor/nvidia_docker_sysbox_setup.sh | sudo bash",
     "kind": "idle_pay", "measured": "no sysbox-runc runtime", "message": "The node does not run the sysbox runtime: no idle pay.",
     "required": "sysbox-runc runtime", "secure_requirement": True, "title": "Sysbox runtime missing",
 }
-P887_GPU_MODEL = {
+CATALOG_GPU_MODEL = {
     "code": "gpu_model_not_eligible_for_unrented_incentive", "docs_url": None,
     "fix": "Nothing to fix on the node: rent it out to earn.", "fix_command": None, "kind": "idle_pay", "measured": None,
     "message": "This GPU model is not part of the idle-pay program: it earns only when rented.", "required": None,
     "secure_requirement": False, "title": "GPU model outside the idle-pay program",
 }
-P887_NO_ROOM = {
+CATALOG_NO_ROOM = {
     "code": "no_unrented_capacity_for_gpu_count", "docs_url": None,
     "fix": "Nothing to fix on the node: the fleet cap changes with the market. Rent it out to earn.", "fix_command": None,
     "kind": "idle_pay", "measured": None,
@@ -500,7 +500,7 @@ P887_NO_ROOM = {
     "required": None, "secure_requirement": False, "title": "No idle-pay capacity for this GPU count",
 }
 # the price code taken out of the portal's gating-codes setting: still a reason, not a Secure requirement
-P887_PRICE_NOT_GATED = {
+CATALOG_PRICE_NOT_GATED = {
     "code": "price_above_market_p90_soft_limit", "docs_url": "https://docs.lium.io/providers/portal/managing-nodes",
     "fix": "Lower the node's price to $2.75/GPU/h or below on the node's page in the provider portal.", "fix_command": None,
     "kind": "idle_pay", "measured": "$3.2/GPU/h", "message": "The price ($3.2/GPU/h) is above the market soft limit: no idle pay.",
@@ -508,8 +508,8 @@ P887_PRICE_NOT_GATED = {
 }
 
 
-def test_p887_entries_print_fix_command_docs_link_and_secure_requirements(portal_for):
-    portal_for(_Portal(node=_node(blocking_reasons=[P887_DRIVER, P887_SYSBOX, P887_PRICE_NOT_GATED])))
+def test_catalog_entries_print_fix_command_docs_link_and_secure_requirements(portal_for):
+    portal_for(_Portal(node=_node(blocking_reasons=[CATALOG_DRIVER, CATALOG_SYSBOX, CATALOG_PRICE_NOT_GATED])))
 
     result = _run("node", "get", "e-1")
 
@@ -529,8 +529,8 @@ def test_p887_entries_print_fix_command_docs_link_and_secure_requirements(portal
     assert "• Price above the market soft limit" not in secure_block
 
 
-def test_p887_command_sits_on_its_own_line_under_fix(portal_for):
-    portal_for(_Portal(node=_node(blocking_reasons=[P887_DRIVER])))
+def test_catalog_command_sits_on_its_own_line_under_fix(portal_for):
+    portal_for(_Portal(node=_node(blocking_reasons=[CATALOG_DRIVER])))
 
     result = _run("node", "get", "e-1")
 
@@ -540,8 +540,8 @@ def test_p887_command_sits_on_its_own_line_under_fix(portal_for):
     assert any(line.startswith("Fix: Upgrade the NVIDIA driver") for line in lines[:command_row])
 
 
-def test_p887_not_gated_entries_without_a_gating_key_are_not_eligible_not_blocked(portal_for, ansi_console):
-    portal_for(_Portal(nodes=[_node("e-2", blocking_reasons=[P887_GPU_MODEL, P887_NO_ROOM])]))
+def test_catalog_not_gated_entries_without_a_gating_key_are_not_eligible_not_blocked(portal_for, ansi_console):
+    portal_for(_Portal(nodes=[_node("e-2", blocking_reasons=[CATALOG_GPU_MODEL, CATALOG_NO_ROOM])]))
 
     result = _run("node", "list")
 
@@ -558,8 +558,8 @@ def test_p887_not_gated_entries_without_a_gating_key_are_not_eligible_not_blocke
     assert _red_lines(ansi_console.getvalue()) == []
 
 
-def test_p887_not_gated_entry_prints_its_title_as_sent_with_a_no_action_line(portal_for, ansi_console):
-    portal_for(_Portal(node=_node("e-2", blocking_reasons=[P887_GPU_MODEL])))
+def test_catalog_not_gated_entry_prints_its_title_as_sent_with_a_no_action_line(portal_for, ansi_console):
+    portal_for(_Portal(node=_node("e-2", blocking_reasons=[CATALOG_GPU_MODEL])))
 
     result = _run("node", "get", "e-2")
 
@@ -570,8 +570,8 @@ def test_p887_not_gated_entry_prints_its_title_as_sent_with_a_no_action_line(por
     assert GPU_ACTION in plain
 
 
-def test_p887_secure_requirement_on_a_spot_node_is_no_secure_listing_line(portal_for):
-    portal_for(_Portal(node=_node(tier="spot", blocking_reasons=[P887_DRIVER])))
+def test_catalog_secure_requirement_on_a_spot_node_is_no_secure_listing_line(portal_for):
+    portal_for(_Portal(node=_node(tier="spot", blocking_reasons=[CATALOG_DRIVER])))
 
     result = _run("node", "get", "e-1")
 
