@@ -41,15 +41,15 @@ def run_handoff(
 ) -> dict[str, Any]:
     """Run ``step`` through a handoff; returns ``{step, done: True, …}`` once the person has finished."""
     try:
-        session = client.create_handoff(step)
+        answer = client.create_handoff(step)
     except ProviderError as e:
         if e.code == PORTAL_NOT_SUPPORTED:
             raise _not_supported(step, e, legacy_url) from e
         if e.code == "portal.handoff_step_done":
             return {"step": step, "done": True, "already_done": True}
         raise
-    data = {k: session.get(k) for k in HANDOFF_FIELDS}
-    data["step"] = session.get("step") or step
+    data = {k: answer.get(k) for k in HANDOFF_FIELDS}
+    data["step"] = answer.get("step") or step
     missing = [k for k in ("handoff_id", "handoff_url", "code") if not data[k]]
     if missing:
         raise ProviderError(

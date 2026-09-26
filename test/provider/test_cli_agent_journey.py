@@ -12,7 +12,7 @@ import pytest
 from click.testing import CliRunner
 
 from lium.cli.provider.command import provider_command
-from ._portal_stub import PortalStub, closed_port_url
+from ._portal_stub import PortalStub, closed_port_url, detail_response
 
 TOKEN = "lpk_stub"
 HOTKEY = "5StubHotkeyForTheAgentJourneyTests"
@@ -237,15 +237,56 @@ def test_token_commands_say_not_supported_until_the_portal_serves_them(portal, a
     assert err["code"] == "portal.not_supported"
 
 
+TOKEN_ID = "0b9f3c1e-6a2d-4f57-9c8e-2d1a7b4e5f60"
+TOKEN_VIEW = {
+    "id": TOKEN_ID,
+    "name": "ci",
+    "token_prefix": "lpk_Q7mZ2xRk",
+    "scopes": ["node", "read"],
+    "created_at": "2026-09-26T04:00:00Z",
+    "expires_at": "2026-10-26T04:00:00Z",
+    "last_used_at": None,
+    "revoked_at": None,
+}
+
+
 def test_token_create_list_and_revoke_once_the_portal_serves_them(portal) -> None:
-    portal.route("POST", "/auth/api-tokens", {"success": True, "data": {"id": "t-1", "token": "lpk_new_stub", "scopes": ["read", "node"]}})
-    portal.route("GET", "/auth/api-tokens", {"success": True, "data": {"tokens": [{"id": "t-1", "name": "ci"}]}})
-    portal.route("DELETE", "/auth/api-tokens/t-1", {"success": True, "data": {"id": "t-1", "revoked": True}})
+    portal.route("POST", "/auth/api-tokens", detail_response({**TOKEN_VIEW, "token": "lpk_Q7mZ2xRk_secret"}), status=201)
+    portal.route("GET", "/auth/api-tokens", detail_response([TOKEN_VIEW]))
+    portal.route("DELETE", f"/auth/api-tokens/{TOKEN_ID}", detail_response({**TOKEN_VIEW, "revoked_at": "2026-09-26T05:00:00Z"}))
     created = ok(run(portal, "--json", "token", "create", "--name", "ci", "--scope", "read", "--scope", "node", "--expires-days", "30", "--yes"))
-    assert created["token"] == "lpk_new_stub"
+    assert created["token"] == "lpk_Q7mZ2xRk_secret" and created["token_prefix"] == "lpk_Q7mZ2xRk"
     assert portal.requests[0]["json"] == {"name": "ci", "scopes": ["read", "node"], "expires_in_days": 30}
-    assert ok(run(portal, "--json", "token", "list"))["tokens"][0]["id"] == "t-1"
-    assert ok(run(portal, "--json", "token", "revoke", "t-1", "--yes"))["revoked"] is True
+    assert ok(run(portal, "--json", "token", "list")) == [TOKEN_VIEW]
+    assert ok(run(portal, "--json", "token", "revoke", TOKEN_ID, "--yes"))["revoked_at"] == "2026-09-26T05:00:00Z"
+
+
+def test_token_expiry_past_365_days_is_refused_before_the_portal(portal) -> None:
+    result = run(portal, "--json", "token", "create", "--name", "ci", "--scope", "read", "--expires-days", "366", "--yes")
+    assert result.exit_code == 2 and portal.requests == []
+
+
+def test_token_commands_with_an_api_token_say_sign_in(portal) -> None:
+    portal.route(
+        "GET", "/auth/api-tokens",
+        {"detail": {"code": "api_token_needs_session", "message": "An API token cannot do this; sign in to the portal."}},
+        status=403,
+    )
+    err = error(run(portal, "--json", "token", "list"), 6)
+    assert err["code"] == "portal.api_token_needs_session"
+    assert "unset LIUM_PROVIDER_TOKEN" in err["hint"]
+
+
+def test_a_token_without_the_scope_names_the_scope_it_needs(portal) -> None:
+    portal.route(
+        "GET", "/executors/listing",
+        {"detail": {"code": "api_token_scope_missing", "message": "This API token lacks the scope this call needs (read).",
+                    "required_scopes": ["read"]}},
+        status=403,
+    )
+    err = error(run(portal, "--json", "node", "listing"), 6)
+    assert err["code"] == "portal.api_token_scope_missing" and err["data"]["detail"]["required_scopes"] == ["read"]
+    assert "token create --scope" in err["hint"]
 
 
 def test_token_revoke_without_yes_under_json_revokes_nothing(portal) -> None:

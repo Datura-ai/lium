@@ -53,7 +53,6 @@ from lium.provider._routes import (
 from lium.provider._routes import (
     API_TOKEN_BY_ID,
     API_TOKENS,
-    EMAIL_VERIFY_CODE,
     EXECUTOR_NEW_RENTALS_PAUSE,
     EXECUTOR_TIER_ELIGIBILITY,
     EXECUTOR_UPDATE_TIER,
@@ -853,12 +852,20 @@ class ProviderClient:
             payload["expires_in_days"] = expires_days
         return _api_tokens_call(lambda: self._http.post(API_TOKENS, json_body=payload))
 
-    def list_api_tokens(self) -> dict[str, Any]:
-        """``GET /auth/api-tokens`` -- the account's tokens (never their secrets)."""
-        return _api_tokens_call(lambda: self._http.get(API_TOKENS))
+    def list_api_tokens(self) -> list[dict[str, Any]]:
+        """``GET /auth/api-tokens`` -- the account's live tokens (``token_prefix``, never the secret)."""
+        body = _api_tokens_call(lambda: self._http.get(API_TOKENS))
+        tokens = body.get("data")
+        if not isinstance(tokens, list):
+            raise ProviderError(
+                "the portal's API-token list is not a list",
+                code="PORTAL_CONTRACT_DRIFT",
+                context={"body": _summarise_body(body)},
+            )
+        return tokens
 
     def revoke_api_token(self, token_id: str) -> dict[str, Any]:
-        """``DELETE /auth/api-tokens/{id}``."""
+        """``DELETE /auth/api-tokens/{id}`` -- the revoked token (``revoked_at`` set); it stops working at once."""
         return _api_tokens_call(
             lambda: self._http.delete(API_TOKEN_BY_ID.format(token_id=_safe_id(token_id, label="token_id")))
         )
@@ -875,12 +882,6 @@ class ProviderClient:
     def get_handoff(self, handoff_id: str) -> dict[str, Any]:
         """``GET /auth/handoffs/{id}`` -- ``status`` is ``pending``, ``claimed``, ``completed`` or ``expired``."""
         return _unwrap(self._http.get(HANDOFF_BY_ID.format(handoff_id=_safe_id(handoff_id, label="handoff_id"))))
-
-    def verify_email_code(self, code: str) -> dict[str, Any]:
-        """``POST /auth/me/email/verify-code`` -- the 6-digit code e-mailed with the confirmation link."""
-        return _not_supported_call(
-            lambda: self._http.post(EMAIL_VERIFY_CODE, json_body={"code": code}), "e-mailed confirmation codes"
-        )
 
     # ------------------------------------------------------------------
     # Internals

@@ -13,18 +13,31 @@ import pytest
 from click.testing import CliRunner
 
 from lium.cli.provider.command import provider_command
-from ._portal_stub import PortalStub
+from ._portal_stub import PortalStub, detail_response
 
 TOKEN = "lpk_stub"
+HANDOFF_ID = "hof_Zb3kq0Xw9yR2mT7vLp4sNg"
+POLL_PATH = f"/auth/handoffs/{HANDOFF_ID}"
 HANDOFF = {
-    "handoff_id": "h-1",
+    "handoff_id": HANDOFF_ID,
+    "step": "discord_link",
     "handoff_url": "https://portal.example/handoff",
     "code": "ANNH-BD65",
     "expires_at": "2026-09-26T04:40:00Z",
     "message_for_human": "Open https://portal.example/handoff and enter code ANNH-BD65 to link Discord to your "
     "Lium provider account (expires 04:40 UTC).",
-    "poll_url": "/auth/handoffs/h-1",
+    "poll_url": POLL_PATH,
 }
+
+
+def created(step: str = "discord_link") -> dict:
+    return detail_response({**HANDOFF, "step": step})
+
+
+def polled(status: str, step: str = "discord_link") -> tuple[int, dict]:
+    return 200, detail_response(
+        {"handoff_id": HANDOFF_ID, "step": step, "status": status, "expires_at": HANDOFF["expires_at"]}
+    )
 OAUTH_URL = "https://discord.com/oauth2/authorize?client_id=stub"
 
 
@@ -51,7 +64,7 @@ def envelope(result, exit_code: int) -> dict:
 
 
 def test_connect_discord_is_a_handoff_exit_12_with_the_url_and_code(portal) -> None:
-    portal.route("POST", "/auth/handoffs", HANDOFF, status=201)
+    portal.route("POST", "/auth/handoffs", created(), status=201)
     error = envelope(run(portal, "--json", "config", "connect-discord"), 12)["error"]
     assert (error["code"], error["exit_code"]) == ("human.handoff_required", 12)
     assert {k: error["data"][k] for k in ("step", "handoff_url", "code", "expires_at", "message_for_human")} == {
@@ -68,18 +81,15 @@ def test_connect_discord_is_a_handoff_exit_12_with_the_url_and_code(portal) -> N
 
 
 def test_connect_discord_in_a_terminal_prints_the_sentence_to_relay(portal) -> None:
-    portal.route("POST", "/auth/handoffs", HANDOFF, status=201)
+    portal.route("POST", "/auth/handoffs", created(), status=201)
     result = run(portal, "config", "connect-discord")
     assert result.exit_code == 12
     assert HANDOFF["message_for_human"] in " ".join(result.stderr.split())
 
 
 def test_connect_discord_wait_polls_until_the_person_is_done(portal) -> None:
-    portal.route("POST", "/auth/handoffs", HANDOFF, status=201)
-    portal.route_sequence(
-        "GET", "/auth/handoffs/h-1",
-        (200, {"status": "pending"}), (200, {"status": "claimed"}), (200, {"status": "completed"}),
-    )
+    portal.route("POST", "/auth/handoffs", created(), status=201)
+    portal.route_sequence("GET", POLL_PATH, polled("pending"), polled("claimed"), polled("completed"))
     result = run(portal, "--json", "config", "connect-discord", "--wait", "--poll-interval", "0.1")
     data = envelope(result, 0)["data"]
     assert data["done"] is True and data["step"] == "discord_link" and data["discord_connected"] is True
@@ -89,16 +99,16 @@ def test_connect_discord_wait_polls_until_the_person_is_done(portal) -> None:
 
 
 def test_connect_discord_wait_ends_at_the_codes_expiry(portal) -> None:
-    portal.route("POST", "/auth/handoffs", HANDOFF, status=201)
-    portal.route_sequence("GET", "/auth/handoffs/h-1", (200, {"status": "pending"}), (200, {"status": "expired"}))
+    portal.route("POST", "/auth/handoffs", created(), status=201)
+    portal.route_sequence("GET", POLL_PATH, polled("pending"), polled("expired"))
     error = envelope(run(portal, "--json", "config", "connect-discord", "--wait", "--poll-interval", "0.1"), 12)["error"]
     assert (error["code"], error["exit_code"]) == ("human.handoff_expired", 12)
     assert error["data"]["status"] == "expired" and error["data"]["code"] == "ANNH-BD65"
 
 
 def test_connect_discord_wait_timeout_is_still_handoff_required(portal) -> None:
-    portal.route("POST", "/auth/handoffs", HANDOFF, status=201)
-    portal.route("GET", "/auth/handoffs/h-1", {"status": "pending"})
+    portal.route("POST", "/auth/handoffs", created(), status=201)
+    portal.route_sequence("GET", POLL_PATH, polled("pending"))
     error = envelope(run(portal, "--json", "config", "connect-discord", "--wait", "--timeout", "0"), 12)["error"]
     assert error["code"] == "human.handoff_required" and error["data"]["status"] == "pending"
     assert "waited_s" in error["data"]
@@ -114,13 +124,16 @@ def test_connect_discord_without_handoff_sessions_is_not_supported_with_the_old_
 
 
 def test_connect_discord_already_linked_is_done(portal) -> None:
-    portal.route("POST", "/auth/handoffs", {"detail": {"code": "handoff_step_done", "message": "Discord is linked."}}, status=409)
+    portal.route(
+        "POST", "/auth/handoffs",
+        {"detail": {"code": "handoff_step_done", "message": "This step is already done for the account."}}, status=409,
+    )
     data = envelope(run(portal, "--json", "config", "connect-discord"), 0)["data"]
     assert data["done"] is True and data["already_done"] is True
 
 
 def test_a_handoff_answer_without_a_code_is_contract_drift(portal) -> None:
-    portal.route("POST", "/auth/handoffs", {"handoff_id": "h-1"}, status=201)
+    portal.route("POST", "/auth/handoffs", detail_response({"handoff_id": HANDOFF_ID}), status=201)
     error = envelope(run(portal, "--json", "config", "connect-discord"), 3)["error"]
     assert error["legacy_code"] == "PORTAL_CONTRACT_DRIFT"
     assert error["data"]["missing"] == ["handoff_url", "code"]
@@ -130,17 +143,17 @@ def test_a_handoff_answer_without_a_code_is_contract_drift(portal) -> None:
 
 
 def test_confirm_email_is_a_handoff_exit_12(portal) -> None:
-    portal.route("POST", "/auth/handoffs", {**HANDOFF, "step": "email_confirm"}, status=201)
+    portal.route("POST", "/auth/handoffs", created("email_confirm"), status=201)
     error = envelope(run(portal, "--json", "portal", "confirm-email"), 12)["error"]
     assert error["code"] == "human.handoff_required" and error["data"]["step"] == "email_confirm"
     assert portal.requests[0]["json"] == {"step": "email_confirm"}
 
 
 def test_confirm_email_wait_success(portal) -> None:
-    portal.route("POST", "/auth/handoffs", {**HANDOFF, "step": "email_confirm"}, status=201)
-    portal.route_sequence("GET", "/auth/handoffs/h-1", (200, {"status": "claimed"}), (200, {"status": "completed"}))
+    portal.route("POST", "/auth/handoffs", created("email_confirm"), status=201)
+    portal.route_sequence("GET", POLL_PATH, polled("claimed", "email_confirm"), polled("completed", "email_confirm"))
     data = envelope(run(portal, "--json", "portal", "confirm-email", "--wait", "--poll-interval", "0.1"), 0)["data"]
-    assert data == {"step": "email_confirm", "done": True, "handoff_id": "h-1"}
+    assert data == {"step": "email_confirm", "done": True, "handoff_id": HANDOFF_ID}
 
 
 def test_confirm_email_without_handoff_sessions_is_not_supported(portal) -> None:
@@ -149,31 +162,9 @@ def test_confirm_email_without_handoff_sessions_is_not_supported(portal) -> None
     assert error["data"]["legacy_browser_url"] == f"{portal.url}/settings"
 
 
-def test_confirm_email_code_is_submitted(portal) -> None:
-    portal.route("POST", "/auth/me/email/verify-code", {"email_verified": True})
-    data = envelope(run(portal, "--json", "portal", "confirm-email", "--code", "123456"), 0)["data"]
-    assert data["done"] is True and data["email_verified"] is True
-    assert portal.requests[0]["json"] == {"code": "123456"}
-    assert portal.calls("POST") == [("POST", "/auth/me/email/verify-code")]
-
-
-def test_confirm_email_code_on_a_portal_without_codes_is_not_supported(portal) -> None:
-    error = envelope(run(portal, "--json", "portal", "confirm-email", "--code", "123456"), 3)["error"]
-    assert error["code"] == "portal.not_supported" and error["data"]["step"] == "email_confirm"
-    assert error["data"]["legacy_browser_url"].endswith("/settings")
-    assert "without --code" in error["hint"]
-
-
-def test_confirm_email_code_the_portal_refuses_passes_its_code_through(portal) -> None:
-    portal.route("POST", "/auth/me/email/verify-code",
-                 {"detail": {"code": "email_code_invalid", "message": "That code is wrong or expired."}}, status=400)
-    error = envelope(run(portal, "--json", "portal", "confirm-email", "--code", "123456"), 3)["error"]
-    assert error["code"] == "portal.email_code_invalid" and error["message"] == "That code is wrong or expired."
-
-
-def test_confirm_email_code_must_be_six_digits_and_nothing_is_sent(portal) -> None:
-    error = envelope(run(portal, "--json", "portal", "confirm-email", "--code", "12ab"), 2)["error"]
-    assert error["code"] == "input.code_invalid"
+def test_confirm_email_takes_no_code_option(portal) -> None:
+    result = run(portal, "--json", "portal", "confirm-email", "--code", "123456")
+    assert result.exit_code == 2 and "No such option '--code'" in result.output
     assert portal.requests == []
 
 

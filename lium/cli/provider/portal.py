@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 
 import click
 
@@ -21,10 +20,9 @@ from lium.cli.provider._render import (
 )
 from lium.cli.settings import ConfigManager
 from lium.provider.client import ProviderClient, discord_connected_from_profile
-from lium.provider.errors import ARG_INVALID, INPUT_REQUIRED, PORTAL_NOT_SUPPORTED, ProviderError
+from lium.provider.errors import ARG_INVALID, INPUT_REQUIRED, ProviderError
 
 PASSWORD_ENV = "LIUM_PROVIDER_PASSWORD"
-CODE_INVALID = "input.code_invalid"
 
 
 @click.group("portal")
@@ -150,11 +148,6 @@ def _login_email(ctx: click.Context, email: str) -> None:
 
 @portal_command.command("confirm-email", short_help="Confirm the account's e-mail (a one-time human step).")
 @click.option(
-    "--code",
-    default=None,
-    help="The 6-digit code e-mailed with the confirmation link, when the portal accepts codes.",
-)
-@click.option(
     "--wait",
     is_flag=True,
     help="After the handoff is printed, poll until the e-mail is confirmed (exit 0) or the code expires "
@@ -176,39 +169,19 @@ def _login_email(ctx: click.Context, email: str) -> None:
 @with_provider_overrides
 @click.pass_context
 def confirm_email(
-    ctx: click.Context, code: str | None, wait: bool, timeout: int | None, poll_interval: float
+    ctx: click.Context, wait: bool, timeout: int | None, poll_interval: float
 ) -> None:
     """Confirming the e-mail is a one-time human step.
 
-    With --code the 6-digit code from the confirmation mail is submitted. Otherwise the portal hands out
-    one URL plus a short code: without --wait this is human.handoff_required (exit 12) with data
-    {step, handoff_url, code, expires_at, message_for_human}; relay message_for_human to the person.
-    A portal without handoff sessions (or without e-mailed codes, for --code) answers
-    portal.not_supported (exit 3); data.legacy_browser_url is the portal page the old flow uses.
+    The portal hands out one URL plus a short code: without --wait this is human.handoff_required
+    (exit 12) with data {step, handoff_url, code, expires_at, message_for_human}; relay
+    message_for_human to the person, who enters the code in the portal and follows the mailed link.
+    A portal without handoff sessions answers portal.not_supported (exit 3);
+    data.legacy_browser_url is the portal page the old flow uses.
     """
     require_hotkey(ctx, group="portal")
     opts = (ctx.obj or {}).get("provider_opts") or {}
     client = build_client(ctx)
-    if code is not None:
-        code = code.strip()
-        if not re.fullmatch(r"\d{6}", code):
-            fatal(ctx, ProviderError(
-                "--code takes the 6 digits from the confirmation mail",
-                code=CODE_INVALID,
-                hint="Copy the code from the mail, or run without --code for a handoff.",
-            ))
-            return
-        try:
-            body = client.verify_email_code(code)
-        except ProviderError as e:
-            if e.code == PORTAL_NOT_SUPPORTED:
-                e.context.update(step="email_confirm", legacy_flow=True,
-                                 legacy_browser_url=_email_legacy_url(opts))
-                e.hint = "Open the link in the confirmation mail, or run without --code for a handoff."
-            ctx.exit(emit_error(ctx, e))
-            return
-        render(ctx, {"step": "email_confirm", "done": True, **body}, summary="e-mail confirmed")
-        return
     try:
         result = run_handoff(
             client,

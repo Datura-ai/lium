@@ -68,6 +68,8 @@ PORTAL_NOT_SUPPORTED = "portal.not_supported"
 NODE_NOT_LISTED = "node.not_listed_yet"
 HANDOFF_REQUIRED = "human.handoff_required"
 HANDOFF_EXPIRED = "human.handoff_expired"
+API_TOKEN_NEEDS_SESSION = "portal.api_token_needs_session"
+API_TOKEN_SCOPE_MISSING = "portal.api_token_scope_missing"
 
 # The unified exit map (docs/exit-codes.md).
 EXIT_OK = 0
@@ -101,6 +103,8 @@ def unified_exit_code(code: str, status: int | None = None) -> int:
         return EXIT_NOT_LISTED
     if code == PORTAL_NOT_SUPPORTED:
         return EXIT_API
+    if code in (API_TOKEN_NEEDS_SESSION, API_TOKEN_SCOPE_MISSING):
+        return EXIT_AUTH
     leaf = code.rsplit(".", 1)[-1]
     not_found = leaf == "not_found" or leaf.endswith("_not_found")
     if code.startswith("portal."):
@@ -143,6 +147,8 @@ _HINTS: dict[str, str] = {
     HANDOFF_REQUIRED: "Relay data.message_for_human to the person, then re-run with --wait (or run it again once they are done).",
     HANDOFF_EXPIRED: "The code expired before the person finished; run the command again for a new one.",
     PORTAL_NOT_SUPPORTED: "This portal does not serve that yet; sign in with `lium provider portal login` instead.",
+    API_TOKEN_NEEDS_SESSION: "An API token cannot create, list or revoke tokens: unset LIUM_PROVIDER_TOKEN and sign in (hotkey, or `lium provider portal login --email`).",
+    API_TOKEN_SCOPE_MISSING: "The token lacks the scope in data.detail.required_scopes; create one with it (`lium provider token create --scope …`).",
 }
 
 
@@ -226,6 +232,8 @@ class ProviderConfigError(ProviderError):
 
 
 __all__ = [
+    "API_TOKEN_NEEDS_SESSION",
+    "API_TOKEN_SCOPE_MISSING",
     "ARG_INVALID",
     "CONFIG_MISSING",
     "CONFIRMATION_REQUIRED",

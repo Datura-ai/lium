@@ -5,7 +5,9 @@ A token (``lpk_…``) is created from a signed-in session (hotkey or ``portal lo
 ``LIUM_PROVIDER_TOKEN=<token>`` and every ``lium provider`` command sends it as
 ``Authorization: Bearer`` instead of signing in with a wallet.
 
-Until the portal serves the token routes these commands fail with ``portal.not_supported`` (exit 3).
+These routes take a signed-in session only: with ``LIUM_PROVIDER_TOKEN`` set the portal answers
+``portal.api_token_needs_session`` (exit 6). Until the portal serves the token routes these commands fail with
+``portal.not_supported`` (exit 3).
 """
 
 from __future__ import annotations
@@ -26,7 +28,8 @@ def token_command() -> None:
     """Create, list and revoke provider API tokens (LIUM_PROVIDER_TOKEN).
 
     This is how an agent signs in. Google sign-in is for people in the portal; a person signed in
-    (hotkey, or `portal login --email`) creates the token here and hands it to the agent.
+    (hotkey, or `portal login --email`, not LIUM_PROVIDER_TOKEN) creates the token here and hands it
+    to the agent.
     """
 
 
@@ -40,7 +43,7 @@ def token_command() -> None:
     type=click.Choice(SCOPES),
     help="What the token may do (repeatable): read, node, tier, register.",
 )
-@click.option("--expires-days", type=click.IntRange(min=1), default=None, help="Days until it expires (portal default otherwise).")
+@click.option("--expires-days", type=click.IntRange(min=1, max=365), default=None, help="Days until it expires, 1 to 365 (the portal's default is 90).")
 @with_provider_overrides
 @click.pass_context
 def create(ctx: click.Context, name: str, scopes: tuple[str, ...], expires_days: int | None) -> None:
@@ -60,7 +63,7 @@ def create(ctx: click.Context, name: str, scopes: tuple[str, ...], expires_days:
 @with_provider_overrides
 @click.pass_context
 def list_tokens(ctx: click.Context) -> None:
-    """Name, scopes, created, last used and expiry of each token; never the secret."""
+    """Name, scopes, token_prefix (`lpk_` plus 8 characters), created, last used and expiry of each live token; never the secret."""
     require_hotkey(ctx, group="token")
     client = build_client(ctx)
     try:

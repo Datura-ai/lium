@@ -68,6 +68,11 @@ class PortalStub:
         self._server.server_close()
 
 
+def detail_response(data: Any) -> dict[str, Any]:
+    """The portal's ``DetailResponse`` wrapper around one answer."""
+    return {"success": True, "data": data, "timestamp": "2026-09-26T04:30:00Z"}
+
+
 def closed_port_url() -> str:
     """A 127.0.0.1 URL nothing listens on (connection refused)."""
     with socket.socket() as s:

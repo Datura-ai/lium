@@ -179,11 +179,12 @@ with `detail.message` as the message and the rest of `detail` in `error.data`.
 | `input.input_required` | 2 | A prompt nobody can answer: `lium mine` without `-k` off a terminal, `portal login --email` without `LIUM_PROVIDER_PASSWORD` off a terminal. |
 | `input.register_token_invalid` | 2 | `lium mine --json --register` with an expired or unreadable token; nothing on the host was touched. |
 | `input.hotkey_conflicts_with_token` | 2 | `lium mine --json --register … -k` with a hotkey the token does not name. |
-| `input.code_invalid` | 2 | `lium provider portal confirm-email --code` with anything but 6 digits; nothing is sent. |
 | `human.handoff_required` | 12 | A one-time human step (`lium provider config connect-discord`, `lium provider portal confirm-email`). `data`: `step` (`discord_link`, `email_confirm`), `handoff_url`, `code`, `expires_at`, `message_for_human`. Relay `message_for_human` to the person, then re-run with `--wait`. With `--wait --timeout N`, also when N seconds pass first (`data.waited_s`). |
 | `human.handoff_expired` | 12 | `--wait`: the code expired before the person finished; run the command again for a new code. |
 | `net.unreachable` | 4 | Connection refused, DNS failure or timeout reaching the portal. |
 | `portal.not_supported` | 3 | The portal answered 404/405 for a route this CLI knows (`lium provider token …` before the portal serves API tokens). |
+| `portal.api_token_needs_session` | 6 | `lium provider token create`, `list` or `revoke` sent `LIUM_PROVIDER_TOKEN`; tokens are managed from a signed-in session only (hotkey or `portal login --email`). |
+| `portal.api_token_scope_missing` | 6 | `LIUM_PROVIDER_TOKEN` lacks the scope the call needs; `data.detail.required_scopes` names it. |
 | `portal.<detail.code>` | by status | The portal's own code, passed through. |
 | `node.not_found` | 5 | `node listing` / `idle-pay` named a node the account does not have. |
 | `node.not_listed_yet` | 11 | `lium mine --json --register`: registered, not listed within `--wait`. |
@@ -209,8 +210,8 @@ token with `lium provider token create` and hands it over.
 One-time human steps (`config connect-discord`, `portal confirm-email`) answer `human.handoff_required` (exit 12):
 one URL plus a short code for the person. `--wait` polls until the step is done (exit 0) or the code expires
 (`human.handoff_expired`, exit 12); under `--json` the handoff is also one `{"event": "handoff", …}` line on stderr
-while it waits. `portal confirm-email --code 123456` submits the 6-digit code from the confirmation mail. A portal
-that does not serve handoff sessions (or e-mailed codes) answers `portal.not_supported` (exit 3) with
+while it waits. The person enters the code in the portal, which then starts the step (the Discord consent, or the
+confirmation link mailed to the address). A portal that does not serve handoff sessions answers `portal.not_supported` (exit 3) with
 `data.legacy_flow: true` and `data.legacy_browser_url`, the old browser link; in a terminal `connect-discord`
 then runs the old browser flow.
 
