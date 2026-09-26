@@ -17,6 +17,7 @@ from lium.sdk import (
 )
 from lium.sdk.secrets import SECRETS_DISABLED, secrets_enabled, validate_secret_names
 from lium.cli import ui
+from lium.cli.secrets.command import redacted_usage_error
 from lium.cli.workspaces.context import show_workspace
 from lium.cli.utils import (
     CliFailure,
@@ -132,7 +133,19 @@ def _post_rent_failure(exc: Exception, billing_pod: dict, doing: str, note: str 
     )
 
 
-@click.command("up")
+class UpCommand(click.Command):
+    def parse_args(self, ctx, args):
+        with_secret = any(arg == "--secret" or arg.startswith("--secret=") for arg in args)
+        try:
+            return super().parse_args(ctx, args)
+        except click.UsageError as error:
+            # with --secret on the line, a token click cannot place may be the secret's value
+            if with_secret:
+                raise redacted_usage_error(error, ctx) from None
+            raise
+
+
+@click.command("up", cls=UpCommand)
 @click.argument("executor_id", required=False, metavar="NODE_ID")
 @click.option("--name", "-n", help="Custom pod name")
 @click.option("--template_id", "-t", help="Template ID")
@@ -418,7 +431,14 @@ def up_command(
         # hint becomes the failure's own (the envelope's error.hint), the id stays in data
         data = dict(result.data or {})
         hint = data.pop("hint", None)
-        raise CliFailure("node_selection_failed", result.error, EXIT_GENERAL_ERROR, data=data or None, hint=hint)
+        error = result.error
+        if secret_names and executor_id and executor_id in (error or ""):
+            # `lium up --secret NAME VALUE` puts the value where NODE_ID goes
+            error = (
+                "No node matches NODE_ID (not shown: with --secret it may be a secret value); "
+                "run 'lium ls --format json' for the ids rentable now"
+            )
+        raise CliFailure("node_selection_failed", error, EXIT_GENERAL_ERROR, data=data or None, hint=hint)
 
     executor = result.data["executor"]
     # What the rental bills: the server's figure when it picked (a split of a larger node

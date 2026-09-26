@@ -1375,7 +1375,7 @@ class Lium:
             executor_id: Target node ID.
             timeout: Seconds to wait for the pod to become ready.
             **up_kwargs: Any other keyword argument :meth:`up` accepts
-                (``name``, ``template_id``, ``ports`` ...).
+                (``name``, ``template_id``, ``ports``, ``secret_names`` ...).
 
         Yields:
             The ready :class:`PodInfo`.
@@ -1387,7 +1387,7 @@ class Lium:
         rent_args = dict(
             name="Your Pod", template_id=None, image=None, dockerfile_content=None, volume_id=None,
             ports=None, ssh_keys=None, ssh_name=None, enable_volume_encryption=True,
-            backup_id=None, restore_path=None, gpu_count=None,
+            backup_id=None, restore_path=None, gpu_count=None, secret_names=None,
         )
         unknown = set(up_kwargs) - set(rent_args)
         if unknown:

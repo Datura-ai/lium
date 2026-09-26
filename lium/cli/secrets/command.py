@@ -23,12 +23,26 @@ VALUE_NOT_ON_ARGV = (
 # click would echo an unexpected argument or unknown subcommand back; it may be a pasted value
 EXTRA_ARGS = "Unexpected extra argument (not shown: it may be a secret value); see 'lium secrets --help'"
 UNKNOWN_SUBCOMMAND = "Unknown secrets command (not shown: it may be a secret value); use set, list or rm"
+UNPARSED_ARGS = "Unrecognized option or argument (not shown: it may be a secret value); see --help"
 PASSTHROUGH_ARGS = {"ignore_unknown_options": True, "allow_extra_args": True}
 
 
+def redacted_usage_error(error: click.UsageError, ctx: click.Context) -> click.UsageError:
+    """click's parse errors quote the offending token (`No such option '--tok…'`); this one quotes nothing."""
+    if isinstance(error, click.MissingParameter) or type(error).__name__ == "NoArgsIsHelpError":
+        return error
+    return click.UsageError(UNPARSED_ARGS, ctx)
+
+
 class SecretsGroup(click.Group):
+    def parse_args(self, ctx, args):
+        try:
+            return super().parse_args(ctx, args)
+        except click.UsageError as error:
+            raise redacted_usage_error(error, ctx) from None
+
     def resolve_command(self, ctx, args):
-        if args and not args[0].startswith("-") and self.get_command(ctx, args[0]) is None:
+        if args and self.get_command(ctx, args[0]) is None:
             raise click.UsageError(UNKNOWN_SUBCOMMAND, ctx)
         return super().resolve_command(ctx, args)
 

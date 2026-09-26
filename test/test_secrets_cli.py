@@ -523,3 +523,87 @@ def test_lium_up_secret_reaches_the_rent_as_a_name(monkeypatch):
     assert [r["secret_names"] for r in rent_with] == [["HF_TOKEN"]]
     assert all("secret_names" not in r for r in rent_without)
     assert {k: v for k, v in rent_with[0].items() if k != "secret_names"} == rent_without[0]
+
+
+# --- click's own parse errors quote the offending token; under secrets they must not ---------------
+
+class NoNodes:
+    workspaces = SimpleNamespace(current=lambda: None)
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def supports(self, feature):
+        return False
+
+    def get_executor(self, executor_id):
+        return None
+
+
+UNPARSEABLE = {
+    "unknown option": ["secrets", f"--tok{VALUE}"],
+    "unknown option after --": ["secrets", "--", f"--tok{VALUE}"],
+    "unknown option after --help": ["secrets", "--help", f"--tok{VALUE}"],
+    "unknown subcommand": ["secrets", VALUE],
+    "set extra after --": ["secrets", "set", "HF_TOKEN", "--", VALUE],
+    "set unknown option": ["secrets", "set", "HF_TOKEN", f"--tok{VALUE}"],
+    "rm extra after --": ["secrets", "rm", "-y", "HF_TOKEN", "--", f"--tok{VALUE}"],
+    "list extra after --": ["secrets", "list", "--", VALUE],
+    "up --secret unknown option": ["up", "--secret", "HF_TOKEN", f"--tok{VALUE}"],
+    "up --secret extra argument": ["up", "exec-1", "--secret", "HF_TOKEN", VALUE, "-y"],
+    "up --secret value as NODE_ID": ["up", "--secret", "HF_TOKEN", VALUE, "-y"],
+    "up --secret value as NODE_ID after --": ["up", "--secret", "HF_TOKEN", "-y", "--", f"--tok{VALUE}"],
+}
+
+
+@pytest.mark.parametrize("case", UNPARSEABLE, ids=list(UNPARSEABLE))
+@pytest.mark.parametrize("json_mode", [False, True], ids=["text", "json"])
+def test_unparseable_input_is_refused_without_repeating_it(fake, up_ready, monkeypatch, case, json_mode):
+    monkeypatch.setattr(up_command, "Lium", NoNodes)
+    if json_mode:
+        monkeypatch.setenv("LIUM_OUTPUT", "json")
+
+    result = CliRunner().invoke(cli, UNPARSEABLE[case], input="")
+    printed = _everything_printed(result)
+
+    assert result.exit_code != 0, printed
+    assert fake.set_calls == [] and fake.deleted == []
+    assert VALUE not in printed
+
+
+def test_up_without_secret_keeps_clicks_own_message(monkeypatch):
+    result = CliRunner().invoke(cli, ["up", "--gpus", "x"])
+    assert result.exit_code == 2
+    assert "No such option '--gpus'" in result.output
+
+
+def test_up_without_secret_still_names_a_missing_node(up_ready, monkeypatch):
+    monkeypatch.setattr(up_command, "Lium", NoNodes)
+    result = CliRunner().invoke(cli, ["up", "some-node", "-y"])
+    assert "some-node" in result.output
+
+
+# --- Lium.rental forwards secret_names like up/rent ---------------------------------------------
+
+@responses.activate
+def test_rental_sends_secret_names(client, monkeypatch):
+    responses.add(responses.POST, f"{BASE}/executors/exec-1/rent", json={"id": "pod-1"})
+    monkeypatch.setattr(client, "_pod_ids_or_none", lambda: frozenset())
+    monkeypatch.setattr(client, "wait_ready", lambda pod, timeout=None: SimpleNamespace(id="pod-1"))
+    removed = []
+    monkeypatch.setattr(client, "_remove_quietly", removed.append)
+
+    with client.rental(executor_id="exec-1", template_id="tpl", ssh_keys=[KEY], secret_names=["HF_TOKEN", "HF_TOKEN"]):
+        pass
+
+    sent = json.loads(responses.calls[-1].request.body)
+    assert sent["secret_names"] == ["HF_TOKEN"]
+    assert removed == [{"id": "pod-1"}]
+
+
+def test_rental_refuses_a_bad_secret_name_without_repeating_it(client, monkeypatch):
+    monkeypatch.setattr(client, "_pod_ids_or_none", lambda: None)
+    with pytest.raises(ValueError) as caught:
+        with client.rental(executor_id="exec-1", template_id="tpl", ssh_keys=[KEY], secret_names=[f"{VALUE}=="]):
+            pass
+    assert VALUE not in str(caught.value)
