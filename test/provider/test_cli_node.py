@@ -690,10 +690,20 @@ def test_node_notice_period_set_and_unset(patched_build_client) -> None:
 
     result = runner.invoke(
         provider_command,
-        ["-y", "--hotkey", "hk1", "node", "notice-period", "set", "e-1"],
+        [
+            "-y", "--hotkey", "hk1", "node", "notice-period", "set", "e-1",
+            "--start", "2026-10-01T09:00:00Z", "--minutes", "45", "--reason", "disk swap",
+        ],
     )
     assert result.exit_code == 0, result.output
-    assert portal.posts[0][0] == "/executors/e-1/notice-period"
+    path, body, _auth = portal.posts[0]
+    assert path == "/executors/e-1/notice-period"
+    assert body == {
+        "starting_at": "2026-10-01T09:00:00+00:00",
+        "period_in_minute": 45,
+        "reason": "disk swap",
+        "permanent_removal": False,
+    }
 
     result = runner.invoke(
         provider_command,
@@ -701,6 +711,78 @@ def test_node_notice_period_set_and_unset(patched_build_client) -> None:
     )
     assert result.exit_code == 0, result.output
     assert portal.deletes == [("/executors/e-1/notice-period", True)]
+
+
+def test_node_notice_period_set_permanent_sends_no_period(patched_build_client) -> None:
+    portal = _Portal(post_body={})
+    patched_build_client(portal)
+    result = CliRunner().invoke(
+        provider_command,
+        [
+            "-y", "--hotkey", "hk1", "node", "notice-period", "set", "e-1",
+            "--start", "2026-10-02T09:00:00+02:00", "--permanent",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert portal.posts[0][1] == {
+        "starting_at": "2026-10-02T09:00:00+02:00",
+        "period_in_minute": None,
+        "reason": None,
+        "permanent_removal": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        [],
+        ["--minutes", "30", "--permanent"],
+    ],
+    ids=["neither", "both"],
+)
+def test_node_notice_period_set_needs_exactly_one_kind(patched_build_client, extra) -> None:
+    portal = _Portal(post_body={})
+    patched_build_client(portal)
+    result = CliRunner().invoke(
+        provider_command,
+        ["-y", "--json", "--hotkey", "hk1", "node", "notice-period", "set", "e-1",
+         "--start", "2026-10-01T09:00:00Z", *extra],
+    )
+    assert result.exit_code == 1, result.output
+    assert "exactly one of --minutes and --permanent" in result.output
+    assert portal.posts == []
+
+
+@pytest.mark.parametrize(
+    ("start", "message"),
+    [
+        ("tomorrow 9am", "ISO 8601"),
+        ("2026-10-01T09:00:00", "UTC offset"),
+    ],
+)
+def test_node_notice_period_set_refuses_a_bad_start(patched_build_client, start, message) -> None:
+    portal = _Portal(post_body={})
+    patched_build_client(portal)
+    result = CliRunner().invoke(
+        provider_command,
+        ["-y", "--json", "--hotkey", "hk1", "node", "notice-period", "set", "e-1",
+         "--start", start, "--minutes", "30"],
+    )
+    assert result.exit_code == 1, result.output
+    assert message in result.output
+    assert portal.posts == []
+
+
+def test_node_notice_period_set_refuses_a_window_over_60_minutes(patched_build_client) -> None:
+    portal = _Portal(post_body={})
+    patched_build_client(portal)
+    result = CliRunner().invoke(
+        provider_command,
+        ["-y", "--hotkey", "hk1", "node", "notice-period", "set", "e-1",
+         "--start", "2026-10-01T09:00:00Z", "--minutes", "90"],
+    )
+    assert result.exit_code == 2, result.output
+    assert portal.posts == []
 
 
 def test_node_notify_added(patched_build_client) -> None:

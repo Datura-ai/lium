@@ -584,17 +584,32 @@ class ProviderClient:
         )
 
     def create_notice_period(
-        self, node_id: str, payload: dict[str, Any] | None = None
+        self,
+        node_id: str,
+        *,
+        starting_at: str | None = None,
+        period_in_minute: int | None = None,
+        reason: str | None = None,
+        permanent_removal: bool = False,
     ) -> dict[str, Any]:
-        """``POST /executors/{id}/notice-period``."""
-        try:
-            body = NoticePeriodPayload.model_validate(payload or {}).model_dump()
-        except Exception as e:
-            raise ProviderError(
-                f"invalid notice-period payload: {e}",
-                code=ARG_INVALID,
-                cause=e,
-            ) from e
+        """``POST /executors/{id}/notice-period``.
+
+        Pass ``starting_at`` with ``period_in_minute`` for maintenance or
+        ``permanent_removal=True`` for a removal; see
+        :class:`~lium.provider.models.NoticePeriodPayload`. A call with no
+        fields posts an empty body, as it always has.
+        """
+        if starting_at is None and period_in_minute is None and reason is None and not permanent_removal:
+            body: dict[str, Any] = {}
+        else:
+            body = _build_payload(
+                NoticePeriodPayload,
+                hint_for=_notice_period_hint,
+                starting_at=starting_at,
+                period_in_minute=period_in_minute,
+                reason=reason,
+                permanent_removal=permanent_removal,
+            )
         return self._http.post(
             EXECUTOR_NOTICE_PERIOD.format(id=_safe_id(node_id, label="node_id")),
             json_body=body,
@@ -785,7 +800,7 @@ def _safe_hotkey_segment(value: str, *, label: str = "miner_hotkey") -> str:
     return _safe_id(value, label=label)
 
 
-def _build_payload(model_class, /, **kwargs) -> dict[str, Any]:
+def _build_payload(model_class, /, hint_for=None, **kwargs) -> dict[str, Any]:
     """Construct a Pydantic payload model and serialise it.
 
     Converts a ``pydantic.ValidationError`` into ``ProviderError(ARG_INVALID)``
@@ -797,12 +812,38 @@ def _build_payload(model_class, /, **kwargs) -> dict[str, Any]:
     except Exception as e:
         # Avoid importing pydantic here; ValidationError exposes ``.errors()``
         # but we only need the human-readable str() form.
+        hint = hint_for(e) if hint_for is not None else None
         raise ProviderError(
             f"invalid payload for {model_class.__name__}: {e}",
             code=ARG_INVALID,
             cause=e,
-            hint="Check field constraints: gpu_count >= 1, port 1-65535, valid email, etc.",
+            hint=hint or "Check field constraints: gpu_count >= 1, port 1-65535, valid email, etc.",
         ) from e
+
+
+_NOTICE_PERIOD_FIELD_HINTS = {
+    "starting_at": "starting_at: ISO 8601 with a UTC offset, e.g. 2026-10-01T09:00:00+00:00",
+    "period_in_minute": "period_in_minute: 1-60 for maintenance, omitted for a permanent removal",
+    "reason": "reason: at most 500 characters",
+    "permanent_removal": "permanent_removal: True for a removal (no period_in_minute)",
+}
+
+
+def _notice_period_hint(exc: Exception) -> str | None:
+    """Name the notice-period field(s) a validation error is about."""
+    errors = getattr(exc, "errors", None)
+    if not callable(errors):
+        return None
+    names: list[str] = []
+    for err in errors():
+        loc = err.get("loc") or ()
+        if loc:
+            name = str(loc[0])
+            names.append(_NOTICE_PERIOD_FIELD_HINTS.get(name, name))
+        else:
+            names.append(_NOTICE_PERIOD_FIELD_HINTS["period_in_minute"])
+            names.append(_NOTICE_PERIOD_FIELD_HINTS["permanent_removal"])
+    return "Check " + "; ".join(dict.fromkeys(names)) if names else None
 
 
 def _summarise_body(body: Any, *, max_chars: int = 240) -> str:

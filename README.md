@@ -314,7 +314,8 @@ Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, 
 - `lium provider node min-gpu set|unset <NODE_ID> [COUNT]` - Min GPU count for rental matchmaking
 - `lium provider node pods <NODE_ID>` - Pods currently rented on a node
 - `lium provider node machine-requests <NODE_ID>` - Pending tenant requests on a node
-- `lium provider node notice-period set|unset <NODE_ID>` - Open/close a maintenance notice period
+- `lium provider node notice-period set <NODE_ID> --start <ISO 8601> --minutes N | --permanent [--reason TEXT]` - Open a notice period: a maintenance window of up to 60 minutes, or a permanent removal
+- `lium provider node notice-period unset <NODE_ID>` - Close the node's notice period
 - `lium provider node notify-added <NODE_ID> --request-id <REQ>` - Mark a tenant machine request fulfilled
 - `lium provider config show|opt-in|opt-out|set-email|set-subscriptions` - Portal-account configuration (incl. lium.io central miner server toggle)
 - `lium provider sync from-miner-server|to-miner-server` - Batch node-state sync between portal and the central miner server
