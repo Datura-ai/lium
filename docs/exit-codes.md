@@ -250,7 +250,7 @@ for a 400 or 409, `PORTAL_FORBIDDEN` for a 403, `PORTAL_NOT_FOUND` for a 404, `P
 | `portal.overview_not_for_custodied_account` | 6 | `lium provider idle-pay` on an account created with e-mail or Google: the portal serves its overview to hotkey accounts only (plain text mode: exit 2, as `PORTAL_FORBIDDEN`). |
 | `portal.<code>` | by status | The portal's own code in snake_case (`portal.node_rented`), passed through; `legacy_code` is the old code for its status. |
 | `node.not_found` | 5 | `node listing` / `idle-pay` named a node the account does not have. |
-| `node.pause_id_mismatch` | 3 | `node resume --pause-id`: the portal answered 409 `PAUSE_ID_MISMATCH` because that pause is no longer the node's current one (someone resumed, or resumed and paused again). Nothing changed. `data`: `node_id`, `pause_id` (the one given), `current_pause_id` (a UUID, or `null` when the node is not paused or its pause has no id), `status` 409, `portal_code`. Same exit in plain text mode. |
+| `node.pause_id_mismatch` | 3 | `node resume --pause-id`: the portal answered 409 `PAUSE_ID_MISMATCH` because the node's current pause is another one, or none (someone resumed, or resumed and paused again). Nothing changed. `data`: `node_id`, `pause_id` (the one given), `current_pause_id` (a UUID, or `null` when the node is not paused or its pause has no id), `status` 409, `portal_code`. Same exit in plain text mode. |
 | `node.not_listed_yet` | 11 | `lium mine --register` in agent mode: registered, not listed within `--wait`. |
 | `node.<status>` | 1 | `lium mine --json --register`: the portal names a fix (`node.offline`, `node.validation_failed`). |
 | `host.nvidia_driver_missing`, `host.nvidia_container_toolkit_missing`, `host.docker_missing` | 1 | `lium mine` step 3. |
