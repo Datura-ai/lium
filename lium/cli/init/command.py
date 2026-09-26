@@ -191,11 +191,11 @@ def _recheck_saved_key(saved_key: str, relogin_without_browser: bool) -> bool:
     if status == "valid":
         return False
     if status == "unreachable":
-        ui.warning(f"{check.error}. Keeping the saved key; 'lium init --force' logs in again anyway.")
+        ui.warning(f"{escape(check.error)}. Keeping the saved key; 'lium init --force' logs in again anyway.")
         return False
     if status == "refused":
         ui.warning(
-            f"The API refused the saved API key ({check.error}). The key is not expired, so it is kept; "
+            f"The API refused the saved API key ({escape(check.error)}). The key is not expired, so it is kept; "
             "'lium init --force' logs in again anyway."
         )
         return False

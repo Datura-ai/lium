@@ -246,6 +246,21 @@ def test_an_unapproved_session_keeps_the_old_key(monkeypatch, home, api, browser
     assert home.get("api.api_key") == "sk_saved"
 
 
+@pytest.mark.parametrize("outcome,expected", [
+    (LiumPermissionError("Permission denied: [bold]Account[/] is blocked [red]"), "[bold]Account[/] is blocked [red]"),
+    (LiumServerError("Server error: [bold]502[/]"), "[bold]502[/]"),
+], ids=["refused", "unreachable"])
+def test_server_text_with_markup_is_printed_literally(home, api, browser, terminal, outcome, expected):
+    api.outcome = outcome
+
+    result = CliRunner().invoke(cli, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert result.exception is None
+    assert expected in " ".join(result.output.split())
+    assert home.get("api.api_key") == "sk_saved"
+
+
 def test_the_config_file_is_written_atomically_and_owner_only(home):
     home.set("api.api_key", "sk_second")
 
