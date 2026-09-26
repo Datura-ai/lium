@@ -79,7 +79,10 @@ def _select_minted_key(api_keys: list) -> str | None:
 
 
 def rent_key_tag(rent_key: str | None) -> str | None:
-    return hashlib.sha256(rent_key.encode()).hexdigest()[:16] if rent_key else None
+    # a key-derivation function, not a bare digest: the tag sits next to credentials in config.ini
+    if not rent_key:
+        return None
+    return hashlib.pbkdf2_hmac("sha256", rent_key.encode(), b"lium-billing-key-for", 100_000).hex()[:16]
 
 
 def refuse_if_key_configured() -> ActionResult | None:

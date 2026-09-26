@@ -106,8 +106,8 @@ def signup_command(email: str | None, no_email: bool, display_name: str | None, 
             **billing_fields,
             "next_steps": [
                 _credit_line(credit_granted),
-                "Top up: lium topup link -a 10 --wait 900 (a person pays by card) or "
-                "lium topup create -a 10 -c USDC -n base --wait 900 (send the stablecoin).",
+                ("Top up: lium topup link -a 10 --wait 900 (a person pays by card) or "
+                 "lium topup create -a 10 -c USDC -n base --wait 900 (send the stablecoin)."),
                 "Then: lium ls, lium up <node-id>.",
                 "The verification link in the confirmation email does not gate renting — it confirms "
                 "the address so password resets and account emails reach the user.",
@@ -176,8 +176,8 @@ def _signup_without_email(billing_key: bool, json_output: bool) -> None:
             "next_steps": [
                 "Store the fingerprint: it is the only login (https://lium.io) and cannot be recovered.",
                 _credit_line(credit_granted),
-                "Top up: lium topup link -a 10 --wait 900 (a person pays by card) or "
-                "lium topup create -a 10 -c USDC -n base --wait 900 (send the stablecoin).",
+                ("Top up: lium topup link -a 10 --wait 900 (a person pays by card) or "
+                 "lium topup create -a 10 -c USDC -n base --wait 900 (send the stablecoin)."),
                 "Then: lium ls, lium up <node-id>.",
             ],
         }, sort_keys=True))
