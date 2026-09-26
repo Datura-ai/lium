@@ -21,13 +21,14 @@ mirrors it and a unit test keeps the two in step.
 "cmd" && next` behaves like `cmd && next` would on the pod. Usage errors caught
 by the argument parser (an unknown option, a missing argument) exit 2 with
 click's plain-text usage message; they are raised before the command runs and
-are not rendered as JSON. `lium provider …` keeps its own exit-code map,
-documented in `lium/cli/provider/_render.py`. `lium mine --register` exits 0
+are not rendered as JSON. `lium provider …` and `lium mine --json` use the
+provider map below ([Provider commands](#provider-commands-lium-provider-and-lium-mine---json)).
+`lium mine --register` in text mode exits 0
 when the node is listed, 1 on a failed step or a fix the portal names, and 2
 when the node is registered but not listed — within `--wait` minutes, or not
 yet in the node list right after the add — the same
 code as a usage error; the timeout message (`Still … after N min`) is on
-stdout, a usage error on stderr.
+stdout, a usage error on stderr. Under `--json` the not-listed case is exit 11.
 
 ## The error envelope
 
@@ -142,6 +143,82 @@ again (the transfer may have reached the chain).
 With `LIUM_DEBUG=1` every handled failure also prints its Python traceback to
 stderr before the error (or the envelope), so "re-run with `LIUM_DEBUG=1`" gives
 the detail the hints promise.
+
+## Provider commands (`lium provider …` and `lium mine --json`)
+
+Provider commands print their envelope on **stdout** (`{"ok": true, "data": …}` or
+`{"ok": false, "error": {"code", "message", "hint", "exit_code", "data"?, "request_id"?}}`);
+progress, when a command has any, is one JSON object per line on stderr. `--json` or
+`LIUM_OUTPUT=json` turns it on; every command that changes something takes `--yes`.
+
+### The unified exit map
+
+A namespaced code (`<namespace>.<snake_case>`) exits by this map (`unified_exit_code` in
+`lium/provider/errors.py`):
+
+| Exit | Constant | Meaning |
+|------|----------|---------|
+| 0 | `EXIT_OK` | Success. |
+| 1 | `EXIT_GENERAL` | A failure with no better class; every `host.*` step failure of `lium mine`. |
+| 2 | `EXIT_INPUT` | `input.*`: a value or a confirmation nobody could give (no terminal, `--json`, EOF), a bad option or token. |
+| 3 | `EXIT_API` | `portal.*`: the portal refused or failed the call; `portal.not_supported` (the portal does not serve this route yet). |
+| 4 | `EXIT_NETWORK` | `net.*` and `ssh.*`: nothing answered (`net.unreachable`: connection refused, DNS, timeout). |
+| 5 | `EXIT_NOT_FOUND` | A code ending in `not_found`, or a portal 404 (`node.not_found`, `portal.executor_not_found`). |
+| 6 | `EXIT_AUTH` | `auth.*`, or a portal refusal with HTTP 401/403/419/440. |
+| 7 | `EXIT_RETRYABLE` | A portal 429: retry after a pause. |
+| 10 | `EXIT_BLOCKED` | `node.blocked.<code>`: the portal refused the node change for a named reason. |
+| 11 | `EXIT_NOT_LISTED` | `node.not_listed_yet`: the node is registered and waited for, but not listed. |
+| 12 | `EXIT_HUMAN` | `human.*`: a person has to act (a browser step, a support ticket) before the command can succeed. |
+
+A portal refusal whose body names `detail.code` is passed through as `portal.<detail.code>`
+with `detail.message` as the message and the rest of `detail` in `error.data`.
+
+| `code` | Exit | When |
+|--------|------|------|
+| `input.confirmation_required` | 2 | A persona gate or `--yes` question under `--json`, without a terminal, or at EOF / Ctrl-D. Re-run with `--yes` or `LIUM_PROVIDER_ACK=1`. The acknowledgement is kept per user and config, so a new shell does not ask again. |
+| `input.input_required` | 2 | A prompt nobody can answer: `lium mine` without `-k` off a terminal, `portal login --email` without `LIUM_PROVIDER_PASSWORD` off a terminal. |
+| `input.register_token_invalid` | 2 | `lium mine --json --register` with an expired or unreadable token; nothing on the host was touched. |
+| `input.hotkey_conflicts_with_token` | 2 | `lium mine --json --register … -k` with a hotkey the token does not name. |
+| `net.unreachable` | 4 | Connection refused, DNS failure or timeout reaching the portal. |
+| `portal.not_supported` | 3 | The portal answered 404/405 for a route this CLI knows (`lium provider token …` before the portal serves API tokens). |
+| `portal.<detail.code>` | by status | The portal's own code, passed through. |
+| `node.not_found` | 5 | `node listing` / `idle-pay` named a node the account does not have. |
+| `node.not_listed_yet` | 11 | `lium mine --json --register`: registered, not listed within `--wait`. |
+| `node.<status>` | 1 | `lium mine --json --register`: the portal names a fix (`node.offline`, `node.validation_failed`). |
+| `host.nvidia_driver_missing`, `host.nvidia_container_toolkit_missing`, `host.docker_missing` | 1 | `lium mine` step 3. |
+| `host.port_in_use` | 1 | `lium mine` step 4: `data` has `port`, `label`, `owner`. |
+| `host.executor_unhealthy` | 1 | `lium mine` step 5: the health check timed out; the message has the compose status and log tail. |
+| `host.preflight_failed`, `host.preflight_no_verdict` | 1 | `lium mine` step 6; `data.verdict` is the preflight image's verdict. |
+| `host.<step>_failed` | 1 | Any other failure of a step (`host.repo`, `host.tools`, `host.prereqs`, `host.env`, `host.start`, `host.validate`, `host.register`). |
+
+`lium mine --json` step events look like
+`{"event": "step", "step": 4, "total": 6, "code": "host.env", "message": "Configuring environment", "status": "started|done|failed", "elapsed_s": 1.2, "error_code": "host.port_in_use"}`;
+step 6 adds `{"event": "check", "name": …}` lines and `--register` adds `{"event": "node_status", "node_id", "status", "message"}`.
+`--auto` takes the default ports (service 8080, SSH 2200); off a terminal or under `--json` the defaults
+are taken anyway and a missing `-k` is `input.input_required`.
+
+Provider auth without a wallet: `LIUM_PROVIDER_TOKEN` is sent as the Bearer token when set;
+`lium provider portal login --email you@example.com` reads the password from `LIUM_PROVIDER_PASSWORD`
+(a hidden prompt on a terminal) and keeps the session for later commands (`LIUM_PROVIDER_EMAIL` picks the session).
+
+### Old codes and their new names
+
+The UPPER_CASE codes are still emitted with their old exit statuses (1 argument, 2 auth,
+3 portal, 5 SSH, 6 config, 7 token-cache race) so scripts keep working while they
+migrate. Where a failure already has a namespaced code, the old code is no longer raised
+for it:
+
+| Old `code` (exit) | New `code` (exit) | When |
+|-------------------|-------------------|------|
+| `PORTAL_SERVER_ERROR` (3) | `net.unreachable` (4) | Connection refused, DNS failure, timeout. A 5xx stays `PORTAL_SERVER_ERROR`. |
+| `PORTAL_REQUEST_REJECTED` (1), `PORTAL_AUTH_INVALID` (2), `PORTAL_NOT_FOUND` (3), `PORTAL_SERVER_ERROR` (3) | `portal.<detail.code>` (by status) | The portal's body named `detail.code`. |
+| `ARG_INVALID` (1), or a prompt that hung | `input.confirmation_required` (2) | The persona gate without a terminal or under `--json`. A decline at the prompt stays `ARG_INVALID`. |
+| exit 2 (text, not listed) | `node.not_listed_yet` (11) | `lium mine --register`, under `--json` only. |
+| exit 1 (any `lium mine` step) | `host.*` (1) | Under `--json` only; text mode is unchanged. |
+
+Planned renames, not in effect yet: `PORTAL_AUTH_INVALID`/`PORTAL_AUTH_EXPIRED` → `auth.invalid`/`auth.expired` (6),
+`PORTAL_FORBIDDEN` → `auth.forbidden` (6), `PORTAL_RATE_LIMIT` → `portal.rate_limited` (7),
+`SSH_UNREACHABLE`/`SSH_AUTH_FAILED` → `ssh.unreachable`/`ssh.auth_failed` (4), `CONFIG_MISSING` → `input.config_missing` (2).
 
 ## Programmatic use
 
