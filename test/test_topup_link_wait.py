@@ -245,9 +245,14 @@ def test_link_uses_the_billing_key_from_the_environment(fake_lium, monkeypatch):
     assert "sk_billing_only" in fake_lium.made_with
 
 
+def _saved(**values):
+    return lambda key, default=None: values.get(key.replace(".", "__"), default)
+
+
 def test_link_uses_the_billing_key_saved_by_signup(fake_lium, monkeypatch):
-    monkeypatch.setattr(topup_module.config, "get",
-                        lambda key, default=None: "sk_saved_billing" if key == "api.billing_api_key" else None)
+    monkeypatch.setattr(topup_module.config, "get", _saved(
+        api__api_key="sk_rent", api__billing_api_key="sk_saved_billing",
+        api__billing_key_for=signup_actions.rent_key_tag("sk_rent")))
 
     result = CliRunner().invoke(cli, ["topup", "link", "-a", "10", "--json"])
 
@@ -458,7 +463,8 @@ def test_signup_billing_key_mints_a_billing_only_key_with_the_session_and_stores
     out = json.loads(result.stdout)
     assert out["api_key"] == "sk_rent_key"
     assert out["billing_api_key"] == "sk_billing" and out["billing_key_configured"] is True
-    assert signup_env == {"api.api_key": "sk_rent_key", "api.billing_api_key": "sk_billing"}
+    assert signup_env == {"api.api_key": "sk_rent_key", "api.billing_api_key": "sk_billing",
+                          "api.billing_key_for": signup_actions.rent_key_tag("sk_rent_key")}
     keys_call = [kw for url, kw in calls if url.endswith("/keys")][0]
     assert keys_call["json"] == {"name": "agent-billing", "scopes": ["billing"]}
     assert keys_call["headers"] == {"Authorization": "Bearer jwt-1"}
@@ -657,3 +663,25 @@ def test_a_half_failed_no_email_signup_keeps_the_fingerprint_out_of_the_message(
     envelope = _envelope(result)
     assert envelope["data"]["fingerprint"] == FP
     assert FP not in envelope["error"]["message"]
+
+
+
+def test_a_replaced_rent_key_is_not_paired_with_the_old_accounts_billing_key(fake_lium, monkeypatch):
+    # `lium init --api-key B` after signing up as A: A's billing key stays in the file, bound to A's key
+    monkeypatch.setattr(topup_module.config, "get", _saved(
+        api__api_key="sk_account_b", api__billing_api_key="sk_billing_a",
+        api__billing_key_for=signup_actions.rent_key_tag("sk_account_a")))
+
+    result = CliRunner().invoke(cli, ["topup", "link", "-a", "10", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert "sk_billing_a" not in fake_lium.made_with
+
+
+def test_a_saved_billing_key_without_a_binding_is_not_used(fake_lium, monkeypatch):
+    monkeypatch.setattr(topup_module.config, "get", _saved(api__api_key="sk_rent", api__billing_api_key="sk_old"))
+
+    result = CliRunner().invoke(cli, ["topup", "link", "-a", "10", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert "sk_old" not in fake_lium.made_with

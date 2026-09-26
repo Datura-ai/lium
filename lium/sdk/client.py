@@ -4673,7 +4673,8 @@ class Lium:
         a payment returns before the money is on the balance. Read :meth:`balance` before starting the
         payment and pass it as ``baseline``. A balance read that fails is retried on the next tick; the
         pods' own billing can lower the balance meanwhile, so a top-up smaller than what the account's
-        running pods burn in ``interval`` seconds may be missed.
+        running pods burn in ``interval`` seconds may be missed, and any other credit landing meanwhile
+        (a second invoice, a transfer) also ends the wait: compare ``balance`` with what you paid.
 
         Returns:
             ``{"credited": bool, "balance": float | None, "seconds": float}``: ``credited`` is ``False``

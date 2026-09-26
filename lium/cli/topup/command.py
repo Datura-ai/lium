@@ -18,6 +18,7 @@ from lium.sdk import Lium, LiumCardTopUpError, LiumChargeOutcomeUnknownError, Li
 from lium.sdk.config import Config
 from lium.cli import ui
 from lium.cli.settings import config
+from lium.cli.signup.actions import BILLING_KEY_BOUND_OPTION, rent_key_tag
 from lium.cli.utils import (
     EXIT_API_ERROR,
     EXIT_CONFIGURATION_ERROR,
@@ -41,6 +42,13 @@ def rent_key_from_environment() -> bool:
     return bool(os.getenv("LIUM_API_KEY") or os.getenv("LIUM_API_API_KEY"))
 
 
+def saved_billing_key_matches_rent_key() -> bool:
+    """`lium init` or `config set api.api_key` can swap the rent key under a saved billing key; the tag
+    written at signup says which rent key it belongs to. Only LIUM_BILLING_API_KEY overrides this."""
+    bound = config.get(BILLING_KEY_BOUND_OPTION)
+    return bool(bound) and bound == rent_key_tag(config.get("api.api_key"))
+
+
 def billing_client() -> Lium:
     """The client for money routes: the `billing` key when one is set (LIUM_BILLING_API_KEY, then
     `[api] billing_api_key`, which `lium signup --billing-key` writes), else the usual key.
@@ -51,9 +59,9 @@ def billing_client() -> Lium:
         return Lium()
     key = os.getenv(BILLING_KEY_ENV_VAR)
     source = f"env:{BILLING_KEY_ENV_VAR}"
-    if not key and not rent_key_from_environment():
-        # the saved billing key goes with the saved rent key (one signup, one account); an exported
-        # rent key may be another account's, so its money goes through that key instead
+    if not key and not rent_key_from_environment() and saved_billing_key_matches_rent_key():
+        # the saved billing key goes with the rent key it was minted next to (one signup, one account);
+        # an exported or since-replaced rent key may be another account's, so that key pays instead
         key = config.get(BILLING_KEY_OPTION)
         source = config.get_source(BILLING_KEY_OPTION) or f"config:{config.get_config_path()} [api] billing_api_key"
     if not key:

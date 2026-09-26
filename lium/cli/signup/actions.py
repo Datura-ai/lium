@@ -1,9 +1,11 @@
 """Signup action: create an account and keep the API key it mints."""
 
+import hashlib
 import os
 import secrets
 import string
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 import requests
 
@@ -18,6 +20,8 @@ REQUEST_TIMEOUT = 30
 MINTED_KEY_NAME = "Default"
 BILLING_KEY_NAME = "agent-billing"
 BILLING_KEY_OPTION = "api.billing_api_key"
+# which rent key the saved billing key was minted next to (a hash, never the key): one account
+BILLING_KEY_BOUND_OPTION = "api.billing_key_for"
 FINGERPRINT_OPTION = "account.fingerprint"
 DEFAULT_BASE_URL = "https://lium.io/api"
 
@@ -72,6 +76,10 @@ def _select_minted_key(api_keys: list) -> str | None:
 
     newest = max(usable, key=lambda k: (k.get("name") == MINTED_KEY_NAME, str(k.get("created_at") or "")))
     return newest.get("key")
+
+
+def rent_key_tag(rent_key: str | None) -> str | None:
+    return hashlib.sha256(rent_key.encode()).hexdigest()[:16] if rent_key else None
 
 
 def refuse_if_key_configured() -> ActionResult | None:
@@ -350,6 +358,7 @@ class MintBillingKeyAction:
             return ActionResult(ok=False, data={}, error="the server returned no key")
 
         config.set(BILLING_KEY_OPTION, key)
+        config.set(BILLING_KEY_BOUND_OPTION, rent_key_tag(config.get("api.api_key")) or "")
         return ActionResult(ok=True, data={"billing_api_key": key, "billing_api_key_id": body.get("id")})
 
     @staticmethod
@@ -358,7 +367,7 @@ class MintBillingKeyAction:
             return False
         try:
             response = request_same_origin(
-                _send, "DELETE", f"{base_url()}/keys/{key_id}",
+                _send, "DELETE", f"{base_url()}/keys/{quote(str(key_id), safe='')}",
                 headers={"Authorization": f"Bearer {token}"}, timeout=REQUEST_TIMEOUT,
             )
         except (requests.RequestException, LiumError):
