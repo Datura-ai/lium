@@ -936,9 +936,12 @@ def _render_provider_status(status: ProviderStatus) -> None:
 
 
 __all__ = [
+    "ERROR_CODES",
+    "EXIT_NODE_BLOCKED",
     "discord_incentive_warnings",
     "emit_error",
     "emit_warning",
+    "error_code_for",
     "exit_code_for",
     "fatal",
     "render",

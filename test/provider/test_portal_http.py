@@ -194,7 +194,7 @@ def test_a_portal_nothing_answers_at_is_net_unreachable_not_a_server_error() -> 
         http.get("/anything")
     assert not isinstance(exc.value, ProviderServerError)
     assert exc.value.code == "net.unreachable"
-    assert "dns blew up" in exc.value.message and "https://portal.example.com" in exc.value.message
+    assert exc.value.message == "could not reach the portal at https://portal.example.com: dns blew up"
 
 
 def test_a_read_timeout_is_net_unreachable() -> None:
