@@ -25,9 +25,9 @@ from __future__ import annotations
 import click
 
 from lium.cli.provider._client import bearer_token
-from lium.cli.provider._persona import ConfirmationRequired, confirm_persona
+from lium.cli.provider._persona import ConfirmationRequired, Interrupted, confirm_persona
 from lium.cli.provider._render import emit_error, fatal
-from lium.provider.errors import ARG_INVALID, CONFIRMATION_REQUIRED, ProviderError
+from lium.provider.errors import ARG_INVALID, CONFIRMATION_REQUIRED, INTERRUPTED, ProviderError
 
 
 def require_hotkey(ctx: click.Context, *, group: str | None = None) -> None:
@@ -71,6 +71,9 @@ def require_persona_ack(ctx: click.Context) -> None:
                 context={"flag": "--yes", "env": "LIUM_PROVIDER_ACK=1"},
             ),
         )
+        return
+    except Interrupted as e:
+        fatal(ctx, ProviderError(f"stopped: {e}", code=INTERRUPTED, hint="Nothing was sent to the portal."))
         return
     if ok:
         return

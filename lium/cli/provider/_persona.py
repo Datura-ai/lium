@@ -53,6 +53,16 @@ class ConfirmationRequired(Exception):
     """The gate needed an answer and nobody could give one (``--json``, no terminal, EOF)."""
 
 
+class Interrupted(Exception):
+    """Ctrl-C at the prompt: the person stopped the command (``input.interrupted``, exit 130)."""
+
+
+def _read_answer() -> str:
+    # input(), not click.prompt: click turns Ctrl-C and EOF alike into Abort, and the two mean different things
+    click.echo("Type 'y' to continue (or set LIUM_PROVIDER_ACK=1): ", nl=False, err=True)
+    return input()
+
+
 @dataclass(frozen=True)
 class PersonaContext:
     """Inputs needed to compute an ack key."""
@@ -159,7 +169,7 @@ def confirm_persona(
             stdin and no ``LIUM_NONINTERACTIVE``.
         env: env mapping override.
         path: ack-cache path override.
-        input_func: callable used to read stdin (defaults to ``click.prompt``).
+        input_func: callable used to read stdin (defaults to ``input()`` after the prompt on stderr).
         output_func: callable used for the prompt banner (defaults to
             ``click.echo`` writing to stderr).
 
@@ -184,20 +194,12 @@ def confirm_persona(
         "Spend-affecting actions (node / install) follow."
     )
 
-    reader = input_func or (
-        lambda: click.prompt(
-            "Type 'y' to continue (or set LIUM_PROVIDER_ACK=1)",
-            default="n",
-            show_default=False,
-            err=True,
-        )
-    )
+    reader = input_func or _read_answer
     try:
         answer = (reader() or "").strip().lower()
-    except KeyboardInterrupt:
-        return False
+    except KeyboardInterrupt as e:
+        raise Interrupted("interrupted at the confirmation prompt") from e
     except (EOFError, click.Abort) as e:
-        # click.prompt turns an EOF into Abort: stdin closed before anyone answered
         raise ConfirmationRequired("stdin closed before an answer") from e
     if answer not in ("y", "yes"):
         return False
@@ -209,6 +211,7 @@ __all__ = [
     "DEFAULT_ACK_PATH",
     "SPEND_AFFECTING_SUBCOMMANDS",
     "ConfirmationRequired",
+    "Interrupted",
     "PersonaContext",
     "ack_scope",
     "confirm_persona",

@@ -151,6 +151,29 @@ Provider commands print their envelope on **stdout** (`{"ok": true, "data": …}
 progress, when a command has any, is one JSON object per line on stderr. `--json` or
 `LIUM_OUTPUT=json` turns it on; every command that changes something takes `--yes`.
 
+### Which exit map applies
+
+- **Under `--json` or `LIUM_OUTPUT=json`**, every provider error exits by the unified map below, whatever its
+  origin. `error.code` is the namespaced code and `error.legacy_code` the UPPER_CASE code it replaces
+  (`PORTAL_REQUEST_REJECTED`, `PORTAL_NOT_FOUND`, …), so a script can still match the old name.
+- **In text mode** (no `--json`), every error keeps the exit status it had before the unified map, so
+  existing scripts don't break. The status follows the error's UPPER_CASE code:
+
+| Old code | Text exit | `--json` code | `--json` exit |
+|----------|-----------|---------------|---------------|
+| `ARG_INVALID` | 1 | `input.arg_invalid` | 2 |
+| `PORTAL_REQUEST_REJECTED` | 1 | `portal.request_rejected`, or the portal's own `portal.<code>` | 3 |
+| `PORTAL_AUTH_INVALID` | 2 | `auth.invalid` | 6 |
+| `PORTAL_FORBIDDEN` | 2 | `auth.forbidden`, or `portal.<code>` | 6 |
+| `PORTAL_NOT_FOUND` | 3 | `portal.not_found`, or `portal.<code>` | 5 |
+| `PORTAL_RATE_LIMIT` | 3 | `portal.rate_limited`, or `portal.<code>` | 7 |
+| `PORTAL_SERVER_ERROR` | 3 | `portal.server_error`, `net.unreachable` (4) | 3 |
+| `SSH_UNREACHABLE` | 5 | `ssh.unreachable` | 4 |
+| `CONFIG_MISSING` | 6 | `input.config_missing` | 2 |
+
+  A code new with the unified map and with no old equivalent (`input.confirmation_required`,
+  `human.handoff_required`, `portal.not_supported`, `input.interrupted`) exits by the unified map in both modes.
+
 ### The unified exit map
 
 A namespaced code (`<namespace>.<snake_case>`) exits by this map (`unified_exit_code` in
@@ -169,23 +192,29 @@ A namespaced code (`<namespace>.<snake_case>`) exits by this map (`unified_exit_
 | 10 | `EXIT_BLOCKED` | `node.blocked.<code>`: the portal refused the node change for a named reason. |
 | 11 | `EXIT_NOT_LISTED` | `node.not_listed_yet`: the node is registered and waited for, but not listed. |
 | 12 | `EXIT_HUMAN` | `human.*`: a person has to act (link Discord, confirm the e-mail) before the command can succeed; `data` says what to relay. |
+| 130 | `EXIT_INTERRUPTED` | `input.interrupted`: Ctrl-C at a prompt; nothing was sent. |
 
-A portal refusal whose body names `detail.code` is passed through as `portal.<detail.code>`
-with `detail.message` as the message and the rest of `detail` in `error.data`.
+A portal refusal whose body names `detail.code` is passed through as `portal.<code>`, the portal's code in
+snake_case (`EXECUTOR_NOT_FOUND` is `portal.executor_not_found`, `NODE_RENTED` is `portal.node_rented`), with
+`detail.message` as the message, the portal's own spelling in `error.data.portal_code` and the rest of `detail`
+in `error.data.detail`. Its `legacy_code` is the UPPER_CASE code the same status had before (`PORTAL_REQUEST_REJECTED`
+for a 400 or 409, `PORTAL_FORBIDDEN` for a 403, `PORTAL_NOT_FOUND` for a 404, `PORTAL_RATE_LIMIT` for a 429).
 
 | `code` | Exit | When |
 |--------|------|------|
 | `input.confirmation_required` | 2 | A persona gate or `--yes` question under `--json`, without a terminal, or at EOF / Ctrl-D. Re-run with `--yes` or `LIUM_PROVIDER_ACK=1`. The acknowledgement is kept per user and config, so a new shell does not ask again. |
+| `input.interrupted` | 130 | Ctrl-C at the persona prompt; nothing was sent. |
 | `input.input_required` | 2 | A prompt nobody can answer: `lium mine` without `-k` off a terminal, `portal login --email` without `LIUM_PROVIDER_PASSWORD` off a terminal. |
 | `input.register_token_invalid` | 2 | `lium mine --json --register` with an expired or unreadable token; nothing on the host was touched. |
 | `input.hotkey_conflicts_with_token` | 2 | `lium mine --json --register … -k` with a hotkey the token does not name. |
 | `human.handoff_required` | 12 | A one-time human step (`lium provider config connect-discord`, `lium provider portal confirm-email`). `data`: `step` (`discord_link`, `email_confirm`), `handoff_url`, `code`, `expires_at`, `message_for_human`. Relay `message_for_human` to the person, then re-run with `--wait`. With `--wait --timeout N`, also when N seconds pass first (`data.waited_s`). |
-| `human.handoff_expired` | 12 | `--wait`: the code expired before the person finished; run the command again for a new code. |
+| `human.handoff_expired` | 12 | `--wait`: the code expired before the person finished, or the portal answers 404 for the handoff (`data.status: not_found`); run the command again for a new code. A poll the portal could not answer (5xx, 429, unreachable) is retried with backoff until `--timeout`. |
 | `net.unreachable` | 4 | Connection refused, DNS failure or timeout reaching the portal. |
 | `portal.not_supported` | 3 | The portal answered 404/405 for a route this CLI knows (`lium provider token …` before the portal serves API tokens). |
 | `portal.api_token_needs_session` | 6 | `lium provider token create`, `list` or `revoke` sent `LIUM_PROVIDER_TOKEN`; tokens are managed from a signed-in session only (hotkey or `portal login --email`). |
 | `portal.api_token_scope_missing` | 6 | `LIUM_PROVIDER_TOKEN` lacks the scope the call needs; `data.detail.required_scopes` names it. |
-| `portal.<detail.code>` | by status | The portal's own code, passed through. |
+| `portal.overview_not_for_custodied_account` | 6 | `lium provider idle-pay` on an account created with e-mail or Google: the portal serves its overview to hotkey accounts only (text mode: exit 2, as `PORTAL_FORBIDDEN`). |
+| `portal.<code>` | by status | The portal's own code in snake_case (`portal.node_rented`), passed through; `legacy_code` is the old code for its status. |
 | `node.not_found` | 5 | `node listing` / `idle-pay` named a node the account does not have. |
 | `node.not_listed_yet` | 11 | `lium mine --json --register`: registered, not listed within `--wait`. |
 | `node.<status>` | 1 | `lium mine --json --register`: the portal names a fix (`node.offline`, `node.validation_failed`). |
@@ -217,18 +246,18 @@ then runs the old browser flow.
 
 ### Old codes and their new names
 
-The UPPER_CASE codes are still emitted with their old exit statuses (1 argument, 2 auth,
-3 portal, 5 SSH, 6 config, 7 token-cache race) so scripts keep working while they
-migrate. The failures below carry the namespaced code:
+In text mode the UPPER_CASE codes keep their old exit statuses (1 argument, 2 auth, 3 portal, 5 SSH, 6 config,
+7 token-cache race), so scripts keep working while they migrate. The failures below carry the namespaced code,
+with the old one as `legacy_code`; the exits on the right are the `--json` ones:
 
 | Old `code` (exit) | New `code` (exit) | When |
 |-------------------|-------------------|------|
 | `PORTAL_SERVER_ERROR` (3) | `net.unreachable` (4) | Connection refused, DNS failure, timeout. A 5xx stays `PORTAL_SERVER_ERROR`. |
-| `PORTAL_REQUEST_REJECTED` (1), `PORTAL_AUTH_INVALID` (2), `PORTAL_NOT_FOUND` (3), `PORTAL_SERVER_ERROR` (3) | `portal.<detail.code>` (by status) | The portal's body named `detail.code`. |
+| `PORTAL_REQUEST_REJECTED` (1), `PORTAL_FORBIDDEN` (2), `PORTAL_NOT_FOUND` (3), `PORTAL_RATE_LIMIT` (3) | `portal.<code>` (3, 6, 5, 7) | The portal's body named `detail.code` (`node rm` on a rented node, the `node add` refusals). Text mode keeps the old exit. |
 | `ARG_INVALID` (1), or a prompt that hung | `input.confirmation_required` (2) | The persona gate without a terminal or under `--json`. A decline at the prompt stays `ARG_INVALID`. |
 | exit 2 (text, not listed) | `node.not_listed_yet` (11) | `lium mine --register`, under `--json` only. |
 | exit 1 (any `lium mine` step) | `host.*` (1) | Under `--json` only; text mode is unchanged. |
-| exit 0 with `authorization_url` | `human.handoff_required` (12), or `portal.not_supported` (3) with `data.legacy_browser_url` | `config connect-discord --json`. |
+| exit 0 with `authorization_url` | `human.handoff_required` (12), or `portal.not_supported` (3) with `data.legacy_browser_url` | `config connect-discord --json`: exit 3 until the portal serves handoff sessions. |
 
 Planned renames, not in effect yet: `PORTAL_AUTH_INVALID`/`PORTAL_AUTH_EXPIRED` → `auth.invalid`/`auth.expired` (6),
 `PORTAL_FORBIDDEN` → `auth.forbidden` (6), `PORTAL_RATE_LIMIT` → `portal.rate_limited` (7),

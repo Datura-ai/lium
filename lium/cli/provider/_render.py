@@ -130,12 +130,28 @@ def error_code_for(code: str) -> str:
     return f"general.{code.lower()}"
 
 
-def exit_code_for(err: ProviderError) -> int:
-    """Map a :class:`ProviderError` to its CLI exit status."""
-    if "." in err.code:
-        # a namespaced code exits by the unified map; the UPPER_CASE ones keep the old statuses while scripts migrate
-        return unified_exit_code(err.code, err.context.get("status"))
-    return _EXIT_CODES.get(err.code, 1)
+def legacy_code_for(err: ProviderError) -> str | None:
+    """The UPPER_CASE code of ``err``: its own, or the one its namespaced code replaces (None for a new code)."""
+    if "." not in err.code:
+        return err.code
+    return err.legacy_code
+
+
+def exit_code_for(err: ProviderError, *, json_mode: bool = False) -> int:
+    """Map a :class:`ProviderError` to its CLI exit status (``docs/exit-codes.md``).
+
+    Under ``--json`` every error exits by the unified map, whatever its origin. Text mode keeps the old
+    statuses so existing scripts do not break: an error with an UPPER_CASE code (its own, or the one a
+    namespaced code replaces) exits as that code always did; only codes with no old equivalent use the
+    unified map there.
+    """
+    status = err.context.get("status")
+    if json_mode:
+        return unified_exit_code(error_code_for(err.code), status)
+    legacy = legacy_code_for(err)
+    if legacy is not None:
+        return _EXIT_CODES.get(legacy, 1)
+    return unified_exit_code(err.code, status)
 
 
 def render(
@@ -196,15 +212,15 @@ def render(
 
 def emit_error(ctx: click.Context, err: ProviderError) -> int:
     """Format a :class:`ProviderError` and return its exit code."""
-    code = exit_code_for(err)
+    code = exit_code_for(err, json_mode=_json_mode(ctx))
     if _json_mode(ctx):
         error = {
             "code": error_code_for(err.code),
-            "legacy_code": err.code,
+            "legacy_code": legacy_code_for(err) or err.code,
             "message": err.message,
             "hint": err.hint,
             "exit_code": code,
-            "context": err.context,
+            "context": err.context or {},
         }
         if err.context:
             error["data"] = err.context
@@ -943,6 +959,7 @@ __all__ = [
     "emit_warning",
     "error_code_for",
     "exit_code_for",
+    "legacy_code_for",
     "fatal",
     "render",
 ]

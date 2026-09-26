@@ -17,7 +17,7 @@ from lium.cli.provider._client import build_client
 from lium.cli.provider._guards import handle_provider_error, require_hotkey
 from lium.cli.provider._overrides import with_provider_overrides
 from lium.cli.provider._render import fatal, render
-from lium.provider.errors import ProviderError
+from lium.provider.errors import OVERVIEW_NOT_FOR_CUSTODIED_ACCOUNT, PORTAL_FORBIDDEN, ProviderError
 
 _DATE = click.DateTime(formats=["%Y-%m-%d"])
 
@@ -80,12 +80,26 @@ def earnings_command(
 def idle_pay_command(ctx: click.Context, node_id: str | None) -> None:
     """For each node with a free GPU: `idle_pay` is `paid`, `not_paid` (with `idle_pay_reasons`, the
     validator's codes), `rented_last_cycle` or `unknown` (no validator cycle yet). A fully rented node has
-    `idle_pay: null`. With NODE_ID only that node; one that is not yours is `node.not_found` (exit 5)."""
+    `idle_pay: null`. With NODE_ID only that node; one that is not yours is `node.not_found` (exit 5).
+
+    The portal serves this overview to hotkey accounts only: an account created with e-mail or Google gets
+    `portal.overview_not_for_custodied_account` (exit 6 under --json)."""
     require_hotkey(ctx, group="idle-pay")
     client = build_client(ctx)
     try:
         overview = client.provider_overview()
     except ProviderError as e:
+        if e.code == PORTAL_FORBIDDEN:
+            e = ProviderError(
+                "the portal serves idle pay (its provider overview) to hotkey accounts only; this account was "
+                "created with e-mail or Google",
+                code=OVERVIEW_NOT_FOR_CUSTODIED_ACCOUNT,
+                legacy_code=PORTAL_FORBIDDEN,
+                hint="Sign in with the account's hotkey for idle pay (`lium provider -k <hotkey> idle-pay`); "
+                "`lium provider node listing` works with this sign-in.",
+                cause=e,
+                context=e.context,
+            )
         ctx.exit(handle_provider_error(ctx, e))
         return
     rows = overview.get("node_rows") if isinstance(overview.get("node_rows"), list) else []

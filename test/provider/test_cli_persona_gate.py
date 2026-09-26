@@ -171,6 +171,26 @@ def test_eof_at_the_prompt_is_no_answer_not_a_crash(tmp_path: Path) -> None:
     assert "stdin closed" in seen["raised"]
 
 
+def test_ctrl_c_at_the_prompt_stops_the_command_with_exit_130(tmp_path: Path, monkeypatch) -> None:
+    import builtins
+
+    from lium.cli.provider.command import provider_command
+
+    def ctrl_c(*_args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("lium.cli.provider._persona.DEFAULT_ACK_PATH", tmp_path / "ack.json")
+    monkeypatch.setattr("lium.cli.provider._persona.is_interactive", lambda: True)
+    monkeypatch.setattr(builtins, "input", ctrl_c)
+    env = {"LIUM_PROVIDER_TOKEN": "lpk_stub", "LIUM_PROVIDER_ACK": "", "LIUM_OUTPUT": "", "LIUM_NONINTERACTIVE": ""}
+    result = CliRunner().invoke(
+        provider_command, ["--portal-url", "http://127.0.0.1:9", "node", "pause", "7c1f0e2a-0000-4000-8000-000000000001"],
+        env=env,
+    )
+    assert result.exit_code == 130, result.output
+    assert "[input.interrupted]" in result.stderr and "stdin closed" not in result.stderr
+
+
 def test_an_ack_covers_every_process_of_the_user_not_one_parent_pid(tmp_path: Path, monkeypatch) -> None:
     import os
 

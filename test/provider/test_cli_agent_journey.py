@@ -57,7 +57,7 @@ def test_the_provider_token_env_is_sent_as_the_bearer_token(portal) -> None:
 
 
 def test_no_hotkey_and_no_token_names_the_token_env_in_the_hint(portal) -> None:
-    err = error(run(portal, "--json", "node", "listing", env={"LIUM_PROVIDER_TOKEN": ""}), 1)
+    err = error(run(portal, "--json", "node", "listing", env={"LIUM_PROVIDER_TOKEN": ""}), 2)
     assert err["legacy_code"] == "ARG_INVALID" and "LIUM_PROVIDER_TOKEN" in err["hint"]
     assert portal.requests == []
 
@@ -78,6 +78,22 @@ def test_register_token_mints_the_token_and_prints_the_install_line(portal) -> N
 
 def test_register_token_under_json_without_yes_asks_for_confirmation_and_mints_nothing(portal) -> None:
     err = error(run(portal, "--json", "node", "register-token"), 2)
+    assert err["code"] == "input.confirmation_required"
+    assert portal.requests == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("node", "tier", "set", NODE, "secure"),
+        ("node", "pause", NODE),
+        ("node", "resume", NODE),
+        ("token", "create", "--name", "ci", "--scope", "read"),
+    ],
+    ids=["tier-set", "pause", "resume", "token-create"],
+)
+def test_each_change_under_json_without_yes_asks_for_confirmation_and_sends_nothing(portal, args) -> None:
+    err = error(run(portal, "--json", *args), 2)
     assert err["code"] == "input.confirmation_required"
     assert portal.requests == []
 
@@ -191,6 +207,14 @@ def test_idle_pay_for_an_account_without_the_overview_passes_the_portal_code_thr
     assert error(run(portal, "--json", "idle-pay"), 6)["code"] == "portal.overview_not_for_custodied_account"
 
 
+def test_idle_pay_for_an_email_or_google_account_names_the_limit(portal) -> None:
+    portal.route("GET", "/miners/overview", {"detail": "Forbidden"}, status=403)
+    err = error(run(portal, "--json", "idle-pay"), 6)
+    assert (err["code"], err["legacy_code"]) == ("portal.overview_not_for_custodied_account", "PORTAL_FORBIDDEN")
+    assert "hotkey" in err["hint"] and "e-mail or Google" in err["message"]
+    assert run(portal, "idle-pay").exit_code == 2
+
+
 def test_ledger_passes_the_range(portal) -> None:
     portal.route("GET", "/provider-ledger/daily", {"success": True, "data": {"rows": [{"date": "2026-09-25", "kind": "rental"}]}})
     assert ok(run(portal, "--json", "ledger", "--from", "2026-09-01", "--to", "2026-09-25"))["rows"][0]["kind"] == "rental"
@@ -221,8 +245,10 @@ def test_email_login_without_the_password_env_is_input_required_not_a_prompt(por
 
 def test_a_wrong_password_is_an_auth_error(portal) -> None:
     portal.route("POST", "/auth/login-email", {"detail": "Invalid credentials"}, status=401)
-    err = error(run(portal, "--json", "portal", "login", "--email", "agent@example.invalid", env={"LIUM_PROVIDER_PASSWORD": "x"}), 2)
+    err = error(run(portal, "--json", "portal", "login", "--email", "agent@example.invalid", env={"LIUM_PROVIDER_PASSWORD": "x"}), 6)
     assert err["legacy_code"] == "PORTAL_AUTH_INVALID"
+    assert "LIUM_PROVIDER_PASSWORD" in err["hint"] and "Token rejected" not in err["hint"]
+    assert err["message"] == "the portal refused this e-mail and password"
 
 
 # --- provider API tokens ------------------------------------------------------------------------
@@ -317,5 +343,5 @@ def test_an_uncoded_portal_error_keeps_its_old_exit_status(portal) -> None:
 
 def test_text_mode_prints_the_code_on_stderr(portal) -> None:
     result = run(closed_port_url(), "node", "listing")
-    assert result.exit_code == 4
+    assert result.exit_code == 3, "text mode keeps the old exit of a refused connection (PORTAL_SERVER_ERROR)"
     assert "[net.unreachable]" in result.stderr and result.stdout == ""

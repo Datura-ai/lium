@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Callable
 
 import requests
@@ -20,6 +21,7 @@ from lium.provider.errors import (
     NET_UNREACHABLE,
     PORTAL_AUTH_EXPIRED,
     PORTAL_AUTH_INVALID,
+    PORTAL_CONTRACT_DRIFT,
     PORTAL_FORBIDDEN,
     PORTAL_NOT_FOUND,
     PORTAL_RATE_LIMIT,
@@ -146,6 +148,7 @@ class PortalHTTP:
             raise ProviderError(
                 f"could not reach the portal at {self.base_url}: {e}",
                 code=NET_UNREACHABLE,
+                legacy_code=PORTAL_SERVER_ERROR,
                 cause=e,
                 context={"url": url, "method": method},
             ) from e
@@ -275,19 +278,40 @@ def _coded_detail(body: Any) -> dict[str, Any] | None:
     return None
 
 
+def _legacy_code_for_status(status: int) -> str:
+    """The UPPER_CASE code an uncoded answer with this status gets: what a coded one replaces."""
+    if status == 401:
+        return PORTAL_AUTH_INVALID
+    if status == 403:
+        return PORTAL_FORBIDDEN
+    if status == 404:
+        return PORTAL_NOT_FOUND
+    if status in (419, 440):
+        return PORTAL_AUTH_EXPIRED
+    if status == 422:
+        return PORTAL_CONTRACT_DRIFT
+    if status == 429:
+        return PORTAL_RATE_LIMIT
+    if 400 <= status < 500:
+        return PORTAL_REQUEST_REJECTED
+    return PORTAL_SERVER_ERROR
+
+
 def _coded_error(status: int, detail: dict[str, Any], context: dict[str, Any]) -> ProviderError:
-    """``portal.<detail.code>``, as the portal named it; the class still follows the status (a 401 stays an auth error)."""
-    code = "portal." + detail["code"].strip()
+    """``portal.<detail.code>`` in snake_case (``EXECUTOR_NOT_FOUND`` -> ``portal.executor_not_found``); the class
+    and ``legacy_code`` still follow the status, so text mode exits as it did before the portal coded it."""
+    code = "portal." + (re.sub(r"[^a-z0-9]+", "_", detail["code"].strip().lower()).strip("_") or "request_rejected")
     message = str(detail.get("message") or f"portal refused the request ({status})")
     extra = {k: v for k, v in detail.items() if k not in ("code", "message")}
-    ctx = {**context, **({"detail": extra} if extra else {})}
+    ctx = {**context, "portal_code": detail["code"].strip(), **({"detail": extra} if extra else {})}
+    kwargs = {"code": code, "context": ctx, "legacy_code": _legacy_code_for_status(status)}
     if status in (401, 403, 419, 440):
-        return ProviderAuthError(message, code=code, context=ctx)
+        return ProviderAuthError(message, **kwargs)
     if status == 404:
-        return ProviderNotFoundError(message, code=code, context=ctx)
+        return ProviderNotFoundError(message, **kwargs)
     if 500 <= status < 600:
-        return ProviderServerError(message, code=code, context=ctx)
-    return ProviderError(message, code=code, context=ctx)
+        return ProviderServerError(message, **kwargs)
+    return ProviderError(message, **kwargs)
 
 
 def _portal_detail(body: Any) -> str:

@@ -214,7 +214,7 @@ def test_mine_status_refuses_an_ss58_as_the_hotkey_name(patched_client, monkeypa
     assert portal.gets == []
 
     result = CliRunner().invoke(cli, ["mine", "status", "e-1", "--json", "-k", ss58])
-    assert result.exit_code == 1, result.output
+    assert result.exit_code == 2, result.output
     payload = json.loads(result.output.strip())
     assert payload["ok"] is False and (payload["error"]["code"], payload["error"]["legacy_code"]) == ("input.arg_invalid", "ARG_INVALID")
     assert portal.gets == []

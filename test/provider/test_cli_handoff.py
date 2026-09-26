@@ -101,9 +101,36 @@ def test_connect_discord_wait_polls_until_the_person_is_done(portal) -> None:
 def test_connect_discord_wait_ends_at_the_codes_expiry(portal) -> None:
     portal.route("POST", "/auth/handoffs", created(), status=201)
     portal.route_sequence("GET", POLL_PATH, polled("pending"), polled("expired"))
-    error = envelope(run(portal, "--json", "config", "connect-discord", "--wait", "--poll-interval", "0.1"), 12)["error"]
+    args = ("--json", "config", "connect-discord", "--wait", "--poll-interval", "0.1", "--timeout", "5")
+    error = envelope(run(portal, *args), 12)["error"]
     assert (error["code"], error["exit_code"]) == ("human.handoff_expired", 12)
     assert error["data"]["status"] == "expired" and error["data"]["code"] == "ANNH-BD65"
+
+
+def test_connect_discord_wait_rides_out_a_portal_blip(portal) -> None:
+    unavailable = (503, {"detail": {"code": "handoff_unavailable", "message": "Try again in a minute."}})
+    portal.route("POST", "/auth/handoffs", created(), status=201)
+    portal.route_sequence("GET", POLL_PATH, unavailable, (502, {"detail": "Bad Gateway"}), polled("completed"))
+    args = ("--json", "config", "connect-discord", "--wait", "--poll-interval", "0.1", "--timeout", "10")
+    data = envelope(run(portal, *args), 0)["data"]
+    assert data["done"] is True and len(portal.calls("GET")) == 3
+
+
+def test_connect_discord_wait_gives_up_on_a_portal_that_stays_down_at_the_timeout(portal) -> None:
+    portal.route("POST", "/auth/handoffs", created(), status=201)
+    portal.route("GET", POLL_PATH, {"detail": {"code": "handoff_unavailable", "message": "Try again."}}, status=503)
+    args = ("--json", "config", "connect-discord", "--wait", "--poll-interval", "0.1", "--timeout", "1")
+    error = envelope(run(portal, *args), 3)["error"]
+    assert error["code"] == "portal.handoff_unavailable" and len(portal.calls("GET")) >= 2
+
+
+def test_a_handoff_the_portal_no_longer_knows_has_expired(portal) -> None:
+    portal.route("POST", "/auth/handoffs", created(), status=201)
+    portal.route("GET", POLL_PATH, {"detail": {"code": "handoff_not_found", "message": "No such handoff (or it expired)."}},
+                 status=404)
+    args = ("--json", "config", "connect-discord", "--wait", "--poll-interval", "0.1", "--timeout", "5")
+    error = envelope(run(portal, *args), 12)["error"]
+    assert (error["code"], error["data"]["status"]) == ("human.handoff_expired", "not_found")
 
 
 def test_connect_discord_wait_timeout_is_still_handoff_required(portal) -> None:

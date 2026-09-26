@@ -63,6 +63,7 @@ CONFIG_MISSING = "CONFIG_MISSING"
 # ``detail.code`` is raised as ``portal.<that code>``.
 INPUT_REQUIRED = "input.input_required"
 CONFIRMATION_REQUIRED = "input.confirmation_required"
+INTERRUPTED = "input.interrupted"
 NET_UNREACHABLE = "net.unreachable"
 PORTAL_NOT_SUPPORTED = "portal.not_supported"
 NODE_NOT_LISTED = "node.not_listed_yet"
@@ -70,6 +71,7 @@ HANDOFF_REQUIRED = "human.handoff_required"
 HANDOFF_EXPIRED = "human.handoff_expired"
 API_TOKEN_NEEDS_SESSION = "portal.api_token_needs_session"
 API_TOKEN_SCOPE_MISSING = "portal.api_token_scope_missing"
+OVERVIEW_NOT_FOR_CUSTODIED_ACCOUNT = "portal.overview_not_for_custodied_account"
 
 # The unified exit map (docs/exit-codes.md).
 EXIT_OK = 0
@@ -83,6 +85,7 @@ EXIT_RETRYABLE = 7
 EXIT_BLOCKED = 10
 EXIT_NOT_LISTED = 11
 EXIT_HUMAN = 12
+EXIT_INTERRUPTED = 130
 
 _NAMESPACE_EXITS: dict[str, int] = {
     "input": EXIT_INPUT,
@@ -97,13 +100,15 @@ _NAMESPACE_EXITS: dict[str, int] = {
 
 def unified_exit_code(code: str, status: int | None = None) -> int:
     """The unified-map exit status of a namespaced code; ``status`` is the portal's HTTP status, if any."""
+    if code == INTERRUPTED:
+        return EXIT_INTERRUPTED
     if code.startswith("node.blocked"):
         return EXIT_BLOCKED
     if code == NODE_NOT_LISTED:
         return EXIT_NOT_LISTED
     if code == PORTAL_NOT_SUPPORTED:
         return EXIT_API
-    if code in (API_TOKEN_NEEDS_SESSION, API_TOKEN_SCOPE_MISSING):
+    if code in (API_TOKEN_NEEDS_SESSION, API_TOKEN_SCOPE_MISSING, OVERVIEW_NOT_FOR_CUSTODIED_ACCOUNT):
         return EXIT_AUTH
     leaf = code.rsplit(".", 1)[-1]
     not_found = leaf == "not_found" or leaf.endswith("_not_found")
@@ -112,7 +117,7 @@ def unified_exit_code(code: str, status: int | None = None) -> int:
             return EXIT_AUTH
         if status == 404 or not_found:
             return EXIT_NOT_FOUND
-        if status == 429:
+        if status == 429 or leaf == "rate_limited":
             return EXIT_RETRYABLE
         return EXIT_API
     if not_found:
@@ -164,6 +169,8 @@ class ProviderError(Exception):
         hint: actionable next step, or empty string.
         cause: the underlying exception, if any (chained, not stringified).
         context: free-form ``dict[str, Any]``.
+        legacy_code: the UPPER_CASE code a namespaced ``code`` replaces (``PORTAL_REQUEST_REJECTED`` for a
+            coded 400); text mode exits by it, and ``--json`` shows it as ``legacy_code``.
     """
 
     default_code: str = "PROVIDER_ERROR"
@@ -176,10 +183,12 @@ class ProviderError(Exception):
         hint: str | None = None,
         cause: BaseException | None = None,
         context: dict[str, Any] | None = None,
+        legacy_code: str | None = None,
     ) -> None:
         self.code = code or self.default_code
+        self.legacy_code = legacy_code
         self.message = message
-        self.hint = hint if hint is not None else _HINTS.get(self.code, "")
+        self.hint = hint if hint is not None else (_HINTS.get(self.code) or _HINTS.get(legacy_code or "", ""))
         self.cause = cause
         self.context = context or {}
         super().__init__(self.message)
@@ -243,6 +252,7 @@ __all__ = [
     "EXIT_BLOCKED",
     "EXIT_GENERAL",
     "EXIT_HUMAN",
+    "EXIT_INTERRUPTED",
     "EXIT_INPUT",
     "EXIT_NETWORK",
     "EXIT_NOT_FOUND",
@@ -254,8 +264,10 @@ __all__ = [
     "HOTKEY_NOT_REGISTERED",
     "INPUT_REQUIRED",
     "INSTALLER_PARTIAL_FAIL",
+    "INTERRUPTED",
     "NET_UNREACHABLE",
     "NODE_NOT_LISTED",
+    "OVERVIEW_NOT_FOR_CUSTODIED_ACCOUNT",
     "PORTAL_NOT_SUPPORTED",
     "unified_exit_code",
     "ProviderAuthError",

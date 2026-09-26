@@ -830,7 +830,19 @@ class ProviderClient:
         The session is kept in the token store under ``email:<address>`` (the account may have
         no key of its own) and used as this client's bearer token. Returns ``{miner, token}``.
         """
-        body = self._http.post(LOGIN_EMAIL, json_body={"email": email, "password": password}, auth=False)
+        try:
+            body = self._http.post(LOGIN_EMAIL, json_body={"email": email, "password": password}, auth=False)
+        except ProviderAuthError as e:
+            if e.code != PORTAL_AUTH_INVALID:
+                raise
+            raise ProviderAuthError(
+                "the portal refused this e-mail and password",
+                code=PORTAL_AUTH_INVALID,
+                hint="Check the address and LIUM_PROVIDER_PASSWORD (the portal password of an e-mail account); "
+                "an account created with Google has no password, so an agent uses LIUM_PROVIDER_TOKEN instead.",
+                cause=e,
+                context=e.context,
+            ) from e
         token = body.get("token") if isinstance(body, dict) else None
         if not isinstance(token, str) or not token:
             raise ProviderAuthError(
