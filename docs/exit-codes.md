@@ -55,12 +55,16 @@ The envelope goes to **stderr**, stdout is left empty, and the process exits
 with `exit_code`. On success stdout carries the result JSON. Read both streams;
 do not `2>/dev/null`.
 
-Under `--wait` (`topup link`, `topup create`, `topup card`), stderr first
-carries the progress line (`"event": "handoff"`, `"invoice_created"` or
-`"charged"`) and the envelope is the **last line** of stderr. Parse the last
-line, not the whole stream: after a card charge that timed out
-(`credit_not_seen`, exit 6, `data.charged: true`), that line's
-`data.idempotency_key` is the only safe way to retry `topup card`.
+Under `--wait` (`topup link`, `topup create`, `topup card`), stderr may first
+carry the progress line (`"event": "handoff"`, `"invoice_created"` or
+`"charged"`, once the page, invoice or charge exists); the envelope is always
+the **last line** of stderr. Parse the last line, not the whole stream. After
+a card charge that timed out (`credit_not_seen`, exit 6, `data.charged: true`)
+the card was charged: do not run the charge again, keep waiting with
+`lium topup wait --above <data.balance_before>`. A repeat of `topup card` must
+carry that line's `data.idempotency_key` and the same amount
+(`data.amount_usd`) within 24 h; the same key with a different amount is a new
+charge.
 
 `lium up --json` acts before it answers, so its progress lines (the node
 picked, the rent, the wait, the price prompt) go to stderr and stdout holds
@@ -124,7 +128,7 @@ Codes raised by the shared error handler (any command can produce them) when the
 Commands add their own codes for the failures only they can have — for example
 `up` raises `node_selection_failed`, `template_failed`, `jupyter_install_failed`,
 `unreadable_dockerfile`; `exec` raises `unreadable_script`; `rm` raises
-`removal_failed`; `fund` raises `transfer_failed`; `topup link`, `topup create`, `topup card` and `topup wait` with `--wait` raise `balance_unreadable` (3: the balance could not be read before the payment, so nothing was created or charged) and `credit_not_seen` (the balance did not rise in time; `data.charged` says whether money already left: 3 with `charged: null` (not known: a payment may be made and its credit on the way) after a payment page, an invoice or `topup wait` — keep waiting with `lium topup wait --above <data.balance_before>`; 6 with `charged: true` after `topup card` — the card was charged, do not run the charge again except with `data.idempotency_key`); `topup card` (not released yet) passes on the platform's own
+`removal_failed`; `fund` raises `transfer_failed`; `topup link`, `topup create`, `topup card` and `topup wait` with `--wait` raise `balance_unreadable` (3: the balance could not be read before the payment, so nothing was created or charged) and `credit_not_seen` (the balance did not rise in time; `data.charged` says whether money already left: 3 with `charged: null` (not known: a payment may be made and its credit on the way) after a payment page, an invoice or `topup wait` — keep waiting with `lium topup wait --above <data.balance_before>`; 6 with `charged: true` after `topup card` — the card was charged, do not run the charge again except with `data.idempotency_key` and the same amount within 24 h); `topup card` (not released yet) passes on the platform's own
 `CARD_AUTHENTICATION_REQUIRED`, `CARD_DECLINED`, `NO_SAVED_CARD` and
 `NO_DEFAULT_CARD` (3: the
 API refused the charge and the balance did not move; `data` carries `dashboard_url`, the bank's
