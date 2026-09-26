@@ -2,8 +2,8 @@
 
 Two output modes:
 
-- ``--json``: deterministic ``{ok, data, error, warnings}`` envelope, one
-  line per result. Driven by an agent.
+- ``--json`` (or ``LIUM_OUTPUT=json``): one envelope per result on stdout, ``{ok: true, data, warnings?}``
+  or ``{ok: false, error: {code, legacy_code, message, hint, exit_code, data?}}``. Driven by an agent.
 - TTY default: Rich tables (one table per known DTO), key/value panels
   for single-record endpoints, and a multi-section snapshot for
   ``ProviderStatus``. Curated columns combine related fields (e.g.
@@ -18,7 +18,9 @@ identical.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import sys
 from typing import Any, Callable, Iterable, Mapping
 
@@ -28,6 +30,7 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
+from lium.cli.provider import _blocking
 from lium.cli.utils import console
 from lium.provider.errors import (
     ARG_INVALID,
@@ -43,8 +46,11 @@ from lium.provider.errors import (
     PORTAL_REQUEST_REJECTED,
     PORTAL_SERVER_ERROR,
     PORTS_INVALID,
+    EXECUTOR_UUID_MISMATCH,
+    INSTALLER_PARTIAL_FAIL,
     SSH_AUTH_FAILED,
     SSH_UNREACHABLE,
+    UUID_NOT_FOUND,
     WALLET_NOT_FOUND,
     ProviderError,
 )
@@ -84,6 +90,46 @@ _EXIT_CODES: dict[str, int] = {
     # 7: token-cache contention
     PORTAL_AUTH_REFRESH_RACE: 7,
 }
+
+
+# A node with a gating blocking reason under ``--fail-on-blocked`` or ``--until-clear``.
+EXIT_NODE_BLOCKED = 10
+
+# The namespaced snake_case code each provider error carries in ``--json``; the UPPER_CASE code it
+# replaces stays in the envelope as ``legacy_code``. Never rename a code once shipped.
+ERROR_CODES: dict[str, str] = {
+    WALLET_NOT_FOUND: "auth.wallet_not_found",
+    HOTKEY_NOT_REGISTERED: "auth.hotkey_not_registered",
+    PORTAL_AUTH_EXPIRED: "auth.expired",
+    PORTAL_AUTH_INVALID: "auth.invalid",
+    PORTAL_AUTH_REFRESH_RACE: "auth.refresh_race",
+    PORTAL_FORBIDDEN: "auth.forbidden",
+    PORTAL_CONTRACT_DRIFT: "portal.contract_drift",
+    PORTAL_NOT_FOUND: "portal.not_found",
+    PORTAL_SERVER_ERROR: "portal.server_error",
+    PORTAL_RATE_LIMIT: "portal.rate_limited",
+    PORTAL_REQUEST_REJECTED: "portal.request_rejected",
+    SSH_UNREACHABLE: "ssh.unreachable",
+    SSH_AUTH_FAILED: "ssh.auth_failed",
+    INSTALLER_PARTIAL_FAIL: "host.installer_partial_fail",
+    EXECUTOR_UUID_MISMATCH: "host.executor_uuid_mismatch",
+    UUID_NOT_FOUND: "host.uuid_not_found",
+    PORTS_INVALID: "input.ports_invalid",
+    ARG_INVALID: "input.arg_invalid",
+    CONFIG_MISSING: "input.config_missing",
+}
+
+
+def error_code_for(code: str) -> str:
+    """The namespaced code for a provider error code; a code already namespaced passes through."""
+    if "." in code:
+        return code
+    if code in ERROR_CODES:
+        return ERROR_CODES[code]
+    for prefix, namespace in (("PORTAL_AUTH_", "auth"), ("PORTAL_", "portal"), ("SSH_", "ssh")):
+        if code.startswith(prefix):
+            return f"{namespace}.{code[len(prefix):].lower()}"
+    return f"general.{code.lower()}"
 
 
 def exit_code_for(err: ProviderError) -> int:
@@ -151,8 +197,17 @@ def emit_error(ctx: click.Context, err: ProviderError) -> int:
     """Format a :class:`ProviderError` and return its exit code."""
     code = exit_code_for(err)
     if _json_mode(ctx):
-        envelope = {"ok": False, "error": err.to_dict()}
-        click.echo(json.dumps(envelope, sort_keys=True, default=str), err=True)
+        error = {
+            "code": error_code_for(err.code),
+            "legacy_code": err.code,
+            "message": err.message,
+            "hint": err.hint,
+            "exit_code": code,
+            "context": err.context or {},
+        }
+        if err.context:
+            error["data"] = err.context
+        click.echo(json.dumps({"ok": False, "error": error}, sort_keys=True, default=str))
     else:
         prefix = click.style(f"[{err.code}]", fg="red", bold=True)
         click.echo(f"{prefix} {err.message}", err=True)
@@ -161,6 +216,51 @@ def emit_error(ctx: click.Context, err: ProviderError) -> int:
         if _debug_mode(ctx) and err.context:
             click.echo(f"  context: {err.context}", err=True)
     return code
+
+
+def emit_node_blocked(ctx: click.Context, node_id: str, reasons: list[Mapping[str, Any]], data: Any) -> int:
+    """Report a node held back by gating ``reasons`` and return :data:`EXIT_NODE_BLOCKED`.
+
+    ``--json`` gets one error envelope, ``node.blocked.<first reason's code>``, with the command's
+    result under ``error.data`` and the keys every provider error carries (``legacy_code`` is null:
+    the code is new, ``context`` is empty); the text mode has already printed the BLOCKING panel. The code
+    never holds a space: see :func:`_code_token`.
+    """
+    first = reasons[0]
+    code = f"node.blocked.{_code_token(first)}" if first.get("code") else "node.blocked"
+    message = f"node {node_id} is blocked: " + "; ".join(str(r.get("title") or r.get("code")) for r in reasons)
+    hint = str(first.get("fix") or "")
+    if _json_mode(ctx):
+        error = {
+            "code": code,
+            "legacy_code": None,
+            "message": message,
+            "hint": hint,
+            "exit_code": EXIT_NODE_BLOCKED,
+            "context": {},
+            "data": _to_serialisable(data),
+        }
+        click.echo(json.dumps({"ok": False, "error": error}, sort_keys=True, default=str))
+    else:
+        click.echo(f"{click.style(f'[{code}]', fg='red', bold=True)} {message}", err=True)
+    return EXIT_NODE_BLOCKED
+
+
+_CODE_TOKEN = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _code_token(reason: Mapping[str, Any]) -> str:
+    """The reason's code as one token. The portal sends a last error without ``reason_code`` with its
+    title as the code (``GPU verification failed``): that becomes ``last_error``. Any other such code
+    is its ASCII snake_case slug plus the first 8 hex digits of the code's sha256, so two codes that
+    slug alike (``Ошибка GPU`` and ``GPU error``) stay apart. The text stays in the envelope's ``message``."""
+    code = str(reason.get("code") or "")
+    if _CODE_TOKEN.fullmatch(code):
+        return code
+    if reason.get("kind") == "last_error":
+        return "last_error"
+    slug = re.sub(r"[^a-z0-9]+", "_", code.lower()).strip("_") or "unknown"
+    return f"{slug}_{hashlib.sha256(code.encode()).hexdigest()[:8]}"
 
 
 def emit_warning(ctx: click.Context, code: str, message: str) -> None:
@@ -334,9 +434,14 @@ def _node_status_label(status: Any) -> str:
 
 def _node_status(row: Mapping[str, Any]) -> str:
     computed = row.get("computed_status")
+    status = computed.get("status") if isinstance(computed, Mapping) else None
+    if _blocking.node_reasons(row):
+        # an AVAILABLE node that loses idle pay or the Secure listing must not read green
+        text = escape(str(status)) if status and status != "AVAILABLE" else "BLOCKED"
+        return console.get_styled(text, "error")
     if not isinstance(computed, Mapping):
         return console.get_styled("—", "dim")
-    return _node_status_label(computed.get("status"))
+    return _node_status_label(status)
 
 
 def _computed_status_rows(value: Mapping[str, Any]) -> list[tuple[str, str]]:
@@ -716,6 +821,8 @@ def _render_record(body: Mapping[str, Any]) -> None:
     for key, value in body.items():
         if key == "extra_incentive_eligible" and extra_incentives_disabled:
             continue
+        if key in ("blocking_reasons", "blocking_reasons_source"):
+            continue   # the BLOCKING panel under the table prints them
         if key == "computed_status" and isinstance(value, Mapping):
             for label, text in _computed_status_rows(value):
                 table.add_row(label, text)
@@ -822,6 +929,14 @@ def _format_discord_incentive_next_step() -> str:
 
 def _render_provider_status(status: ProviderStatus) -> None:
     """Multi-section render for the aggregated ``status`` command."""
+    if status.blocked_node_count:
+        console.print(
+            console.get_styled(
+                f"✗ {status.blocked_node_count} of {status.node_count or len(status.nodes)} nodes BLOCKED"
+                " — each one's fix is in its panel below",
+                "error",
+            )
+        )
     overview = _new_table(headers=False, expand=False)
     overview.add_column("Field", style="dim", justify="right", no_wrap=True)
     overview.add_column("Value", overflow="fold")
@@ -858,7 +973,10 @@ def _render_provider_status(status: ProviderStatus) -> None:
 
     if status.nodes:
         console.print(console.get_styled(f"\nNodes ({len(status.nodes)})", "info"))
-        _render_rows([n.model_dump() for n in status.nodes])
+        node_rows = [n.model_dump() for n in status.nodes]
+        _render_rows(node_rows)
+        _blocking.print_panels(node_rows)
+        _blocking.print_not_eligible(node_rows, short=True)
 
     if status.validator_weights:
         console.print(
@@ -880,9 +998,13 @@ def _render_provider_status(status: ProviderStatus) -> None:
 
 
 __all__ = [
+    "ERROR_CODES",
+    "EXIT_NODE_BLOCKED",
     "discord_incentive_warnings",
     "emit_error",
+    "emit_node_blocked",
     "emit_warning",
+    "error_code_for",
     "exit_code_for",
     "fatal",
     "render",

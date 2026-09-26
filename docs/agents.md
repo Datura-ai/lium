@@ -5,7 +5,7 @@ One page for an LLM agent (or any unattended script) that has to rent a GPU pod,
 The rules of the road:
 
 1. **Authenticate from the environment.** `LIUM_API_KEY` wins over `~/.lium/config.ini`. Never run `lium init` from an agent.
-2. **Ask for JSON.** `--format json` on `ls`/`ps`, `--json` on `exec`/`describe`/`balance`: the result is on stdout and the exit code says whether it worked. On any of them a runtime error is one JSON object on stderr (`LIUM_OUTPUT=json` switches that on for every command); a usage error is click's plain text with exit 2 (§2).
+2. **Ask for JSON.** `--format json` on `ls`/`ps`, `--json` on `exec`/`describe`/`balance`: the result is on stdout and the exit code says whether it worked. On any of them a runtime error is one JSON object on stderr (`LIUM_OUTPUT=json` switches that on for every renter command); `lium provider` prints its error envelope on stdout under `--json` or `LIUM_OUTPUT=json` (§7). A usage error is click's plain text with exit 2 (§2).
 3. **Never let a command wait for a human.** Pass `--yes` to anything that would confirm (`up`, `rm`); `reboot` never asks.
 4. **Always give a pod a lifetime** (`--ttl`) and always remove it when finished, including on failure.
 
@@ -36,7 +36,7 @@ All four keys are always there: `error.hint` is the next command or option to tr
 
 A usage error on any command — an unknown option, a missing argument — is click's plain-text `Usage: … Error: No such option '--bogus'` on stderr with exit 2, not the envelope: read exit 2 with non-JSON stderr as "fix the invocation".
 
-Failure on `ls --format json` / `ps --format json`: the same envelope on **stderr**, stdout empty — `lium ps no-such-pod --format json` exits 5 with `{"ok": false, "error": {"code": "pod_not_found", …}}` on stderr. `LIUM_OUTPUT=json` in the environment turns the envelope on for every command's failures, flag or no flag; success output stays JSON only where `--format json`/`--json` asks for it.
+Failure on `ls --format json` / `ps --format json`: the same envelope on **stderr**, stdout empty — `lium ps no-such-pod --format json` exits 5 with `{"ok": false, "error": {"code": "pod_not_found", …}}` on stderr. `LIUM_OUTPUT=json` in the environment turns the envelope on for every renter command's failures, flag or no flag; success output stays JSON only where `--format json`/`--json` asks for it. `lium provider` is the exception: there `LIUM_OUTPUT=json` acts like `--json`, success output is JSON too and the error envelope is on stdout (§7).
 
 Exit codes:
 
@@ -205,6 +205,27 @@ lium exec "$POD" --json "cd /root/project && . .venv/bin/activate && python trai
 lium exec "$POD" --json "tar czf /root/out.tgz -C /root/project out" >/dev/null
 lium scp "$POD" /root/out.tgz ./out.tgz -d
 ```
+
+## 7. Provider nodes (`lium provider`)
+
+`lium provider … --json`, or `LIUM_OUTPUT=json` in the environment, prints one envelope per command on stdout: `{"ok": true, "data": …}`, or on failure `{"ok": false, "error": {"code", "legacy_code", "message", "hint", "exit_code", "context", "data"?}}`. `code` is namespaced snake_case (`auth.expired`, `input.arg_invalid`, `portal.not_found`, `ssh.unreachable`, …) and never holds a space; `legacy_code` is the UPPER_CASE code older scripts matched (`PORTAL_NOT_FOUND`), and `null` on a code that never had one (`node.blocked.*`). `data` carries the error's details when there are any. `legacy_code` and `context` are on every provider error, `node.blocked.*` included: `context` holds the same details as `data`, is `{}` when there are none, and is kept for older readers, so read `data`. The provider commands keep their own exit statuses: 1 input, 2 auth, 3 portal, 5 ssh, 6 config, 7 token-cache contention, and 10 for a blocked node. These numbers are today's: a shared exit table for every command is coming in [docs/exit-codes.md](exit-codes.md) and may move them, so until it lands match on `code` and on the `exit_code` the envelope reports.
+
+What keeps a node off the listing or out of idle pay is in `lium provider --json node get <id>` under `data.blocking_reasons`, one entry per reason: `kind` (`idle_pay`, `availability`, `last_error`), `code`, `gating`, `message`, `measured`, `required`, `fix`, `fix_command`, `verify_command`, `requires` (`sudo`, `reboot`, `no_rentals`) and `docs_url`, as the portal sends them. `availability` and `last_error` reasons block renting whatever their `gating`. For `idle_pay`, `gating: true` blocks and `gating: false` only says the node earns no idle pay and needs no action. From a portal that sends no `gating`, the CLI decides from the code and marks the entry `"gating_source": "cli_legacy_fallback"`.
+
+```bash
+# exit 10 while anything blocks; the envelope's error.code is node.blocked.<first reason's code>
+lium provider node get "$NODE" --json --fail-on-blocked
+# after a fix: one JSON object per refresh, exit 0 once clear, 10 when 30 minutes pass first
+lium provider node status "$NODE" --json --watch --until-clear --timeout 1800
+# plain --watch with --fail-on-blocked: exit 10 at the first refresh that finds the node blocked
+lium provider node status "$NODE" --json --watch --fail-on-blocked
+```
+
+A reason whose `requires` lists `reboot` (or a fix that needs `sudo` on a host you do not control) is a step for a person: stop and hand it over.
+
+`no_rentals` means the fix stops every pod on the host: pause new rentals first (the portal's Pause New Rentals, or the provider CLI's pause command, coming with the next CLI release), wait until no rental runs, apply the fix, then resume rentals. An agent that cannot pause the node hands the step over.
+
+`requires_unknown: true` means stop and hand over to a person; do not act. The CLI sets it on a reason whose needs nobody has listed: one it built itself (a node marked `"blocking_reasons_source": "cli_fallback"`), a reachability or last-error reason the portal sent with an empty `requires`, or any reason sent without `requires`. The text panel prints it as `Requires: unknown — hand this step to a person` above the fix.
 
 ## See also
 

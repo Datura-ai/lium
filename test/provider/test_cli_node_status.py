@@ -103,13 +103,19 @@ def test_render_text_for_a_failed_last_run():
 
 
 class _Portal:
-    def __init__(self, body):
+    def __init__(self, body, node=None, overview=None):
         self.body = body
+        self.node = node if node is not None else {"id": "e-1"}
+        self.overview = overview or {}
         self.gets = []
 
     def get(self, path, *, params=None, auth=True):
         self.gets.append(path)
-        return self.body
+        if path.endswith("/verification"):
+            return self.body
+        if path == "/miners/overview":
+            return self.overview
+        return dict(self.node)
 
     def post(self, *a, **k):  # pragma: no cover
         return {}
@@ -123,8 +129,8 @@ class _Portal:
 
 @pytest.fixture
 def patched_client(monkeypatch, fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore):
-    def _factory(body):
-        portal = _Portal(body)
+    def _factory(body, node=None, overview=None):
+        portal = _Portal(body, node, overview)
 
         def _builder(ctx):
             return ProviderClient(signer=fake_signer, token_store=tmp_token_store, http=portal)  # type: ignore[arg-type]
@@ -140,7 +146,7 @@ def test_node_status_prints_the_headline_and_steps(patched_client):
     result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", "node", "status", "e-1"])
 
     assert result.exit_code == 0, result.output
-    assert portal.gets == ["/executors/e-1/verification"]
+    assert portal.gets == ["/executors/e-1/verification", "/executors/e-1", "/miners/overview"]
     assert result.output.splitlines()[0] == "verifying · step 3/6 Bandwidth & GPU proof · 42 s elapsed · ~1 min 10 s left"
     assert "  … 3. Bandwidth & GPU proof — 36 s so far · typically 1 min 10 s" in result.output
 
@@ -170,7 +176,7 @@ def test_node_status_watch_refreshes_until_interrupted(patched_client, monkeypat
     result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", "node", "status", "e-1", "--watch", "--interval", "2"])
 
     assert result.exit_code == 0, result.output
-    assert portal.gets == ["/executors/e-1/verification"] * 2  # two refreshes, then Ctrl-C
+    assert portal.gets == ["/executors/e-1/verification", "/executors/e-1", "/miners/overview"] * 2  # two refreshes, then Ctrl-C
 
 
 def test_mine_status_is_the_same_command(patched_client, monkeypatch):
@@ -180,7 +186,7 @@ def test_mine_status_is_the_same_command(patched_client, monkeypatch):
     result = CliRunner().invoke(cli, ["mine", "status", "e-1"])
 
     assert result.exit_code == 0, result.output
-    assert portal.gets == ["/executors/e-1/verification"]
+    assert portal.gets == ["/executors/e-1/verification", "/executors/e-1", "/miners/overview"]
     assert result.output.splitlines()[0].startswith("idle · last run failed (VERIFYX_FAILED_NETWORK_SPEED_TOO_SLOW)")
 
 
@@ -194,7 +200,7 @@ def test_mine_status_hotkey_flag_means_the_provider_hotkey(patched_client, monke
 
     result = CliRunner().invoke(cli, ["mine", "status", "e-1", flag, "hk1"])
     assert result.exit_code == 0, result.output
-    assert portal.gets == ["/executors/e-1/verification"]
+    assert portal.gets == ["/executors/e-1/verification", "/executors/e-1", "/miners/overview"]
     assert result.output.splitlines()[0].startswith("idle · last run failed")
 
     result = CliRunner().invoke(cli, ["mine", "status", "e-1"])
@@ -216,7 +222,7 @@ def test_mine_status_refuses_an_ss58_as_the_hotkey_name(patched_client, monkeypa
     result = CliRunner().invoke(cli, ["mine", "status", "e-1", "--json", "-k", ss58])
     assert result.exit_code == 1, result.output
     payload = json.loads(result.output.strip())
-    assert payload["ok"] is False and payload["error"]["code"] == "ARG_INVALID"
+    assert payload["ok"] is False and (payload["error"]["code"], payload["error"]["legacy_code"]) == ("input.arg_invalid", "ARG_INVALID")
     assert portal.gets == []
 
 
