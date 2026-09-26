@@ -206,6 +206,21 @@ lium exec "$POD" --json "tar czf /root/out.tgz -C /root/project out" >/dev/null
 lium scp "$POD" /root/out.tgz ./out.tgz -d
 ```
 
+## 7. Provider nodes (`lium provider`)
+
+`lium provider … --json`, or `LIUM_OUTPUT=json` in the environment, prints one envelope per command on stdout: `{"ok": true, "data": …}`, or on failure `{"ok": false, "error": {"code", "legacy_code", "message", "hint", "exit_code", "data"?}}`. `code` is namespaced snake_case (`auth.expired`, `input.arg_invalid`, `portal.not_found`, `ssh.unreachable`, …); `legacy_code` is the UPPER_CASE code older scripts matched (`PORTAL_NOT_FOUND`). The provider commands keep their own exit statuses: 1 input, 2 auth, 3 portal, 5 ssh, 6 config, 7 token-cache contention, and 10 for a blocked node.
+
+What keeps a node off the listing or out of idle pay is in `lium provider --json node get <id>` under `data.blocking_reasons`, one entry per reason: `kind` (`idle_pay`, `availability`, `last_error`), `code`, `gating`, `message`, `measured`, `required`, `fix`, `fix_command`, `verify_command`, `requires` (`sudo`, `reboot`, `no_rentals`) and `docs_url`, as the portal sends them. `availability` and `last_error` reasons block renting whatever their `gating`. For `idle_pay`, `gating: true` blocks and `gating: false` only says the node earns no idle pay and needs no action. From a portal that sends no `gating`, the CLI decides from the code and marks the entry `"gating_source": "cli_legacy_fallback"`.
+
+```bash
+# exit 10 while anything blocks; the envelope's error.code is node.blocked.<first reason's code>
+lium provider node get "$NODE" --json --fail-on-blocked
+# after a fix: one JSON object per refresh, exit 0 once clear, 10 when 30 minutes pass first
+lium provider node status "$NODE" --json --watch --until-clear --timeout 1800
+```
+
+A reason whose `requires` lists `reboot` (or a fix that needs `sudo` on a host you do not control) is a step for a person: stop and hand it over rather than retrying.
+
 ## See also
 
 - "First hour on a Lium pod" in `docs/getting-started.rst`

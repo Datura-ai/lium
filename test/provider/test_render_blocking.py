@@ -863,3 +863,56 @@ def test_the_panel_prints_requires_and_the_verify_command(portal_for):
     verify = lines.index("Verify:")
     assert lines[verify + 1] == "nvidia-smi --query-gpu=driver_version --format=csv,noheader"
     assert lines.index("sudo apt-get install -y nvidia-driver-580 && sudo reboot") < verify
+
+
+# The portal's reachability and last-error entries: `gating` is false (it is only about the Secure
+# idle-pay gate) and `secure_requirement` follows it, yet the node rents nowhere.
+AVAILABILITY_ENTRY = {
+    "kind": "availability", "code": "PORT_UNREACHABLE", "gating": False, "secure_requirement": False,
+    "title": "The validator could not reach the executor port", "message": "The validator could not reach the executor port",
+    "measured": None, "required": None, "fix": "Open port 8080 to the internet and restart the executor.",
+    "fix_command": None, "verify_command": None, "requires": [], "docs_url": None,
+}
+LAST_ERROR_ENTRY = {
+    "kind": "last_error", "code": "GPU_VERIFICATION_FAILED", "gating": False, "secure_requirement": False,
+    "title": "GPU verification failed", "message": "The GPU proof did not match the reported GPUs",
+    "measured": None, "required": None, "fix": "Restart the executor so the validator re-reads its GPUs.",
+    "fix_command": None, "verify_command": None, "requires": [], "docs_url": None,
+}
+
+# the catalog's current shape: `gating` served next to `secure_requirement`
+CATALOG_GPU_MODEL_GATED_FALSE = {**CATALOG_GPU_MODEL, "gating": False, "requires": [], "verify_command": None}
+
+
+@pytest.mark.parametrize("entry", [AVAILABILITY_ENTRY, LAST_ERROR_ENTRY], ids=["availability", "last_error"])
+def test_a_reachability_or_last_error_reason_blocks_whatever_its_gating(portal_for, ansi_console, entry):
+    node = _node("e-1", blocking_reasons=[entry])
+    portal_for(_Portal(nodes=[node], node=node))
+
+    result = _run("node", "list")
+
+    assert result.exit_code == 0, result.output
+    assert "blocked=1" in result.output
+    assert re.search(r"1\s+BLOCKED\s+e-1", result.output)
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", ansi_console.getvalue())
+    assert f"✗ {entry['title']}" in plain
+    assert "not eligible for idle pay" not in plain.lower()
+    assert "Secure listing" not in plain   # not a Secure requirement, a reason it rents nowhere
+
+    result = _run("--json", "node", "get", "e-1", "--fail-on-blocked")
+    assert result.exit_code == 10
+    assert json.loads(result.stdout)["error"]["code"] == f"node.blocked.{entry['code']}"
+
+
+def test_an_idle_pay_reason_with_gating_false_is_not_eligible_and_no_panel(portal_for, ansi_console):
+    node = _node("e-1", blocking_reasons=[CATALOG_GPU_MODEL_GATED_FALSE])
+    portal_for(_Portal(nodes=[node], node=node))
+
+    result = _run("node", "list")
+
+    assert result.exit_code == 0, result.output
+    assert "blocked=0" in result.output and "BLOCKED" not in result.output
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", ansi_console.getvalue())
+    assert "BLOCKING" not in plain
+    assert "◦ e-1: not eligible for idle pay (GPU model outside the idle-pay program); no action needed" in plain
+    assert _run("node", "get", "e-1", "--fail-on-blocked").exit_code == 0

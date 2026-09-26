@@ -5,10 +5,12 @@ out of idle pay, each with its message, the measured and required value and the 
 the portal serves that list, it is rebuilt here from what the portal already returns: the
 validator's ``computed_status.last_error``, the listing's ``hidden_reasons`` and the idle-pay
 reasons of ``GET /miners/overview``. A node with any reason gets a red BLOCKING panel; ``--json``
-carries the same list under each node's ``blocking_reasons``. Whether a reason blocks is the portal's
-``gating``; an entry with ``gating: false`` (an idle-pay code Secure does not require) blocks nothing: it
-prints as "Not eligible for idle pay: …" with its "No action: …" line. Only an entry the portal sends
-without ``gating`` (a portal from before the field) is decided here, from the code: the legacy fallback.
+carries the same list under each node's ``blocking_reasons``. The portal's ``gating`` says whether an
+idle-pay reason gates Secure; an idle-pay entry with ``gating: false`` (a code Secure does not require)
+blocks nothing: it prints as "Not eligible for idle pay: …" with its "No action: …" line. A reachability
+or last-error reason (``kind`` other than ``idle_pay``) blocks renting whatever its ``gating``. Only an
+entry the portal sends without ``gating`` (a portal from before the field) is decided here, from the
+code: the legacy fallback.
 """
 
 from __future__ import annotations
@@ -273,18 +275,23 @@ def _legacy_gating(code: str) -> bool:
 def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
     """One portal ``blocking_reasons`` entry as the fields the renderer prints.
 
-    ``gating`` is the portal's. ``secure`` (listed as an unmet Secure requirement) is the portal's
-    ``secure``/``secure_requirement``, else a gating idle-pay reason. An entry without ``gating`` takes
-    both from the code (``gating_source: cli_legacy_fallback``). Fields not named here are not printed.
+    ``gating`` is the portal's and only about the Secure idle-pay gate. ``blocks`` (the BLOCKING panel,
+    the blocked count, ``--fail-on-blocked``) is a gating reason or any reason that is not ``kind:
+    idle_pay``: a failed reachability check or the last error keeps the node from renting whatever its
+    ``gating``. An entry without ``kind`` (an older portal) counts as idle pay. ``secure`` (listed as an
+    unmet Secure requirement) is the portal's ``secure``/``secure_requirement``, else a gating idle-pay
+    reason. An entry without ``gating`` takes both from the code (``gating_source: cli_legacy_fallback``).
+    Fields not named here are not printed.
     """
     code = str(_first(entry, "code", "reason_code") or "")
     code = _ALIASES.get(code, code)
     secure = _first(entry, "secure", "secure_requirement", "blocks_secure", "gates_secure")
+    idle_pay = str(entry.get("kind") or "idle_pay") == "idle_pay"
     served = None if entry.get("gating_source") == "cli_legacy_fallback" else entry.get("gating")
     if served is not None:
         gating = bool(served)
         if secure is None:
-            secure = gating and str(entry.get("kind") or "idle_pay") == "idle_pay"
+            secure = gating and idle_pay
     else:
         gating = _legacy_gating(code)
         if secure is None:
@@ -302,6 +309,7 @@ def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
         "docs_url": _first(entry, "docs_url"),
         "secure": bool(secure),
         "gating": gating,
+        "blocks": gating or not idle_pay,
         "gating_source": "portal" if served is not None else "cli_legacy_fallback",
     }
 
@@ -314,13 +322,13 @@ def _all_reasons(row: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def node_reasons(row: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """What blocks the node (the BLOCKING panel): the portal's list without its ``gating: false`` entries."""
-    return [reason for reason in _all_reasons(row) if reason["gating"]]
+    """What blocks the node (the BLOCKING panel): every reason except a ``gating: false`` idle-pay one."""
+    return [reason for reason in _all_reasons(row) if reason["blocks"]]
 
 
 def not_eligible_reasons(row: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Why the node earns no idle pay while nothing needs fixing: the ``gating: false`` entries."""
-    return [reason for reason in _all_reasons(row) if not reason["gating"]]
+    """Why the node earns no idle pay while nothing needs fixing: the ``gating: false`` idle-pay entries."""
+    return [reason for reason in _all_reasons(row) if not reason["blocks"]]
 
 
 def needs_fallback(rows: Iterable[Mapping[str, Any]]) -> bool:
