@@ -344,8 +344,8 @@ CARD_TOPUP_ERROR_CODES = frozenset(
 # before processing). A 5xx without one of these still means the charge may have gone through.
 CARD_TOPUP_NOT_CHARGED_CODES = frozenset({"STRIPE_UNAVAILABLE", "STRIPE_REFUSED"})
 
-CHECKOUT_SUCCESS_URL = "https://lium.io/billing?success=true"
-CHECKOUT_CANCEL_URL = "https://lium.io/billing"
+CHECKOUT_SUCCESS_PATH = "/billing?success=true"
+CHECKOUT_CANCEL_PATH = "/billing"
 # below the smallest top-up by far, above float noise in the balance the API returns
 CREDIT_EPSILON_USD = 0.005
 
@@ -4414,6 +4414,13 @@ class Lium:
         """
         return float(self._request("GET", "/users/me").json().get("balance") or 0)
 
+    def balance_or_none(self) -> Optional[float]:
+        """The balance from ``/users/me``, or ``None`` when the answer has no ``balance`` field — where
+        :meth:`balance` would say 0, which a caller comparing balances would misread."""
+        body = self._request("GET", "/users/me").json()
+        value = body.get("balance") if isinstance(body, dict) else None
+        return None if value is None else float(value)
+
     def events(
         self,
         *,
@@ -4609,8 +4616,8 @@ class Lium:
     def topup_checkout_link(
         self,
         amount_usd: float,
-        success_url: str = CHECKOUT_SUCCESS_URL,
-        cancel_url: str = CHECKOUT_CANCEL_URL,
+        success_url: Optional[str] = None,
+        cancel_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Open a Stripe Checkout page that tops up this account by card (``POST /stripe/create-checkout-session``).
 
@@ -4623,8 +4630,9 @@ class Lium:
 
         Args:
             amount_usd: At least $10, the platform's top-up minimum.
-            success_url: Where Checkout sends the payer after paying.
-            cancel_url: Where Checkout sends the payer on cancel.
+            success_url: Where Checkout sends the payer after paying; default the Billing page of the
+                site the client talks to.
+            cancel_url: Where Checkout sends the payer on cancel; same default.
 
         Returns:
             ``{"url", "session_id", "amount_usd", "expires_at"}``; ``expires_at`` is a Unix time, or
@@ -4632,6 +4640,10 @@ class Lium:
         """
         if not math.isfinite(amount_usd):
             raise LiumError("amount_usd must be a finite number of dollars (at least 10).")
+        parsed = urlparse(self.config.base_url)
+        site = f"{parsed.scheme}://{parsed.netloc}"
+        success_url = success_url or site + CHECKOUT_SUCCESS_PATH
+        cancel_url = cancel_url or site + CHECKOUT_CANCEL_PATH
         body = self._request(
             "POST",
             "/stripe/create-checkout-session",
@@ -4671,9 +4683,12 @@ class Lium:
         balance: Optional[float] = None
         while True:
             try:
-                balance = self.balance()
-            except (LiumError, requests.RequestException):
-                pass
+                read = self.balance_or_none()
+            except Exception:
+                # a payment may already be made: an odd answer is one missed tick, never a crash
+                read = None
+            if read is not None:
+                balance = read
             elapsed = _clock() - start
             if balance is not None and balance > baseline + CREDIT_EPSILON_USD:
                 return {"credited": True, "balance": balance, "seconds": round(elapsed, 1)}

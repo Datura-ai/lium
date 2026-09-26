@@ -32,14 +32,24 @@ WAIT_HELP = ("Wait up to SECONDS for the balance to rise (the payment provider's
              "then print how long it took; under --json the payment details go to stderr first")
 
 
+def workspace_requested() -> bool:
+    """A workspace is asked for (`-w` / LIUM_WORKSPACE) or selected (`lium workspaces use`)."""
+    return bool(os.getenv("LIUM_WORKSPACE") or config.get("workspaces.active"))
+
+
 def billing_client() -> Lium:
     """The client for money routes: the `billing` key when one is set (LIUM_BILLING_API_KEY, then
-    `[api] billing_api_key`, which `lium signup --billing-key` writes), else the usual key."""
-    key = os.environ.get(BILLING_KEY_ENV_VAR)
+    `[api] billing_api_key`, which `lium signup --billing-key` writes), else the usual key.
+
+    A billing key belongs to one account. Under a workspace the workspace's own key pays, so the money
+    lands on the balance the workspace rents from."""
+    if workspace_requested():
+        return Lium()
+    key = os.getenv(BILLING_KEY_ENV_VAR)
     source = f"env:{BILLING_KEY_ENV_VAR}"
     if not key:
         key = config.get(BILLING_KEY_OPTION)
-        source = f"config:{config.get_config_path()} [api] billing_api_key"
+        source = config.get_source(BILLING_KEY_OPTION) or f"config:{config.get_config_path()} [api] billing_api_key"
     if not key:
         return Lium()
     return Lium(config=Config(
@@ -50,42 +60,58 @@ def billing_client() -> Lium:
     ))
 
 
-def balance_client(fallback: Lium) -> Lium:
-    """The usual key reads the balance; a billing key may too (GET /users/me), for an agent holding only that."""
-    try:
-        return Lium()
-    except (LiumError, ValueError):
-        return fallback
-
-
 def read_balance(client: Lium) -> Optional[float]:
     # best effort: the baseline and the final figure are reports, never a reason to fail after money moved
     try:
-        return client.balance()
+        reader = getattr(client, "balance_or_none", None) or client.balance
+        return reader()
     except Exception:
         return None
 
 
-def wait_for_credit_or_fail(client: Lium, baseline: Optional[float], wait: float, extra: dict) -> dict:
-    """Wait for the balance to pass `baseline`; the result dict on success, a CliFailure when time runs out."""
+def baseline_or_fail(client: Lium, *, what: str) -> float:
+    """The balance before a payment starts, read with the client that pays (the same account).
+    Refused before anything is created or charged when it cannot be read."""
+    baseline = read_balance(client)
     if baseline is None:
-        baseline = read_balance(client)
-        if baseline is None:
-            raise CliFailure(
-                "balance_unreadable",
-                "Could not read the balance to wait on. Check it with 'lium balance --json'.",
-                EXIT_API_ERROR,
-                data=extra,
-            )
+        raise CliFailure(
+            "balance_unreadable",
+            f"Could not read the balance to wait on, so no {what} was made. Check 'lium balance --json', "
+            "or run without --wait.",
+            EXIT_API_ERROR,
+            hint="Run 'lium balance --json'; retry with --wait once it answers, or without --wait.",
+        )
+    return baseline
+
+
+def wait_for_credit_or_fail(client: Lium, baseline: float, wait: float, extra: dict, *, charged: bool = False) -> dict:
+    """Wait for the balance to pass `baseline`; the result dict on success, a CliFailure when time runs out.
+
+    After a card charge (`charged`) the timeout is exit 6, like `charge_pending`: the money has left the
+    card, so the command must not look like one to run again."""
     outcome = client.wait_for_credit(baseline, timeout=wait)
     if not outcome["credited"]:
+        resume = f"lium topup wait --above {baseline:.2f}"
+        if charged:
+            key = extra.get("idempotency_key")
+            raise CliFailure(
+                "credit_not_seen",
+                f"The card was charged, but the balance did not rise above ${baseline:,.2f} within {wait:g} s. "
+                "Do not run the charge again.",
+                EXIT_PERMISSION_DENIED,
+                data={**extra, "charged": True, "balance_before": baseline, "balance": outcome["balance"],
+                      "waited_seconds": outcome["seconds"]},
+                hint=f"The card WAS charged. Keep waiting with '{resume}'; a repeat of the charge must carry "
+                     f"--idempotency-key {key} and the same amount (within 24 h) so it cannot charge twice.",
+            )
         raise CliFailure(
             "credit_not_seen",
-            f"The balance did not rise above ${baseline:,.2f} within {wait:g} s. If the payment was made, "
-            f"run 'lium topup wait --above {baseline:.2f}' to keep waiting; check 'lium balance --json' "
-            "before paying again.",
+            f"The balance did not rise above ${baseline:,.2f} within {wait:g} s.",
             EXIT_API_ERROR,
-            data={**extra, "balance_before": baseline, "balance": outcome["balance"], "waited_seconds": outcome["seconds"]},
+            data={**extra, "charged": False, "balance_before": baseline, "balance": outcome["balance"],
+                  "waited_seconds": outcome["seconds"]},
+            hint=f"If the payment was made, keep waiting with '{resume}'; check 'lium balance --json' before "
+                 "paying again.",
         )
     return {"credited": True, "balance_before": baseline, "balance": outcome["balance"],
             "seconds_to_credit": outcome["seconds"]}
@@ -185,8 +211,7 @@ def create_command(amount: float, currency: str, network: str, wait: float | Non
     """
     check_wait(wait)
     client = billing_client()
-    reader = balance_client(client)
-    baseline = read_balance(reader) if wait else None
+    baseline = baseline_or_fail(client, what="invoice") if wait else None
     invoice = client.topup_create_invoice(
         amount=amount, crypto_currency=currency, crypto_network=network
     )
@@ -196,7 +221,7 @@ def create_command(amount: float, currency: str, network: str, wait: float | Non
         if not json_output:
             print_invoice(invoice)
             ui.info(f"Waiting up to {wait:g} s for the transfer to be credited…")
-        credit = wait_for_credit_or_fail(reader, baseline, wait, {"invoice_id": invoice.get("invoice_id")})
+        credit = wait_for_credit_or_fail(client, baseline, wait, {"invoice_id": invoice.get("invoice_id")})
         if json_output:
             click.echo(json.dumps({**invoice, **credit}, sort_keys=True))
         else:
@@ -257,8 +282,7 @@ def link_command(amount: float, wait: float | None, json_output: bool):
                          EXIT_CONFIGURATION_ERROR)
     check_wait(wait)
     client = billing_client()
-    reader = balance_client(client)
-    baseline = read_balance(reader)
+    baseline = baseline_or_fail(client, what="payment page") if wait else read_balance(client)
     link = client.topup_checkout_link(amount)
     payload = {
         **link,
@@ -275,7 +299,7 @@ def link_command(amount: float, wait: float | None, json_output: bool):
         if not json_output:
             ui.info(f"Pay here: {link['url']}")
             ui.info(f"Waiting up to {wait:g} s for the payment…")
-        credit = wait_for_credit_or_fail(reader, baseline, wait, {"session_id": link.get("session_id")})
+        credit = wait_for_credit_or_fail(client, baseline, wait, {"session_id": link.get("session_id")})
         if json_output:
             click.echo(json.dumps({**payload, **credit}, sort_keys=True))
         else:
@@ -310,8 +334,9 @@ def wait_command(above: float | None, timeout_s: float, json_output: bool):
       lium topup wait --above 0 --timeout 900 --json
     """
     check_wait(timeout_s)
-    reader = balance_client(billing_client())
-    credit = wait_for_credit_or_fail(reader, above, timeout_s, {})
+    client = billing_client()
+    baseline = above if above is not None else baseline_or_fail(client, what="wait")
+    credit = wait_for_credit_or_fail(client, baseline, timeout_s, {})
     if json_output:
         click.echo(json.dumps(credit, sort_keys=True))
         return
@@ -363,8 +388,8 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     repeat with both shows the charge's status within 24 h.
 
     `--wait SECONDS` keeps the command running until the credit is on the balance and adds
-    `seconds_to_credit`; if the time runs out it exits 3 with credit_not_seen and the
-    idempotency key — the charge was still made, so do not run the command again without it.
+    `seconds_to_credit`; if the time runs out it exits 6 with credit_not_seen, `data.charged`
+    true and the idempotency key — the charge was made, so do not run the command again without it.
 
     \b
     Examples:
@@ -399,15 +424,7 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
             return
 
     client = billing_client()
-    reader = balance_client(client)
-    baseline = read_balance(reader) if wait else None
-    if wait and baseline is None:
-        raise CliFailure(
-            "balance_unreadable",
-            "Could not read the balance to wait on, so nothing was charged. Check 'lium balance --json', "
-            "or run without --wait.",
-            EXIT_API_ERROR,
-        )
+    baseline = baseline_or_fail(client, what="charge") if wait else None
     try:
         result = client.topup_card(
             amount, payment_method_id=payment_method_id, idempotency_key=idempotency_key
@@ -434,7 +451,8 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     if wait:
         announce({**result, "event": "charged"}, json_output)
         credit = wait_for_credit_or_fail(
-            reader, baseline, wait, {"idempotency_key": result.get("idempotency_key"), "amount_usd": amount}
+            client, baseline, wait, {"idempotency_key": result.get("idempotency_key"), "amount_usd": amount},
+            charged=True,
         )
         balance = credit["balance"]
     else:

@@ -327,11 +327,30 @@ class MintBillingKeyAction:
             detail = body.get("detail") or body.get("message") or (body.get("error") or {}).get("message")
             return ActionResult(ok=False, data={}, error=str(detail or f"HTTP {key_response.status_code}"))
         if body.get("scopes") != ["billing"]:
-            # never keep a key as the money key when the server widened or changed its scopes
-            return ActionResult(ok=False, data={}, error=f"the server minted scopes {body.get('scopes')}, not ['billing']")
+            # never keep a key as the money key when the server widened or changed its scopes; take it back
+            revoked = self._revoke(token, body.get("id"))
+            return ActionResult(
+                ok=False,
+                data={"billing_api_key_id": body.get("id"), "revoked": revoked},
+                error=f"the server minted scopes {body.get('scopes')}, not ['billing']; key {body.get('id')} "
+                      + ("was revoked" if revoked else "could not be revoked — revoke it on https://lium.io"),
+            )
         key = body.get("key") or body.get("api_key")
         if not key:
             return ActionResult(ok=False, data={}, error="the server returned no key")
 
         config.set(BILLING_KEY_OPTION, key)
         return ActionResult(ok=True, data={"billing_api_key": key, "billing_api_key_id": body.get("id")})
+
+    @staticmethod
+    def _revoke(token: str, key_id) -> bool:
+        if not key_id:
+            return False
+        try:
+            response = request_same_origin(
+                _send, "DELETE", f"{base_url()}/keys/{key_id}",
+                headers={"Authorization": f"Bearer {token}"}, timeout=REQUEST_TIMEOUT,
+            )
+        except (requests.RequestException, LiumError):
+            return False
+        return response.status_code < 400

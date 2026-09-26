@@ -25,6 +25,8 @@ lium up --gpu RTX4090 --ttl 30m --yes --json | jq -r .pod.huid        # cheapest
 
 `topup link` makes a Stripe Checkout page and charges nothing; `--wait SECONDS` prints the page on stderr at once (one JSON line, `"event": "handoff"`) and exits 0 when the balance rises, with `seconds_to_credit`, or 3 with `credit_not_seen` when the time runs out (`lium topup wait --above <balance_before>` resumes). The card is saved on the account for later top-ups. `topup create --wait` does the same for a crypto invoice, and `topup card --wait` for a saved card where the platform allows it.
 
+The balance a `--wait` watches is read with the same key that pays, so both are one account. Under a workspace (`-w`, `LIUM_WORKSPACE`, `lium workspaces use`) the workspace's key pays and the personal billing key is not used. A `--wait` that cannot read the balance first creates nothing (`balance_unreadable`, exit 3); a timeout is `credit_not_seen`, exit 3 after a page or invoice (keep waiting) and exit 6 after a card charge (`data.charged: true`: do not charge again).
+
 Renting needs a balance above 15 minutes of the node's price (`insufficient_balance`, exit 6, otherwise).
 
 ## 1. Authentication

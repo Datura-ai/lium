@@ -82,7 +82,7 @@ class _Clock:
 
 def test_wait_for_credit_returns_once_the_balance_rises(client, monkeypatch):
     readings = iter([0.0, 0.0, 10.0])
-    monkeypatch.setattr(client, "balance", lambda: next(readings))
+    monkeypatch.setattr(client, "balance_or_none", lambda: next(readings))
     clock = _Clock()
 
     outcome = client.wait_for_credit(0.0, timeout=60, interval=2, _clock=clock, _sleep=clock.sleep)
@@ -91,7 +91,7 @@ def test_wait_for_credit_returns_once_the_balance_rises(client, monkeypatch):
 
 
 def test_wait_for_credit_gives_up_at_the_timeout_with_the_last_balance(client, monkeypatch):
-    monkeypatch.setattr(client, "balance", lambda: 3.0)
+    monkeypatch.setattr(client, "balance_or_none", lambda: 3.0)
     clock = _Clock()
 
     outcome = client.wait_for_credit(3.0, timeout=5, interval=2, _clock=clock, _sleep=clock.sleep)
@@ -112,7 +112,7 @@ def test_wait_for_credit_rides_over_a_failed_balance_read(client, monkeypatch):
             raise value
         return value
 
-    monkeypatch.setattr(client, "balance", balance)
+    monkeypatch.setattr(client, "balance_or_none", balance)
     clock = _Clock()
 
     outcome = client.wait_for_credit(2.5, timeout=60, interval=2, _clock=clock, _sleep=clock.sleep)
@@ -120,8 +120,42 @@ def test_wait_for_credit_rides_over_a_failed_balance_read(client, monkeypatch):
     assert outcome["credited"] is True and outcome["balance"] == 12.5
 
 
+def test_wait_for_credit_survives_any_odd_answer_after_a_payment(client, monkeypatch):
+    readings = iter([AttributeError("odd body"), None, 9.0])
+
+    def balance():
+        value = next(readings)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(client, "balance_or_none", balance)
+    clock = _Clock()
+
+    assert client.wait_for_credit(0.0, timeout=60, interval=2, _clock=clock, _sleep=clock.sleep)["credited"] is True
+
+
+@responses.activate
+def test_a_users_me_without_balance_is_unreadable_not_zero(client):
+    responses.get(f"{API}/users/me", json={"id": "u1"})
+
+    assert client.balance_or_none() is None
+
+
+@responses.activate
+def test_checkout_urls_follow_the_site_the_client_talks_to():
+    staging = Lium(Config(api_key="k", base_url="https://staging.lium.io/api"))
+    responses.post("https://staging.lium.io/api/stripe/create-checkout-session", json={"id": "cs", "url": CHECKOUT_URL})
+
+    staging.topup_checkout_link(10)
+
+    body = json.loads(responses.calls[0].request.body)
+    assert body["success_url"] == "https://staging.lium.io/billing?success=true"
+    assert body["cancel_url"] == "https://staging.lium.io/billing"
+
+
 def test_wait_for_credit_ignores_float_noise(client, monkeypatch):
-    monkeypatch.setattr(client, "balance", lambda: 5.000001)
+    monkeypatch.setattr(client, "balance_or_none", lambda: 5.000001)
     clock = _Clock()
 
     assert client.wait_for_credit(5.0, timeout=3, interval=2, _clock=clock, _sleep=clock.sleep)["credited"] is False
@@ -131,22 +165,28 @@ def test_wait_for_credit_ignores_float_noise(client, monkeypatch):
 
 
 class _FakeLium:
-    """One account: `balances` is what successive balance reads return (the last one repeats)."""
+    """One account: `balances` is what successive balance reads return (the last one repeats).
+    `log` records (key, call) in order; a key of None is the usual key."""
 
     made_with: list = []
     balances: list = [0.0]
     link: dict = {"url": CHECKOUT_URL, "session_id": "cs_test_a1", "amount_usd": 10, "expires_at": None}
     charged: list = []
+    log: list = []
 
     def __init__(self, config=None):
-        type(self).made_with.append(config.api_key if config is not None else None)
+        self.key = config.api_key if config is not None else None
+        type(self).made_with.append(self.key)
 
-    def balance(self):
+    def balance_or_none(self):
+        type(self).log.append((self.key, "balance"))
         values = type(self).balances
         value = values.pop(0) if len(values) > 1 else values[0]
         if isinstance(value, Exception):
             raise value
         return value
+
+    balance = balance_or_none
 
     def wait_for_credit(self, baseline, timeout=600, interval=2.0):
         seen = self.balance()
@@ -155,20 +195,24 @@ class _FakeLium:
         return {"credited": False, "balance": seen, "seconds": timeout}
 
     def topup_checkout_link(self, amount):
+        type(self).log.append((self.key, "link"))
         return {**type(self).link, "amount_usd": amount}
 
     def topup_create_invoice(self, amount, crypto_currency, crypto_network):
+        type(self).log.append((self.key, "invoice"))
         return {"invoice_id": "inv-1", "deposit_address": "0xabc", "crypto_amount": amount,
                 "crypto_currency": crypto_currency, "crypto_network": crypto_network}
 
     def topup_card(self, amount, payment_method_id=None, idempotency_key=None):
+        type(self).log.append((self.key, "charge"))
         type(self).charged.append(amount)
         return {"status": "succeeded", "payment_intent_id": "pi_1", "idempotency_key": "k-1", "amount_usd": amount}
 
 
 @pytest.fixture
 def fake_lium(monkeypatch):
-    fake = type("FakeLium", (_FakeLium,), {"made_with": [], "balances": [0.0], "charged": []})
+    fake = type("FakeLium", (_FakeLium,), {"made_with": [], "balances": [0.0], "charged": [], "log": []})
+    monkeypatch.delenv("LIUM_WORKSPACE", raising=False)
     monkeypatch.setattr(topup_module, "Lium", fake)
     monkeypatch.delenv("LIUM_BILLING_API_KEY", raising=False)
     monkeypatch.setattr(topup_module.config, "get", lambda key, default=None: None)
@@ -235,6 +279,8 @@ def test_link_wait_timeout_is_credit_not_seen_exit_3_with_the_session(fake_lium)
     assert envelope["error"]["code"] == "credit_not_seen"
     assert envelope["data"]["session_id"] == "cs_test_a1"
     assert envelope["data"]["balance_before"] == 0.0
+    assert envelope["data"]["charged"] is False
+    assert "lium topup wait --above 0.00" in envelope["error"]["hint"]
 
 
 @pytest.mark.parametrize("args", [["--wait", "0"], ["--wait", "-3"], ["--wait", "nan"]])
@@ -276,6 +322,42 @@ def test_card_wait_reads_the_baseline_before_charging_and_reports_the_credit(fak
     assert out["balance"] == 54.0
     assert out["seconds_to_credit"] == 3.0
     assert fake_lium.charged == [50.0]
+    calls = [call for _, call in fake_lium.log]
+    assert calls.index("balance") < calls.index("charge"), calls
+
+
+def test_the_balance_is_read_with_the_key_that_pays(fake_lium, monkeypatch):
+    monkeypatch.setenv("LIUM_BILLING_API_KEY", "sk_billing_only")
+    fake_lium.balances = [0.0, 10.0]
+
+    result = CliRunner().invoke(cli, ["topup", "link", "-a", "10", "--wait", "60", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert {key for key, _ in fake_lium.log} == {"sk_billing_only"}
+
+
+def test_under_a_workspace_the_workspace_key_pays_not_the_personal_billing_key(fake_lium, monkeypatch):
+    monkeypatch.setenv("LIUM_BILLING_API_KEY", "sk_personal_billing")
+    monkeypatch.setenv("LIUM_WORKSPACE", "team-a")
+
+    result = CliRunner().invoke(cli, ["topup", "link", "-a", "10", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert "sk_personal_billing" not in fake_lium.made_with
+
+
+@pytest.mark.parametrize("args,created", [
+    (["link", "-a", "10"], "link"),
+    (["create", "-a", "20", "-c", "USDC", "-n", "base"], "invoice"),
+])
+def test_wait_with_an_unreadable_balance_creates_nothing(fake_lium, args, created):
+    fake_lium.balances = [RuntimeError("down")]
+
+    result = CliRunner().invoke(cli, ["topup", *args, "--wait", "60", "--json"])
+
+    assert result.exit_code == 3
+    assert _envelope(result)["error"]["code"] == "balance_unreadable"
+    assert created not in [call for _, call in fake_lium.log]
 
 
 def test_card_wait_with_an_unreadable_balance_charges_nothing(fake_lium):
@@ -293,10 +375,12 @@ def test_card_wait_timeout_keeps_the_idempotency_key_so_a_retry_does_not_charge_
 
     result = CliRunner().invoke(cli, ["topup", "card", "-a", "50", "--yes", "--wait", "5", "--json"])
 
-    assert result.exit_code == 3
+    assert result.exit_code == 6
     envelope = _envelope(result)
     assert envelope["error"]["code"] == "credit_not_seen"
     assert envelope["data"]["idempotency_key"] == "k-1"
+    assert envelope["data"]["charged"] is True
+    assert "WAS charged" in envelope["error"]["hint"] and "Retry" not in envelope["error"]["hint"]
     assert fake_lium.charged == [50.0]
 
 
@@ -400,15 +484,21 @@ def test_a_refused_billing_key_is_reported_and_the_account_stands(monkeypatch, s
     assert signup_env["api.api_key"] == "sk_rent_key"
 
 
-def test_a_key_minted_with_wider_scopes_is_never_kept_as_the_money_key(monkeypatch, signup_env):
-    _fake_server(monkeypatch, _Response(200, {"id": "k2", "key": "sk_wide", "scopes": ["read", "rent", "billing"]}))
+@pytest.mark.parametrize("scopes", [["read", "rent", "billing"], None])
+def test_a_key_minted_with_other_scopes_is_never_kept_and_is_revoked(monkeypatch, signup_env, scopes):
+    _fake_server(monkeypatch, _Response(200, {"id": "k2", "key": "sk_wide", "scopes": scopes}))
+    deleted = []
+    monkeypatch.setattr(signup_actions.requests, "delete",
+                        lambda url, **kw: deleted.append((url, kw["headers"])) or _Response(200), raising=False)
 
     result = CliRunner().invoke(cli, ["signup", "--email", "a@example.com", "--billing-key", "--json"])
 
     assert result.exit_code == 0, result.output
     out = json.loads(result.stdout)
     assert out["billing_key_configured"] is False
+    assert "was revoked" in out["billing_key_error"]
     assert "api.billing_api_key" not in signup_env
+    assert deleted == [(f"{API}/keys/k2", {"Authorization": "Bearer jwt-1"})]
 
 
 # -- signup --no-email

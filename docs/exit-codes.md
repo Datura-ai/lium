@@ -117,7 +117,7 @@ Codes raised by the shared error handler (any command can produce them) when the
 Commands add their own codes for the failures only they can have — for example
 `up` raises `node_selection_failed`, `template_failed`, `jupyter_install_failed`,
 `unreadable_dockerfile`; `exec` raises `unreadable_script`; `rm` raises
-`removal_failed`; `fund` raises `transfer_failed`; `topup card` (not released yet) passes on the platform's own
+`removal_failed`; `fund` raises `transfer_failed`; `topup link`, `topup create`, `topup card` and `topup wait` with `--wait` raise `balance_unreadable` (3: the balance could not be read before the payment, so nothing was created or charged) and `credit_not_seen` (the balance did not rise in time; `data.charged` says whether money already left: 3 with `charged: false` after a payment page or invoice — keep waiting with `lium topup wait --above <data.balance_before>`; 6 with `charged: true` after `topup card` — the card was charged, do not run the charge again except with `data.idempotency_key`); `topup card` (not released yet) passes on the platform's own
 `CARD_AUTHENTICATION_REQUIRED`, `CARD_DECLINED`, `NO_SAVED_CARD` and
 `NO_DEFAULT_CARD` (3: the
 API refused the charge and the balance did not move; `data` carries `dashboard_url`, the bank's
