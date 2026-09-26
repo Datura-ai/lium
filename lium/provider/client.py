@@ -20,7 +20,6 @@ from __future__ import annotations
 import logging
 import re as _re
 import time
-import warnings
 from typing import Any
 
 from lium.provider._routes import (
@@ -587,60 +586,29 @@ class ProviderClient:
     def create_notice_period(
         self,
         node_id: str,
-        payload: dict[str, Any] | None = None,
         *,
         starting_at: str | None = None,
         period_in_minute: int | None = None,
         reason: str | None = None,
-        permanent_removal: bool | None = None,
+        permanent_removal: bool = False,
     ) -> dict[str, Any]:
         """``POST /executors/{id}/notice-period``.
 
         Pass ``starting_at`` with ``period_in_minute`` for maintenance or
         ``permanent_removal=True`` for a removal; see
-        :class:`~lium.provider.models.NoticePeriodPayload`.
-
-        The ``payload`` dict and a call with no fields are deprecated and emit
-        a ``DeprecationWarning``; its keys map onto the keyword fields. A call
-        with no fields at all posts the empty body it always did. A key given
-        both in ``payload`` and as a keyword with a different value raises
-        ``TypeError``.
+        :class:`~lium.provider.models.NoticePeriodPayload`. A call with no
+        fields posts an empty body, as it always has.
         """
-        fields = {
-            k: v
-            for k, v in {
-                "starting_at": starting_at,
-                "period_in_minute": period_in_minute,
-                "reason": reason,
-                "permanent_removal": permanent_removal,
-            }.items()
-            if v is not None
-        }
-        if payload is not None or not fields:
-            warnings.warn(
-                "create_notice_period(node_id, payload) and calls without fields are deprecated; "
-                "pass starting_at, period_in_minute, reason and permanent_removal as keywords",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        if payload is not None:
-            if not isinstance(payload, dict):
-                raise TypeError(f"payload must be a dict, got {type(payload).__name__}")
-            conflicts = sorted(k for k in payload.keys() & fields.keys() if payload[k] != fields[k])
-            if conflicts:
-                raise TypeError(
-                    f"create_notice_period got conflicting values for {', '.join(conflicts)} "
-                    "in payload and keyword arguments"
-                )
-            fields = {**payload, **fields}
-        if not fields:
+        if starting_at is None and period_in_minute is None and reason is None and not permanent_removal:
             body: dict[str, Any] = {}
         else:
-            fields.setdefault("permanent_removal", False)
             body = _build_payload(
                 NoticePeriodPayload,
                 hint_for=_notice_period_hint,
-                **fields,
+                starting_at=starting_at,
+                period_in_minute=period_in_minute,
+                reason=reason,
+                permanent_removal=permanent_removal,
             )
         return self._http.post(
             EXECUTOR_NOTICE_PERIOD.format(id=_safe_id(node_id, label="node_id")),
@@ -871,9 +839,6 @@ def _notice_period_hint(exc: Exception) -> str | None:
         loc = err.get("loc") or ()
         if loc:
             name = str(loc[0])
-            if err.get("type") == "extra_forbidden":
-                names.append(f"{name}: not a notice-period field")
-                continue
             names.append(_NOTICE_PERIOD_FIELD_HINTS.get(name, name))
         else:
             names.append(_NOTICE_PERIOD_FIELD_HINTS["period_in_minute"])
