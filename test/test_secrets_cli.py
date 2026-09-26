@@ -237,3 +237,77 @@ def test_up_without_secrets_sends_todays_payload(client):
 def test_up_refuses_a_bad_secret_name_before_renting(client):
     with pytest.raises(ValueError):
         client.up(executor_id="exec-1", template_id="tpl", ssh_keys=[KEY], secret_names=["BAD-NAME"])
+
+
+# --- a rejected name is never echoed: it may be a pasted `NAME=value` ------------------------------
+
+PASTED = f"HF_TOKEN={VALUE}"
+
+
+def _everything_printed(result):
+    try:
+        return result.stdout + result.stderr
+    except ValueError:  # click < 8.2 without mix_stderr=False: stderr is already in output
+        return result.output
+
+
+@pytest.fixture
+def up_ready(monkeypatch):
+    monkeypatch.setenv("LIUM_SECRETS_ENABLED", "1")
+    monkeypatch.setattr(up_command, "ensure_config", lambda: None)
+
+
+@pytest.mark.parametrize("args", [
+    ["secrets", "set", PASTED],
+    ["secrets", "rm", PASTED, "-y"],
+    ["up", "exec-1", "--secret", PASTED, "-y"],
+    ["up", "exec-1", "--secret", "HF_TOKEN", "--secret", PASTED, "-y"],
+])
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_a_pasted_name_value_is_refused_without_echoing_the_value(fake, up_ready, monkeypatch, args, json_mode):
+    if json_mode:
+        monkeypatch.setenv("LIUM_OUTPUT", "json")
+
+    result = CliRunner().invoke(cli, args, input="")
+    printed = _everything_printed(result)
+
+    assert result.exit_code == 2
+    assert fake.set_calls == [] and fake.deleted == []
+    assert VALUE not in printed
+    assert "can't contain '='" in printed and "HF_TOKEN followed by '='" in printed
+    if json_mode:
+        assert json.loads(printed.strip().splitlines()[-1])["error"]["code"] == "invalid_arguments"
+
+
+@pytest.mark.parametrize("args", [
+    ["secrets", "rm", "HF_TOKEN", VALUE, "-y"],
+    ["secrets", "list", VALUE],
+    ["secrets", PASTED],
+    ["secrets", "set", "HF_TOKEN", f"--value={VALUE}"],
+])
+def test_stray_arguments_are_refused_without_echoing_them(fake, args):
+    result = CliRunner().invoke(cli, args, input="")
+
+    assert result.exit_code == 2
+    assert fake.set_calls == [] and fake.deleted == []
+    assert VALUE not in _everything_printed(result)
+
+
+@pytest.mark.parametrize("name", [PASTED, f"=={VALUE}", f"bad-{VALUE}", f"{VALUE}-x=y"])
+def test_sdk_refusal_never_contains_the_rejected_name(client, name):
+    for call in (lambda: client.secrets.set(name, "v"), lambda: client.secrets.delete(name),
+                 lambda: client.up(executor_id="exec-1", template_id="tpl", ssh_keys=[KEY], secret_names=[name])):
+        with pytest.raises(ValueError) as caught:
+            call()
+        assert VALUE not in str(caught.value) and VALUE not in repr(caught.value)
+
+
+def test_a_valid_prefix_is_named_and_an_invalid_one_is_not():
+    assert "HF_TOKEN followed by '='" in sdk_secrets.invalid_secret_name_message("HF_TOKEN=x")
+    assert "followed by" not in sdk_secrets.invalid_secret_name_message("bad-name=x")
+
+
+def test_bare_secrets_still_lists(fake):
+    result = _run(["secrets"])
+    assert result.exit_code == 0, result.output
+    assert "HF_TOKEN" in result.output

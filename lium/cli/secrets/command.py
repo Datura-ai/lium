@@ -20,6 +20,17 @@ VALUE_NOT_ON_ARGV = (
     "A secret value is never taken from the command line (it would stay in shell history and in `ps`): "
     "pipe it on stdin (`lium secrets set NAME < file`) or type it at the hidden prompt"
 )
+# click would echo an unexpected argument or unknown subcommand back; it may be a pasted value
+EXTRA_ARGS = "Unexpected extra argument (not shown: it may be a secret value); see 'lium secrets --help'"
+UNKNOWN_SUBCOMMAND = "Unknown secrets command (not shown: it may be a secret value); use set, list or rm"
+PASSTHROUGH_ARGS = {"ignore_unknown_options": True, "allow_extra_args": True}
+
+
+class SecretsGroup(click.Group):
+    def resolve_command(self, ctx, args):
+        if args and not args[0].startswith("-") and self.get_command(ctx, args[0]) is None:
+            raise click.UsageError(UNKNOWN_SUBCOMMAND, ctx)
+        return super().resolve_command(ctx, args)
 
 
 def require_enabled() -> None:
@@ -53,7 +64,7 @@ def read_secret_value(name: str) -> str:
     return value
 
 
-@click.group("secrets", invoke_without_command=True, hidden=not secrets_enabled())
+@click.group("secrets", cls=SecretsGroup, invoke_without_command=True, hidden=not secrets_enabled())
 @click.pass_context
 def secrets_command(ctx):
     """Secrets for pods, delivered as files under /run/lium/secrets/ (experimental)."""
@@ -61,12 +72,15 @@ def secrets_command(ctx):
         ctx.invoke(secrets_list_command)
 
 
-@secrets_command.command("list")
+@secrets_command.command("list", context_settings=PASSTHROUGH_ARGS)
 @click.option("--json", "json_output", is_flag=True, help="Machine-readable output (names and times only)")
+@click.pass_context
 @handle_errors
-def secrets_list_command(json_output: bool):
+def secrets_list_command(ctx, json_output: bool):
     """List secret names and when each last changed; values are never shown."""
     require_enabled()
+    if ctx.args:
+        raise CliFailure("invalid_arguments", EXTRA_ARGS, EXIT_CONFIGURATION_ERROR)
     ensure_config()
     secrets = Lium().secrets.list()
     if json_output:
@@ -81,9 +95,7 @@ def secrets_list_command(json_output: bool):
     ui.print(table)
 
 
-@secrets_command.command(
-    "set", context_settings={"ignore_unknown_options": True, "allow_extra_args": True}
-)
+@secrets_command.command("set", context_settings=PASSTHROUGH_ARGS)
 @click.argument("name")
 @click.pass_context
 @handle_errors
@@ -107,13 +119,16 @@ def secrets_set_command(ctx, name: str):
     ui.success(f"Secret {escape(name)} saved")
 
 
-@secrets_command.command("rm")
+@secrets_command.command("rm", context_settings=PASSTHROUGH_ARGS)
 @click.argument("name")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
 @handle_errors
-def secrets_rm_command(name: str, yes: bool):
+def secrets_rm_command(ctx, name: str, yes: bool):
     """Delete secret NAME. Pods already running keep the copy they were given."""
     require_enabled()
+    if ctx.args:
+        raise CliFailure("invalid_arguments", EXTRA_ARGS, EXIT_CONFIGURATION_ERROR)
     checked_name(name)
     ensure_config()
     if not yes and not ui.confirm(f"Delete secret {escape(name)}?"):
