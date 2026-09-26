@@ -4623,8 +4623,9 @@ class Lium:
 
         Nothing is charged by this call: whoever opens ``url`` enters a card (and passes the bank's
         3-D Secure check, if it asks) and the balance is credited by Stripe's webhook once the payment
-        succeeds. This is how an agent with no card of its own asks a person to pay; the card is saved on
-        the account, so later top-ups can use :meth:`topup_card` where the platform allows it. The key
+        succeeds. This is how an agent with no card of its own asks a person to pay. The card is saved
+        on the account for :meth:`topup_card` only while the platform's card top-up switch is on (not
+        released yet: off on lium.io). The key
         must hold the ``billing`` scope (or be a browser session); a ``read`` / ``rent`` / ``manage`` key
         is refused with :class:`LiumPermissionError`.
 

@@ -283,8 +283,9 @@ def link_command(amount: float, wait: float | None, json_output: bool):
 
     For an agent with no card of its own: it hands the printed `url` (Stripe Checkout) to
     a person, who enters a card there — and passes the bank's 3-D Secure check if it asks.
-    The balance is credited by Stripe's webhook seconds after the payment; the card is saved
-    on the account. The key must hold the `billing` scope: LIUM_BILLING_API_KEY, else
+    The balance is credited by Stripe's webhook seconds after the payment. The card is saved
+    on the account only while the platform's card top-up switch is on (not released yet: off
+    on lium.io). The key must hold the `billing` scope: LIUM_BILLING_API_KEY, else
     `[api] billing_api_key` (written by `lium signup --billing-key`), else the usual key.
 
     With `--wait SECONDS` the command waits for the credit: the link is printed first (on
@@ -470,6 +471,10 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     credit = {}
     if wait:
         announce({**result, "event": "charged"}, json_output)
+        if not json_output:
+            # before polling: a Ctrl-C during the wait must not lose the key a safe repeat needs
+            ui.info(f"Charged; idempotency key: {escape(str(result.get('idempotency_key')))}")
+            ui.info(f"Waiting up to {wait:g} s for the credit…")
         credit = wait_for_credit_or_fail(
             client, baseline, wait, {"idempotency_key": result.get("idempotency_key"), "amount_usd": amount},
             charged=True,

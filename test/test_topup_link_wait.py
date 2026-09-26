@@ -692,3 +692,18 @@ def test_a_saved_billing_key_without_a_binding_is_not_used(fake_lium, monkeypatc
 
     assert result.exit_code == 0, result.output
     assert "sk_old" not in fake_lium.made_with
+
+
+def test_text_mode_card_wait_prints_the_idempotency_key_before_polling(fake_lium, monkeypatch):
+    # a Ctrl-C during the wait must leave the key on screen, or a repeat charges twice
+    fake_lium.balances = [4.0]
+
+    def interrupted(self, baseline, timeout=600, interval=2.0):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(fake_lium, "wait_for_credit", interrupted)
+
+    result = CliRunner().invoke(cli, ["topup", "card", "-a", "50", "--yes", "--wait", "60"])
+
+    assert fake_lium.charged == [50.0]
+    assert "k-1" in result.output
