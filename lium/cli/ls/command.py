@@ -103,6 +103,11 @@ def ls_command(
     18 links, PCIe/SYS = PCIe only, worst class shown); it is "—" until the node's
     validator reports it.
 
+    Download and Upload (Mbps) are the platform's figures for the node: a VerifyX
+    download or an average over the validator's cycles when it has one. A "~" in
+    front marks a node with no such figure yet: the number is a single speed-test
+    sample from the node. --sort download / --sort upload order by the figure shown.
+
     ↓W after a node's Id means a reduced GPU power limit: it is set below the
     card's default, so expect somewhat lower peak performance than the same GPU at
     full power. --format json carries it as gpu_power_limited (true / false / null
