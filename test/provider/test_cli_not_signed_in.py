@@ -66,7 +66,8 @@ def _run(portal: PortalStub, *args: str, env: dict | None = None):
 def _agent_run(portal: PortalStub, switch, *args: str, env: dict | None = None):
     flags, switch_env = switch
     result = _run(portal, *flags, *args, env={**switch_env, **(env or {})})
-    return (result, *read_error(result, switch))
+    code, message, hint = read_error(result, switch)
+    return result, code, message, hint
 
 
 def test_the_walk_finds_the_commands_an_agent_uses() -> None:

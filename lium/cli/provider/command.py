@@ -60,7 +60,7 @@ class _ProviderGroup(click.Group):
             if not agent_mode(ctx):
                 raise
             err = ProviderError("stopped: interrupted", code=INTERRUPTED, hint="Re-run the command; check what it changed first.")
-            ctx.exit(emit_error(ctx, err))
+            return ctx.exit(emit_error(ctx, err))
 
 
 @click.group("provider", cls=_ProviderGroup)

@@ -191,7 +191,7 @@ progress, when a command has any, is one JSON object per line on stderr. `--json
 
   So under `LIUM_NONINTERACTIVE=1` with text output, every row above whose two exits differ now exits by the
   right-hand column, and so do these, which exit differently in plain text: no sign-in at all (1 → 6,
-  `auth.not_signed_in`), Ctrl-C (1 → 130, `input.interrupted`; `node status --watch` stays 0), `config set-password` without `--password`
+  `auth.not_signed_in`), Ctrl-C (1 → 130, `input.interrupted`; `node status` and `lium mine status` stay 0), `config set-password` without `--password`
   (a prompt → `input.arg_invalid`, 2), and `lium mine --register` with an unreadable token or a `-k` the token
   does not name (1 → 2) or a node registered but not listed (2 → 11).
 
@@ -200,8 +200,8 @@ progress, when a command has any, is one JSON object per line on stderr. `--json
   `LIUM_NONINTERACTIVE=1` (agent mode) piped input is ignored: the gate fails with
   `input.confirmation_required` (exit 2); use `--yes` or `LIUM_PROVIDER_ACK=1`. Ctrl-C during a
   `lium provider` command in agent mode is `input.interrupted` (exit 130); in plain text mode it is click's
-  `Aborted!` (exit 1), as it always was. The one exception is `node status --watch`: Ctrl-C is how it is
-  stopped, so it exits 0 in every mode, as on `main`.
+  `Aborted!` (exit 1), as it always was. The exceptions are `node status` (one-shot or `--watch`) and
+  `lium mine status`, which runs it: Ctrl-C exits 0 in every mode (a one-shot run prints nothing), as on `main`.
 
   A `lium provider` code with no old equivalent (`input.confirmation_required`, `human.handoff_required`,
   `human.handoff_expired`, `portal.not_supported`) has `legacy_code: null` and exits by the unified map in both
@@ -236,7 +236,7 @@ for a 400 or 409, `PORTAL_FORBIDDEN` for a 403, `PORTAL_NOT_FOUND` for a 404, `P
 | `code` | Exit | When |
 |--------|------|------|
 | `input.confirmation_required` | 2 | The persona gate under `--json`, `LIUM_OUTPUT=json` or `LIUM_NONINTERACTIVE=1`, where piped input is ignored. Re-run with `--yes` or `LIUM_PROVIDER_ACK=1`. |
-| `input.interrupted` | 130 | Ctrl-C during a `lium provider` command in agent mode (`node status --watch` exits 0 on Ctrl-C in every mode). |
+| `input.interrupted` | 130 | Ctrl-C during a `lium provider` command in agent mode (`node status`, with or without `--watch`, and `lium mine status` exit 0 on Ctrl-C in every mode). |
 | `input.input_required` | 2 | A value the command does not ask for: `lium mine` without `-k` under `--json` or `LIUM_NONINTERACTIVE=1`, `portal login --email` without `LIUM_PROVIDER_PASSWORD` off a terminal. |
 | `input.register_token_invalid` | 2 | `lium mine --register` in agent mode with an expired or unreadable token; nothing on the host was touched. |
 | `input.hotkey_conflicts_with_token` | 2 | `lium mine --register … -k` in agent mode with a hotkey the token does not name. |

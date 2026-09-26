@@ -191,6 +191,31 @@ def test_node_status_watch_stops_on_ctrl_c_with_exit_0_in_agent_mode_too(patched
     assert "input.interrupted" not in result.output
 
 
+MODES = [pytest.param(((), {}), id="plain-text"), *AGENT_SWITCHES]
+
+
+def _ctrl_c_on_fetch(portal) -> None:
+    def _get(path, *, params=None, auth=True):
+        raise KeyboardInterrupt
+    portal.get = _get
+
+
+@pytest.mark.parametrize("switch", MODES)
+@pytest.mark.parametrize("via", ["node status", "mine status"])
+def test_a_one_shot_status_stopped_by_ctrl_c_exits_0_with_nothing_on_stdout_in_every_mode(patched_client, monkeypatch,
+                                                                                          via, switch):
+    _ctrl_c_on_fetch(patched_client(VERIFYING))
+    flags, env = switch
+    if via == "node status":
+        result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", *flags, "node", "status", "e-1"],
+                                    env={**PLAIN_TEXT, **env})
+    else:
+        result = CliRunner().invoke(cli, ["mine", "status", "e-1", *flags],
+                                    env={**PLAIN_TEXT, "LIUM_PROVIDER_HOTKEY": "hk1", **env})
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+
+
 def test_mine_status_is_the_same_command(patched_client, monkeypatch):
     portal = patched_client(IDLE_FAILED)
     monkeypatch.setenv("LIUM_PROVIDER_HOTKEY", "hk1")
