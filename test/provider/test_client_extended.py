@@ -12,6 +12,7 @@ CLI/agent side:
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import pytest
@@ -289,6 +290,101 @@ def test_create_notice_period_refuses_a_payload_the_portal_would_refuse(client, 
         c.create_notice_period("e-1", **kwargs)
     assert exc.value.code == ARG_INVALID
     assert portal.posts == []
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.create_notice_period("e-1"),
+        lambda c: c.create_notice_period("e-1", None),
+        lambda c: c.create_notice_period("e-1", {}),
+        lambda c: c.create_notice_period("e-1", payload={}),
+    ],
+    ids=["bare", "positional-none", "positional-empty", "keyword-empty"],
+)
+def test_create_notice_period_old_call_shape_posts_mains_empty_body_and_warns(client, call) -> None:
+    portal = _Portal(post_body={})
+    c = client(portal)
+    with pytest.warns(DeprecationWarning, match="starting_at, period_in_minute"):
+        call(c)
+    assert portal.posts == [("/executors/e-1/notice-period", {}, True)]
+
+
+@pytest.mark.parametrize("positional", [True, False], ids=["positional", "keyword"])
+def test_create_notice_period_old_payload_maps_onto_the_new_fields(client, positional) -> None:
+    portal = _Portal(post_body={})
+    c = client(portal)
+    payload = {"starting_at": "2026-10-01T09:00:00+00:00", "permanent_removal": True}
+    with pytest.warns(DeprecationWarning):
+        if positional:
+            c.create_notice_period("e-1", payload)
+        else:
+            c.create_notice_period("e-1", payload=payload)
+    assert portal.posts[0][1] == {
+        "starting_at": "2026-10-01T09:00:00+00:00",
+        "period_in_minute": None,
+        "reason": None,
+        "permanent_removal": True,
+    }
+
+
+def test_create_notice_period_new_shape_does_not_warn(client) -> None:
+    portal = _Portal(post_body={})
+    c = client(portal)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        c.create_notice_period(
+            "e-1", starting_at="2026-10-01T09:00:00+00:00", permanent_removal=True
+        )
+    assert portal.posts[0][1]["permanent_removal"] is True
+
+
+def test_create_notice_period_conflicting_payload_and_keyword_raises(client) -> None:
+    portal = _Portal(post_body={})
+    c = client(portal)
+    with pytest.warns(DeprecationWarning), pytest.raises(TypeError, match="period_in_minute"):
+        c.create_notice_period(
+            "e-1",
+            {"starting_at": "2026-10-01T09:00:00+00:00", "period_in_minute": 30},
+            period_in_minute=45,
+        )
+    assert portal.posts == []
+
+
+def test_create_notice_period_matching_payload_and_keyword_is_accepted(client) -> None:
+    portal = _Portal(post_body={})
+    c = client(portal)
+    with pytest.warns(DeprecationWarning):
+        c.create_notice_period(
+            "e-1",
+            {"starting_at": "2026-10-01T09:00:00+00:00", "period_in_minute": 30},
+            period_in_minute=30,
+        )
+    assert portal.posts[0][1]["period_in_minute"] == 30
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "named"),
+    [
+        ({"starting_at": "bad", "period_in_minute": 30}, "starting_at: ISO 8601"),
+        ({"starting_at": "2026-10-01T09:00:00+00:00", "period_in_minute": 61}, "period_in_minute: 1-60"),
+        ({"starting_at": "2026-10-01T09:00:00+00:00"}, "permanent_removal"),
+    ],
+    ids=["starting-at", "period", "no-kind"],
+)
+def test_create_notice_period_refusal_hint_names_the_field(client, kwargs, named) -> None:
+    c = client(_Portal(post_body={}))
+    with pytest.raises(ProviderError) as exc:
+        c.create_notice_period("e-1", **kwargs)
+    assert named in exc.value.hint
+    assert "gpu_count" not in exc.value.hint
+
+
+def test_create_notice_period_unknown_payload_key_is_named(client) -> None:
+    c = client(_Portal(post_body={}))
+    with pytest.warns(DeprecationWarning), pytest.raises(ProviderError) as exc:
+        c.create_notice_period("e-1", {"starting_at": "2026-10-01T09:00:00+00:00", "bogus": 1})
+    assert "bogus: not a notice-period field" in exc.value.hint
 
 
 def test_delete_notice_period(client) -> None:

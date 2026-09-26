@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import re as _re
 import time
+import warnings
 from typing import Any
 
 from lium.provider._routes import (
@@ -586,27 +587,64 @@ class ProviderClient:
     def create_notice_period(
         self,
         node_id: str,
+        payload: dict[str, Any] | None = None,
         *,
-        starting_at: str,
+        starting_at: str | None = None,
         period_in_minute: int | None = None,
         reason: str | None = None,
-        permanent_removal: bool = False,
+        permanent_removal: bool | None = None,
     ) -> dict[str, Any]:
         """``POST /executors/{id}/notice-period``.
 
-        Pass ``period_in_minute`` for maintenance or ``permanent_removal=True``
-        for a removal; see :class:`~lium.provider.models.NoticePeriodPayload`.
+        Pass ``starting_at`` with ``period_in_minute`` for maintenance or
+        ``permanent_removal=True`` for a removal; see
+        :class:`~lium.provider.models.NoticePeriodPayload`.
+
+        The ``payload`` dict and a call with no fields are deprecated and emit
+        a ``DeprecationWarning``; its keys map onto the keyword fields. A call
+        with no fields at all posts the empty body it always did. A key given
+        both in ``payload`` and as a keyword with a different value raises
+        ``TypeError``.
         """
-        payload = _build_payload(
-            NoticePeriodPayload,
-            starting_at=starting_at,
-            period_in_minute=period_in_minute,
-            reason=reason,
-            permanent_removal=permanent_removal,
-        )
+        fields = {
+            k: v
+            for k, v in {
+                "starting_at": starting_at,
+                "period_in_minute": period_in_minute,
+                "reason": reason,
+                "permanent_removal": permanent_removal,
+            }.items()
+            if v is not None
+        }
+        if payload is not None or not fields:
+            warnings.warn(
+                "create_notice_period(node_id, payload) and calls without fields are deprecated; "
+                "pass starting_at, period_in_minute, reason and permanent_removal as keywords",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if payload is not None:
+            if not isinstance(payload, dict):
+                raise TypeError(f"payload must be a dict, got {type(payload).__name__}")
+            conflicts = sorted(k for k in payload.keys() & fields.keys() if payload[k] != fields[k])
+            if conflicts:
+                raise TypeError(
+                    f"create_notice_period got conflicting values for {', '.join(conflicts)} "
+                    "in payload and keyword arguments"
+                )
+            fields = {**payload, **fields}
+        if not fields:
+            body: dict[str, Any] = {}
+        else:
+            fields.setdefault("permanent_removal", False)
+            body = _build_payload(
+                NoticePeriodPayload,
+                hint_for=_notice_period_hint,
+                **fields,
+            )
         return self._http.post(
             EXECUTOR_NOTICE_PERIOD.format(id=_safe_id(node_id, label="node_id")),
-            json_body=payload,
+            json_body=body,
         )
 
     def delete_notice_period(self, node_id: str) -> dict[str, Any]:
@@ -794,7 +832,7 @@ def _safe_hotkey_segment(value: str, *, label: str = "miner_hotkey") -> str:
     return _safe_id(value, label=label)
 
 
-def _build_payload(model_class, /, **kwargs) -> dict[str, Any]:
+def _build_payload(model_class, /, hint_for=None, **kwargs) -> dict[str, Any]:
     """Construct a Pydantic payload model and serialise it.
 
     Converts a ``pydantic.ValidationError`` into ``ProviderError(ARG_INVALID)``
@@ -806,12 +844,41 @@ def _build_payload(model_class, /, **kwargs) -> dict[str, Any]:
     except Exception as e:
         # Avoid importing pydantic here; ValidationError exposes ``.errors()``
         # but we only need the human-readable str() form.
+        hint = hint_for(e) if hint_for is not None else None
         raise ProviderError(
             f"invalid payload for {model_class.__name__}: {e}",
             code=ARG_INVALID,
             cause=e,
-            hint="Check field constraints: gpu_count >= 1, port 1-65535, valid email, etc.",
+            hint=hint or "Check field constraints: gpu_count >= 1, port 1-65535, valid email, etc.",
         ) from e
+
+
+_NOTICE_PERIOD_FIELD_HINTS = {
+    "starting_at": "starting_at: ISO 8601 with a UTC offset, e.g. 2026-10-01T09:00:00+00:00",
+    "period_in_minute": "period_in_minute: 1-60 for maintenance, omitted for a permanent removal",
+    "reason": "reason: at most 500 characters",
+    "permanent_removal": "permanent_removal: True for a removal (no period_in_minute)",
+}
+
+
+def _notice_period_hint(exc: Exception) -> str | None:
+    """Name the notice-period field(s) a validation error is about."""
+    errors = getattr(exc, "errors", None)
+    if not callable(errors):
+        return None
+    names: list[str] = []
+    for err in errors():
+        loc = err.get("loc") or ()
+        if loc:
+            name = str(loc[0])
+            if err.get("type") == "extra_forbidden":
+                names.append(f"{name}: not a notice-period field")
+                continue
+            names.append(_NOTICE_PERIOD_FIELD_HINTS.get(name, name))
+        else:
+            names.append(_NOTICE_PERIOD_FIELD_HINTS["period_in_minute"])
+            names.append(_NOTICE_PERIOD_FIELD_HINTS["permanent_removal"])
+    return "Check " + "; ".join(dict.fromkeys(names)) if names else None
 
 
 def _summarise_body(body: Any, *, max_chars: int = 240) -> str:
