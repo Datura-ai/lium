@@ -18,6 +18,7 @@ identical.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -202,7 +203,7 @@ def emit_error(ctx: click.Context, err: ProviderError) -> int:
             "message": err.message,
             "hint": err.hint,
             "exit_code": code,
-            "context": err.context,
+            "context": err.context or {},
         }
         if err.context:
             error["data"] = err.context
@@ -221,7 +222,8 @@ def emit_node_blocked(ctx: click.Context, node_id: str, reasons: list[Mapping[st
     """Report a node held back by gating ``reasons`` and return :data:`EXIT_NODE_BLOCKED`.
 
     ``--json`` gets one error envelope, ``node.blocked.<first reason's code>``, with the command's
-    result under ``error.data``; the text mode has already printed the BLOCKING panel. The code
+    result under ``error.data`` and the keys every provider error carries (``legacy_code`` is null:
+    the code is new, ``context`` is empty); the text mode has already printed the BLOCKING panel. The code
     never holds a space: see :func:`_code_token`.
     """
     first = reasons[0]
@@ -231,9 +233,11 @@ def emit_node_blocked(ctx: click.Context, node_id: str, reasons: list[Mapping[st
     if _json_mode(ctx):
         error = {
             "code": code,
+            "legacy_code": None,
             "message": message,
             "hint": hint,
             "exit_code": EXIT_NODE_BLOCKED,
+            "context": {},
             "data": _to_serialisable(data),
         }
         click.echo(json.dumps({"ok": False, "error": error}, sort_keys=True, default=str))
@@ -247,14 +251,16 @@ _CODE_TOKEN = re.compile(r"[A-Za-z0-9_]+")
 
 def _code_token(reason: Mapping[str, Any]) -> str:
     """The reason's code as one token. The portal sends a last error without ``reason_code`` with its
-    title as the code (``GPU verification failed``): that becomes ``last_error``, any other such code
-    its snake_case slug. The text stays in the envelope's ``message``."""
+    title as the code (``GPU verification failed``): that becomes ``last_error``. Any other such code
+    is its ASCII snake_case slug plus the first 8 hex digits of the code's sha256, so two codes that
+    slug alike (``Ошибка GPU`` and ``GPU error``) stay apart. The text stays in the envelope's ``message``."""
     code = str(reason.get("code") or "")
     if _CODE_TOKEN.fullmatch(code):
         return code
     if reason.get("kind") == "last_error":
         return "last_error"
-    return re.sub(r"[^a-z0-9]+", "_", code.lower()).strip("_") or "unknown"
+    slug = re.sub(r"[^a-z0-9]+", "_", code.lower()).strip("_") or "unknown"
+    return f"{slug}_{hashlib.sha256(code.encode()).hexdigest()[:8]}"
 
 
 def emit_warning(ctx: click.Context, code: str, message: str) -> None:

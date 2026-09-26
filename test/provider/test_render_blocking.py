@@ -953,10 +953,96 @@ def test_a_blocked_code_never_holds_a_space():
 
     assert _code_token({"code": "PORT_UNREACHABLE", "kind": "availability"}) == "PORT_UNREACHABLE"
     assert _code_token({"code": "GPU verification failed", "kind": "last_error"}) == "last_error"
-    assert _code_token({"code": "Port 8080 not reachable!", "kind": "availability"}) == "port_8080_not_reachable"
+    assert _code_token({"code": "Port 8080 not reachable!", "kind": "availability"}) == "port_8080_not_reachable_5ff72a52"
 
 
 def test_an_unmapped_error_code_falls_back_to_the_general_namespace():
     from lium.cli.provider._render import error_code_for
 
     assert error_code_for("SOMETHING_NEW") == "general.something_new"
+
+
+def test_a_slug_keeps_two_codes_apart_and_the_same_code_always_gives_the_same_token():
+    from lium.cli.provider._render import _code_token
+
+    def token(code):
+        return _code_token({"code": code, "kind": "availability"})
+
+    assert token("Ошибка GPU") == "gpu_46a9d391"   # the ASCII slug alone would be `gpu`
+    assert token("GPU") == "GPU"
+    assert token("GPU!") == "gpu_3265e5a4"
+    assert len({token("Ошибка GPU"), token("GPU"), token("GPU!"), token("Ошибка")}) == 4
+    assert token("Ошибка") == token("Ошибка") and token("Ошибка").startswith("unknown_")
+
+
+_ENVELOPE_KEYS = {"code", "legacy_code", "message", "hint", "exit_code", "context"}
+
+
+@pytest.mark.parametrize(
+    "portal, args",
+    [
+        ("failing", ("node", "get", "e-1")),
+        ("clear", ("node", "status", "e-1", "--until-clear")),
+        ("clear", ("node", "list", "--all", "--miner-hotkey", "5Other")),
+        ("blocked", ("node", "get", "e-1", "--fail-on-blocked")),
+        ("blocked", ("node", "status", "e-1", "--fail-on-blocked")),
+        ("blocked", ("node", "status", "e-1", "--watch", "--fail-on-blocked")),
+        ("blocked", ("node", "status", "e-1", "--watch", "--until-clear", "--timeout", "5")),
+    ],
+    ids=["portal-error", "until-clear-without-watch", "all-with-hotkey", "get-blocked", "status-blocked",
+         "watch-blocked", "until-clear-timeout"],
+)
+def test_every_provider_error_envelope_carries_legacy_code_and_context(portal_for, clock, portal, args):
+    node = _node(blocking_reasons=[DRIVER_GATING] if portal == "blocked" else [])
+    portal_for(_FailingPortal() if portal == "failing" else _SequencePortal([node]))
+
+    result = _run("--json", *args)
+
+    assert result.exit_code != 0
+    error = _envelopes(result.stdout)[-1]["error"]
+    assert _ENVELOPE_KEYS <= set(error), sorted(error)
+    assert isinstance(error["context"], dict)
+    assert error["legacy_code"] is None if error["code"].startswith("node.blocked") else isinstance(error["legacy_code"], str)
+
+
+def test_every_provider_error_code_gets_legacy_code_and_an_empty_context(capsys):
+    import click
+
+    from lium.cli.provider._render import ERROR_CODES, emit_error
+
+    ctx = click.Context(click.Command("x"), obj={"provider_opts": {"json": True}})
+    for legacy in ERROR_CODES:
+        emit_error(ctx, ProviderError("x", code=legacy))
+        error = json.loads(capsys.readouterr().out)["error"]
+        assert _ENVELOPE_KEYS <= set(error) and error["legacy_code"] == legacy and error["context"] == {}, legacy
+
+
+def test_watch_until_clear_with_fail_on_blocked_waits_and_exits_0_once_clear(portal_for, clock):
+    blocked, clear = _node(blocking_reasons=[DRIVER_GATING]), _node(blocking_reasons=[])
+    portal_for(_SequencePortal([blocked, blocked, clear]))
+
+    result = _run("--json", "node", "status", "e-1", "--watch", "--until-clear", "--fail-on-blocked")
+
+    assert result.exit_code == 0, result.output
+    assert [f["ok"] for f in _envelopes(result.stdout)] == [True, True, True]
+    assert clock.sleeps == [5, 5]
+
+
+def test_a_fallback_last_error_carries_kind_last_error(portal_for):
+    node = _node(
+        status="VALIDATION_FAILED",
+        computed_status={
+            "status": "VALIDATION_FAILED",
+            "message": "Validation failed",
+            "last_error": {"title": "GPU check failed", "reason_code": "GPU check failed", "remediation": "Restart the executor"},
+        },
+    )
+    portal_for(_Portal(node=node))
+
+    result = _run("--json", "node", "get", "e-1", "--fail-on-blocked")
+
+    assert result.exit_code == 10
+    error = json.loads(result.stdout)["error"]
+    assert error["code"] == "node.blocked.last_error"
+    assert error["data"]["blocking_reasons_source"] == "cli_fallback"
+    assert error["data"]["blocking_reasons"][0]["kind"] == "last_error"
