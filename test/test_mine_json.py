@@ -1,7 +1,7 @@
 """`lium mine --json`: one result object on stdout, one JSON step event per line on stderr, never a prompt.
 
-An agent driving `lium mine` could not tell a port clash from a missing driver (both were a red line and exit 1),
-and without a terminal the hotkey prompt ended in an EOF traceback.
+An agent driving `lium mine` could not tell a port clash from a missing driver (both were a red line and exit 1).
+Text mode prompts as it always has, reading the answers from stdin off a terminal.
 """
 
 from __future__ import annotations
@@ -43,21 +43,29 @@ def test_json_without_a_hotkey_is_input_required_and_touches_nothing(monkeypatch
     assert calls == []
 
 
-def test_no_terminal_without_a_hotkey_exits_two_instead_of_an_eof_traceback(monkeypatch) -> None:
-    calls = _no_clone(monkeypatch)
-    result = _invoke([])
-    assert result.exit_code == 2, result.output
-    assert result.exception is None or isinstance(result.exception, SystemExit)
-    assert "no terminal to ask" in result.stderr and calls == []
+_TEXT = {"LIUM_OUTPUT": "", "LIUM_NONINTERACTIVE": ""}
 
 
-def test_eof_at_a_prompt_is_input_required(monkeypatch) -> None:
+def test_lium_noninteractive_without_a_hotkey_exits_two_and_touches_nothing(monkeypatch) -> None:
     calls = _no_clone(monkeypatch)
-    monkeypatch.setattr(mine, "is_interactive", lambda: True)
-    result = _invoke(["-k", HOTKEY], input="")   # stdin closes at the first port question
+    result = _invoke([], env={**_TEXT, "LIUM_NONINTERACTIVE": "1"}, input="5Fhotkey\n")
     assert result.exit_code == 2, result.output
-    assert not isinstance(result.exception, EOFError)
-    assert "Service port" in result.stderr and calls == []
+    assert "asks nothing under LIUM_NONINTERACTIVE" in result.stderr and calls == []
+
+
+def test_text_mode_off_a_terminal_reads_the_answers_from_stdin(monkeypatch, tmp_path: Path) -> None:
+    target, executor_dir = _stub_host(monkeypatch, tmp_path)
+    result = _invoke(["-k", HOTKEY, "--dir", str(target)], env=_TEXT, input="9090\n2201\n\n\n")
+    assert result.exit_code == 0, result.output
+    env = dict(l.split("=", 1) for l in (executor_dir / ".env").read_text().splitlines() if "=" in l)
+    assert (env["INTERNAL_PORT"], env["SSH_PORT"]) == ("9090", "2201")
+
+
+def test_text_mode_eof_at_a_prompt_exits_1(monkeypatch) -> None:
+    calls = _no_clone(monkeypatch)
+    result = _invoke(["-k", HOTKEY], env=_TEXT, input="")   # stdin closes at the first port question
+    assert result.exit_code == 1, result.output
+    assert "Service port" in result.output and calls == []
 
 
 def test_json_success_prints_one_result_and_step_events(monkeypatch, tmp_path: Path) -> None:

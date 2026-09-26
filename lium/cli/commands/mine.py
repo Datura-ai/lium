@@ -15,7 +15,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 
-from ..interactive import is_interactive
+from ..interactive import NONINTERACTIVE_ENV, noninteractive_requested
 from ..utils import console, console_on_stderr, handle_errors, json_output_requested, timed_step_status
 
 _SS58_HOTKEY = r"[1-9A-HJ-NP-Za-km-z]{40,60}"  # the shape `lium mine -k` validates and `mine status` refuses
@@ -31,10 +31,6 @@ class HostStepError(Exception):
         super().__init__(message)
         self.code = code
         self.data = data
-
-
-class _InputRequired(Exception):
-    """A value `lium mine` would have asked for, with nobody to answer (no terminal, --json, EOF)."""
 
 
 # --------------------------
@@ -479,14 +475,6 @@ def _apply_env_overrides(
         set_or_append("RENTING_PORT_RANGE", rng)
     env_f.write_text("\n".join(content) + "\n")
 
-def _ask(label: str, **kwargs) -> str:
-    """``Prompt.ask``; an EOF (stdin closed mid-answer) is ``_InputRequired``, not a traceback."""
-    try:
-        return Prompt.ask(label, **kwargs)
-    except EOFError as e:
-        raise _InputRequired(label) from e
-
-
 def _gather_inputs(
     hotkey: Optional[str],
     auto: bool,
@@ -512,14 +500,14 @@ def _gather_inputs(
         console.print("• [cyan]Renting port range[/cyan] → optional, used only if your firewall limits outbound ports.\n")
         
         if not hotkey:
-            hotkey = _ask("Miner hotkey SS58 address")
+            hotkey = Prompt.ask("Miner hotkey SS58 address")
         else:
             console.print(f"Miner hotkey SS58 address: [yellow]{hotkey}[/yellow]\n")
         answers["hotkey"] = hotkey or ""
 
         def ask_port(label, default):
             while True:
-                v = _ask(label, default=str(default))
+                v = Prompt.ask(label, default=str(default))
                 if not v:  # Allow empty for optional ports
                     return ""
                 if v.isdigit() and 1 <= int(v) <= 65535:
@@ -533,10 +521,10 @@ def _gather_inputs(
         answers["ssh_port"] = ask_port("Node SSH port (used by validator to SSH into the container)", 2200)
         
         # Optional ports
-        ssh_public = _ask("Public SSH port (optional, only if behind NAT and forwarding a different port)", default="")
+        ssh_public = Prompt.ask("Public SSH port (optional, only if behind NAT and forwarding a different port)", default="")
         answers["ssh_public_port"] = ssh_public if ssh_public and ssh_public.isdigit() else ""
         
-        answers["port_range"] = _ask("Renting port range (optional, e.g. 2000-2005 or 2000,2001). Leave empty if all ports open", default="")
+        answers["port_range"] = Prompt.ask("Renting port range (optional, e.g. 2000-2005 or 2000,2001). Leave empty if all ports open", default="")
 
     return answers
 
@@ -748,8 +736,9 @@ def _json_failure(code: str, message: str, exit_code: int, hint: str = "", data:
 
 
 def _input_required(label: str, json_mode: bool) -> int:
-    message = f"`lium mine` needs a value for '{label}' and there is no terminal to ask"
-    hint = "Pass -k HOTKEY (or --register TOKEN) with --auto, or run in a terminal."
+    why = "--json" if json_mode else NONINTERACTIVE_ENV
+    message = f"`lium mine` needs a value for '{label}' and asks nothing under {why}"
+    hint = "Pass -k HOTKEY (or --register TOKEN) with --auto."
     if json_mode:
         return _json_failure("input.input_required", message, 2, hint, {"field": label})
     click.echo(f"Error: {message}. {hint}", err=True)
@@ -783,7 +772,7 @@ def _register_result(code: int, report: dict) -> int:
     "-a",
     is_flag=True,
     help="Take the default ports (service 8080, SSH 2200) without asking; needs -k (or --register). "
-    "Without a terminal, or with --json, nothing is asked either: the defaults are taken and a missing -k is "
+    "With --json, LIUM_OUTPUT=json or LIUM_NONINTERACTIVE=1 nothing is asked either: the defaults are taken and a missing -k is "
     "input.input_required (exit 2).",
 )
 @click.option("--verbose", "-v", is_flag=True, help="Show the plan banner")
@@ -929,15 +918,12 @@ def _run_mine(ctx, hotkey, dir_, branch, auto, verbose, register_token, portal_u
                 "If registration fails with an expired token, copy a fresh command from the portal."
             )
 
-    if not auto and (json_mode or not is_interactive()):
-        # nobody to answer the port questions: the defaults, as --auto takes them; the hotkey has no default
+    if not auto and (json_mode or noninteractive_requested()):
+        # agent mode asks nothing: the port defaults, as --auto takes them; the hotkey has no default
         if not hotkey:
             return _input_required("Miner hotkey SS58 address", json_mode)
         auto = True
-    try:
-        answers = _gather_inputs(hotkey, auto)
-    except _InputRequired as e:
-        return _input_required(str(e), json_mode)
+    answers = _gather_inputs(hotkey, auto)
     target_dir = Path(dir_).absolute()
 
     TOTAL_STEPS = 8 if token else 6

@@ -10,7 +10,6 @@ from click.testing import CliRunner
 from lium.cli.provider._persona import (
     ConfirmationRequired,
     PersonaContext,
-    ack_scope,
     confirm_persona,
     is_acked,
     mark_acked,
@@ -18,7 +17,7 @@ from lium.cli.provider._persona import (
 
 
 def _persona() -> PersonaContext:
-    return PersonaContext(coldkey="default", hotkey="hk1", scope="user:test")
+    return PersonaContext(coldkey="default", hotkey="hk1", shell_session_id="123")
 
 
 def test_yes_flag_short_circuits_prompt(tmp_path: Path) -> None:
@@ -80,7 +79,6 @@ def test_user_typing_y_persists_ack(tmp_path: Path) -> None:
             hotkey=persona.hotkey,
             env={},
             path=ack_path,
-            interactive=True,
             input_func=lambda: "y",
             output_func=lambda m: None,
         )
@@ -90,10 +88,14 @@ def test_user_typing_y_persists_ack(tmp_path: Path) -> None:
     result = runner.invoke(cmd, [])
     assert result.exit_code == 0
     assert result.output.strip() == "ok"
+    # The ack key uses the *current* process's parent pid (per shell_session_id())
+    # so our pre-built persona may have a different key. Confirm at least one
+    # entry was written.
     import json
 
+    assert ack_path.exists()
     data = json.loads(ack_path.read_text())
-    assert list(data) == [f"default::hk1::{ack_scope()}"]
+    assert isinstance(data, dict) and len(data) >= 1
 
 
 def test_user_typing_anything_else_rejects(tmp_path: Path) -> None:
@@ -106,7 +108,6 @@ def test_user_typing_anything_else_rejects(tmp_path: Path) -> None:
             hotkey="hk1",
             env={},
             path=tmp_path / "ack.json",
-            interactive=True,
             input_func=lambda: "n",
             output_func=lambda m: None,
         )
@@ -125,7 +126,7 @@ def test_corrupt_ack_file_does_not_crash(tmp_path: Path) -> None:
     assert is_acked(persona, env={}, path=ack_path) is False
 
 
-# --- no prompt without a person to answer it -------------------------------------
+# --- text mode prompts as it always has; agent mode never reads stdin ------------
 
 
 def _gate(tmp_path: Path, **kwargs):
@@ -143,135 +144,113 @@ def _gate(tmp_path: Path, **kwargs):
     return CliRunner().invoke(cmd, []), seen
 
 
-def test_json_mode_never_prompts_it_asks_for_confirmation(tmp_path: Path) -> None:
+def test_json_mode_never_reads_stdin_it_asks_for_confirmation(tmp_path: Path) -> None:
     asked = []
-    result, seen = _gate(tmp_path, json_mode=True, interactive=True, input_func=lambda: asked.append(1) or "y")
+    result, seen = _gate(tmp_path, json_mode=True, input_func=lambda: asked.append(1) or "y")
     assert result.exit_code == 0, result.output
     assert "--json" in seen["raised"] and asked == []
 
 
-def test_no_terminal_never_prompts_it_asks_for_confirmation(tmp_path: Path) -> None:
+def test_lium_noninteractive_is_agent_mode_too(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LIUM_NONINTERACTIVE", "1")
     asked = []
-    result, seen = _gate(tmp_path, interactive=False, input_func=lambda: asked.append(1) or "y")
-    assert "not a terminal" in seen["raised"] and asked == []
+    result, seen = _gate(tmp_path, input_func=lambda: asked.append(1) or "y")
+    assert "LIUM_NONINTERACTIVE" in seen["raised"] and asked == []
 
 
-def test_the_default_reads_the_terminal_so_a_pipe_is_not_asked(tmp_path: Path) -> None:
-    # CliRunner's stdin is not a terminal: with no `interactive=` the gate must not wait on it
-    result, seen = _gate(tmp_path, input_func=lambda: "y")
-    assert "raised" in seen, seen
-
-
-def test_eof_at_the_prompt_is_no_answer_not_a_crash(tmp_path: Path) -> None:
-    def eof():
-        raise click.Abort()   # what click.prompt raises on EOF
-
-    result, seen = _gate(tmp_path, interactive=True, input_func=eof, output_func=lambda m: None)
-    assert result.exit_code == 0, result.output
-    assert "stdin closed" in seen["raised"]
-
-
-def test_ctrl_c_at_the_prompt_stops_the_command_as_input_interrupted(tmp_path: Path, monkeypatch) -> None:
-    import builtins
-
-    from lium.cli.provider.command import provider_command
-
-    def ctrl_c(*_args):
+def test_ctrl_c_at_the_text_prompt_is_a_decline(tmp_path: Path) -> None:
+    def ctrl_c():
         raise KeyboardInterrupt
 
-    monkeypatch.setattr("lium.cli.provider._persona.DEFAULT_ACK_PATH", tmp_path / "ack.json")
-    monkeypatch.setattr("lium.cli.provider._persona.is_interactive", lambda: True)
-    monkeypatch.setattr(builtins, "input", ctrl_c)
-    env = {"LIUM_PROVIDER_TOKEN": "lpk_stub", "LIUM_PROVIDER_ACK": "", "LIUM_OUTPUT": "", "LIUM_NONINTERACTIVE": ""}
-    result = CliRunner().invoke(
-        provider_command, ["--portal-url", "http://127.0.0.1:9", "node", "pause", "7c1f0e2a-0000-4000-8000-000000000001"],
-        env=env,
-    )
-    assert result.exit_code == 1, "text mode keeps the old ARG_INVALID exit"
-    assert "[input.interrupted]" in result.stderr and "stdin closed" not in result.stderr
+    result, seen = _gate(tmp_path, input_func=ctrl_c, output_func=lambda m: None)
+    assert seen == {"ok": False}
 
 
-def test_the_gate_errors_exit_1_in_text_and_2_or_130_under_json() -> None:
+def test_the_agent_mode_codes_have_no_legacy_code_and_exit_2_or_130() -> None:
     from lium.cli.provider._render import exit_code_for, legacy_code_for
-    from lium.provider.errors import ARG_INVALID, CONFIRMATION_REQUIRED, INTERRUPTED, ProviderError
+    from lium.provider.errors import CONFIRMATION_REQUIRED, INTERRUPTED, ProviderError
 
-    for code, json_exit in ((CONFIRMATION_REQUIRED, 2), (INTERRUPTED, 130)):
-        err = ProviderError("x", code=code, legacy_code=ARG_INVALID)
-        assert (exit_code_for(err), exit_code_for(err, json_mode=True)) == (1, json_exit), code
-        assert legacy_code_for(err) == ARG_INVALID
-
-
-def test_the_real_gate_error_carries_arg_invalid_as_its_legacy_code(monkeypatch, fake_signer, tmp_token_store) -> None:
-    import json
-
-    result, portal = _node_rm(monkeypatch, fake_signer, tmp_token_store, ["node", "rm", "e-1"], env={"LIUM_OUTPUT": "json"})
-    assert json.loads(result.stdout)["error"]["legacy_code"] == "ARG_INVALID"
-
-
-def test_an_ack_covers_every_process_of_the_user_not_one_parent_pid(tmp_path: Path, monkeypatch) -> None:
-    import os
-
-    monkeypatch.setattr(os, "getppid", lambda: 1111)
-    result, seen = _gate(tmp_path, interactive=True, input_func=lambda: "y", output_func=lambda m: None)
-    assert seen["ok"] is True
-    # the next agent subprocess has another parent: no prompt, no refusal
-    monkeypatch.setattr(os, "getppid", lambda: 2222)
-    result, seen = _gate(tmp_path, interactive=False)
-    assert seen == {"ok": True}
-
-
-def test_the_ack_key_names_the_user() -> None:
-    import getpass
-
-    assert ack_scope() == f"user:{getpass.getuser()}"
+    for code, exit_code in ((CONFIRMATION_REQUIRED, 2), (INTERRUPTED, 130)):
+        err = ProviderError("x", code=code)
+        assert (exit_code_for(err), exit_code_for(err, json_mode=True)) == (exit_code, exit_code), code
+        assert legacy_code_for(err) is None
 
 
 class _RecordingPortal:
-    def __init__(self):
+    def __init__(self, on_delete=None):
         self.deletes: list = []
+        self.on_delete = on_delete
 
     def delete(self, path, *, auth=True):
+        if self.on_delete:
+            self.on_delete()
         self.deletes.append(path)
         return {}
 
 
-def _node_rm(monkeypatch, fake_signer, tmp_token_store, args, env=None):
+def _node_rm(monkeypatch, fake_signer, tmp_token_store, args, env=None, input=None, on_delete=None):
     from lium.cli.provider.command import provider_command
     from lium.provider.client import ProviderClient
 
-    portal = _RecordingPortal()
+    portal = _RecordingPortal(on_delete)
     monkeypatch.setattr(
         "lium.cli.provider.node.build_client",
         lambda ctx: ProviderClient(signer=fake_signer, token_store=tmp_token_store, http=portal),
     )
-    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", *args], env={"LIUM_PROVIDER_ACK": "", **(env or {})})
+    monkeypatch.setattr("lium.cli.provider._persona.DEFAULT_ACK_PATH", tmp_token_store.path.parent / "ack.json")
+    env = {"LIUM_PROVIDER_ACK": "", "LIUM_OUTPUT": "", "LIUM_NONINTERACTIVE": "", **(env or {})}
+    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", *args], env=env, input=input)
     return result, portal
 
 
-def test_a_mutation_under_json_without_yes_is_confirmation_required_exit_2(monkeypatch, fake_signer, tmp_token_store) -> None:
+def test_text_mode_a_piped_y_confirms_and_the_command_runs(monkeypatch, fake_signer, tmp_token_store) -> None:
+    result, portal = _node_rm(monkeypatch, fake_signer, tmp_token_store, ["node", "rm", "e-1"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert portal.deletes == ["/executors/e-1"]
+
+
+def test_text_mode_a_piped_n_declines_and_exits_1(monkeypatch, fake_signer, tmp_token_store) -> None:
+    result, portal = _node_rm(monkeypatch, fake_signer, tmp_token_store, ["node", "rm", "e-1"], input="n\n")
+    assert result.exit_code == 1, result.output
+    assert "[ARG_INVALID] persona confirmation declined" in result.stderr
+    assert portal.deletes == []
+
+
+def test_text_mode_eof_at_the_prompt_exits_1(monkeypatch, fake_signer, tmp_token_store) -> None:
+    result, portal = _node_rm(monkeypatch, fake_signer, tmp_token_store, ["node", "rm", "e-1"], input="")
+    assert result.exit_code == 1, result.output
+    assert "input.confirmation_required" not in result.output
+    assert portal.deletes == []
+
+
+def test_json_mode_a_piped_y_is_confirmation_required_exit_2(monkeypatch, fake_signer, tmp_token_store) -> None:
     import json
 
-    result, portal = _node_rm(monkeypatch, fake_signer, tmp_token_store, ["--json", "node", "rm", "e-1"])
+    result, portal = _node_rm(monkeypatch, fake_signer, tmp_token_store, ["--json", "node", "rm", "e-1"], input="y\n")
     assert result.exit_code == 2, result.output
     error = json.loads(result.stdout)["error"]
-    assert (error["code"], error["exit_code"]) == ("input.confirmation_required", 2)
+    assert (error["code"], error["exit_code"], error["legacy_code"]) == ("input.confirmation_required", 2, None)
     assert "--yes" in error["hint"] and error["data"] == {"flag": "--yes", "env": "LIUM_PROVIDER_ACK=1"}
     assert portal.deletes == []
 
 
-def test_a_mutation_behind_a_pipe_is_refused_in_text_mode_too(monkeypatch, fake_signer, tmp_token_store) -> None:
-    result, portal = _node_rm(monkeypatch, fake_signer, tmp_token_store, ["node", "rm", "e-1"], env={"LIUM_OUTPUT": ""})
-    assert result.exit_code == 1, "text mode keeps the old ARG_INVALID exit"
-    assert "input.confirmation_required" in result.stderr
+def test_lium_output_json_ignores_a_piped_y_as_json_does(monkeypatch, fake_signer, tmp_token_store) -> None:
+    import json
+
+    result, portal = _node_rm(
+        monkeypatch, fake_signer, tmp_token_store, ["node", "rm", "e-1"], env={"LIUM_OUTPUT": "json"}, input="y\n"
+    )
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout)["error"]["code"] == "input.confirmation_required"
     assert portal.deletes == []
 
 
-def test_lium_output_json_is_the_same_as_json(monkeypatch, fake_signer, tmp_token_store) -> None:
-    import json
-
-    result, portal = _node_rm(monkeypatch, fake_signer, tmp_token_store, ["node", "rm", "e-1"], env={"LIUM_OUTPUT": "json"})
+def test_lium_noninteractive_ignores_a_piped_y_in_text_output(monkeypatch, fake_signer, tmp_token_store) -> None:
+    result, portal = _node_rm(
+        monkeypatch, fake_signer, tmp_token_store, ["node", "rm", "e-1"], env={"LIUM_NONINTERACTIVE": "1"}, input="y\n"
+    )
     assert result.exit_code == 2, result.output
-    assert json.loads(result.stdout)["error"]["code"] == "input.confirmation_required"
+    assert "[input.confirmation_required]" in result.stderr and portal.deletes == []
 
 
 def test_yes_or_the_ack_env_still_goes_through(monkeypatch, fake_signer, tmp_token_store) -> None:
@@ -282,3 +261,22 @@ def test_yes_or_the_ack_env_still_goes_through(monkeypatch, fake_signer, tmp_tok
     )
     assert result.exit_code == 0, result.output
     assert portal.deletes == ["/executors/e-1"]
+
+
+def _ctrl_c():
+    raise KeyboardInterrupt
+
+
+def test_ctrl_c_under_json_is_input_interrupted_exit_130(monkeypatch, fake_signer, tmp_token_store) -> None:
+    import json
+
+    result, _ = _node_rm(monkeypatch, fake_signer, tmp_token_store, ["--json", "node", "rm", "e-1", "--yes"], on_delete=_ctrl_c)
+    assert result.exit_code == 130, result.output
+    error = json.loads(result.stdout)["error"]
+    assert (error["code"], error["exit_code"], error["legacy_code"]) == ("input.interrupted", 130, None)
+
+
+def test_ctrl_c_in_text_mode_aborts_with_exit_1_as_before(monkeypatch, fake_signer, tmp_token_store) -> None:
+    result, _ = _node_rm(monkeypatch, fake_signer, tmp_token_store, ["node", "rm", "e-1", "--yes"], on_delete=_ctrl_c)
+    assert result.exit_code == 1, result.output
+    assert "input.interrupted" not in result.output

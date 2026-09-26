@@ -7,10 +7,11 @@ Two gates that every spend-affecting subcommand needs:
   config, or a bearer token (``LIUM_PROVIDER_TOKEN``, or the session of
   ``portal login --email``). Read-only commands also use this so they fail
   fast with a clear hint.
-- ``require_persona_ack`` -- asks for confirmation once per user before any
-  irreversible portal mutation. ``--yes`` / ``LIUM_PROVIDER_ACK=1`` / an
-  earlier ack short-circuit silently; under ``--json`` or without a terminal
-  it fails with ``input.confirmation_required`` (exit 2) instead of asking.
+- ``require_persona_ack`` -- a fresh shell prompts once for confirmation
+  before any irreversible portal mutation. ``--yes`` / ``LIUM_PROVIDER_ACK=1`` /
+  per-shell ack short-circuit silently; in agent mode (``--json``,
+  ``LIUM_OUTPUT=json``, ``LIUM_NONINTERACTIVE=1``) it fails with
+  ``input.confirmation_required`` (exit 2) instead of asking.
 
 Centralising these here removes the same 5-line guard repeated across
 ``node.py``, ``config.py``, ``sync.py``, ``queries.py``.
@@ -25,9 +26,9 @@ from __future__ import annotations
 import click
 
 from lium.cli.provider._client import bearer_token
-from lium.cli.provider._persona import ConfirmationRequired, Interrupted, confirm_persona
+from lium.cli.provider._persona import ConfirmationRequired, confirm_persona
 from lium.cli.provider._render import emit_error, fatal
-from lium.provider.errors import ARG_INVALID, CONFIRMATION_REQUIRED, INTERRUPTED, ProviderError
+from lium.provider.errors import ARG_INVALID, CONFIRMATION_REQUIRED, ProviderError
 
 
 def require_hotkey(ctx: click.Context, *, group: str | None = None) -> None:
@@ -67,16 +68,9 @@ def require_persona_ack(ctx: click.Context) -> None:
             ProviderError(
                 f"confirmation required before a spend-affecting command ({e})",
                 code=CONFIRMATION_REQUIRED,
-                legacy_code=ARG_INVALID,
                 hint="Re-run with --yes, or set LIUM_PROVIDER_ACK=1 once for this agent's environment.",
                 context={"flag": "--yes", "env": "LIUM_PROVIDER_ACK=1"},
             ),
-        )
-        return
-    except Interrupted as e:
-        fatal(
-            ctx,
-            ProviderError(f"stopped: {e}", code=INTERRUPTED, legacy_code=ARG_INVALID, hint="Nothing was sent to the portal."),
         )
         return
     if ok:

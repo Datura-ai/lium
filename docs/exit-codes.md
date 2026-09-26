@@ -161,7 +161,7 @@ progress, when a command has any, is one JSON object per line on stderr. `--json
 
 | Old code | Text exit | `--json` code | `--json` exit |
 |----------|-----------|---------------|---------------|
-| `ARG_INVALID` | 1 | `input.arg_invalid`; `input.confirmation_required` and `input.interrupted` (130) at the persona gate | 2 |
+| `ARG_INVALID` | 1 | `input.arg_invalid` | 2 |
 | `PORTS_INVALID` | 1 | `input.ports_invalid` | 2 |
 | `HOTKEY_NOT_REGISTERED` | 1 | `auth.hotkey_not_registered` | 6 |
 | `PORTAL_REQUEST_REJECTED` | 1 | `portal.request_rejected`, or the portal's own `portal.<code>` | 3 |
@@ -184,13 +184,15 @@ progress, when a command has any, is one JSON object per line on stderr. `--json
   The same applies to `lium mine status --json`, which prints the provider envelope (an SS58 given as the hotkey
   name is `ARG_INVALID`: 1 in text, 2 under `--json`).
 
-  The persona gate asks only when a person can answer. Off a terminal, under `--json`, or at EOF (Ctrl-D) it
-  fails with `input.confirmation_required` and Ctrl-C at the prompt is `input.interrupted`; both exit 1 in text
-  mode (their `legacy_code` is `ARG_INVALID`, as a decline was). A piped `y` does not confirm: pass `--yes` or set
-  `LIUM_PROVIDER_ACK=1`.
+  In text mode the persona gate prompts as it always has: off a terminal it reads the answer from stdin, so a
+  piped `y` confirms, and a decline, EOF (Ctrl-D) or Ctrl-C exits 1. Under `--json`, `LIUM_OUTPUT=json` or
+  `LIUM_NONINTERACTIVE=1` (agent mode) piped input is ignored: the gate fails with
+  `input.confirmation_required` (exit 2); use `--yes` or `LIUM_PROVIDER_ACK=1`. Ctrl-C under `--json` is
+  `input.interrupted` (exit 130).
 
-  A `lium provider` code with no old equivalent (`human.handoff_required`, `human.handoff_expired`,
-  `portal.not_supported`) has `legacy_code: null` and exits by the unified map in both modes.
+  A `lium provider` code with no old equivalent (`input.confirmation_required`, `input.interrupted`,
+  `human.handoff_required`, `human.handoff_expired`, `portal.not_supported`) has `legacy_code: null` and exits
+  by the unified map in both modes.
 
 ### The unified exit map
 
@@ -201,7 +203,7 @@ A namespaced code (`<namespace>.<snake_case>`) exits by this map (`unified_exit_
 |------|----------|---------|
 | 0 | `EXIT_OK` | Success. |
 | 1 | `EXIT_GENERAL` | A failure with no better class; every `host.*` step failure of `lium mine`. |
-| 2 | `EXIT_INPUT` | `input.*`: a value or a confirmation nobody could give (no terminal, `--json`, EOF), a bad option or token. |
+| 2 | `EXIT_INPUT` | `input.*`: a value or a confirmation the command does not ask for in agent mode (`--json`, `LIUM_NONINTERACTIVE=1`), a bad option or token. |
 | 3 | `EXIT_API` | `portal.*`: the portal refused or failed the call; `portal.not_supported` (the portal does not serve this route yet). |
 | 4 | `EXIT_NETWORK` | `net.*` and `ssh.*`: nothing answered (`net.unreachable`: connection refused, DNS, timeout). |
 | 5 | `EXIT_NOT_FOUND` | A code ending in `not_found`, or a portal 404 (`node.not_found`, `portal.executor_not_found`). |
@@ -210,7 +212,7 @@ A namespaced code (`<namespace>.<snake_case>`) exits by this map (`unified_exit_
 | 10 | `EXIT_BLOCKED` | `node.blocked.<code>`: the portal refused the node change for a named reason. |
 | 11 | `EXIT_NOT_LISTED` | `node.not_listed_yet`: the node is registered and waited for, but not listed. |
 | 12 | `EXIT_HUMAN` | `human.*`: a person has to act (link Discord, confirm the e-mail) before the command can succeed; `data` says what to relay. |
-| 130 | `EXIT_INTERRUPTED` | `input.interrupted`: Ctrl-C at a prompt; nothing was sent. |
+| 130 | `EXIT_INTERRUPTED` | `input.interrupted`: Ctrl-C under `--json`. |
 
 A portal refusal whose body names `detail.code` is passed through as `portal.<code>`, the portal's code in
 snake_case (`EXECUTOR_NOT_FOUND` is `portal.executor_not_found`, `NODE_RENTED` is `portal.node_rented`), with
@@ -220,9 +222,9 @@ for a 400 or 409, `PORTAL_FORBIDDEN` for a 403, `PORTAL_NOT_FOUND` for a 404, `P
 
 | `code` | Exit | When |
 |--------|------|------|
-| `input.confirmation_required` | 2 | A persona gate or `--yes` question under `--json`, without a terminal, or at EOF / Ctrl-D. Re-run with `--yes` or `LIUM_PROVIDER_ACK=1`. The acknowledgement is kept per user and config, so a new shell does not ask again. |
-| `input.interrupted` | 130 | Ctrl-C at the persona prompt; nothing was sent. |
-| `input.input_required` | 2 | A prompt nobody can answer: `lium mine` without `-k` off a terminal, `portal login --email` without `LIUM_PROVIDER_PASSWORD` off a terminal. |
+| `input.confirmation_required` | 2 | The persona gate under `--json`, `LIUM_OUTPUT=json` or `LIUM_NONINTERACTIVE=1`, where piped input is ignored. Re-run with `--yes` or `LIUM_PROVIDER_ACK=1`. |
+| `input.interrupted` | 130 | Ctrl-C during a `lium provider` command under `--json`. |
+| `input.input_required` | 2 | A value the command does not ask for: `lium mine` without `-k` under `--json` or `LIUM_NONINTERACTIVE=1`, `portal login --email` without `LIUM_PROVIDER_PASSWORD` off a terminal. |
 | `input.register_token_invalid` | 2 | `lium mine --json --register` with an expired or unreadable token; nothing on the host was touched. |
 | `input.hotkey_conflicts_with_token` | 2 | `lium mine --json --register … -k` with a hotkey the token does not name. |
 | `human.handoff_required` | 12 | A one-time human step (`lium provider config connect-discord`, `lium provider portal confirm-email`). `data`: `step` (`discord_link`, `email_confirm`), `handoff_url`, `code`, `expires_at`, `message_for_human`. Relay `message_for_human` to the person, then re-run with `--wait`. With `--wait --timeout N`, also when N seconds pass first (`data.waited_s`). |
@@ -245,8 +247,8 @@ for a 400 or 409, `PORTAL_FORBIDDEN` for a 403, `PORTAL_NOT_FOUND` for a 404, `P
 `lium mine --json` step events look like
 `{"event": "step", "step": 4, "total": 6, "code": "host.env", "message": "Configuring environment", "status": "started|done|failed", "elapsed_s": 1.2, "error_code": "host.port_in_use"}`;
 step 6 adds `{"event": "check", "name": …}` lines and `--register` adds `{"event": "node_status", "node_id", "status", "message"}`.
-`--auto` takes the default ports (service 8080, SSH 2200); off a terminal or under `--json` the defaults
-are taken anyway and a missing `-k` is `input.input_required`.
+`--auto` takes the default ports (service 8080, SSH 2200); under `--json`, `LIUM_OUTPUT=json` or
+`LIUM_NONINTERACTIVE=1` the defaults are taken anyway and a missing `-k` is `input.input_required`.
 
 Provider auth without a wallet: `LIUM_PROVIDER_TOKEN` is sent as the Bearer token when set;
 `lium provider portal login --email you@example.com` reads the password from `LIUM_PROVIDER_PASSWORD`
@@ -272,8 +274,8 @@ with the old one as `legacy_code`; the exits on the right are the `--json` ones:
 |-------------------|-------------------|------|
 | `PORTAL_SERVER_ERROR` (3) | `net.unreachable` (4) | Connection refused, DNS failure, timeout. A 5xx stays `PORTAL_SERVER_ERROR`. |
 | `PORTAL_REQUEST_REJECTED` (1), `PORTAL_FORBIDDEN` (2), `PORTAL_NOT_FOUND` (3), `PORTAL_RATE_LIMIT` (3) | `portal.<code>` (3, 6, 5, 7) | The portal's body named `detail.code` (`node rm` on a rented node, the `node add` refusals). Text mode keeps the old exit. |
-| `ARG_INVALID` (1), or a piped answer | `input.confirmation_required` (2) | The persona gate off a terminal, under `--json`, or at EOF (Ctrl-D). Text mode still exits 1. A piped `y` does not confirm: pass `--yes` or set `LIUM_PROVIDER_ACK=1`. A decline at the prompt stays `ARG_INVALID`. |
-| `ARG_INVALID` (1) | `input.interrupted` (130) | Ctrl-C at the persona prompt; text mode still exits 1. |
+| the persona prompt | `input.confirmation_required` (2) | Under `--json`, `LIUM_OUTPUT=json` or `LIUM_NONINTERACTIVE=1` piped input is ignored; use `--yes` or `LIUM_PROVIDER_ACK=1`. Text mode prompts as it always has; a decline stays `ARG_INVALID` (1). |
+| exit 1 (Ctrl-C) | `input.interrupted` (130) | Under `--json` only; text mode is unchanged. |
 | `PORTAL_AUTH_REFRESH_RACE` (7) | `auth.refresh_race` (7) | Another process holds the token cache; retry. |
 | exit 2 (text, not listed) | `node.not_listed_yet` (11) | `lium mine --register`, under `--json` only. |
 | exit 1 (any `lium mine` step) | `host.*` (1) | Under `--json` only; text mode is unchanged. |

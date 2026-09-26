@@ -3,27 +3,25 @@
 Why this exists: ``lium mine`` (renter rent flow) and ``lium provider`` (provider
 flow) live in adjacent namespaces. Spend-affecting subcommands -- adding /
 removing nodes, installing a node over SSH -- get
-an explicit one-shot confirmation the first time they run for a user.
-After ack, subsequent invocations by the same user are silent for 24 h.
+an explicit one-shot confirmation the first time they run in a shell
+session. After ack, subsequent invocations in the same shell are silent.
 
 Acks short-circuit on:
 
 - ``LIUM_PROVIDER_ACK=1`` env var (set once by an automating agent)
 - ``--yes`` global flag
 
-Otherwise the CLI prints a one-liner and reads ``y`` from stdin -- but only when
-a person can answer: under ``--json``, without a terminal on stdin, or with
-``LIUM_NONINTERACTIVE`` set, nothing is asked and :class:`ConfirmationRequired`
-is raised (the command fails with ``input.confirmation_required``, exit 2). An
-EOF at the prompt is the same "no answer". State lives at
-``~/.lium/state/provider-ack.json`` keyed by ``(coldkey, hotkey, user)``: the
-parent PID used to be part of the key, so every agent subprocess (a new parent
-each time) was asked again.
+Otherwise the CLI prints a one-liner and reads ``y`` from stdin. State lives
+at ``~/.lium/state/provider-ack.json`` keyed by ``(coldkey, hotkey, ppid)``
+so a fresh shell re-prompts but child commands within the same shell don't.
+
+In agent mode (``--json``, ``LIUM_OUTPUT=json`` or ``LIUM_NONINTERACTIVE=1``)
+nothing is asked and stdin is not read: :class:`ConfirmationRequired` is raised
+and the command fails with ``input.confirmation_required`` (exit 2).
 """
 
 from __future__ import annotations
 
-import getpass
 import json
 import os
 import time
@@ -32,7 +30,7 @@ from pathlib import Path
 
 import click
 
-from lium.cli.interactive import is_interactive, noninteractive_reason
+from lium.cli.interactive import NONINTERACTIVE_ENV, noninteractive_requested
 
 DEFAULT_ACK_PATH = Path.home() / ".lium" / "state" / "provider-ack.json"
 
@@ -50,17 +48,7 @@ SPEND_AFFECTING_SUBCOMMANDS: frozenset[str] = frozenset(
 
 
 class ConfirmationRequired(Exception):
-    """The gate needed an answer and nobody could give one (``--json``, no terminal, EOF)."""
-
-
-class Interrupted(Exception):
-    """Ctrl-C at the prompt: the person stopped the command (``input.interrupted``, exit 130)."""
-
-
-def _read_answer() -> str:
-    # input(), not click.prompt: click turns Ctrl-C and EOF alike into Abort, and the two mean different things
-    click.echo("Type 'y' to continue (or set LIUM_PROVIDER_ACK=1): ", nl=False, err=True)
-    return input()
+    """Agent mode and no ack: stdin is not read, so only ``--yes`` or ``LIUM_PROVIDER_ACK=1`` confirms."""
 
 
 @dataclass(frozen=True)
@@ -69,18 +57,20 @@ class PersonaContext:
 
     coldkey: str | None
     hotkey: str | None
-    scope: str
+    shell_session_id: str
 
     def key(self) -> str:
-        return f"{self.coldkey or '-'}::{self.hotkey or '-'}::{self.scope}"
+        return f"{self.coldkey or '-'}::{self.hotkey or '-'}::{self.shell_session_id}"
 
 
-def ack_scope() -> str:
-    """The user an ack belongs to: one ``y`` covers every shell and subprocess of that user."""
-    try:
-        return f"user:{getpass.getuser()}"
-    except Exception:  # no login name (a container with an unmapped uid)
-        return f"uid:{os.getuid()}" if hasattr(os, "getuid") else "user:-"
+def shell_session_id() -> str:
+    """Best-effort stable id for the parent shell session.
+
+    Uses ``$$``'s parent (``os.getppid()``) so two ``lium provider`` invocations
+    from the same shell share an id. Agents wanting deterministic acks
+    should set ``LIUM_PROVIDER_ACK=1`` instead of relying on this heuristic.
+    """
+    return str(os.getppid())
 
 
 def is_acked(
@@ -151,7 +141,6 @@ def confirm_persona(
     yes_flag: bool = False,
     auto_ack: bool = False,
     json_mode: bool = False,
-    interactive: bool | None = None,
     env: dict[str, str] | None = None,
     path: Path | None = None,
     input_func=None,
@@ -164,29 +153,29 @@ def confirm_persona(
         coldkey/hotkey: persona components for the ack key.
         yes_flag: if True (``--yes`` passed), confirms without prompting.
         auto_ack: if True (test seam), confirms without prompting.
-        json_mode: ``--json``/``LIUM_OUTPUT=json``: never prompt.
-        interactive: whether a person can answer; defaults to a terminal on
-            stdin and no ``LIUM_NONINTERACTIVE``.
+        json_mode: ``--json``/``LIUM_OUTPUT=json``: agent mode, never prompt.
         env: env mapping override.
         path: ack-cache path override.
-        input_func: callable used to read stdin (defaults to ``input()`` after the prompt on stderr).
+        input_func: callable used to read stdin (defaults to ``click.prompt``).
         output_func: callable used for the prompt banner (defaults to
             ``click.echo`` writing to stderr).
 
     Raises:
-        ConfirmationRequired: no ack, and nobody can answer (``--json``, no
-            terminal, or EOF at the prompt).
+        ConfirmationRequired: no ack in agent mode (``--json``,
+            ``LIUM_OUTPUT=json`` or ``LIUM_NONINTERACTIVE=1``).
     """
     del ctx  # currently unused; reserved for ``--debug`` plumbing.
-    persona = PersonaContext(coldkey=coldkey, hotkey=hotkey, scope=ack_scope())
+    persona = PersonaContext(
+        coldkey=coldkey,
+        hotkey=hotkey,
+        shell_session_id=shell_session_id(),
+    )
     if yes_flag or auto_ack or is_acked(persona, env=env, path=path):
         return True
-
     if json_mode:
         raise ConfirmationRequired("no prompt is shown under --json")
-    can_ask = is_interactive() if interactive is None else interactive
-    if not can_ask:
-        raise ConfirmationRequired(f"no prompt is shown because {noninteractive_reason()}")
+    if noninteractive_requested():
+        raise ConfirmationRequired(f"no prompt is shown because {NONINTERACTIVE_ENV} is set")
 
     output = output_func or (lambda m: click.echo(m, err=True))
     output(
@@ -194,13 +183,17 @@ def confirm_persona(
         "Spend-affecting actions (node / install) follow."
     )
 
-    reader = input_func or _read_answer
+    reader = input_func or (
+        lambda: click.prompt(
+            "Type 'y' to continue (or set LIUM_PROVIDER_ACK=1)",
+            default="n",
+            show_default=False,
+        )
+    )
     try:
         answer = (reader() or "").strip().lower()
-    except KeyboardInterrupt as e:
-        raise Interrupted("interrupted at the confirmation prompt") from e
-    except (EOFError, click.Abort) as e:
-        raise ConfirmationRequired("stdin closed before an answer") from e
+    except (EOFError, KeyboardInterrupt):
+        return False
     if answer not in ("y", "yes"):
         return False
     mark_acked(persona, path=path)
@@ -211,10 +204,9 @@ __all__ = [
     "DEFAULT_ACK_PATH",
     "SPEND_AFFECTING_SUBCOMMANDS",
     "ConfirmationRequired",
-    "Interrupted",
     "PersonaContext",
-    "ack_scope",
     "confirm_persona",
     "is_acked",
     "mark_acked",
+    "shell_session_id",
 ]

@@ -48,10 +48,22 @@ from lium.cli.provider.status import status_command
 from lium.cli.provider.sync import sync_command
 from lium.cli.settings import ConfigManager
 from lium.cli.utils import json_output_requested
-from lium.provider.errors import ProviderError
+from lium.provider.errors import INTERRUPTED, ProviderError
 
 
-@click.group("provider")
+class _ProviderGroup(click.Group):
+    def invoke(self, ctx: click.Context):
+        try:
+            return super().invoke(ctx)
+        except KeyboardInterrupt:
+            # text mode: click's own "Aborted!" and exit 1, as before
+            if not ((ctx.obj or {}).get("provider_opts") or {}).get("json"):
+                raise
+            err = ProviderError("stopped: interrupted", code=INTERRUPTED, hint="Re-run the command; check what it changed first.")
+            ctx.exit(emit_error(ctx, err))
+
+
+@click.group("provider", cls=_ProviderGroup)
 @click.option(
     "--coldkey",
     "-w",
@@ -175,9 +187,9 @@ def enforce_persona_gate(ctx: click.Context) -> None:
 
     Called as the first action of any subcommand that takes a spend-affecting
     or otherwise-irreversible action (register, node mutations,
-    install). If the user declines, exits with ``ARG_INVALID`` exit code; when
-    nobody can answer (``--json``, no terminal, EOF) with
-    ``input.confirmation_required`` (exit 2).
+    install). If the user declines, exits with ``ARG_INVALID`` exit code; in
+    agent mode (``--json``, ``LIUM_OUTPUT=json``, ``LIUM_NONINTERACTIVE=1``)
+    it does not ask and exits with ``input.confirmation_required`` (exit 2).
     """
     require_persona_ack(ctx)
 
