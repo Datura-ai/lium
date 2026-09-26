@@ -4566,6 +4566,8 @@ class Lium:
                 before trying again; ``idempotency_key`` on the error repeats it safely.
                 A 5xx whose code is ``STRIPE_UNAVAILABLE`` or ``STRIPE_REFUSED`` is a
                 :class:`LiumServerError` instead: nothing was charged.
+
+        @private: left out of the SDK reference until prod serves ``POST /payments/topup``.
         """
         if not math.isfinite(amount_usd):
             raise LiumError("amount_usd must be a finite number of dollars (at least 10).")
