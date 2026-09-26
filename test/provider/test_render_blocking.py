@@ -169,8 +169,8 @@ def test_node_get_renders_every_portal_reason_and_the_unmet_secure_requirements(
     text = _flat(result.output)
     assert "✗ NVIDIA driver below the minimum measured 550.54.15 · required 580.65.06" in text
     assert "Fix: Upgrade the NVIDIA driver to 580.65.06 and restart the executor" in text
-    assert "✗ Not enough disk for the VRAM measured 500 GB · required 1280 GB Fix: Grow the disk to 1280 GB" in text
-    assert "✗ Disk 95% used measured 95% · required 90% or less Fix: Free disk space" in text
+    assert "✗ Not enough disk for the VRAM measured 500 GB · required 1280 GB Requires: unknown — hand this step to a person Fix: Grow the disk to 1280 GB" in text   # a portal from before `requires`
+    assert "✗ Disk 95% used measured 95% · required 90% or less Requires: unknown — hand this step to a person Fix: Free disk space" in text
     assert "Secure listing: 2 unmet requirements" in text
     secure_block = text.split("Secure listing:")[1]
     assert "• NVIDIA driver below the minimum" in secure_block
@@ -218,8 +218,8 @@ def test_fallback_reads_last_error_hidden_reasons_and_gating_idle_pay_reasons(po
 
     assert result.exit_code == 0, result.output
     text = _flat(result.output)
-    assert "✗ Network too slow Fix: Move the node to a faster uplink" in text
-    assert "✗ Hidden from renters: disk 95% used Fix: Free disk on the node until it is at most 90% used." in text
+    assert "✗ Network too slow Requires: unknown — hand this step to a person Fix: Move the node to a faster uplink" in text
+    assert "✗ Hidden from renters: disk 95% used Requires: unknown — hand this step to a person Fix: Free disk on the node until it is at most 90% used." in text
     assert "✗ Price above the market's soft limit measured $3.2/GPU·h · required $2.4/GPU·h or less" in text
     assert "Fix: `lium provider node update-price e-1 --price 2.4`" in text
     assert "paused new rentals" not in text   # the provider's own choice, not a blocker
@@ -257,7 +257,7 @@ def test_node_list_json_carries_the_same_list(portal_for):
         }
     ]
     # the portal's list; an entry without `gating` (an older portal) gets the legacy verdict, marked
-    assert rows["e-2"]["blocking_reasons"] == [{**PORTAL_REASONS[0], "gating": True, "gating_source": "cli_legacy_fallback"}]
+    assert rows["e-2"]["blocking_reasons"] == [{**PORTAL_REASONS[0], "gating": True, "gating_source": "cli_legacy_fallback", "requires_unknown": True}]
     assert "blocking_reasons_source" not in rows["e-2"]
     assert rows["e-3"]["blocking_reasons"] == []
 
@@ -310,7 +310,7 @@ def test_node_status_prints_the_panel_and_json_carries_the_list(portal_for):
 
     result = _run("--json", "node", "status", "e-1")
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["data"]["blocking_reasons"] == [{**PORTAL_REASONS[0], "gating": True, "gating_source": "cli_legacy_fallback"}]
+    assert json.loads(result.output)["data"]["blocking_reasons"] == [{**PORTAL_REASONS[0], "gating": True, "gating_source": "cli_legacy_fallback", "requires_unknown": True}]
 
 
 def test_healthy_node_has_no_panel(portal_for):
@@ -703,7 +703,7 @@ def test_the_portals_gating_decides_not_a_code_list_in_the_cli(portal_for):
     assert "Not eligible for idle pay: price above the market soft limit" in text
 
     result = _run("--json", "node", "get", "e-1")
-    assert json.loads(result.stdout)["data"]["blocking_reasons"] == [new_code, price_off]   # served, untouched
+    assert json.loads(result.stdout)["data"]["blocking_reasons"] == [{**new_code, "requires_unknown": True}, {**price_off, "requires_unknown": True}]   # served; no `requires` key
 
 
 def test_an_entry_without_gating_takes_the_legacy_fallback_and_says_so(portal_for):
@@ -713,7 +713,7 @@ def test_an_entry_without_gating_takes_the_legacy_fallback_and_says_so(portal_fo
     result = _run("--json", "node", "get", "e-1")
 
     [entry] = json.loads(result.stdout)["data"]["blocking_reasons"]
-    assert entry == {**old_portal, "gating": True, "gating_source": "cli_legacy_fallback"}
+    assert entry == {**old_portal, "gating": True, "gating_source": "cli_legacy_fallback", "requires_unknown": True}
     text = _flat(_run("node", "get", "e-1").output)
     assert "✗ A check the CLI has never heard of" in text
     assert "Secure listing" not in text   # the legacy list does not know the code
@@ -1163,3 +1163,44 @@ def test_a_served_reason_keeps_its_own_requires_unknown_and_an_idle_pay_one_gets
     served = json.loads(_run("--json", "node", "get", "e-1").stdout)["data"]["blocking_reasons"]
 
     assert served == [said_known, DRIVER_GATING]
+
+
+def test_the_panel_says_requires_unknown_above_the_fix_of_a_last_error(portal_for):
+    node = _node(
+        status="VALIDATION_FAILED",
+        computed_status={
+            "status": "VALIDATION_FAILED",
+            "last_error": {"title": "NVML driver/library mismatch", "reason_code": "NVML_MISMATCH",
+                           "remediation": "Reboot the host so the new driver loads."},
+        },
+    )
+    portal_for(_Portal(node=node))
+
+    text = _flat(_run("node", "get", "e-1").output)
+
+    assert "✗ NVML driver/library mismatch Requires: unknown — hand this step to a person Fix: Reboot the host so the new driver loads." in text
+
+
+def test_the_panel_prints_no_unknown_line_for_a_reason_whose_requires_is_known(portal_for):
+    portal_for(_Portal(node=_node(blocking_reasons=[DRIVER_GATING])))
+
+    assert "Requires: unknown" not in _flat(_run("node", "get", "e-1").output)
+
+
+def test_the_profiling_fix_pauses_new_rentals_before_its_own_reboot_step():
+    [entry] = fallback_reasons(_node(), [{"code": "flagship_without_ncu_or_split", "context": {}}])
+
+    fix = _flat(entry["fix"])
+    assert fix.startswith("Open the profiling counters: first click Pause New Rentals")
+    assert fix.index("Pause New Rentals") < fix.index("reboot the host")
+
+
+def test_a_served_idle_pay_reason_without_a_requires_key_is_requires_unknown(portal_for):
+    old_shape = {"kind": "idle_pay", "code": "sysbox_not_enabled", "gating": True,
+                 "message": "sysbox runtime not enabled", "fix": "Install sysbox."}
+    portal_for(_Portal(node=_node(blocking_reasons=[dict(old_shape)])))
+
+    [served] = json.loads(_run("--json", "node", "get", "e-1").stdout)["data"]["blocking_reasons"]
+
+    assert served == {**old_shape, "requires_unknown": True}
+    assert "Requires: unknown — hand this step to a person Fix: Install sysbox." in _flat(_run("node", "get", "e-1").output)

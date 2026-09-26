@@ -120,9 +120,12 @@ def _with_requires(entry: dict[str, Any], context: Mapping[str, Any] | None = No
 
 def _requires_unknown(entry: Mapping[str, Any]) -> bool:
     """Whether nobody has said what the reason's fix needs. The portal's catalog fills ``requires`` only
-    for idle-pay reasons: a reachability or last-error reason sent with an empty one is unknown too."""
+    for idle-pay reasons: a reachability or last-error reason sent with an empty one is unknown too, and so
+    is any entry without the key (a portal from before it)."""
     if "requires_unknown" in entry:
         return bool(entry["requires_unknown"])
+    if "requires" not in entry:
+        return True
     return str(entry.get("kind") or "idle_pay") != "idle_pay" and not entry.get("requires")
 
 # Listing states the provider chose; the node is hidden on purpose, not blocked.
@@ -191,10 +194,10 @@ def _idle_pay_entry(code: str, context: Mapping[str, Any], message: str | None, 
         title = "Idle flagship node offers no NCU profiling, GPU splitting or confidential computing"
         required = "NCU profiling, GPU splitting or confidential computing"
         fix = (
-            "Open the profiling counters (NVreg_RestrictProfilingToAdminUsers=0, then reboot), or set a "
-            f"minimum GPU count below the full node (`lium provider node min-gpu set {node} <n>`), "
-            "or run the executor in a confidential VM. Before the reboot: "
-            f"{DRAIN_FIRST[0].lower()}{DRAIN_FIRST[1:]} {RESUME_AFTER}"
+            f"Open the profiling counters: {DRAIN_FIRST[0].lower()}{DRAIN_FIRST[1:]} Then set "
+            "NVreg_RestrictProfilingToAdminUsers=0 and reboot the host. Or set a minimum GPU count below "
+            f"the full node (`lium provider node min-gpu set {node} <n>`), or run the executor in a "
+            f"confidential VM. {RESUME_AFTER}"
         )
     elif code == "cannot_apply_gpu_power_cap":
         title = "Executor cannot set a GPU power limit"
@@ -205,8 +208,8 @@ def _idle_pay_entry(code: str, context: Mapping[str, Any], message: str | None, 
         )
         if _under_sysbox(ctx):
             fix = (
-                f"/dev/nvidiactl owned by uid {_SYSBOX_NAMESPACE_UID} means the executor container runs under "
-                "sysbox, which it must not (pods need it, the executor container does not). Keep sysbox-runc "
+                f"/dev/nvidiactl owned by uid {_SYSBOX_NAMESPACE_UID} means the node container runs under "
+                "sysbox, which it must not (pods need it, the node container does not). Keep sysbox-runc "
                 'as a named runtime but remove any "default-runtime": "sysbox-runc" line from '
                 "/etc/docker/daemon.json (`grep -n default-runtime /etc/docker/daemon.json` shows it), and "
                 "drop `runtime: sysbox-runc` from your own compose if it sets one. Restarting Docker to apply "
@@ -440,7 +443,8 @@ def attach(rows: Iterable[Any], idle_by_node: Mapping[str, list[Mapping[str, Any
 
     A portal entry without ``gating`` gets the legacy fallback's ``gating`` and
     ``gating_source: cli_legacy_fallback`` so a ``--json`` reader sees the same verdict the panel prints;
-    a reachability or last-error entry with an empty ``requires`` gets ``requires_unknown: true``.
+    a reachability or last-error entry with an empty ``requires``, or any entry without one, gets
+    ``requires_unknown: true``.
     """
     for row in rows:
         if not isinstance(row, dict):
@@ -488,6 +492,8 @@ def blocking_panel(row: Mapping[str, Any]) -> Panel | None:
             figures.append(f"required {reason['required']}")
         if figures:
             lines.append(Padding(Text(" · ".join(figures)), (0, 0, 0, 2)))
+        if reason.get("requires_unknown"):
+            lines.append(Padding(Text.from_markup("[bold red]Requires: unknown — hand this step to a person[/]"), (0, 0, 0, 2)))
         if reason.get("fix"):
             lines.append(Padding(Text.from_markup(f"[bold]Fix:[/] {escape(str(reason['fix']))}"), (0, 0, 0, 2)))
         if reason.get("fix_command"):
