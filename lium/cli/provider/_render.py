@@ -28,6 +28,7 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
+from lium.cli.provider import _blocking
 from lium.cli.utils import console
 from lium.provider.errors import (
     ARG_INVALID,
@@ -334,9 +335,14 @@ def _node_status_label(status: Any) -> str:
 
 def _node_status(row: Mapping[str, Any]) -> str:
     computed = row.get("computed_status")
+    status = computed.get("status") if isinstance(computed, Mapping) else None
+    if _blocking.node_reasons(row):
+        # an AVAILABLE node that loses idle pay or the Secure listing must not read green
+        text = escape(str(status)) if status and status != "AVAILABLE" else "BLOCKED"
+        return console.get_styled(text, "error")
     if not isinstance(computed, Mapping):
         return console.get_styled("—", "dim")
-    return _node_status_label(computed.get("status"))
+    return _node_status_label(status)
 
 
 def _computed_status_rows(value: Mapping[str, Any]) -> list[tuple[str, str]]:
@@ -716,6 +722,8 @@ def _render_record(body: Mapping[str, Any]) -> None:
     for key, value in body.items():
         if key == "extra_incentive_eligible" and extra_incentives_disabled:
             continue
+        if key in ("blocking_reasons", "blocking_reasons_source"):
+            continue   # the BLOCKING panel under the table prints them
         if key == "computed_status" and isinstance(value, Mapping):
             for label, text in _computed_status_rows(value):
                 table.add_row(label, text)
@@ -822,6 +830,14 @@ def _format_discord_incentive_next_step() -> str:
 
 def _render_provider_status(status: ProviderStatus) -> None:
     """Multi-section render for the aggregated ``status`` command."""
+    if status.blocked_node_count:
+        console.print(
+            console.get_styled(
+                f"✗ {status.blocked_node_count} of {status.node_count or len(status.nodes)} nodes BLOCKED"
+                " — each one's fix is in its panel below",
+                "error",
+            )
+        )
     overview = _new_table(headers=False, expand=False)
     overview.add_column("Field", style="dim", justify="right", no_wrap=True)
     overview.add_column("Value", overflow="fold")
@@ -858,7 +874,9 @@ def _render_provider_status(status: ProviderStatus) -> None:
 
     if status.nodes:
         console.print(console.get_styled(f"\nNodes ({len(status.nodes)})", "info"))
-        _render_rows([n.model_dump() for n in status.nodes])
+        node_rows = [n.model_dump() for n in status.nodes]
+        _render_rows(node_rows)
+        _blocking.print_panels(node_rows)
 
     if status.validator_weights:
         console.print(

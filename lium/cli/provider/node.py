@@ -30,6 +30,7 @@ import time
 
 import click
 
+from lium.cli.provider import _blocking
 from lium.cli.provider._client import build_client
 from lium.cli.provider._guards import (
     handle_provider_error,
@@ -101,7 +102,17 @@ def list_nodes(
     summary_parts = [f"nodes={len(rows) if isinstance(rows, list) else 0}"]
     if total is not None:
         summary_parts.append(f"total={total}")
+    # the global listing is every provider's fleet: a panel per blocked node there is noise
+    blocking = isinstance(rows, list) and not all_miners
+    if blocking:
+        # the overview is the signed-in provider's own: another provider's nodes get no idle-pay reasons
+        own = miner_hotkey is None
+        idle = _blocking.fetch_idle_pay_reasons(client) if own and _blocking.needs_fallback(rows) else {}
+        _blocking.attach(rows, idle)
+        summary_parts.append(f"blocked={_blocking.blocked_count(rows)}")
     render(ctx, body, summary="node list: " + ", ".join(summary_parts))
+    if blocking and not _json_mode(ctx):
+        _blocking.print_panels(rows)
 
 
 @node_command.command("get", short_help="Show one node.")
@@ -116,7 +127,11 @@ def get_node(ctx: click.Context, node_id: str) -> None:
     except ProviderError as e:
         ctx.exit(handle_provider_error(ctx, e))
         return
+    if isinstance(body, dict):
+        _attach_blocking(client, body)
     render(ctx, body, summary=f"node {node_id}")
+    if isinstance(body, dict) and not _json_mode(ctx):
+        _blocking.print_panels([body])
 
 
 @node_command.command("status", short_help="Verification progress of one node.")
@@ -149,7 +164,7 @@ def status_node(ctx: click.Context, node_id: str, watch: bool, interval: int) ->
     """
     require_hotkey(ctx, group="node")
     client = build_client(ctx)
-    json_mode = bool(((ctx.obj or {}).get("provider_opts") or {}).get("json"))
+    json_mode = _json_mode(ctx)
     # One guard around the whole loop: Ctrl-C exits 0 whether it lands during the fetch,
     # the print or the sleep (click would otherwise print "Aborted!" and exit 1 mid-fetch).
     try:
@@ -159,17 +174,44 @@ def status_node(ctx: click.Context, node_id: str, watch: bool, interval: int) ->
             except ProviderError as e:
                 ctx.exit(handle_provider_error(ctx, e))
                 return
+            node = _node_with_blocking(client, node_id)
             if json_mode:
+                if isinstance(body, dict) and node is not None:
+                    body = {**body, "blocking_reasons": node["blocking_reasons"]}
                 render(ctx, body)
             else:
                 if watch:
                     click.clear()
                 click.echo(render_text(body))
+                if node is not None:
+                    _blocking.print_panels([node])
             if not watch:
                 return
             time.sleep(interval)
     except KeyboardInterrupt:
         return
+
+
+def _json_mode(ctx: click.Context) -> bool:
+    return bool(((ctx.obj or {}).get("provider_opts") or {}).get("json"))
+
+
+def _attach_blocking(client, node: dict) -> None:
+    idle = _blocking.fetch_idle_pay_reasons(client) if _blocking.needs_fallback([node]) else {}
+    _blocking.attach([node], idle)
+
+
+def _node_with_blocking(client, node_id: str) -> dict | None:
+    """The node record with its blocking reasons; None when the portal does not return it (the
+    verification view still prints)."""
+    try:
+        node = client.get_node(node_id)
+    except ProviderError:
+        return None
+    if not isinstance(node, dict):
+        return None
+    _attach_blocking(client, node)
+    return node
 
 
 @node_command.command("add", short_help="Queue a new node addition.")

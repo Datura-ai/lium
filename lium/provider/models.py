@@ -201,6 +201,8 @@ class ProviderStatus(BaseModel):
     discord_connected: bool | None = None
     extra_incentive_eligible: bool | None = None
     node_count: int | None = None
+    # nodes with at least one blocking reason (``nodes[].blocking_reasons``); None when not computed
+    blocked_node_count: int | None = None
     nodes: list[ExecutorInfo] = Field(default_factory=list)
     validator_weights: list[ValidatorWeight] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
