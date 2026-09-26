@@ -204,8 +204,8 @@ progress, when a command has any, is one JSON object per line on stderr. `--json
   `lium mine status`, which runs it: Ctrl-C exits 0 in every mode (a one-shot run prints nothing), as on `main`.
 
   A `lium provider` code with no old equivalent (`input.confirmation_required`, `human.handoff_required`,
-  `human.handoff_expired`, `portal.not_supported`) has `legacy_code: null` and exits by the unified map in both
-  modes; `input.interrupted` (also `legacy_code: null`) occurs only in agent mode.
+  `human.handoff_expired`, `portal.not_supported`, `node.pause_id_mismatch`, `node.resume_unverified`) has
+  `legacy_code: null` and exits by the unified map in both modes; `input.interrupted` (also `legacy_code: null`) occurs only in agent mode.
 
 ### The unified exit map
 
@@ -217,14 +217,14 @@ A namespaced code (`<namespace>.<snake_case>`) exits by this map (`unified_exit_
 | 0 | `EXIT_OK` | Success. |
 | 1 | `EXIT_GENERAL` | A failure with no better class; every `host.*` step failure of `lium mine`. |
 | 2 | `EXIT_INPUT` | `input.*`: a value or a confirmation the command does not ask for in agent mode (`--json`, `LIUM_OUTPUT=json`, `LIUM_NONINTERACTIVE=1`), a bad option or token. |
-| 3 | `EXIT_API` | `portal.*`: the portal refused or failed the call; `portal.not_supported` (the portal does not serve this route yet). |
+| 3 | `EXIT_API` | `portal.*`: the portal refused or failed the call; `portal.not_supported` (the portal does not serve this route yet); `node.pause_id_mismatch` (the portal refused a resume and changed nothing). |
 | 4 | `EXIT_NETWORK` | `net.*` and `ssh.*`: nothing answered (`net.unreachable`: connection refused, DNS, timeout). |
 | 5 | `EXIT_NOT_FOUND` | A code ending in `not_found`, or a portal 404 (`node.not_found`, `portal.executor_not_found`). |
 | 6 | `EXIT_AUTH` | `auth.*`, or a portal refusal with HTTP 401/403/419/440. |
 | 7 | `EXIT_RETRYABLE` | A portal 429: retry after a pause. |
 | 10 | `EXIT_BLOCKED` | `node.blocked.<code>`: the portal refused the node change for a named reason. |
 | 11 | `EXIT_NOT_LISTED` | `node.not_listed_yet`: the node is registered and waited for, but not listed. |
-| 12 | `EXIT_HUMAN` | `human.*`: a person has to act (link Discord, confirm the e-mail) before the command can succeed; `data` says what to relay. |
+| 12 | `EXIT_HUMAN` | `human.*`: a person has to act (link Discord, confirm the e-mail) before the command can succeed; `data` says what to relay. Also `node.resume_unverified`: a person has to check the node. |
 | 130 | `EXIT_INTERRUPTED` | `input.interrupted`: Ctrl-C in agent mode. |
 
 A portal refusal whose body names `detail.code` is passed through as `portal.<code>`, the portal's code in
@@ -244,12 +244,14 @@ for a 400 or 409, `PORTAL_FORBIDDEN` for a 403, `PORTAL_NOT_FOUND` for a 404, `P
 | `human.handoff_expired` | 12 | `--wait`: the code expired before the person finished, or the portal answers 404 for the handoff (`data.status: not_found`); run the command again for a new code. A poll the portal could not answer (5xx, 429, unreachable) is retried with backoff until `--timeout`. |
 | `auth.not_signed_in` | 6 | Any `lium provider` command that needs a sign-in, in agent mode, with no `LIUM_PROVIDER_TOKEN`, no hotkey and no live `portal login --email` session (`data.session_email` is the configured address when it has no live session); `lium mine status` too. The hint names all three ways in; `legacy_code` is `ARG_INVALID`. Plain text mode prints `ARG_INVALID` and exits 1 as before (`portal whoami` says "not signed in to the provider portal" with the same hint). `status`, `portal login`, `portal logout`, `config set-email` and `config set-password` need the hotkey itself and stay `input.arg_invalid` (exit 2), with a token or e-mail session too: the last two sign with the hotkey's wallet (plain text: the old `config commands require --hotkey` line, exit 1). |
 | `net.unreachable` | 4 | Connection refused, DNS failure or timeout reaching the portal. |
-| `portal.not_supported` | 3 | The portal answered 404/405 for a route this CLI knows (`lium provider token …` before the portal serves API tokens). |
+| `portal.not_supported` | 3 | The portal answered 404/405 for a route this CLI knows (`lium provider token …` before the portal serves API tokens). Also `node resume --pause-id` when `node get` has no `pause_id` field: that portal would resume whatever the id, so no resume is sent (`data.unsupported: "pause_id"`, with `node_id` and `pause_id`). |
 | `portal.api_token_needs_session` | 6 | `lium provider token create`, `list` or `revoke` sent `LIUM_PROVIDER_TOKEN`; tokens are managed from a signed-in session only (hotkey or `portal login --email`). |
 | `portal.api_token_scope_missing` | 6 | `LIUM_PROVIDER_TOKEN` lacks the scope the call needs; `data.detail.required_scopes` names it. |
 | `portal.overview_not_for_custodied_account` | 6 | `lium provider idle-pay` on an account created with e-mail or Google: the portal serves its overview to hotkey accounts only (plain text mode: exit 2, as `PORTAL_FORBIDDEN`). |
 | `portal.<code>` | by status | The portal's own code in snake_case (`portal.node_rented`), passed through; `legacy_code` is the old code for its status. |
 | `node.not_found` | 5 | `node listing` / `idle-pay` named a node the account does not have. |
+| `node.resume_unverified` | 12 | `node resume --pause-id`: the portal answered the resume without a `pause_id` field, so it did not confirm the id check (an instance without pause ids, while the portal is rolled out); new rentals may have been resumed whatever the pause was. `data`: `node_id`, `pause_id`, `pause_id_checked: false`, `may_have_resumed: true`, `new_rentals_pause_requested_at`, `message_for_human`. Relay the message; do not pause or resume again on your own. Same exit in plain text mode. |
+| `node.pause_id_mismatch` | 3 | `node resume --pause-id`: the portal answered 409 `PAUSE_ID_MISMATCH` because the node's current pause is another one, or none (someone resumed, or resumed and paused again). Nothing changed. `data`: `node_id`, `pause_id` (the one given), `current_pause_id` (a UUID, or `null` when the node is not paused or its pause has no id), `status` 409, `portal_code`. Same exit in plain text mode. |
 | `node.not_listed_yet` | 11 | `lium mine --register` in agent mode: registered, not listed within `--wait`. |
 | `node.<status>` | 1 | `lium mine --json --register`: the portal names a fix (`node.offline`, `node.validation_failed`). |
 | `host.nvidia_driver_missing`, `host.nvidia_container_toolkit_missing`, `host.docker_missing` | 1 | `lium mine` step 3. |
@@ -283,11 +285,38 @@ for the account, as they scope to the local wallet's hotkey otherwise.
 `lium provider node listing [NODE_ID] --json` rows always carry `gpu_count` and `rented_gpu_count` (`null` when the
 portal does not send them). A node rented in part keeps `listing_state: "listed"` for its free GPUs, with
 `rented_gpu_count` above 0: check `rented_gpu_count`, not only `listing_state`, before anything that interrupts a rental.
+The rows also always carry `new_rentals_pause_requested_at` and `pause_id` (`null` by default). A `null` `pause_id`
+proves no pause: new rentals are taken, the pause was set without an id, or the portal does not send it. Read
+`new_rentals_pause_requested_at` for whether new rentals are paused.
 
 New rentals already paused (`node pause`): the `node listing --json` row has `NEW_RENTALS_PAUSED` in
 `hidden_reasons[].code`, and `computed_status.status` is `PAUSING_NEW_RENTALS` while the current rental runs or
 `NEW_RENTALS_PAUSED` once the node is idle; `node get --json` has `new_rentals_pause_requested_at` set
 (`null` when new rentals are taken). `node resume` clears it.
+
+Whose pause it is: `node pause --json` answers `paused_by_this_call` and `pause_id`. `paused_by_this_call` is `true`
+only when this call set the pause, and `pause_id` is then this call's own; on a node already paused it is `false` and
+`pause_id` is the existing pause's, which is `null` for a pause set without one (so a `null` never proves whose pause it
+is). A portal that does not send them gives `null` for both, never `false`. `node get --json` always carries `pause_id`
+(`null` by default, with the same meaning as in the listing rows: no provable pause); plain text `node get` prints the portal's fields as it always has.
+`node resume <id> --pause-id <uuid>` resumes only while that pause is still the current one:
+
+- It reads the node first. When the record has no `pause_id` field the portal predates pause ids and would resume
+  whatever the id says, so the command sends no resume and fails with `portal.not_supported` (exit 3).
+- A resume the portal refuses because the pause changed is `node.pause_id_mismatch` (exit 3; nothing changed,
+  `data.current_pause_id` is the node's pause now). It exits 3 as the other portal refusals do: the refusal is the
+  portal's, and the code, not the exit, tells it apart. Exit 10 stays for `node.blocked.*`.
+- A malformed id (not a UUID locally, or a portal 422) is `input.arg_invalid` (exit 2) in agent mode, `ARG_INVALID`
+  (exit 1) in plain text mode, like every other bad argument; a locally malformed id sends nothing.
+- A resume the portal answers without a `pause_id` field is `node.resume_unverified` (exit 12). While the portal is
+  rolled out, the node read can reach an instance that checks the id and the resume one that does not, which lifts
+  any pause and answers success. The command cannot tell whose pause was lifted, so it does not report success: `data`
+  has `node_id`, `pause_id`, `pause_id_checked: false`, `may_have_resumed: true`, the answer's
+  `new_rentals_pause_requested_at` and `message_for_human`. It exits 12, the map's "a person has to act" class, not 3:
+  exit 3 also covers portal failures an agent may retry, and here the node may already have changed, so the agent
+  relays `data.message_for_human` and leaves the node alone. Same exit in plain text mode.
+
+Without `--pause-id`, `node resume` lifts any pause, as before.
 
 One-time human steps (`config connect-discord`, `portal confirm-email`) answer `human.handoff_required` (exit 12):
 one URL plus a short code for the person. `config connect-discord` does so with `--wait` or in agent mode

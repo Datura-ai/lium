@@ -278,6 +278,11 @@ def _json_mode(ctx: click.Context) -> bool:
     return bool(_opts(ctx).get("json"))
 
 
+def json_output(ctx: click.Context) -> bool:
+    """Whether results print as the JSON envelope (``--json`` or ``LIUM_OUTPUT=json``), not text."""
+    return _json_mode(ctx)
+
+
 def _debug_mode(ctx: click.Context) -> bool:
     return bool(_opts(ctx).get("debug"))
 
@@ -978,5 +983,6 @@ __all__ = [
     "exit_code_for",
     "legacy_code_for",
     "fatal",
+    "json_output",
     "render",
 ]
