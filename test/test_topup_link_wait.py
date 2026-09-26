@@ -409,3 +409,101 @@ def test_a_key_minted_with_wider_scopes_is_never_kept_as_the_money_key(monkeypat
     out = json.loads(result.stdout)
     assert out["billing_key_configured"] is False
     assert "api.billing_api_key" not in signup_env
+
+
+# -- signup --no-email
+
+
+def _fingerprint_server(monkeypatch, signup_response, keys_list=None, keys_post=None):
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(("POST", url, kwargs))
+        if url.endswith("/auth/signup"):
+            return signup_response
+        if url.endswith("/auth/login"):
+            return _Response(200, {"token": "jwt-fp"})
+        if url.endswith("/keys"):
+            return keys_post or _Response(200, {"id": "k2", "key": "sk_billing_fp", "scopes": ["billing"]})
+        raise AssertionError(url)
+
+    def fake_get(url, **kwargs):
+        calls.append(("GET", url, kwargs))
+        return _Response(200, keys_list or [])
+
+    monkeypatch.setattr(signup_actions.requests, "post", fake_post)
+    monkeypatch.setattr(signup_actions.requests, "get", fake_get)
+    return calls
+
+
+FP = "a" * 28 + "WXYZ"
+
+
+def test_no_email_signup_is_one_call_and_keeps_the_fingerprint_and_key(monkeypatch, signup_env):
+    calls = _fingerprint_server(monkeypatch, _Response(200, {"user_id": "u1", "username": "lium_1", "fingerprint": FP,
+                                                             "api_key": "sk_rent_fp", "signup_credit_granted": False}))
+
+    result = CliRunner().invoke(cli, ["signup", "--no-email", "--json"])
+
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.stdout)
+    assert out["fingerprint"] == FP and out["api_key"] == "sk_rent_fp"
+    assert signup_env == {"account.fingerprint": FP, "api.api_key": "sk_rent_fp"}
+    assert [(m, u.rsplit("/api", 1)[1]) for m, u, _ in calls] == [("POST", "/auth/signup")]
+
+
+def test_no_email_billing_key_logs_in_with_the_fingerprint(monkeypatch, signup_env):
+    calls = _fingerprint_server(monkeypatch, _Response(200, {"fingerprint": FP, "api_key": "sk_rent_fp"}))
+
+    result = CliRunner().invoke(cli, ["signup", "--no-email", "--billing-key", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["billing_api_key"] == "sk_billing_fp"
+    login = [kw for m, u, kw in calls if u.endswith("/auth/login")][0]
+    assert login["json"] == {"fingerprint": FP}
+    assert signup_env["api.billing_api_key"] == "sk_billing_fp"
+
+
+def test_no_email_without_a_key_in_the_answer_mints_one_through_a_session(monkeypatch, signup_env):
+    _fingerprint_server(monkeypatch, _Response(200, {"fingerprint": FP, "api_key": None}),
+                        keys_list=[], keys_post=_Response(200, {"id": "k1", "key": "sk_minted"}))
+
+    result = CliRunner().invoke(cli, ["signup", "--no-email", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["api_key"] == "sk_minted"
+
+
+def test_no_email_with_no_key_at_all_still_hands_over_the_fingerprint(monkeypatch, signup_env):
+    _fingerprint_server(monkeypatch, _Response(200, {"fingerprint": FP, "api_key": None}),
+                        keys_list=[], keys_post=_Response(500))
+
+    result = CliRunner().invoke(cli, ["signup", "--no-email", "--json"])
+
+    assert result.exit_code != 0
+    envelope = _envelope(result)
+    assert envelope["data"]["fingerprint"] == FP
+    assert signup_env == {"account.fingerprint": FP}
+
+
+def test_no_email_rate_limit_is_explained(monkeypatch, signup_env):
+    _fingerprint_server(monkeypatch, _Response(429))
+
+    result = CliRunner().invoke(cli, ["signup", "--no-email", "--json"])
+
+    assert result.exit_code != 0
+    assert "Too many" in _envelope(result)["error"]["message"]
+    assert signup_env == {}
+
+
+@pytest.mark.parametrize("args", [[], ["--email", "a@example.com", "--no-email"], ["--no-email", "--password", "x"]])
+def test_signup_needs_exactly_one_of_email_or_no_email(signup_env, args):
+    result = CliRunner().invoke(cli, ["signup", *args])
+
+    assert result.exit_code == 2
+
+
+def test_config_get_masks_the_fingerprint_harder_than_a_key():
+    from lium.cli.config.get.command import mask_value
+
+    assert mask_value(FP, "account.fingerprint") == "***WXYZ"

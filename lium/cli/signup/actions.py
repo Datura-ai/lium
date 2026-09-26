@@ -18,6 +18,7 @@ REQUEST_TIMEOUT = 30
 MINTED_KEY_NAME = "Default"
 BILLING_KEY_NAME = "agent-billing"
 BILLING_KEY_OPTION = "api.billing_api_key"
+FINGERPRINT_OPTION = "account.fingerprint"
 DEFAULT_BASE_URL = "https://lium.io/api"
 
 
@@ -73,6 +74,40 @@ def _select_minted_key(api_keys: list) -> str | None:
     return newest.get("key")
 
 
+def refuse_if_key_configured() -> ActionResult | None:
+    # a second account would be unreachable — nothing here can switch between keys
+    if not config.get("api.api_key"):
+        return None
+    if os.environ.get("LIUM_API_KEY"):
+        return ActionResult(
+            ok=False,
+            data={},
+            error="An API key is already configured through the LIUM_API_KEY environment "
+                  "variable. Run 'unset LIUM_API_KEY' first, or use 'lium init' to "
+                  "re-authenticate.",
+        )
+    return ActionResult(
+        ok=False,
+        data={},
+        error="An API key is already configured. Run 'lium config unset api.api_key' first, "
+              "or use 'lium init' to re-authenticate.",
+    )
+
+
+def session_token(login_path: str, credentials: dict) -> tuple[str | None, str | None]:
+    """A session token from `POST <login_path>`: ``(token, None)``, or ``(None, why)``."""
+    try:
+        response = request_same_origin(
+            _send, "POST", f"{base_url()}{login_path}", json=credentials, timeout=REQUEST_TIMEOUT
+        )
+    except (requests.RequestException, LiumError) as e:
+        return None, f"login request failed: {e}"
+    if response.status_code >= 400:
+        return None, f"login failed with HTTP {response.status_code}"
+    token = _json_object(response).get("token")
+    return (token, None) if token else (None, "login returned no session token")
+
+
 class SignupAction:
     """Register an account and return the API key minted for it.
 
@@ -88,22 +123,9 @@ class SignupAction:
         self.display_name = display_name
 
     def execute(self, ctx: dict) -> ActionResult:
-        # a second account would be unreachable — nothing here can switch between keys
-        if config.get("api.api_key"):
-            if os.environ.get("LIUM_API_KEY"):
-                return ActionResult(
-                    ok=False,
-                    data={},
-                    error="An API key is already configured through the LIUM_API_KEY environment "
-                          "variable. Run 'unset LIUM_API_KEY' first, or use 'lium init' to "
-                          "re-authenticate.",
-                )
-            return ActionResult(
-                ok=False,
-                data={},
-                error="An API key is already configured. Run 'lium config unset api.api_key' first, "
-                      "or use 'lium init' to re-authenticate.",
-            )
+        refused = refuse_if_key_configured()
+        if refused:
+            return refused
 
         creation_result = self._create_account()
         if not creation_result.ok:
@@ -198,32 +220,97 @@ class SignupAction:
         return str(detail) if detail else f"Signup failed with HTTP {response.status_code}."
 
 
+class FingerprintSignupAction:
+    """Register an account with no e-mail and no password (``POST /auth/signup``) and keep its API key.
+
+    The server returns a ``fingerprint``, a random 32-character string that is the account's only login
+    (dashboard, ``POST /auth/login``) and is shown once; it is kept as ``[account] fingerprint`` in the
+    0600 config file. When the server could not mint a key in the same call (best effort there), one is
+    read back or minted through a session.
+    """
+
+    def execute(self, ctx: dict) -> ActionResult:
+        refused = refuse_if_key_configured()
+        if refused:
+            return refused
+        try:
+            response = request_same_origin(_send, "POST", f"{base_url()}/auth/signup", json={}, timeout=REQUEST_TIMEOUT)
+        except (requests.RequestException, LiumError) as e:
+            return ActionResult(ok=False, data={}, error=f"Signup request failed: {e}. No account was confirmed.")
+        if response.status_code == 429:
+            return ActionResult(
+                ok=False, data={},
+                error="Too many e-mail-less signups from this network today. Wait, or use --email.",
+            )
+        if response.status_code >= 400:
+            return ActionResult(ok=False, data={}, error=SignupAction._describe_failure(response))
+
+        body = _json_object(response)
+        fingerprint = body.get("fingerprint")
+        if not fingerprint:
+            return ActionResult(ok=False, data={}, error="Signup answered without the account's fingerprint.")
+        # the fingerprint first: it is the only way back into the account, whatever happens next
+        config.set(FINGERPRINT_OPTION, fingerprint)
+
+        api_key = body.get("api_key") or self._mint_key(fingerprint)
+        data = {
+            "fingerprint": fingerprint,
+            "user_id": body.get("user_id"),
+            "username": body.get("username"),
+            "signup_credit_granted": body.get("signup_credit_granted"),
+        }
+        if not api_key:
+            return ActionResult(
+                ok=False,
+                data={**data, "account_may_exist": True},
+                error="Account created, but no API key could be minted. Log in at https://lium.io with the "
+                      "fingerprint and create one.",
+            )
+        config.set("api.api_key", api_key)
+        return ActionResult(ok=True, data={**data, "api_key": api_key})
+
+    @staticmethod
+    def _mint_key(fingerprint: str) -> str | None:
+        token, _ = session_token("/auth/login", {"fingerprint": fingerprint})
+        if not token:
+            return None
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            listed = request_same_origin(_send, "GET", f"{base_url()}/keys", headers=headers, timeout=REQUEST_TIMEOUT)
+            existing = listed.json() if listed.status_code < 400 else []
+            key = _select_minted_key(existing) if isinstance(existing, list) else None
+            if key:
+                return key
+            minted = request_same_origin(
+                _send, "POST", f"{base_url()}/keys", headers=headers, json={"name": MINTED_KEY_NAME},
+                timeout=REQUEST_TIMEOUT,
+            )
+        except (requests.RequestException, LiumError, ValueError):
+            return None
+        body = _json_object(minted) if minted.status_code < 400 else {}
+        return body.get("key") or body.get("api_key")
+
+
 class MintBillingKeyAction:
     """Mint a key holding only the `billing` scope for a new account and keep it as ``[api] billing_api_key``.
 
     A key that pays is not a key that rents: the server grants `billing` alone and only to a signed-in
-    session (``POST /keys``), so this logs in with the password the account was just made with. The key can
-    open card payment pages and crypto invoices and read the balance; it reaches no pods.
+    session (``POST /keys``), so this logs in with the credentials the account was just made with (e-mail
+    and password, or the fingerprint). The key can open card payment pages and crypto invoices and read
+    the balance; it reaches no pods.
     """
 
-    def __init__(self, email: str, password: str):
-        self.email = email
-        self.password = password
+    def __init__(self, email: str | None = None, password: str | None = None, fingerprint: str | None = None):
+        if fingerprint:
+            self.login = ("/auth/login", {"fingerprint": fingerprint})
+        else:
+            self.login = ("/users/login", {"email": email, "password": password})
 
     def execute(self, ctx: dict) -> ActionResult:
+        token, why = session_token(*self.login)
+        if not token:
+            return ActionResult(ok=False, data={}, error=why)
         try:
-            login_response = request_same_origin(
-                _send,
-                "POST",
-                f"{base_url()}/users/login",
-                json={"email": self.email, "password": self.password},
-                timeout=REQUEST_TIMEOUT,
-            )
-            if login_response.status_code >= 400:
-                return ActionResult(ok=False, data={}, error=f"login failed with HTTP {login_response.status_code}")
-            token = _json_object(login_response).get("token")
-            if not token:
-                return ActionResult(ok=False, data={}, error="login returned no session token")
             key_response = request_same_origin(
                 _send,
                 "POST",
@@ -239,7 +326,7 @@ class MintBillingKeyAction:
         if key_response.status_code >= 400:
             detail = body.get("detail") or body.get("message") or (body.get("error") or {}).get("message")
             return ActionResult(ok=False, data={}, error=str(detail or f"HTTP {key_response.status_code}"))
-        if body.get("scopes") not in (None, ["billing"]):
+        if body.get("scopes") != ["billing"]:
             # never keep a key as the money key when the server widened or changed its scopes
             return ActionResult(ok=False, data={}, error=f"the server minted scopes {body.get('scopes')}, not ['billing']")
         key = body.get("key") or body.get("api_key")

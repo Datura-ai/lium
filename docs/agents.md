@@ -14,13 +14,14 @@ The rules of the road:
 A new agent with no account gets one, funds it and rents in one script; only the payment itself can need a person (a card form, a 3-D Secure check, or a wallet send).
 
 ```bash
-lium signup --email "$EMAIL" --billing-key --json > signup.json       # account, rent key, billing-only key, SSH key: ~1.3 s
+lium signup --no-email --billing-key --json > signup.json            # account, rent key, billing-only key, SSH key: ~1 s
+# or with an e-mail (password generated): lium signup --email "$EMAIL" --billing-key --json
 lium topup link -a 10 --wait 900 --json 2>handoff.json > paid.json    # handoff.json holds the Stripe page for a person; exits when credited
 # or, from a wallet: lium topup create -a 10 -c USDC -n base --wait 900 --json 2>invoice.json
 lium up --gpu RTX4090 --ttl 30m --yes --json | jq -r .pod.huid        # cheapest matching node, returns when SSH answers
 ```
 
-`signup --json` returns `api_key` (read, rent, manage: never moves money) and, with `--billing-key`, `billing_api_key`, a key that holds only the `billing` scope: it opens payment pages and invoices and reads the balance, and reaches no pods. Both are saved in `~/.lium/config.ini`; `LIUM_BILLING_API_KEY` overrides the saved one. The verification e-mail does not gate renting.
+`--no-email` makes the account in one request with no e-mail, password or verification; its only login is the `fingerprint` in the output (kept as `[account] fingerprint`, shown once, no recovery), and a network gets a few of these a day. `signup --json` returns `api_key` (read, rent, manage: never moves money) and, with `--billing-key`, `billing_api_key`, a key that holds only the `billing` scope: it opens payment pages and invoices and reads the balance, and reaches no pods. Both are saved in `~/.lium/config.ini`; `LIUM_BILLING_API_KEY` overrides the saved one. The verification e-mail does not gate renting.
 
 `topup link` makes a Stripe Checkout page and charges nothing; `--wait SECONDS` prints the page on stderr at once (one JSON line, `"event": "handoff"`) and exits 0 when the balance rises, with `seconds_to_credit`, or 3 with `credit_not_seen` when the time runs out (`lium topup wait --above <balance_before>` resumes). The card is saved on the account for later top-ups. `topup create --wait` does the same for a crypto invoice, and `topup card --wait` for a saved card where the platform allows it.
 
