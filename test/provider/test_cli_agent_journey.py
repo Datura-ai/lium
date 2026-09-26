@@ -146,6 +146,8 @@ def _listing_row(node_id: str, state: str, *, gpus: int = 8, rented: int = 0, re
         "rented_gpu_count": rented,
         "rented_since": "2026-09-26T08:00:00Z" if rented else None,
         "computed_status": None,
+        "new_rentals_pause_requested_at": None,
+        "pause_id": None,
     }
 
 

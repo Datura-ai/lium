@@ -69,6 +69,7 @@ NOT_SIGNED_IN = "auth.not_signed_in"
 NET_UNREACHABLE = "net.unreachable"
 PORTAL_NOT_SUPPORTED = "portal.not_supported"
 NODE_NOT_LISTED = "node.not_listed_yet"
+PAUSE_ID_MISMATCH = "node.pause_id_mismatch"
 HANDOFF_REQUIRED = "human.handoff_required"
 HANDOFF_EXPIRED = "human.handoff_expired"
 API_TOKEN_NEEDS_SESSION = "portal.api_token_needs_session"
@@ -110,7 +111,7 @@ def unified_exit_code(code: str, status: int | None = None) -> int:
         return EXIT_BLOCKED
     if code == NODE_NOT_LISTED:
         return EXIT_NOT_LISTED
-    if code == PORTAL_NOT_SUPPORTED:
+    if code in (PORTAL_NOT_SUPPORTED, PAUSE_ID_MISMATCH):
         return EXIT_API
     if code in (API_TOKEN_NEEDS_SESSION, API_TOKEN_SCOPE_MISSING, OVERVIEW_NOT_FOR_CUSTODIED_ACCOUNT):
         return EXIT_AUTH
@@ -156,6 +157,8 @@ _HINTS: dict[str, str] = {
     HANDOFF_REQUIRED: "Relay data.message_for_human to the person, then re-run with --wait (or run it again once they are done).",
     HANDOFF_EXPIRED: "The code expired before the person finished; run the command again for a new one.",
     PORTAL_NOT_SUPPORTED: "This portal does not serve that yet; sign in with `lium provider portal login` instead.",
+    PAUSE_ID_MISMATCH: "Nothing changed: someone resumed or paused the node again after your pause. Leave it as it is; "
+    "`lium provider node get <id> --json` shows the current `pause_id`.",
     API_TOKEN_NEEDS_SESSION: "An API token cannot create, list or revoke tokens: unset LIUM_PROVIDER_TOKEN and sign in (hotkey, or `lium provider portal login --email`).",
     API_TOKEN_SCOPE_MISSING: "The token lacks the scope in data.detail.required_scopes; create one with it (`lium provider token create --scope …`).",
 }
@@ -278,6 +281,7 @@ __all__ = [
     "NODE_NOT_LISTED",
     "NOT_SIGNED_IN",
     "OVERVIEW_NOT_FOR_CUSTODIED_ACCOUNT",
+    "PAUSE_ID_MISMATCH",
     "PORTAL_NOT_SUPPORTED",
     "unified_exit_code",
     "ProviderAuthError",

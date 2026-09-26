@@ -37,7 +37,7 @@ from lium.cli.provider._guards import (
     require_persona_ack,
 )
 from lium.cli.provider._overrides import with_provider_overrides
-from lium.cli.provider._render import fatal, render
+from lium.cli.provider._render import fatal, json_output, render
 from lium.cli.provider._verification import render_text
 from lium.provider._shared_config import default_price_for_gpu, fetch_shared_config
 from lium.provider.errors import ARG_INVALID, ProviderError
@@ -109,6 +109,8 @@ def list_nodes(
 @with_provider_overrides
 @click.pass_context
 def get_node(ctx: click.Context, node_id: str) -> None:
+    """The node's record as the portal has it. Under --json it always carries `pause_id` (null when new
+    rentals are not paused, or the portal does not send it)."""
     require_hotkey(ctx, group="node")
     client = build_client(ctx)
     try:
@@ -116,6 +118,8 @@ def get_node(ctx: click.Context, node_id: str) -> None:
     except ProviderError as e:
         ctx.exit(handle_provider_error(ctx, e))
         return
+    if json_output(ctx) and isinstance(body, dict):
+        body = {"pause_id": None, **body}
     render(ctx, body, summary=f"node {node_id}")
 
 

@@ -99,8 +99,10 @@ class PortalHTTP:
     ) -> dict[str, Any]:
         return self._request("PUT", path, json_body=json_body, auth=auth)
 
-    def delete(self, path: str, *, auth: bool = True) -> dict[str, Any]:
-        return self._request("DELETE", path, auth=auth)
+    def delete(
+        self, path: str, *, params: dict[str, Any] | None = None, auth: bool = True
+    ) -> dict[str, Any]:
+        return self._request("DELETE", path, params=params, auth=auth)
 
     # ------------------------------------------------------------------
     # Internals
