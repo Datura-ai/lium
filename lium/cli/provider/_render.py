@@ -877,6 +877,7 @@ def _render_provider_status(status: ProviderStatus) -> None:
         node_rows = [n.model_dump() for n in status.nodes]
         _render_rows(node_rows)
         _blocking.print_panels(node_rows)
+        _blocking.print_not_eligible(node_rows, short=True)
 
     if status.validator_weights:
         console.print(

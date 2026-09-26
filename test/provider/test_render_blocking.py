@@ -8,12 +8,15 @@ The portal's ``blocking_reasons`` are rendered as they come; without them the li
 from __future__ import annotations
 
 import copy
+import io
 import json
 import re
 
 import pytest
 from click.testing import CliRunner
+from rich.console import Console
 
+from lium.cli.provider import _blocking
 from lium.cli.provider._blocking import SECURE_GATING_CODES, fallback_reasons
 from lium.cli.provider.command import provider_command
 from lium.provider.auth import LocalKeypairSigner
@@ -218,7 +221,6 @@ def test_fallback_reads_last_error_hidden_reasons_and_gating_idle_pay_reasons(po
     assert "✗ Price above the market's soft limit measured $3.2/GPU·h · required $2.4/GPU·h or less" in text
     assert "Fix: `lium provider node update-price e-1 --price 2.4`" in text
     assert "paused new rentals" not in text   # the provider's own choice, not a blocker
-    assert "gpu_model_not_eligible" not in text   # the GPU program's scope is not gated
     assert "Secure listing: 1 unmet requirement" in text
 
 
@@ -246,6 +248,7 @@ def test_node_list_json_carries_the_same_list(portal_for):
                 "then restart the executor (`docker compose up -d` in neurons/executor)."
             ),
             "secure": True,
+            "gating": True,
             "source": "idle_pay",
         }
     ]
@@ -321,3 +324,146 @@ def test_secure_gating_codes_are_the_validators_node_level_codes():
     # a healthy status ignores a stale last_error
     row = _node(computed_status={"status": "AVAILABLE", "last_error": {"title": "old", "remediation": "x"}})
     assert fallback_reasons(row) == []
+
+
+NOT_ELIGIBLE_OVERVIEW = {
+    "node_rows": [
+        {
+            "executor_id": "e-2",
+            "idle_pay": "not_paid",
+            "idle_pay_reasons": [
+                {"code": "gpu_model_not_eligible_for_unrented_incentive", "context": {}, "message": None},
+                {"code": "no_unrented_capacity_for_gpu_count", "context": {}, "message": None},
+            ],
+        }
+    ]
+}
+GPU_LINE = "Not eligible for idle pay: this GPU model is not in the idle-pay program"
+GPU_ACTION = "No action: this model earns from rentals only."
+ROOM_LINE = "Not eligible for idle pay: no idle-pay room for this node size right now"
+ROOM_ACTION = "No action: room for this size is full. Rentals still pay, and room opens as the market moves."
+
+
+@pytest.fixture
+def ansi_console(monkeypatch):
+    """The panels and idle-pay lines printed with colour, so a test can tell red from not red."""
+    for var in ("NO_COLOR", "FORCE_COLOR", "COLUMNS"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")   # a dumb terminal would drop the colour and wrap at 80
+    out = io.StringIO()
+    monkeypatch.setattr(_blocking, "console", Console(file=out, force_terminal=True, color_system="standard", width=200))
+    return out
+
+
+def _red_lines(ansi: str) -> list[str]:
+    return [line for line in ansi.splitlines() if re.search(r"\x1b\[[0-9;]*31m", line)]
+
+
+def test_node_get_shows_both_not_eligible_lines_with_no_action_and_not_in_red(portal_for, ansi_console):
+    portal_for(_Portal(node=_node("e-2"), overview=NOT_ELIGIBLE_OVERVIEW))
+
+    result = _run("node", "get", "e-2")
+
+    assert result.exit_code == 0, result.output
+    ansi = ansi_console.getvalue()
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", ansi)
+    for line in (GPU_LINE, GPU_ACTION, ROOM_LINE, ROOM_ACTION):
+        assert line in plain
+    assert "BLOCKING" not in plain
+    assert _red_lines(ansi) == []
+
+
+def test_not_eligible_lines_sit_outside_a_blocking_panel_on_a_blocked_node(portal_for, ansi_console):
+    overview = copy.deepcopy(DRIVER_OVERVIEW)
+    overview["data"]["node_rows"][0]["idle_pay_reasons"].append(
+        {"code": "gpu_model_not_eligible_for_unrented_incentive", "context": {}}
+    )
+    portal_for(_Portal(node=_node("e-1"), overview=overview))
+
+    result = _run("node", "get", "e-1")
+
+    assert result.exit_code == 0, result.output
+    ansi = ansi_console.getvalue()
+    red = "\n".join(_red_lines(ansi))
+    assert "NVIDIA driver below the network minimum" in red
+    assert "not in the idle-pay program" not in red
+    assert GPU_LINE in re.sub(r"\x1b\[[0-9;]*m", "", ansi)
+    panel = re.sub(r"\x1b\[[0-9;]*m", "", ansi).split("╰")[0]
+    assert "idle-pay program" not in panel
+    assert "Secure listing: 1 unmet requirement" in panel
+
+
+def test_node_list_marks_a_not_eligible_node_without_counting_it_blocked(portal_for, ansi_console):
+    portal_for(_Portal(nodes=[_node("e-1"), _node("e-2")], overview=NOT_ELIGIBLE_OVERVIEW))
+
+    result = _run("node", "list")
+
+    assert result.exit_code == 0, result.output
+    assert "blocked=0" in result.output
+    assert re.search(r"2\s+AVAILABLE\s+e-2", result.output)
+    assert "BLOCKED" not in result.output
+    ansi = ansi_console.getvalue()
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", ansi)
+    assert (
+        "◦ e-2: not eligible for idle pay (this GPU model is not in the idle-pay program; "
+        "no idle-pay room for this node size right now); no action needed"
+    ) in plain
+    assert "e-1" not in plain
+    assert _red_lines(ansi) == []
+
+
+def test_provider_status_shows_the_marker_and_counts_no_blocked_node(portal_for, monkeypatch, ansi_console):
+    monkeypatch.setattr("lium.provider.client._read_metagraph", lambda **kw: (True, []))
+    portal_for(_Portal(nodes=[_node("e-1"), _node("e-2")], overview=NOT_ELIGIBLE_OVERVIEW))
+
+    result = _run("status")
+
+    assert result.exit_code == 0, result.output
+    assert "blocked=0" in result.output.splitlines()[0]
+    assert "nodes BLOCKED" not in result.output
+    assert "◦ e-2: not eligible for idle pay" in re.sub(r"\x1b\[[0-9;]*m", "", ansi_console.getvalue())
+    assert _red_lines(ansi_console.getvalue()) == []
+
+    result = _run("--json", "status")
+    data = json.loads(result.output)["data"]
+    assert data["blocked_node_count"] == 0
+    e2 = next(n for n in data["nodes"] if n["id"] == "e-2")
+    assert [(r["code"], r["gating"]) for r in e2["blocking_reasons"]] == [
+        ("gpu_model_not_eligible_for_unrented_incentive", False),
+        ("no_unrented_capacity_for_gpu_count", False),
+    ]
+
+
+def test_json_carries_the_not_eligible_reasons_with_gating_false(portal_for):
+    portal_for(_Portal(node=_node("e-2"), overview=NOT_ELIGIBLE_OVERVIEW))
+
+    result = _run("--json", "node", "get", "e-2")
+
+    assert result.exit_code == 0, result.output
+    reasons = json.loads(result.output)["data"]["blocking_reasons"]
+    assert reasons[0] == {
+        "code": "gpu_model_not_eligible_for_unrented_incentive",
+        "title": "This GPU model is not in the idle-pay program",
+        "measured": None,
+        "required": None,
+        "fix": GPU_ACTION,
+        "secure": False,
+        "gating": False,
+        "source": "idle_pay",
+    }
+    assert reasons[1]["fix"] == ROOM_ACTION and reasons[1]["gating"] is False
+
+
+def test_node_status_shows_a_portal_gating_false_entry_as_not_eligible(portal_for, ansi_console):
+    served = [{"code": "gpu_model_not_eligible", "message": "This GPU model is not in the idle-pay program",
+               "fix": GPU_ACTION, "gating": False}]
+    portal_for(_Portal(node=_node("e-2", blocking_reasons=served)))
+
+    result = _run("node", "status", "e-2")
+
+    assert result.exit_code == 0, result.output
+    ansi = ansi_console.getvalue()
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", ansi)
+    assert GPU_LINE in plain and GPU_ACTION in plain
+    assert "BLOCKING" not in plain
+    assert _red_lines(ansi) == []

@@ -113,6 +113,7 @@ def list_nodes(
     render(ctx, body, summary="node list: " + ", ".join(summary_parts))
     if blocking and not _json_mode(ctx):
         _blocking.print_panels(rows)
+        _blocking.print_not_eligible(rows, short=True)
 
 
 @node_command.command("get", short_help="Show one node.")
@@ -132,6 +133,7 @@ def get_node(ctx: click.Context, node_id: str) -> None:
     render(ctx, body, summary=f"node {node_id}")
     if isinstance(body, dict) and not _json_mode(ctx):
         _blocking.print_panels([body])
+        _blocking.print_not_eligible([body], short=False)
 
 
 @node_command.command("status", short_help="Verification progress of one node.")
@@ -185,6 +187,7 @@ def status_node(ctx: click.Context, node_id: str, watch: bool, interval: int) ->
                 click.echo(render_text(body))
                 if node is not None:
                     _blocking.print_panels([node])
+                    _blocking.print_not_eligible([node], short=False)
             if not watch:
                 return
             time.sleep(interval)

@@ -5,7 +5,9 @@ out of idle pay, each with its message, the measured and required value and the 
 the portal serves that list, it is rebuilt here from what the portal already returns: the
 validator's ``computed_status.last_error``, the listing's ``hidden_reasons`` and the idle-pay
 reasons of ``GET /miners/overview``. A node with any reason gets a red BLOCKING panel; ``--json``
-carries the same list under each node's ``blocking_reasons``.
+carries the same list under each node's ``blocking_reasons``. An entry with ``gating: false`` (an
+idle-pay code Secure does not require) blocks nothing: it prints as "Not eligible for idle pay: …"
+with its "No action: …" line.
 """
 
 from __future__ import annotations
@@ -23,9 +25,8 @@ from lium.cli.utils import console
 from lium.provider.errors import ProviderError
 
 # The validator's idle-pay codes (lium-io ``ZeroIncentiveReason``) a Secure listing requires,
-# the portal's default gating list. Not listed on purpose: the GPU program's scope
-# (``gpu_model_not_eligible_for_unrented_incentive``), the fleet cap
-# (``no_unrented_capacity_for_gpu_count``), ``spot_tier`` and ``new_rentals_paused``.
+# the portal's default gating list. Not listed on purpose: the two ``NOT_GATED`` codes below,
+# ``spot_tier`` and ``new_rentals_paused``.
 SECURE_GATING_CODES = frozenset(
     {
         "nvidia_driver_below_minimum",
@@ -41,6 +42,24 @@ SECURE_GATING_CODES = frozenset(
         "port_limited_remainder",
     }
 )
+
+# Idle-pay codes Secure does not require: shown as "Not eligible for idle pay: …" with a "No action: …" line,
+# never in the BLOCKING panel and never counted as blocked (``gating: false``). Same words as the portal.
+NOT_GATED: dict[str, tuple[str, str]] = {
+    "gpu_model_not_eligible_for_unrented_incentive": (
+        "This GPU model is not in the idle-pay program",
+        "No action: this model earns from rentals only.",
+    ),
+    "no_unrented_capacity_for_gpu_count": (
+        "No idle-pay room for this node size right now",
+        "No action: room for this size is full. Rentals still pay, and room opens as the market moves.",
+    ),
+}
+_ALIASES = {
+    "price_above_p90": "price_above_market_p90_soft_limit",
+    "gpu_model_not_eligible": "gpu_model_not_eligible_for_unrented_incentive",
+    "no_unrented_capacity": "no_unrented_capacity_for_gpu_count",
+}
 
 # lium-io ``incentive/default.py::get_min_driver_multiplier``: the lowest driver that earns idle pay.
 MIN_NVIDIA_DRIVER = "580.65.06"
@@ -150,6 +169,21 @@ def _idle_pay_entry(code: str, context: Mapping[str, Any], message: str | None, 
         "required": required,
         "fix": fix,
         "secure": code in SECURE_GATING_CODES,
+        "gating": True,
+        "source": "idle_pay",
+    }
+
+
+def _not_gated_entry(code: str) -> dict[str, Any]:
+    title, fix = NOT_GATED[code]
+    return {
+        "code": code,
+        "title": title,
+        "measured": None,
+        "required": None,
+        "fix": fix,
+        "secure": False,
+        "gating": False,
         "source": "idle_pay",
     }
 
@@ -179,6 +213,7 @@ def fallback_reasons(row: Mapping[str, Any], idle_pay_reasons: Iterable[Mapping[
                     "required": None,
                     "fix": err.get("remediation") or err.get("message") or "",
                     "secure": False,
+                    "gating": True,
                     "source": "last_error",
                 }
             )
@@ -198,6 +233,7 @@ def fallback_reasons(row: Mapping[str, Any], idle_pay_reasons: Iterable[Mapping[
                 "required": None,
                 "fix": _HIDDEN_FIXES.get(code, message).replace("<id>", node_id or "<id>"),
                 "secure": False,
+                "gating": True,
                 "source": "hidden_reason",
             }
         )
@@ -206,6 +242,10 @@ def fallback_reasons(row: Mapping[str, Any], idle_pay_reasons: Iterable[Mapping[
         if not isinstance(idle, Mapping):
             continue
         code = str(idle.get("code") or idle.get("reason") or "")
+        code = _ALIASES.get(code, code)
+        if code in NOT_GATED:
+            _add(_not_gated_entry(code))
+            continue
         if code not in SECURE_GATING_CODES:
             continue
         context = idle.get("context") if isinstance(idle.get("context"), Mapping) else {}
@@ -225,7 +265,9 @@ def _first(entry: Mapping[str, Any], *keys: str) -> Any:
 def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
     """One portal ``blocking_reasons`` entry in the renderer's field names; unknown names pass through."""
     code = str(_first(entry, "code", "reason_code") or "")
+    code = _ALIASES.get(code, code)
     secure = _first(entry, "secure", "secure_requirement", "blocks_secure", "gates_secure")
+    gating = entry.get("gating")
     return {
         "code": code,
         "title": _first(entry, "title", "message") or code,
@@ -233,15 +275,25 @@ def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
         "required": _first(entry, "required", "required_value"),
         "fix": _first(entry, "fix", "exact_fix", "fix_text", "remediation") or "",
         "secure": bool(secure) if secure is not None else code in SECURE_GATING_CODES,
+        "gating": bool(gating) if gating is not None else code not in NOT_GATED,
     }
 
 
-def node_reasons(row: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """The reasons to render for one node: the portal's list, normalised."""
+def _all_reasons(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     raw = row.get("blocking_reasons")
     if not isinstance(raw, list):
         return []
     return [normalise(entry) for entry in raw if isinstance(entry, Mapping)]
+
+
+def node_reasons(row: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """What blocks the node (the BLOCKING panel): the portal's list without its ``gating: false`` entries."""
+    return [reason for reason in _all_reasons(row) if reason["gating"]]
+
+
+def not_eligible_reasons(row: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Why the node earns no idle pay while nothing needs fixing: the ``gating: false`` entries."""
+    return [reason for reason in _all_reasons(row) if not reason["gating"]]
 
 
 def needs_fallback(rows: Iterable[Mapping[str, Any]]) -> bool:
@@ -346,8 +398,38 @@ def print_panels(rows: Iterable[Any]) -> int:
     return printed
 
 
+def _lower_first(text: str) -> str:
+    return text[:1].lower() + text[1:]
+
+
+def print_not_eligible(rows: Iterable[Any], *, short: bool) -> int:
+    """Print the "Not eligible for idle pay" reasons, never in red; ``short`` is one marker line per node (the tables).
+
+    Returns how many nodes had one.
+    """
+    nodes = 0
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        reasons = not_eligible_reasons(row)
+        if not reasons:
+            continue
+        nodes += 1
+        if short:
+            node_id = str(row.get("id") or row.get("executor_id") or "?")
+            words = "; ".join(_lower_first(str(r["title"])) for r in reasons)
+            console.print(Text(f"  ◦ {node_id}: not eligible for idle pay ({words}); no action needed", style="dim"))
+            continue
+        for reason in reasons:
+            console.print(Text.from_markup(f"[bold]Not eligible for idle pay:[/] {escape(_lower_first(str(reason['title'])))}"))
+            if reason.get("fix"):
+                console.print(Padding(Text(str(reason["fix"])), (0, 0, 0, 2)))
+    return nodes
+
+
 __all__ = [
     "MIN_NVIDIA_DRIVER",
+    "NOT_GATED",
     "SECURE_GATING_CODES",
     "attach",
     "blocked_count",
@@ -358,5 +440,7 @@ __all__ = [
     "needs_fallback",
     "node_reasons",
     "normalise",
+    "not_eligible_reasons",
+    "print_not_eligible",
     "print_panels",
 ]
