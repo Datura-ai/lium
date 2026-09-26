@@ -14,6 +14,7 @@ from lium.cli.provider.command import provider_command
 from lium.provider.auth import LocalKeypairSigner
 from lium.provider.client import ProviderClient
 from lium.provider.token_store import TokenStore
+from ._agent_mode import AGENT_SWITCHES, PLAIN_TEXT
 
 
 def _step(index, name, status, **kw):
@@ -173,6 +174,48 @@ def test_node_status_watch_refreshes_until_interrupted(patched_client, monkeypat
     assert portal.gets == ["/executors/e-1/verification"] * 2  # two refreshes, then Ctrl-C
 
 
+@pytest.mark.parametrize("switch", AGENT_SWITCHES)
+def test_node_status_watch_stops_on_ctrl_c_with_exit_0_in_agent_mode_too(patched_client, monkeypatch, switch):
+    patched_client(VERIFYING)
+
+    def _sleep(_seconds):
+        raise KeyboardInterrupt
+    monkeypatch.setattr("lium.cli.provider.node.time.sleep", _sleep)
+    monkeypatch.setattr("lium.cli.provider.node.click.clear", lambda: None)
+    flags, env = switch
+
+    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", *flags, "node", "status", "e-1", "--watch"],
+                                env={**PLAIN_TEXT, **env})
+
+    assert result.exit_code == 0, result.output
+    assert "input.interrupted" not in result.output
+
+
+MODES = [pytest.param(((), {}), id="plain-text"), *AGENT_SWITCHES]
+
+
+def _ctrl_c_on_fetch(portal) -> None:
+    def _get(path, *, params=None, auth=True):
+        raise KeyboardInterrupt
+    portal.get = _get
+
+
+@pytest.mark.parametrize("switch", MODES)
+@pytest.mark.parametrize("via", ["node status", "mine status"])
+def test_a_one_shot_status_stopped_by_ctrl_c_exits_0_with_nothing_on_stdout_in_every_mode(patched_client, monkeypatch,
+                                                                                          via, switch):
+    _ctrl_c_on_fetch(patched_client(VERIFYING))
+    flags, env = switch
+    if via == "node status":
+        result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", *flags, "node", "status", "e-1"],
+                                    env={**PLAIN_TEXT, **env})
+    else:
+        result = CliRunner().invoke(cli, ["mine", "status", "e-1", *flags],
+                                    env={**PLAIN_TEXT, "LIUM_PROVIDER_HOTKEY": "hk1", **env})
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+
+
 def test_mine_status_is_the_same_command(patched_client, monkeypatch):
     portal = patched_client(IDLE_FAILED)
     monkeypatch.setenv("LIUM_PROVIDER_HOTKEY", "hk1")
@@ -214,9 +257,9 @@ def test_mine_status_refuses_an_ss58_as_the_hotkey_name(patched_client, monkeypa
     assert portal.gets == []
 
     result = CliRunner().invoke(cli, ["mine", "status", "e-1", "--json", "-k", ss58])
-    assert result.exit_code == 1, result.output
+    assert result.exit_code == 2, result.output
     payload = json.loads(result.output.strip())
-    assert payload["ok"] is False and payload["error"]["code"] == "ARG_INVALID"
+    assert payload["ok"] is False and (payload["error"]["code"], payload["error"]["legacy_code"]) == ("input.arg_invalid", "ARG_INVALID")
     assert portal.gets == []
 
 

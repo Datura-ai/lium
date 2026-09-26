@@ -28,6 +28,7 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
+from lium.cli.interactive import noninteractive_requested
 from lium.cli.utils import console
 from lium.provider.errors import (
     ARG_INVALID,
@@ -43,11 +44,15 @@ from lium.provider.errors import (
     PORTAL_REQUEST_REJECTED,
     PORTAL_SERVER_ERROR,
     PORTS_INVALID,
+    EXECUTOR_UUID_MISMATCH,
+    INSTALLER_PARTIAL_FAIL,
     SSH_AUTH_FAILED,
     SSH_UNREACHABLE,
+    UUID_NOT_FOUND,
     WALLET_NOT_FOUND,
     ProviderError,
 )
+from lium.provider.errors import unified_exit_code
 from lium.provider.models import ProviderStatus
 
 
@@ -86,9 +91,77 @@ _EXIT_CODES: dict[str, int] = {
 }
 
 
-def exit_code_for(err: ProviderError) -> int:
-    """Map a :class:`ProviderError` to its CLI exit status."""
-    return _EXIT_CODES.get(err.code, 1)
+# A node with a gating blocking reason under ``--fail-on-blocked`` or ``--until-clear``.
+EXIT_NODE_BLOCKED = 10
+
+# The namespaced snake_case code each provider error carries in ``--json``; the UPPER_CASE code it
+# replaces stays in the envelope as ``legacy_code``. Never rename a code once shipped.
+ERROR_CODES: dict[str, str] = {
+    WALLET_NOT_FOUND: "auth.wallet_not_found",
+    HOTKEY_NOT_REGISTERED: "auth.hotkey_not_registered",
+    PORTAL_AUTH_EXPIRED: "auth.expired",
+    PORTAL_AUTH_INVALID: "auth.invalid",
+    PORTAL_AUTH_REFRESH_RACE: "auth.refresh_race",
+    PORTAL_FORBIDDEN: "auth.forbidden",
+    PORTAL_CONTRACT_DRIFT: "portal.contract_drift",
+    PORTAL_NOT_FOUND: "portal.not_found",
+    PORTAL_SERVER_ERROR: "portal.server_error",
+    PORTAL_RATE_LIMIT: "portal.rate_limited",
+    PORTAL_REQUEST_REJECTED: "portal.request_rejected",
+    SSH_UNREACHABLE: "ssh.unreachable",
+    SSH_AUTH_FAILED: "ssh.auth_failed",
+    INSTALLER_PARTIAL_FAIL: "host.installer_partial_fail",
+    EXECUTOR_UUID_MISMATCH: "host.executor_uuid_mismatch",
+    UUID_NOT_FOUND: "host.uuid_not_found",
+    PORTS_INVALID: "input.ports_invalid",
+    ARG_INVALID: "input.arg_invalid",
+    CONFIG_MISSING: "input.config_missing",
+}
+
+
+def error_code_for(code: str) -> str:
+    """The namespaced code for a provider error code; a code already namespaced passes through."""
+    if "." in code:
+        return code
+    if code in ERROR_CODES:
+        return ERROR_CODES[code]
+    for prefix, namespace in (("PORTAL_AUTH_", "auth"), ("PORTAL_", "portal"), ("SSH_", "ssh")):
+        if code.startswith(prefix):
+            return f"{namespace}.{code[len(prefix):].lower()}"
+    return f"general.{code.lower()}"
+
+
+def legacy_code_for(err: ProviderError) -> str | None:
+    """The UPPER_CASE code of ``err``: its own, or the one its namespaced code replaces (None for a new code)."""
+    if "." not in err.code:
+        return err.code
+    return err.legacy_code
+
+
+def exit_code_for(err: ProviderError, *, json_mode: bool = False) -> int:
+    """Map a :class:`ProviderError` to its CLI exit status (``docs/exit-codes.md``).
+
+    ``json_mode`` means agent mode (``--json``, ``LIUM_OUTPUT=json`` or ``LIUM_NONINTERACTIVE=1``; see
+    :func:`agent_mode`): every error exits by the unified map, whatever its origin. Plain text mode keeps
+    the old statuses so existing scripts do not break: an error with an UPPER_CASE code (its own, or the
+    one a namespaced code replaces) exits as that code always did; only codes with no old equivalent use
+    the unified map there.
+    """
+    status = err.context.get("status")
+    if json_mode:
+        return unified_exit_code(error_code_for(err.code), status)
+    legacy = legacy_code_for(err)
+    if legacy is not None:
+        return _EXIT_CODES.get(legacy, 1)
+    return unified_exit_code(err.code, status)
+
+
+def agent_mode(ctx: click.Context) -> bool:
+    """Whether an agent drives this run: ``--json``, ``LIUM_OUTPUT=json`` or ``LIUM_NONINTERACTIVE=1``.
+
+    All three switches select the same exit map and the same errors; only the output format differs.
+    """
+    return _json_mode(ctx) or noninteractive_requested()
 
 
 def render(
@@ -149,17 +222,33 @@ def render(
 
 def emit_error(ctx: click.Context, err: ProviderError) -> int:
     """Format a :class:`ProviderError` and return its exit code."""
-    code = exit_code_for(err)
+    code = exit_code_for(err, json_mode=agent_mode(ctx))
     if _json_mode(ctx):
-        envelope = {"ok": False, "error": err.to_dict()}
-        click.echo(json.dumps(envelope, sort_keys=True, default=str), err=True)
+        error = {
+            "code": error_code_for(err.code),
+            "legacy_code": legacy_code_for(err),
+            "message": err.message,
+            "hint": err.hint,
+            "exit_code": code,
+            "context": err.context or {},
+        }
+        if err.context:
+            error["data"] = err.context
+        click.echo(json.dumps({"ok": False, "error": error}, sort_keys=True, default=str))
+        return code
+    if agent_mode(ctx):
+        # the label is the namespaced code, so it matches the exit status
+        shown, label = err, error_code_for(err.code)
     else:
-        prefix = click.style(f"[{err.code}]", fg="red", bold=True)
-        click.echo(f"{prefix} {err.message}", err=True)
-        if err.hint:
-            click.echo(f"  hint: {err.hint}", err=True)
-        if _debug_mode(ctx) and err.context:
-            click.echo(f"  context: {err.context}", err=True)
+        # plain text prints the old UPPER_CASE label (and, where the old CLI worded it differently, its message)
+        shown = err.legacy_error or err
+        label = legacy_code_for(shown) or shown.code
+    prefix = click.style(f"[{label}]", fg="red", bold=True)
+    click.echo(f"{prefix} {shown.message}", err=True)
+    if shown.hint:
+        click.echo(f"  hint: {shown.hint}", err=True)
+    if _debug_mode(ctx) and shown.context:
+        click.echo(f"  context: {shown.context}", err=True)
     return code
 
 
@@ -880,10 +969,14 @@ def _render_provider_status(status: ProviderStatus) -> None:
 
 
 __all__ = [
+    "ERROR_CODES",
+    "EXIT_NODE_BLOCKED",
     "discord_incentive_warnings",
     "emit_error",
     "emit_warning",
+    "error_code_for",
     "exit_code_for",
+    "legacy_code_for",
     "fatal",
     "render",
 ]

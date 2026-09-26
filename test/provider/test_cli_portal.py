@@ -237,6 +237,24 @@ def test_portal_whoami_renders_body(patched_build_client) -> None:
     assert portal.gets == [("/auth/me", True)]
 
 
+def test_portal_whoami_text_mode_output_is_unchanged_with_a_hotkey(patched_build_client, monkeypatch) -> None:
+    monkeypatch.delenv("LIUM_PROVIDER_TOKEN", raising=False)
+    monkeypatch.delenv("LIUM_NONINTERACTIVE", raising=False)
+    patched_build_client(_Portal(get_body={"id": "m-1", "miner_hotkey": "5xxx"}))
+    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", "portal", "whoami"], env={"LIUM_OUTPUT": ""})
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines()[0] == "portal session active"
+    assert "auth_method" not in result.output
+
+
+def test_portal_whoami_json_with_a_hotkey_says_hotkey(patched_build_client, monkeypatch) -> None:
+    monkeypatch.delenv("LIUM_PROVIDER_TOKEN", raising=False)
+    patched_build_client(_Portal(get_body={"miner_id": "m-1", "miner_hotkey": "5xxx"}))
+    result = CliRunner().invoke(provider_command, ["--json", "--hotkey", "hk1", "portal", "whoami"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["data"] == {"miner_id": "m-1", "miner_hotkey": "5xxx", "auth_method": "hotkey"}
+
+
 def test_portal_logout_clears_cache(
     patched_build_client, fake_signer, tmp_token_store: TokenStore
 ) -> None:

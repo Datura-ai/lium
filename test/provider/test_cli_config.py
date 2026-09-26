@@ -8,11 +8,13 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
+from lium.cli.provider._client import bearer_token
 from lium.cli.provider.command import provider_command
 from lium.provider.auth import LocalKeypairSigner
 from lium.provider.client import ProviderClient
-from lium.provider.errors import ProviderError
+from lium.provider.errors import ProviderError, ProviderNotFoundError
 from lium.provider.token_store import TokenStore
+from ._agent_mode import AGENT_SWITCHES, PLAIN_TEXT, read_error
 
 
 class _Portal:
@@ -47,11 +49,13 @@ def patched_build_client(
     monkeypatch, fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
 ):
     def _factory(portal: _Portal):
-        def _builder(ctx):
+        def _builder(ctx, *, wallet_only: bool = False):
+            opts = (ctx.obj or {}).get("provider_opts") or {}
             return ProviderClient(
                 signer=fake_signer,
                 token_store=tmp_token_store,
                 http=portal,  # type: ignore[arg-type]
+                api_token=None if wallet_only else bearer_token(opts),
             )
 
         monkeypatch.setattr("lium.cli.provider.config.build_client", _builder)
@@ -242,6 +246,25 @@ def test_config_set_password_posts_signature_payload(
     assert payload["message"].isdigit()
 
 
+def test_config_set_password_help_says_when_it_prompts() -> None:
+    result = CliRunner().invoke(provider_command, ["config", "set-password", "--help"])
+    text = " ".join(result.output.split())
+    assert "prompts only in plain interactive text mode (not under --json, LIUM_OUTPUT=json or LIUM_NONINTERACTIVE=1)" in text
+
+
+@pytest.mark.parametrize("switch", AGENT_SWITCHES)
+def test_config_set_password_without_a_password_is_input_arg_invalid_in_agent_mode(patched_build_client, switch) -> None:
+    portal = _Portal(post_body={"data": {}})
+    patched_build_client(portal)
+    flags, env = switch
+    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", *flags, "config", "set-password"],
+                                env={**PLAIN_TEXT, **env}, input="pw-123456\npw-123456\n")
+    assert result.exit_code == 2, result.output
+    assert read_error(result, switch)[0] == "input.arg_invalid"
+    assert "New password" not in result.output
+    assert portal.posts == []
+
+
 def test_config_set_password_json_requires_password(patched_build_client) -> None:
     portal = _Portal(post_body={"data": {}})
     patched_build_client(portal)
@@ -250,58 +273,38 @@ def test_config_set_password_json_requires_password(patched_build_client) -> Non
         provider_command,
         ["--hotkey", "hk1", "--json", "config", "set-password"],
     )
-    assert result.exit_code == 1, result.output
+    assert result.exit_code == 2, result.output
     payload = json.loads(result.output.strip())
     assert payload["ok"] is False
-    assert payload["error"]["code"] == "ARG_INVALID"
+    assert (payload["error"]["code"], payload["error"]["legacy_code"]) == ("input.arg_invalid", "ARG_INVALID")
     assert portal.posts == []
 
 
-def test_config_connect_discord_no_wait_json(patched_build_client, monkeypatch) -> None:
+_NO_HANDOFFS = ProviderNotFoundError("portal returned 404", code="PORTAL_NOT_FOUND", context={"status": 404})
+
+
+def test_config_connect_discord_json_without_handoffs_is_not_supported_with_the_old_url(
+    patched_build_client, monkeypatch
+) -> None:
     portal = _Portal(
         get_body={
             "/auth/me/discord/oauth-url": {
                 "authorization_url": "https://discord.com/oauth2/authorize?x=1"
             },
             "/auth/me": {"discord_id": None},
-        }
+        },
+        post_raises=_NO_HANDOFFS,
     )
     patched_build_client(portal)
-    monkeypatch.setattr(
-        "lium.cli.provider.config._open_authorization_url",
-        lambda url: False,
-    )
-    runner = CliRunner()
-    result = runner.invoke(
-        provider_command,
-        [
-            "--hotkey",
-            "hk1",
-            "--json",
-            "config",
-            "connect-discord",
-            "--no-wait",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output.strip())
-    assert payload["data"] == {
-        "authorization_url": "https://discord.com/oauth2/authorize?x=1",
-        "browser_opened": False,
-        "discord_connected": False,
-        "extra_incentive_eligible": False,
-        "next_action": "open_authorization_url_and_complete_discord_oauth",
-    }
-    assert payload["warnings"] == [
-        {
-            "code": "DISCORD_REQUIRED_FOR_EXTRA_INCENTIVES",
-            "message": "Discord is not connected. No Discord = no extra incentives. Run `lium provider config connect-discord` to become eligible.",
-        }
-    ]
-    assert [call[0] for call in portal.gets] == [
-        "/auth/me/discord/oauth-url",
-        "/auth/me",
-    ]
+    opened: list[str] = []
+    monkeypatch.setattr("lium.cli.provider.config._open_authorization_url", opened.append)
+    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", "--json", "config", "connect-discord"])
+    assert result.exit_code == 3, result.output
+    error = json.loads(result.stdout)["error"]
+    assert error["code"] == "portal.not_supported"
+    assert error["data"]["legacy_flow"] is True and error["data"]["step"] == "discord_link"
+    assert error["data"]["legacy_browser_url"] == "https://discord.com/oauth2/authorize?x=1"
+    assert [p[0] for p in portal.posts] == ["/auth/handoffs"] and opened == []
 
 
 def test_config_connect_discord_no_wait_human_omits_agent_fields(
@@ -313,7 +316,8 @@ def test_config_connect_discord_no_wait_human_omits_agent_fields(
                 "authorization_url": "https://discord.com/oauth2/authorize?x=1"
             },
             "/auth/me": {"discord_id": None},
-        }
+        },
+        post_raises=_NO_HANDOFFS,
     )
     patched_build_client(portal)
     monkeypatch.setattr(

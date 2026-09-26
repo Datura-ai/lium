@@ -4,7 +4,8 @@ Every external failure surface (portal HTTP, SSH, wallet materialisation) is
 mapped onto a stable code with an actionable hint, so an agent driving the
 CLI can branch on machine-readable values rather than log strings.
 
-Exit-code mapping (used by ``lium/cli/provider/_render.py``):
+Exit-code mapping (used by ``lium/cli/provider/_render.py``). The UPPER_CASE
+codes keep the old provider map while scripts migrate:
 
     0  success
     1  user error (bad arg)
@@ -13,6 +14,10 @@ Exit-code mapping (used by ``lium/cli/provider/_render.py``):
     5  SSH error
     6  config error
     7  token-cache contention (PORTAL_AUTH_REFRESH_RACE)
+
+A namespaced snake_case code (``input.confirmation_required``, ``net.unreachable``,
+``portal.<the portal's detail.code>``) exits by the unified map instead
+(:func:`unified_exit_code`, ``docs/exit-codes.md``).
 
 Each error code is exported as a string constant so callers can do::
 
@@ -54,6 +59,76 @@ PORTS_INVALID = "PORTS_INVALID"
 ARG_INVALID = "ARG_INVALID"
 CONFIG_MISSING = "CONFIG_MISSING"
 
+# Namespaced codes (snake_case, never renamed once shipped). A portal refusal that names its own
+# ``detail.code`` is raised as ``portal.<that code>``.
+INPUT_REQUIRED = "input.input_required"
+CONFIRMATION_REQUIRED = "input.confirmation_required"
+INTERRUPTED = "input.interrupted"
+AUTH_REFRESH_RACE = "auth.refresh_race"
+NOT_SIGNED_IN = "auth.not_signed_in"
+NET_UNREACHABLE = "net.unreachable"
+PORTAL_NOT_SUPPORTED = "portal.not_supported"
+NODE_NOT_LISTED = "node.not_listed_yet"
+HANDOFF_REQUIRED = "human.handoff_required"
+HANDOFF_EXPIRED = "human.handoff_expired"
+API_TOKEN_NEEDS_SESSION = "portal.api_token_needs_session"
+API_TOKEN_SCOPE_MISSING = "portal.api_token_scope_missing"
+OVERVIEW_NOT_FOR_CUSTODIED_ACCOUNT = "portal.overview_not_for_custodied_account"
+
+# The unified exit map (docs/exit-codes.md).
+EXIT_OK = 0
+EXIT_GENERAL = 1
+EXIT_INPUT = 2
+EXIT_API = 3
+EXIT_NETWORK = 4
+EXIT_NOT_FOUND = 5
+EXIT_AUTH = 6
+EXIT_RETRYABLE = 7
+EXIT_BLOCKED = 10
+EXIT_NOT_LISTED = 11
+EXIT_HUMAN = 12
+EXIT_INTERRUPTED = 130
+
+_NAMESPACE_EXITS: dict[str, int] = {
+    "input": EXIT_INPUT,
+    "human": EXIT_HUMAN,
+    "auth": EXIT_AUTH,
+    "net": EXIT_NETWORK,
+    "ssh": EXIT_NETWORK,
+    "host": EXIT_GENERAL,
+    "portal": EXIT_API,
+}
+
+
+def unified_exit_code(code: str, status: int | None = None) -> int:
+    """The unified-map exit status of a namespaced code; ``status`` is the portal's HTTP status, if any."""
+    if code == INTERRUPTED:
+        return EXIT_INTERRUPTED
+    if code == AUTH_REFRESH_RACE:
+        return EXIT_RETRYABLE
+    if code.startswith("node.blocked"):
+        return EXIT_BLOCKED
+    if code == NODE_NOT_LISTED:
+        return EXIT_NOT_LISTED
+    if code == PORTAL_NOT_SUPPORTED:
+        return EXIT_API
+    if code in (API_TOKEN_NEEDS_SESSION, API_TOKEN_SCOPE_MISSING, OVERVIEW_NOT_FOR_CUSTODIED_ACCOUNT):
+        return EXIT_AUTH
+    leaf = code.rsplit(".", 1)[-1]
+    not_found = leaf == "not_found" or leaf.endswith("_not_found")
+    if code.startswith("portal."):
+        if status in (401, 403, 419, 440):
+            return EXIT_AUTH
+        if status == 404 or not_found:
+            return EXIT_NOT_FOUND
+        if status == 429 or leaf == "rate_limited":
+            return EXIT_RETRYABLE
+        return EXIT_API
+    if not_found:
+        return EXIT_NOT_FOUND
+    return _NAMESPACE_EXITS.get(code.split(".", 1)[0], EXIT_GENERAL)
+
+
 # Default hint table -- keep human and short. Empty string => no hint.
 _HINTS: dict[str, str] = {
     WALLET_NOT_FOUND: "Run `btcli wallet new_coldkey` then `btcli wallet new_hotkey`, or check --coldkey/--hotkey names.",
@@ -75,6 +150,14 @@ _HINTS: dict[str, str] = {
     PORTS_INVALID: "Use the form HTTP=8080,SSH=2200,RANGE=2000-2005 with positive integers.",
     ARG_INVALID: "Check the argument value and consult --help.",
     CONFIG_MISSING: "Run `lium init` or set the missing config value.",
+    INPUT_REQUIRED: "Pass the value as an option; no prompt is shown without a terminal or under --json.",
+    CONFIRMATION_REQUIRED: "Re-run with --yes (or set LIUM_PROVIDER_ACK=1).",
+    NET_UNREACHABLE: "Nothing answered at the portal URL. Check --portal-url / LIUM_PORTAL_URL and the network, then retry.",
+    HANDOFF_REQUIRED: "Relay data.message_for_human to the person, then re-run with --wait (or run it again once they are done).",
+    HANDOFF_EXPIRED: "The code expired before the person finished; run the command again for a new one.",
+    PORTAL_NOT_SUPPORTED: "This portal does not serve that yet; sign in with `lium provider portal login` instead.",
+    API_TOKEN_NEEDS_SESSION: "An API token cannot create, list or revoke tokens: unset LIUM_PROVIDER_TOKEN and sign in (hotkey, or `lium provider portal login --email`).",
+    API_TOKEN_SCOPE_MISSING: "The token lacks the scope in data.detail.required_scopes; create one with it (`lium provider token create --scope …`).",
 }
 
 
@@ -90,6 +173,10 @@ class ProviderError(Exception):
         hint: actionable next step, or empty string.
         cause: the underlying exception, if any (chained, not stringified).
         context: free-form ``dict[str, Any]``.
+        legacy_code: the UPPER_CASE code a namespaced ``code`` replaces (``PORTAL_REQUEST_REJECTED`` for a
+            coded 400); text mode exits by it, and ``--json`` shows it as ``legacy_code``.
+        legacy_error: the same failure as the CLI reported it before the namespaced code existed; text mode
+            prints its code, message and hint.
     """
 
     default_code: str = "PROVIDER_ERROR"
@@ -102,10 +189,14 @@ class ProviderError(Exception):
         hint: str | None = None,
         cause: BaseException | None = None,
         context: dict[str, Any] | None = None,
+        legacy_code: str | None = None,
+        legacy_error: ProviderError | None = None,
     ) -> None:
         self.code = code or self.default_code
+        self.legacy_code = legacy_code
+        self.legacy_error = legacy_error
         self.message = message
-        self.hint = hint if hint is not None else _HINTS.get(self.code, "")
+        self.hint = hint if hint is not None else (_HINTS.get(self.code) or _HINTS.get(legacy_code or "", ""))
         self.cause = cause
         self.context = context or {}
         super().__init__(self.message)
@@ -158,11 +249,37 @@ class ProviderConfigError(ProviderError):
 
 
 __all__ = [
+    "API_TOKEN_NEEDS_SESSION",
+    "API_TOKEN_SCOPE_MISSING",
     "ARG_INVALID",
+    "AUTH_REFRESH_RACE",
     "CONFIG_MISSING",
+    "CONFIRMATION_REQUIRED",
     "EXECUTOR_UUID_MISMATCH",
+    "EXIT_API",
+    "EXIT_AUTH",
+    "EXIT_BLOCKED",
+    "EXIT_GENERAL",
+    "EXIT_HUMAN",
+    "EXIT_INTERRUPTED",
+    "EXIT_INPUT",
+    "EXIT_NETWORK",
+    "EXIT_NOT_FOUND",
+    "EXIT_NOT_LISTED",
+    "EXIT_OK",
+    "EXIT_RETRYABLE",
+    "HANDOFF_EXPIRED",
+    "HANDOFF_REQUIRED",
     "HOTKEY_NOT_REGISTERED",
+    "INPUT_REQUIRED",
     "INSTALLER_PARTIAL_FAIL",
+    "INTERRUPTED",
+    "NET_UNREACHABLE",
+    "NODE_NOT_LISTED",
+    "NOT_SIGNED_IN",
+    "OVERVIEW_NOT_FOR_CUSTODIED_ACCOUNT",
+    "PORTAL_NOT_SUPPORTED",
+    "unified_exit_code",
     "ProviderAuthError",
     "ProviderConfigError",
     "ProviderError",
