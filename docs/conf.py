@@ -40,8 +40,6 @@ exclude_patterns: list[str] = [
     "_build",
     "Thumbs.db",
     ".DS_Store",
-    "api.rst",
-    "api/*",
     "binary-builds.rst",
     "getting-started.rst",
 ]
