@@ -56,11 +56,23 @@ class ConfigManager:
         return config
     
     def _save_config(self) -> None:
-        """Save configuration to file."""
-        with open(self.config_file, 'w') as f:
-            self._config.write(f)
-        # the file holds the API key — keep it readable by the owner only
-        os.chmod(self.config_file, 0o600)
+        """Save configuration to file.
+
+        Written to a temporary file next to it and renamed over it, so an interrupted write never leaves
+        a truncated file (and no API key) behind. The file holds the API key — readable by the owner only.
+        """
+        tmp = self.config_file.with_name(f".{self.config_file.name}.{os.getpid()}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, 'w') as f:
+                self._config.write(f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, self.config_file)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
     
     def _parse_key(self, key: str) -> tuple[str, str]:
         """Parse key into section and option."""

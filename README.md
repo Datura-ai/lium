@@ -213,7 +213,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 ### Core Commands
 
 - `lium signup` - Create an account from the terminal and store its API key
-- `lium init` - Initialize configuration for an existing account (API key, SSH keys); `--api-key <key>` for machines without a browser
+- `lium init` - Initialize configuration for an existing account (API key, SSH keys); `--api-key <key>` for machines without a browser; `--force` to log in again
 - `lium completion [bash|zsh|fish] [--install]` - Print or install shell tab completion
 - `lium balance` - Show the account balance (add `--format json` for machine-readable output)
 - `lium whoami` - Show which API key is in use, where it came from, and the account it belongs to
@@ -573,6 +573,15 @@ exits 2 (`empty_api_key`); none of them saves anything, and the hint says so. Wi
 `lium keys create <name> --workspace <ws> --save`. With `LIUM_API_KEY` (or `LIUM_API_API_KEY`) already exported,
 `lium init` skips the browser, sets up the SSH key and says the key is coming from the environment — the SSH path
 is written to the file, the key is not; `--api-key` warns when a key is also exported (`env_key` in the JSON).
+
+Login keys can expire or be revoked, so `lium init` next to a saved key checks it against
+`/users/me` first. When the API rejects it (401, or a 403 saying the key's workspace is gone or its creator left it) the normal login runs
+(`Your saved API key has expired or was revoked. Starting a new login…`); without a terminal no browser is opened
+and `lium init` exits 6 (`saved_key_rejected`). Any other 403 (a blocked account, a firewall page), a 429, a 5xx or
+no answer keeps the key with a warning. `lium init --force` logs in again even when the key still works, and
+`lium init --session <ID>` exchanges the session even next to a saved key. The saved key is replaced only once the
+new login has produced a key (the config file is written to a temporary file and renamed over the old one), so an
+aborted browser login or an unapproved session leaves the old key in place.
 
 SSH host keys of pods are pinned on first use under `~/.lium/known_hosts/<pod-id>`
 (`lium ssh`, `lium up`, and the SDK's `exec`, `stream_exec`, `rsync`). `reboot`, `edit`,
