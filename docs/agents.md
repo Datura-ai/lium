@@ -219,7 +219,7 @@ lium provider node get "$NODE" --json --fail-on-blocked
 lium provider node status "$NODE" --json --watch --until-clear --timeout 1800
 ```
 
-A reason whose `requires` lists `reboot` (or a fix that needs `sudo` on a host you do not control) is a step for a person: stop and hand it over rather than retrying.
+A reason whose `requires` lists `reboot` (or a fix that needs `sudo` on a host you do not control) is a step for a person: stop and hand it over.
 
 ## See also
 
