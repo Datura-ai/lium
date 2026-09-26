@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
+from lium.cli.provider._client import bearer_token
 from lium.cli.provider.command import provider_command
 from lium.provider.auth import LocalKeypairSigner
 from lium.provider.client import ProviderClient
@@ -48,11 +49,13 @@ def patched_build_client(
     monkeypatch, fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
 ):
     def _factory(portal: _Portal):
-        def _builder(ctx, **_kw):
+        def _builder(ctx, *, wallet_only: bool = False):
+            opts = (ctx.obj or {}).get("provider_opts") or {}
             return ProviderClient(
                 signer=fake_signer,
                 token_store=tmp_token_store,
                 http=portal,  # type: ignore[arg-type]
+                api_token=None if wallet_only else bearer_token(opts),
             )
 
         monkeypatch.setattr("lium.cli.provider.config.build_client", _builder)
@@ -241,6 +244,12 @@ def test_config_set_password_posts_signature_payload(
     assert auth is False
     assert payload["new_password"] == "change-me-8+"
     assert payload["message"].isdigit()
+
+
+def test_config_set_password_help_says_when_it_prompts() -> None:
+    result = CliRunner().invoke(provider_command, ["config", "set-password", "--help"])
+    text = " ".join(result.output.split())
+    assert "prompts only in plain interactive text mode (not under --json, LIUM_OUTPUT=json or LIUM_NONINTERACTIVE=1)" in text
 
 
 @pytest.mark.parametrize("switch", AGENT_SWITCHES)

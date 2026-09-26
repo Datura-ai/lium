@@ -414,6 +414,19 @@ def test_the_hotkey_wins_over_an_email_session_in_text_mode_too(portal, wallet) 
     assert {r["authorization"] for r in portal.requests} == {"Bearer hotkey-session"}
 
 
+def test_set_email_with_a_token_and_a_hotkey_sends_the_fresh_hotkey_session_not_the_token(portal, wallet) -> None:
+    portal.route("POST", "/auth/login-flexible", {
+        "provider": {"id": "m-1", "miner_hotkey": wallet.ss58_address, "provider_coldkey": "5CK",
+                     "created_at": "2026-09-26T00:00:00", "updated_at": "2026-09-26T00:00:00"},
+        "token": "fresh-hotkey-session",
+    })
+    portal.route("POST", "/auth/set-email", {"email": "ops@example.com"})
+    ok(run(portal, "--json", "--hotkey", "hk", "-y", "config", "set-email", "ops@example.com"))
+    sent = [r for r in portal.requests if r["path"] == "/auth/set-email"]
+    assert len(sent) == 1 and sent[0]["authorization"] == "Bearer fresh-hotkey-session"
+    assert all(r["authorization"] != f"Bearer {TOKEN}" for r in portal.requests)
+
+
 # --- node list / billing list scope to the account's hotkey without a wallet ----------------------
 
 LIST_ENVELOPE = {"data": [], "total": 0, "page": 1, "limit": 20}

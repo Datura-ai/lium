@@ -128,7 +128,8 @@ def set_email(ctx: click.Context, email: str) -> None:
     "--password",
     "new_password",
     envvar="LIUM_PROVIDER_NEW_PASSWORD",
-    help="New password. Prompts when omitted outside --json.",
+    help="New password. When omitted, prompts only in plain interactive text mode "
+    "(not under --json, LIUM_OUTPUT=json or LIUM_NONINTERACTIVE=1).",
 )
 @with_provider_overrides
 @click.pass_context

@@ -14,6 +14,7 @@ from lium.cli.provider.command import provider_command
 from lium.provider.auth import LocalKeypairSigner
 from lium.provider.client import ProviderClient
 from lium.provider.token_store import TokenStore
+from ._agent_mode import AGENT_SWITCHES, PLAIN_TEXT
 
 
 def _step(index, name, status, **kw):
@@ -171,6 +172,23 @@ def test_node_status_watch_refreshes_until_interrupted(patched_client, monkeypat
 
     assert result.exit_code == 0, result.output
     assert portal.gets == ["/executors/e-1/verification"] * 2  # two refreshes, then Ctrl-C
+
+
+@pytest.mark.parametrize("switch", AGENT_SWITCHES)
+def test_node_status_watch_stops_on_ctrl_c_with_exit_0_in_agent_mode_too(patched_client, monkeypatch, switch):
+    patched_client(VERIFYING)
+
+    def _sleep(_seconds):
+        raise KeyboardInterrupt
+    monkeypatch.setattr("lium.cli.provider.node.time.sleep", _sleep)
+    monkeypatch.setattr("lium.cli.provider.node.click.clear", lambda: None)
+    flags, env = switch
+
+    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", *flags, "node", "status", "e-1", "--watch"],
+                                env={**PLAIN_TEXT, **env})
+
+    assert result.exit_code == 0, result.output
+    assert "input.interrupted" not in result.output
 
 
 def test_mine_status_is_the_same_command(patched_client, monkeypatch):
