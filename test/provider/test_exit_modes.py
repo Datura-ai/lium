@@ -130,12 +130,13 @@ def test_an_uncoded_error_exits_old_in_text_and_unified_under_json(portal, answe
     assert (error["code"], error["legacy_code"], error["exit_code"]) == (code, legacy, json_exit)
 
 
-def test_a_cli_input_error_exits_1_in_text_and_2_under_json(portal) -> None:
+def test_no_sign_in_exits_1_in_text_and_6_under_json(portal) -> None:
     env = {"LIUM_PROVIDER_TOKEN": ""}
     assert run(portal.url, "node", "listing", env=env).exit_code == 1
     result = run(portal.url, "--json", "node", "listing", env=env)
-    assert result.exit_code == 2
-    assert json.loads(result.stdout)["error"]["legacy_code"] == "ARG_INVALID"
+    assert result.exit_code == 6
+    error = json.loads(result.stdout)["error"]
+    assert (error["code"], error["legacy_code"]) == ("auth.not_signed_in", "ARG_INVALID")
 
 
 def test_the_missing_hotkey_hint_is_the_old_one_in_text_and_names_the_token_under_json(portal) -> None:

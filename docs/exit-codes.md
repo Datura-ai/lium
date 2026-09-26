@@ -163,7 +163,7 @@ progress, when a command has any, is one JSON object per line on stderr. `--json
 
 | Old code | Text exit | `--json` code | `--json` exit |
 |----------|-----------|---------------|---------------|
-| `ARG_INVALID` | 1 | `input.arg_invalid` | 2 |
+| `ARG_INVALID` | 1 | `input.arg_invalid` (no sign-in at all: `auth.not_signed_in`, exit 6) | 2 |
 | `PORTS_INVALID` | 1 | `input.ports_invalid` | 2 |
 | `HOTKEY_NOT_REGISTERED` | 1 | `auth.hotkey_not_registered` | 6 |
 | `PORTAL_REQUEST_REJECTED` | 1 | `portal.request_rejected`, or the portal's own `portal.<code>` | 3 |
@@ -232,7 +232,7 @@ for a 400 or 409, `PORTAL_FORBIDDEN` for a 403, `PORTAL_NOT_FOUND` for a 404, `P
 | `input.hotkey_conflicts_with_token` | 2 | `lium mine --json --register … -k` with a hotkey the token does not name. |
 | `human.handoff_required` | 12 | A one-time human step (`lium provider config connect-discord`, `lium provider portal confirm-email`). `data`: `step` (`discord_link`, `email_confirm`), `handoff_url`, `code`, `expires_at`, `message_for_human`. Relay `message_for_human` to the person, then re-run with `--wait`. With `--wait --timeout N`, also when N seconds pass first (`data.waited_s`). |
 | `human.handoff_expired` | 12 | `--wait`: the code expired before the person finished, or the portal answers 404 for the handoff (`data.status: not_found`); run the command again for a new code. A poll the portal could not answer (5xx, 429, unreachable) is retried with backoff until `--timeout`. |
-| `auth.not_signed_in` | 6 | `lium provider portal whoami` in agent mode with no `LIUM_PROVIDER_TOKEN`, no hotkey and no live `portal login --email` session (`data.session_email` names a session that has ended). The hint names all three ways in. Text mode keeps the old refusal (`ARG_INVALID`, exit 1). |
+| `auth.not_signed_in` | 6 | Any `lium provider` command that needs a sign-in, in agent mode, with no `LIUM_PROVIDER_TOKEN`, no hotkey and no live `portal login --email` session (`data.session_email` names a session that has ended); `lium mine status` too. The hint names all three ways in; `legacy_code` is `ARG_INVALID`. Text mode prints `ARG_INVALID` and exits 1 as before (`portal whoami` says "not signed in to the provider portal" with the same hint). `status`, `portal login` and `portal logout` need the hotkey itself and stay `input.arg_invalid`. |
 | `net.unreachable` | 4 | Connection refused, DNS failure or timeout reaching the portal. |
 | `portal.not_supported` | 3 | The portal answered 404/405 for a route this CLI knows (`lium provider token …` before the portal serves API tokens). |
 | `portal.api_token_needs_session` | 6 | `lium provider token create`, `list` or `revoke` sent `LIUM_PROVIDER_TOKEN`; tokens are managed from a signed-in session only (hotkey or `portal login --email`). |
@@ -262,9 +262,11 @@ token with `lium provider token create` and hands it over.
 
 When more than one is set, a command signs in with the first of: `LIUM_PROVIDER_TOKEN`, the hotkey (`--hotkey`,
 `LIUM_PROVIDER_HOTKEY` or `provider.hotkey`), the `portal login --email` session. In agent mode (`--json`,
-`LIUM_OUTPUT=json`, `LIUM_NONINTERACTIVE=1`) `lium provider portal whoami` works with any of them and adds
-`auth_method` to the account fields of `/auth/me` (`miner_id`, `miner_hotkey`, `email`, …): `token`, `hotkey` or
-`email_session`, the one used; with none it is `auth.not_signed_in` (exit 6). Text mode needs the hotkey as it always has.
+`LIUM_OUTPUT=json`, `LIUM_NONINTERACTIVE=1`) and in text mode, `lium provider portal whoami` works with any of them.
+Under `--json` it adds `auth_method` to the account fields of `/auth/me` (`miner_id`, `miner_hotkey`, `email`, …):
+`token`, `hotkey` or `email_session`, the one used. The text output names the sign-in on its first line
+(`portal session active, signed in by API token (LIUM_PROVIDER_TOKEN)`) and adds an `Auth Method` row; signed in by
+the hotkey, it prints what it always has. With none it is `auth.not_signed_in` (exit 6; text: `ARG_INVALID`, exit 1).
 
 `lium provider node listing [NODE_ID] --json` rows always carry `gpu_count` and `rented_gpu_count` (`null` when the
 portal does not send them). A node rented in part keeps `listing_state: "listed"` for its free GPUs, with
@@ -291,6 +293,7 @@ with the old one as `legacy_code`; the exits on the right are the `--json` ones:
 | `PORTAL_SERVER_ERROR` (3) | `net.unreachable` (4) | Connection refused, DNS failure, timeout. A 5xx stays `PORTAL_SERVER_ERROR`. |
 | `PORTAL_REQUEST_REJECTED` (1), `PORTAL_FORBIDDEN` (2), `PORTAL_NOT_FOUND` (3), `PORTAL_RATE_LIMIT` (3) | `portal.<code>` (3, 6, 5, 7) | The portal's body named `detail.code` (`node rm` on a rented node, the `node add` refusals). Text mode keeps the old exit. |
 | the persona prompt | `input.confirmation_required` (2) | Under `--json`, `LIUM_OUTPUT=json` or `LIUM_NONINTERACTIVE=1` piped input is ignored; use `--yes` or `LIUM_PROVIDER_ACK=1`. Text mode prompts as it always has; a decline stays `ARG_INVALID` (1). |
+| `ARG_INVALID` (1) | `auth.not_signed_in` (6) | A command that needs a sign-in found none, in agent mode (`--json`, `LIUM_OUTPUT=json`, `LIUM_NONINTERACTIVE=1`; under `LIUM_NONINTERACTIVE=1` alone the output is text, so the exit stays 1). Text mode keeps the old `… require --hotkey` line. |
 | exit 1 (Ctrl-C) | `input.interrupted` (130) | Under `--json` only; text mode is unchanged. |
 | `PORTAL_AUTH_REFRESH_RACE` (7) | `auth.refresh_race` (7) | Another process holds the token cache; retry. |
 | exit 2 (text, not listed) | `node.not_listed_yet` (11) | `lium mine --register`, under `--json` only. |

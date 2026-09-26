@@ -59,8 +59,8 @@ def test_the_provider_token_env_is_sent_as_the_bearer_token(portal) -> None:
 
 
 def test_no_hotkey_and_no_token_names_the_token_env_in_the_hint(portal) -> None:
-    err = error(run(portal, "--json", "node", "listing", env={"LIUM_PROVIDER_TOKEN": ""}), 2)
-    assert err["legacy_code"] == "ARG_INVALID" and "LIUM_PROVIDER_TOKEN" in err["hint"]
+    err = error(run(portal, "--json", "node", "listing", env={"LIUM_PROVIDER_TOKEN": ""}), 6)
+    assert (err["code"], err["legacy_code"]) == ("auth.not_signed_in", "ARG_INVALID") and "LIUM_PROVIDER_TOKEN" in err["hint"]
     assert portal.requests == []
 
 
@@ -341,16 +341,36 @@ def test_whoami_noninteractive_text_names_the_sign_in(portal) -> None:
     portal.route("GET", "/auth/me", detail_response(ME))
     result = run(portal, "portal", "whoami", env={"LIUM_NONINTERACTIVE": "1"})
     assert result.exit_code == 0, result.output
-    assert result.output.splitlines()[0] == "portal session active (signed in by API token (LIUM_PROVIDER_TOKEN))"
+    assert result.output.splitlines()[0] == "portal session active, signed in by API token (LIUM_PROVIDER_TOKEN)"
 
 
-def test_whoami_in_text_mode_without_a_hotkey_still_refuses_as_before(portal) -> None:
+def test_whoami_in_text_mode_with_the_provider_token_names_it_and_the_account(portal) -> None:
+    portal.route("GET", "/auth/me", detail_response(ME))
     result = run(portal, "portal", "whoami")
+    assert result.exit_code == 0, result.output
+    lines = [line.strip() for line in result.output.splitlines()]
+    assert lines[0] == "portal session active, signed in by API token (LIUM_PROVIDER_TOKEN)"
+    assert "Auth Method   token" in lines and f"Miner Hotkey   {HOTKEY}" in lines and "Miner Id   m-1" in lines
+    assert portal.requests[0]["authorization"] == f"Bearer {TOKEN}"
+
+
+def test_whoami_in_text_mode_with_an_email_session_names_it_and_the_account(portal) -> None:
+    _email_session()
+    portal.route("GET", "/auth/me", detail_response(ME))
+    result = run(portal, "portal", "whoami", env={"LIUM_PROVIDER_TOKEN": "", "LIUM_PROVIDER_EMAIL": SESSION_EMAIL})
+    assert result.exit_code == 0, result.output
+    lines = [line.strip() for line in result.output.splitlines()]
+    assert lines[0] == "portal session active, signed in by e-mail session"
+    assert "Auth Method   email_session" in lines and f"Email   {SESSION_EMAIL}" in lines
+    assert portal.requests[0]["authorization"] == "Bearer session-stub"
+
+
+def test_whoami_in_text_mode_signed_in_nowhere_says_so_with_the_old_label_and_exit(portal) -> None:
+    result = run(portal, "portal", "whoami", env={"LIUM_PROVIDER_TOKEN": ""})
     assert result.exit_code == 1
-    assert result.stderr == (
-        "[ARG_INVALID] portal whoami requires --hotkey (or LIUM_PROVIDER_HOTKEY)\n"
-        "  hint: Check the argument value and consult --help.\n"
-    )
+    first, hint = result.stderr.splitlines()
+    assert first == "[ARG_INVALID] not signed in to the provider portal"
+    assert hint.startswith("  hint: Set LIUM_PROVIDER_TOKEN") and "portal login --email <address>" in hint and "--hotkey" in hint
     assert portal.requests == []
 
 

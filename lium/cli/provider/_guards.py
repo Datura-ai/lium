@@ -25,20 +25,42 @@ from __future__ import annotations
 
 import click
 
-from lium.cli.provider._client import bearer_token
+from lium.cli.interactive import noninteractive_requested
+from lium.cli.provider._client import PROVIDER_TOKEN_ENV, bearer_token, session_email
 from lium.cli.provider._persona import ConfirmationRequired, confirm_persona
 from lium.cli.provider._render import emit_error, fatal
-from lium.provider.errors import ARG_INVALID, CONFIRMATION_REQUIRED, ProviderError
+from lium.provider.errors import ARG_INVALID, CONFIRMATION_REQUIRED, NOT_SIGNED_IN, ProviderError
+
+
+def not_signed_in_error() -> ProviderError:
+    """``auth.not_signed_in``: no provider token, no hotkey and no live e-mail session. Text mode prints it as
+    ``ARG_INVALID`` (exit 1); the hint names the three ways in, and an e-mail session that has ended by address."""
+    email = session_email()
+    return ProviderError(
+        f"not signed in to the provider portal (the e-mail session for {email} has ended)"
+        if email
+        else "not signed in to the provider portal",
+        code=NOT_SIGNED_IN,
+        legacy_code=ARG_INVALID,
+        hint=f"Set {PROVIDER_TOKEN_ENV} to a provider API token, or run "
+        f"`lium provider portal login --email {email or '<address>'}` with the password in LIUM_PROVIDER_PASSWORD, "
+        "or pass --hotkey (or LIUM_PROVIDER_HOTKEY) for a wallet on this machine.",
+        context={"session_email": email} if email else None,
+    )
 
 
 def require_hotkey(ctx: click.Context, *, group: str | None = None) -> None:
-    """Exit with a clear ARG_INVALID if neither a hotkey nor a bearer token is configured.
+    """Exit if neither a hotkey nor a bearer token is configured.
 
-    ``group`` (optional) is folded into the message so the user knows
-    which subgroup needs it.
+    In agent mode (``--json``, ``LIUM_OUTPUT=json``, ``LIUM_NONINTERACTIVE=1``) that is ``auth.not_signed_in``
+    (exit 6). Text mode keeps the old ``ARG_INVALID`` line, with ``group`` (optional) folded into the message
+    so the user knows which subgroup needs it.
     """
     opts = (ctx.obj or {}).get("provider_opts") or {}
     if opts.get("hotkey") or bearer_token(opts):
+        return
+    if opts.get("json") or noninteractive_requested():
+        fatal(ctx, not_signed_in_error())
         return
     label = f"{group} commands" if group else "this command"
     fatal(
@@ -46,9 +68,6 @@ def require_hotkey(ctx: click.Context, *, group: str | None = None) -> None:
         ProviderError(
             f"{label} require --hotkey (or LIUM_PROVIDER_HOTKEY)",
             code=ARG_INVALID,
-            hint="Or set LIUM_PROVIDER_TOKEN, or sign in with `lium provider portal login --email <address>`."
-            if opts.get("json")
-            else None,
         ),
     )
 
@@ -96,6 +115,7 @@ def handle_provider_error(ctx: click.Context, err: Exception) -> int:
 
 __all__ = [
     "handle_provider_error",
+    "not_signed_in_error",
     "require_hotkey",
     "require_persona_ack",
 ]
