@@ -55,6 +55,17 @@ The envelope goes to **stderr**, stdout is left empty, and the process exits
 with `exit_code`. On success stdout carries the result JSON. Read both streams;
 do not `2>/dev/null`.
 
+Under `--wait` (`topup link`, `topup create`, `topup card`), stderr may first
+carry the progress line (`"event": "handoff"`, `"invoice_created"` or
+`"charged"`, once the page, invoice or charge exists); the envelope is always
+the **last line** of stderr. Parse the last line, not the whole stream. After
+a card charge that timed out (`credit_not_seen`, exit 6, `data.charged: true`)
+the card was charged: do not run the charge again, keep waiting with
+`lium topup wait --above <data.balance_before>`. A repeat of `topup card` must
+carry that line's `data.idempotency_key` and the same amount
+(`data.amount_usd`) within 24 h; the same key with a different amount is a new
+charge.
+
 `lium up --json` acts before it answers, so its progress lines (the node
 picked, the rent, the wait, the price prompt) go to stderr and stdout holds
 exactly one document, the bare payload, as `ps`, `describe` and `rm --format
@@ -117,7 +128,7 @@ Codes raised by the shared error handler (any command can produce them) when the
 Commands add their own codes for the failures only they can have — for example
 `up` raises `node_selection_failed`, `template_failed`, `jupyter_install_failed`,
 `unreadable_dockerfile`; `exec` raises `unreadable_script`; `rm` raises
-`removal_failed`; `fund` raises `transfer_failed`; `topup card` (not released yet) passes on the platform's own
+`removal_failed`; `fund` raises `transfer_failed`; `topup link`, `topup create`, `topup card` and `topup wait` with `--wait` raise `balance_unreadable` (3: the balance could not be read before the payment, so nothing was created or charged) and `credit_not_seen` (the balance did not rise in time; `data.charged` says whether money already left: 3 with `charged: null` (not known: a payment may be made and its credit on the way) after a payment page, an invoice or `topup wait` — keep waiting with `lium topup wait --above <data.balance_before>`; 6 with `charged: true` after `topup card` — the card was charged, do not run the charge again except with `data.idempotency_key` and the same amount within 24 h); `topup card` (not released yet) passes on the platform's own
 `CARD_AUTHENTICATION_REQUIRED`, `CARD_DECLINED`, `NO_SAVED_CARD` and
 `NO_DEFAULT_CARD` (3: the
 API refused the charge and the balance did not move; `data` carries `dashboard_url`, the bank's
@@ -148,10 +159,11 @@ the detail the hints promise.
 ```bash
 set -o pipefail
 if ! out=$(LIUM_OUTPUT=json lium ps --format json 2>err.json); then
-  code=$(jq -r .error.code err.json)
-  hint=$(jq -r .error.hint err.json)
+  err=$(tail -n 1 err.json)   # the envelope is the last line of stderr
+  code=$(jq -r .error.code <<<"$err")
+  hint=$(jq -r .error.hint <<<"$err")
   echo "lium failed: $code — $hint" >&2
-  exit $(jq -r .error.exit_code err.json)
+  exit $(jq -r .error.exit_code <<<"$err")
 fi
 echo "$out" | jq '.[0].huid'
 ```
@@ -164,7 +176,7 @@ proc = subprocess.run(
     capture_output=True, text=True, env={**os.environ, "LIUM_OUTPUT": "json"},
 )
 if proc.returncode != 0:
-    error = json.loads(proc.stderr)["error"]
+    error = json.loads(proc.stderr.strip().splitlines()[-1])["error"]   # the envelope is the last line
     raise RuntimeError(f"{error['code']}: {error['message']} ({error['hint']})")
 pods = json.loads(proc.stdout)
 ```

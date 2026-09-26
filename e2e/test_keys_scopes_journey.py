@@ -45,7 +45,11 @@ def test_keys_scopes_are_the_servers_four_scopes_with_billing_off_by_default(ses
     assert all(row["description"] and row["can"] and row["route_families"] for row in rows.values())
     assert {v["value"] for v in payload["pod_visibility"]} == {"own", "account"}
     table = session.lium("keys", "scopes", check=True)
-    assert rows["billing"]["description"][:30] in table.out, table  # the table prints the server's sentence
+    # the table prints the server's sentence, wrapped to the terminal width, so compare words rather than one substring
+    lines = [line.split() for line in table.out.splitlines()]
+    assert any(words and words[0] == "billing" for words in lines), table
+    printed = {word for words in lines for word in words}
+    assert all(word in printed for word in rows["billing"]["description"].split()[:4]), table
 
 
 def test_ps_and_billing_history_filter_by_key_id_server_side(session: Session):
