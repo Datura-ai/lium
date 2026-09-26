@@ -1393,6 +1393,9 @@ class Lium:
         if unknown:
             raise TypeError(f"rental() got unexpected keyword arguments: {sorted(unknown)}")
         rent_args.update(up_kwargs)
+        if rent_args["secret_names"]:
+            require_secrets_enabled()
+            rent_args["secret_names"] = validate_secret_names(rent_args["secret_names"])
 
         # The rent itself can raise after the server created the pod (a timed-out
         # or failed second POST, a listing that failed while looking for it), so

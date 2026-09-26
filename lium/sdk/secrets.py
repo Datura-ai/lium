@@ -23,8 +23,54 @@ if TYPE_CHECKING:  # pragma: no cover
 
 SECRETS_FLAG_ENV = "LIUM_SECRETS_ENABLED"
 # The name becomes a file name in the pod (/run/lium/secrets/<name>) and is shown by `list`; only the value is secret.
-SECRET_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+SECRET_NAME_MAX = 64
+SECRET_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,%d}" % (SECRET_NAME_MAX - 1))
 SECRETS_DISABLED = f"Secrets are experimental: set {SECRETS_FLAG_ENV}=1 to use them"
+
+# Prefixes that issuers put in front of a credential (matched case-insensitively, `-` and `_` alike).
+# A name that starts with one is refused only when what follows looks random, so HF_TOKEN,
+# GITHUB_PAT_NAME or SK_LIVE_KEY stay valid names.
+CREDENTIAL_PREFIXES = (
+    "github_pat_", "ghp_", "gho_", "ghs_", "ghu_", "ghr_",  # GitHub
+    "hf_",  # Hugging Face
+    "xoxa_", "xoxb_", "xoxp_", "xoxr_", "xoxs_", "xapp_",  # Slack
+    "sk_", "rk_", "pk_live_", "pk_test_",  # OpenAI / Anthropic / Stripe
+    "glpat_", "gldt_",  # GitLab
+    "npm_", "pypi_", "gsk_", "r8_", "xai_", "dop_v1_",  # npm, PyPI, Groq, Replicate, xAI, DigitalOcean
+)
+AWS_ACCESS_KEY_ID = re.compile(r"(?:AKIA|ASIA|AGPA|AIDA|AROA)[A-Z0-9]{16}")
+LOOKS_LIKE_A_VALUE = (
+    "That looks like a secret value, not a name (not shown); pass it as the value, not the name: "
+    "lium secrets set NAME and enter the value when prompted"
+)
+
+
+def _character_classes(segment: str) -> int:
+    return sum((any(c.isupper() for c in segment), any(c.islower() for c in segment), any(c.isdigit() for c in segment)))
+
+
+def _looks_random(segment: str, min_length: int) -> bool:
+    """Long, and mixing case or letters with digits: how a token reads, not how a word does."""
+    if len(segment) < min_length:
+        return False
+    classes = _character_classes(segment)
+    return classes == 3 or (classes == 2 and len(segment) >= min_length + 4)
+
+
+def looks_like_a_credential(name: str) -> bool:
+    """Whether a would-be name reads like a pasted token (hf_…, ghp_…, AKIA…, a long random run)."""
+    if len(name) > SECRET_NAME_MAX or AWS_ACCESS_KEY_ID.fullmatch(name):
+        return True
+    normalized = name.replace("-", "_")
+    lowered = normalized.lower()
+    for prefix in CREDENTIAL_PREFIXES:
+        if lowered.startswith(prefix):
+            rest = normalized[len(prefix):]
+            if any(_looks_random(part, 8) for part in rest.split("_")):
+                return True
+            if "_" not in rest and len(rest) >= 16:
+                return True
+    return any(_looks_random(part, 20) for part in normalized.split("_"))
 
 
 def secrets_enabled() -> bool:
@@ -48,14 +94,16 @@ def invalid_secret_name_message(name: object) -> str:
             "Secret names can't contain '=' (the name was not shown: it may hold a value); pass the value "
             "separately (lium secrets set NAME and enter the value when prompted)"
         )
+    if isinstance(name, str) and looks_like_a_credential(name):
+        return LOOKS_LIKE_A_VALUE
     return (
         "Invalid secret name (not shown: it may hold a value): letters, digits and _ only, "
-        "not starting with a digit, at most 128"
+        f"not starting with a digit, at most {SECRET_NAME_MAX}"
     )
 
 
 def validate_secret_name(name: str) -> str:
-    if not isinstance(name, str) or not SECRET_NAME_PATTERN.fullmatch(name):
+    if not isinstance(name, str) or not SECRET_NAME_PATTERN.fullmatch(name) or looks_like_a_credential(name):
         raise ValueError(invalid_secret_name_message(name))
     return name
 

@@ -607,3 +607,110 @@ def test_rental_refuses_a_bad_secret_name_without_repeating_it(client, monkeypat
         with client.rental(executor_id="exec-1", template_id="tpl", ssh_keys=[KEY], secret_names=[f"{VALUE}=="]):
             pass
     assert VALUE not in str(caught.value)
+
+
+# --- a credential pasted as the name is refused, never sent, never shown ---------------------------
+# Built at run time so no token-shaped literal sits in the repo (secret scanners would flag it).
+_BODY = "".join("aB3dE5gH7jK9mN1pQ2rS4tU6vW8xY0zC"[(i * 7) % 32] for i in range(40))
+CREDENTIALS = {
+    "hugging face": "hf" + "_" + _BODY[:34],
+    "github classic": "gh" + "p_" + _BODY[:36],
+    "github oauth": "gh" + "o_" + _BODY[:36],
+    "github app": "gh" + "s_" + _BODY[:36],
+    "github user-to-server": "gh" + "u_" + _BODY[:36],
+    "github fine-grained": "github" + "_pat_" + "11A" + _BODY[:19] + "_" + _BODY[3:40],
+    "slack bot": "xox" + "b_" + "123456789012_" + _BODY[:24],
+    "slack user": "XOX" + "P_" + _BODY[:30],
+    "stripe live": "sk" + "_live_" + _BODY[:24],
+    "stripe publishable": "pk" + "_live_" + _BODY[:24],
+    "openai underscore": "sk" + "_" + _BODY[:32],
+    "aws access key id": "AK" + "IA" + "IOSFODNN7EXAMPL3",
+    "aws session key id": "AS" + "IA" + "QWERTYUIOP123456",
+    "gitlab": "gl" + "pat_" + _BODY[:20],
+    "npm": "np" + "m_" + _BODY[:36],
+    "long random run": "Q" + _BODY[:30],
+    "hex digest": "a3f9c2e1b4d5a6f7e8d9c0b1a2f3e4d5c6b7a8f9",
+    "over 64 characters": "A" * 65,
+}
+ORDINARY_NAMES = [
+    "HF_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "HF_HUB_ACCESS_TOKEN", "GITHUB_PAT", "GH_TOKEN_V2",
+    "SK_LIVE_KEY", "NPM_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "WANDB_API_KEY",
+    "ANTHROPIC_API_KEY", "DATABASE_URL_2024", "ASIA_REGION", "hf_token", "sk_prod_key", "PEM", "_PRIVATE",
+    "A" * 64,
+]
+
+
+@pytest.mark.parametrize("name", ORDINARY_NAMES)
+def test_ordinary_names_are_accepted(name):
+    assert sdk_secrets.validate_secret_name(name) == name
+
+
+@pytest.mark.parametrize("shape", CREDENTIALS, ids=list(CREDENTIALS))
+def test_credential_shapes_are_refused_by_the_validator(shape):
+    with pytest.raises(ValueError) as caught:
+        sdk_secrets.validate_secret_name(CREDENTIALS[shape])
+    assert CREDENTIALS[shape] not in str(caught.value)
+    assert "looks like a secret value" in str(caught.value)
+
+
+@pytest.fixture
+def real_client_cli(monkeypatch):
+    """The CLI against the real SDK with an HTTP layer that has no routes: any request fails the test."""
+    monkeypatch.setenv("LIUM_SECRETS_ENABLED", "1")
+    monkeypatch.setenv("LIUM_API_KEY", "test")
+    monkeypatch.setattr(secrets_command, "ensure_config", lambda: None)
+    monkeypatch.setattr(up_command, "ensure_config", lambda: None)
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as mock:
+        yield mock
+
+
+@pytest.mark.parametrize("shape", CREDENTIALS, ids=list(CREDENTIALS))
+@pytest.mark.parametrize("command", ["set", "rm", "up", "up-second"])
+@pytest.mark.parametrize("json_mode", [False, True], ids=["text", "json"])
+def test_credential_as_name_is_refused_by_the_cli_before_any_request(real_client_cli, monkeypatch, shape, command, json_mode):
+    token = CREDENTIALS[shape]
+    args = {
+        "set": ["secrets", "set", token],
+        "rm": ["secrets", "rm", token, "-y"],
+        "up": ["up", "exec-1", "--secret", token, "-y"],
+        "up-second": ["up", "exec-1", "--secret", "HF_TOKEN", "--secret", token, "-y"],
+    }[command]
+    if json_mode:
+        monkeypatch.setenv("LIUM_OUTPUT", "json")
+
+    result = CliRunner().invoke(cli, args, input=f"{VALUE}\n")
+    printed = _everything_printed(result)
+
+    assert result.exit_code == 2, printed
+    assert token not in printed
+    assert "looks like a secret value" in " ".join(printed.split())
+    assert len(real_client_cli.calls) == 0
+    if json_mode:
+        assert json.loads(printed.strip().splitlines()[-1])["error"]["code"] == "invalid_arguments"
+
+
+@pytest.mark.parametrize("shape", CREDENTIALS, ids=list(CREDENTIALS))
+def test_credential_as_name_is_refused_by_the_sdk_before_any_request(client, shape):
+    token = CREDENTIALS[shape]
+    calls = {
+        "set": lambda: client.secrets.set(token, VALUE),
+        "delete": lambda: client.secrets.delete(token),
+        "up": lambda: client.up(executor_id="exec-1", template_id="tpl", ssh_keys=[KEY], secret_names=[token]),
+        "rent": lambda: client.rent(gpu_type="H100", ssh_keys=[KEY], secret_names=["HF_TOKEN", token]),
+        "rental": lambda: client.rental(executor_id="exec-1", template_id="tpl", ssh_keys=[KEY], secret_names=[token]).__enter__(),
+    }
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as mock:
+        for label, call in calls.items():
+            with pytest.raises(ValueError) as caught:
+                call()
+            assert token not in str(caught.value) + repr(caught.value), label
+        assert len(mock.calls) == 0
+
+
+def test_an_ordinary_name_still_goes_through_the_cli(real_client_cli):
+    real_client_cli.add(responses.PUT, f"{BASE}/secrets/HF_TOKEN", json={"name": "HF_TOKEN", "updated_at": "t"})
+
+    result = CliRunner().invoke(cli, ["secrets", "set", "HF_TOKEN"], input=f"{VALUE}\n")
+
+    assert result.exit_code == 0, result.output
+    assert [c.request.url for c in real_client_cli.calls] == [f"{BASE}/secrets/HF_TOKEN"]
