@@ -108,6 +108,12 @@ def ls_command(
     front marks a node with no such figure yet: the number is a single speed-test
     sample from the node. --sort download / --sort upload order by the figure shown.
 
+    ↓W after a node's Id means a reduced GPU power limit: it is set below the
+    card's default, so expect somewhat lower peak performance than the same GPU at
+    full power. --format json carries it as gpu_power_limited (true / false / null
+    when the platform cannot say) with gpu_power_limit_w and
+    gpu_power_limit_default_w in watts.
+
     \b
     Examples:
       lium ls --gpu H100 --count 8

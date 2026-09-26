@@ -332,7 +332,7 @@ def test_cp_does_not_revoke_what_it_never_granted():
         "success": False, "exit_code": 1, "stdout": "", "stderr": "read-only file system",
     }})
 
-    with pytest.raises(LiumError, match="authorise"):
+    with pytest.raises(LiumError, match="authorize"):
         client.cp(SRC, "/a", DST, "/b")
 
     commands = [c for _, c in client.sent]
@@ -367,7 +367,7 @@ def test_cp_cleanup_failure_is_a_warning_not_the_error(dst_pinned):
         client.cp(SRC, "/a", DST, "/b")
 
     message = str(caught[0].message)
-    assert "still authorised on pod train" in message
+    assert "still authorized on pod train" in message
     assert "revoke it with: lium exec brave-lion-11 " in message and "grep -vF" in message
 
 

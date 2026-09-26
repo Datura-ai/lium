@@ -1,8 +1,9 @@
 # Releasing lium
 
 The version is the git tag. Publishing a GitHub release on a tag `vX.Y.Z` runs `.github/workflows/release.yml`, which
-builds the wheel and the binaries from that tag, uploads them and publishes to PyPI; nothing in the tree is bumped
-(DAH-3225). Create the release with `--prerelease` so `latest` moves only once the assets are up. The `lium` CLI and the
+builds the wheel and the binaries from that tag and uploads them; `publish-pypi.yml` then publishes the tag to PyPI
+if it is on `main`. Nothing in the tree is bumped. Create the release with `--prerelease` so `latest` moves
+only once the assets are up. The `lium` CLI and the
 `lium.sdk` Python SDK ship in the same `lium.io` package, so one tag versions both.
 
 ## Choosing the version
@@ -23,3 +24,28 @@ seeded with `0.1.0`, so the next release must be `v0.1.0` or higher; delete the 
 fragments that have piled up in `changelog.d/` in the `0.1.0` release commit (`python scripts/changelog.py --version
 0.1.0`): they carry `### Added`, so whichever release first folds them is held to a minor bump — at `0.1.0` that costs
 nothing, at a later `0.1.1` it would demand `0.2.0`.
+
+## Who can publish
+
+Only code on `main` reaches PyPI, and `main` takes reviewed PRs only. `.github/workflows/publish-pypi.yml` is the only
+path to PyPI for `lium.io`. It starts after `release.yml` succeeds for a published release (`workflow_run`), so it
+always runs `main`'s copy of the file: an edited copy on another branch never runs. It checks that the release tag
+points at the commit the release built and that this commit is on `main`'s first-parent history (`git rev-list
+--first-parent origin/main`; with squash merges only, that is a reviewed PR state), rebuilds it, and uploads from a separate job in the `pypi` environment. That environment admits only `main` and
+requires one approval from a maintainer before a publish runs. Before it uploads, `publish-pypi.yml` checks that the
+environment has at least one required reviewer who is not the loop's account, blocks self-approval and has admin
+bypass off; the settings are in `.github/rulesets/README.md` section 1. PyPI's trusted publisher names this repository, `publish-pypi.yml` and `pypi`, so the upload
+token is minted only there; there is no PyPI API token in the repository's secrets or on anyone's machine. The two
+stub publishers, `release-deprecate-lium-cli.yml` (`lium-cli`) and `release-lium-alias.yml` (`lium`), run by hand in
+the same environment, so they run only from `main`.
+
+The settings behind this (the environment, the pypi.org publishers, squash merge only and approval after the last
+push on `main`, and the `v*` tag ruleset) and the order to apply them are in `.github/rulesets/README.md`. The old pypi.org publisher
+(`release.yml`, no environment) must be deleted right after the merge; until then a hand-run, edited `release.yml` on
+a branch can still upload.
+
+What a release looks like: create the release on a commit that is on `main` (`gh release create vX.Y.Z --prerelease
+…`) → `release.yml` builds, uploads the GitHub release assets and marks the release `latest` → `publish-pypi.yml`
+checks the tag, rebuilds it and uploads the wheel and sdist with PEP 740 attestations (each file's page on pypi.org
+shows a *Provenance* link; `https://pypi.org/integrity/lium.io/X.Y.Z/<filename>/provenance` returns the signed
+statement). A tag on a commit that is not on `main` publishes nothing to PyPI: the check fails the run.

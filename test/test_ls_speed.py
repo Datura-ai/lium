@@ -35,6 +35,9 @@ SUMMARY_ROW = {
     "effective_upload_speed_mbps": 1200.5,
     "effective_download_speed_mbps": 2400.1,
     "nvlink": True,
+    "gpu_power_limited": False,
+    "gpu_power_limit_w": 700,
+    "gpu_power_limit_default_w": 700,
     "interconnect": {
         "gpu_count": 8,
         "gpu_pairs": 28,
@@ -116,7 +119,8 @@ def test_a_summary_row_carries_every_field_the_table_and_json_render():
         "index", "id", "huid", "config", "gpu_type", "gpu_count", "price_per_gpu_hour", "price_per_hour", "country",
         "country_code", "city", "vram_gb", "ram_gb", "cpu_count", "disk_gb", "disk_total_gb", "upload_mbps",
         "download_mbps", "upload_source", "download_source", "available_ports", "docker_in_docker", "is_pareto",
-        "max_cuda_version", "tier", "machine_name", "link", "nvlink", "p2p", "interconnect",
+        "max_cuda_version", "tier", "machine_name", "link", "nvlink", "p2p", "interconnect", "gpu_power_limited",
+        "gpu_power_limit_w", "gpu_power_limit_default_w",
     }
     assert None not in row.values()
     # the fixture's effective figures equal its scrape: the summary view carries no measurement in between

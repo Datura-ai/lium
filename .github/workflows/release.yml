@@ -5,7 +5,8 @@ on:
   # Publishing a GitHub release on tag vX.Y.Z builds that tag and ships it: the version is the
   # tag (hatch-vcs, pyproject.toml), nothing in the tree is bumped (DAH-3225). Create it with
   # --prerelease: `latest` must not point at it until the assets are uploaded below, or install.sh
-  # and self-update see a release without binaries for ~3 min.
+  # and self-update see a release without binaries for ~3 min. PyPI is not uploaded here: publish-pypi.yml runs
+  # after this workflow succeeds and uploads the tag only when it is on main.
   release:
     types: [published]
   # A manual run only builds: no version input, nothing is published.
@@ -52,6 +53,10 @@ jobs:
 
     - name: Build package
       run: python -m build --sdist --wheel --outdir dist/
+
+    # PyPI refuses a distribution whose metadata it cannot render; find out here, before the release goes out
+    - name: Check the distributions' metadata
+      run: twine check --strict dist/*
 
     # a tag hatch-vcs cannot parse (v-less, extra suffix) would publish assets whose --version is not the release
     - name: Built version must equal the release tag
@@ -110,15 +115,35 @@ jobs:
     - uses: astral-sh/setup-uv@v6
 
     # the build image has no git (Dockerfile.build): the version hatch-vcs derives from the tags here is handed in
-    - name: Build Linux bundle in Docker
+    - name: Bundle version (hatch-vcs, from the tags)
+      id: version
       run: |
         version="$(uvx --from hatchling --with hatch-vcs hatchling version)"
         echo "version $version"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    # Release builds do not import or export GHA cache: a default-branch layer is mutable and
+    # must not enter a published CLI bundle. CI workflows still cache.
+    - uses: docker/setup-buildx-action@v3
+
+    # Dockerfile.build installs lockfile dependencies before COPY . . `load` puts the image
+    # in the engine for the extract and the report.
+    - name: Build Linux bundle in Docker
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: Dockerfile.build
+        platforms: ${{ matrix.platform }}
+        build-args: LIUM_VERSION=${{ steps.version.outputs.version }}
+        tags: lium-build:${{ github.sha }}-${{ matrix.asset_name }}
+        load: true
+
+    - name: Extract the bundle from the image
+      run: |
         mkdir -p dist
         rm -rf dist/lium
         docker rm -f lium-extract >/dev/null 2>&1 || true
-        docker build --build-arg LIUM_VERSION="$version" --platform ${{ matrix.platform }} -f Dockerfile.build -t lium-build:${GITHUB_SHA}-${{ matrix.asset_name }} .
-        docker create --name lium-extract lium-build:${GITHUB_SHA}-${{ matrix.asset_name }} true
+        docker create --name lium-extract "lium-build:${GITHUB_SHA}-${{ matrix.asset_name }}" true
         docker cp lium-extract:/app/dist/lium dist/lium
         docker rm -f lium-extract
         tar -czf dist/${{ matrix.asset_name }}.tar.gz -C dist lium
@@ -302,25 +327,3 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: gh release edit "$RELEASE_TAG" --prerelease=false --latest
-
-  approve-and-publish:
-    if: github.event_name == 'release'
-    needs: build-python
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      contents: read
-      id-token: write
-
-    steps:
-    - name: Download artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: python-dist
-        path: dist/
-
-    - name: Publish package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        verbose: true
-        print-hash: true
