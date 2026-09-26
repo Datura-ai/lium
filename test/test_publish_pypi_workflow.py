@@ -2,8 +2,8 @@
 
 publish-pypi.yml is the one upload path for `lium.io`: it runs from main's copy (workflow_run), checks that the release
 tag is on main, and holds the upload token in a job that checks nothing out. The stubs run by hand in the main-only
-`pypi` environment, which also requires one maintainer approval before a publish runs; publish-pypi.yml reads that
-rule back before its upload.
+`pypi` environment, which also requires one maintainer approval before a publish runs; publish-pypi.yml and each
+stub read that rule back before their upload.
 """
 
 import json
@@ -81,13 +81,19 @@ def test_release_workflow_no_longer_uploads_to_pypi():
 
 
 @pytest.mark.parametrize("path", STUBS, ids=lambda p: p.name)
-def test_stubs_run_by_hand_in_the_pypi_environment_without_a_guard(path):
+def test_stubs_run_by_hand_in_the_pypi_environment_behind_the_reviewer_guard(path):
     workflow = load(path)
     assert set(triggers(workflow)) == {"workflow_dispatch"}
-    (job,) = workflow["jobs"].values()
+    (job,) = jobs_uploading(workflow).values()
     assert environment_name(job) == "pypi"
-    assert "actions" not in job["permissions"]
-    assert [s.get("name") for s in job["steps"] if "guard" in str(s.get("name", "")).lower()] == []
+    assert job["if"] == "github.ref == 'refs/heads/main'"
+    assert job["permissions"] == {"actions": "read", "id-token": "write"}
+    names = [s.get("name") for s in job["steps"]]
+    upload = next(i for i, s in enumerate(job["steps"]) if s in steps_using(job, PYPI_ACTION))
+    assert names.index(GUARD_STEP) < upload
+    for name, other in workflow["jobs"].items():
+        if other is not job:
+            assert environment_name(other) is None and "id-token" not in other.get("permissions", {}), name
 
 
 @pytest.mark.parametrize("path", [PUBLISH, RELEASE, *STUBS, REPO_ROOT / "RELEASING.md"], ids=lambda p: p.name)
@@ -219,9 +225,10 @@ def run_guard(tmp_path: Path, path: Path, env_json: dict | None) -> subprocess.C
     )
 
 
+@pytest.mark.parametrize("path", [PUBLISH, *STUBS], ids=lambda p: p.name)
 @pytest.mark.parametrize("env_json, message", GUARD_CASES)
-def test_publish_reviewer_guard(tmp_path, env_json, message):
-    result = run_guard(tmp_path, PUBLISH, env_json)
+def test_reviewer_guard(tmp_path, path, env_json, message):
+    result = run_guard(tmp_path, path, env_json)
     if message is None:
         assert result.returncode == 0, result.stderr
     else:
