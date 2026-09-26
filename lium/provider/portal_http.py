@@ -148,7 +148,9 @@ class PortalHTTP:
                 f"could not reach the portal at {self.base_url}: {e}",
                 code=NET_UNREACHABLE,
                 legacy_code=PORTAL_SERVER_ERROR,
-                legacy_error=ProviderServerError(f"network error reaching portal: {e}", code=PORTAL_SERVER_ERROR),
+                legacy_error=ProviderServerError(
+                    f"network error reaching portal: {e}", code=PORTAL_SERVER_ERROR, context={"url": url, "method": method}
+                ),
                 cause=e,
                 context={"url": url, "method": method},
             ) from e

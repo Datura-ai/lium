@@ -312,10 +312,10 @@ class ProviderClient:
                         provider_id = nested.get("id") or nested.get("provider_id")
         except ProviderAuthError as e:
             out.portal_session_active = False
-            warnings.append(f"whoami: {e.code}")
+            warnings.append(f"whoami: {e.legacy_code or e.code}")
         except ProviderError as e:
             out.portal_session_active = False
-            warnings.append(f"whoami: {e.code}")
+            warnings.append(f"whoami: {e.legacy_code or e.code}")
         out.provider_id = provider_id
 
         # Node list (skip silently if portal not authed). Scoped to this
@@ -350,7 +350,7 @@ class ProviderClient:
                 out.nodes = nodes
                 out.node_count = len(nodes)
             except ProviderError as e:
-                warnings.append(f"nodes: {e.code}")
+                warnings.append(f"nodes: {e.legacy_code or e.code}")
 
         # Subnet registration + validator weights via metagraph.
         try:

@@ -55,6 +55,24 @@ CODED = [
      3, 7, "portal.too_many_requests", "PORTAL_RATE_LIMIT"),
 ]
 IDS = [c[3] for c in CODED]
+REJECTED_HINT = "The portal refused this request (see message). Fix the input; retrying the same call will not help."
+# main's text-mode stderr for each refusal, byte for byte (the portal's code only shows inside main's message)
+MAIN_TEXT = {
+    "NODE_RENTED": ("[PORTAL_REQUEST_REJECTED] portal rejected the request (400): code: NODE_RENTED; message: refused",
+                    REJECTED_HINT),
+    "NODE_ALREADY_ON_YOUR_ACCOUNT": ("[PORTAL_REQUEST_REJECTED] portal rejected the request (400): code: "
+                                     "NODE_ALREADY_ON_YOUR_ACCOUNT; message: refused", REJECTED_HINT),
+    "NODE_REGISTERED_ELSEWHERE": ("[PORTAL_REQUEST_REJECTED] portal rejected the request (409): code: "
+                                  "NODE_REGISTERED_ELSEWHERE; message: refused", REJECTED_HINT),
+    "PROVIDER_EMAIL_REQUIRED": ("[PORTAL_REQUEST_REJECTED] portal rejected the request (400): code: "
+                                "PROVIDER_EMAIL_REQUIRED; message: refused", REJECTED_HINT),
+    "EXECUTOR_NOT_FOUND": ("[PORTAL_NOT_FOUND] portal returned 404",
+                           "The portal returned 404 for that resource (wrong UUID or already removed)."),
+    "OWNERSHIP_MISMATCH": ("[PORTAL_FORBIDDEN] portal forbade the requested action",
+                           "The portal accepted the token but refused the action for this hotkey (e.g. machine-request "
+                           "detail needs a validator-verified node)."),
+    "TOO_MANY_REQUESTS": ("[PORTAL_RATE_LIMIT] portal rate limit", "Backing off; retry shortly."),
+}
 
 
 @pytest.mark.parametrize("route, args, status, portal_code, text_exit, json_exit, code, legacy", CODED, ids=IDS)
@@ -63,7 +81,19 @@ def test_a_coded_refusal_keeps_its_old_exit_and_label_in_text_mode(portal, route
     portal.route(*route, refusal(portal_code), status=status)
     result = run(portal.url, *args)
     assert result.exit_code == text_exit, result.output
-    assert f"[{legacy}]" in result.stderr and f"[{code}]" not in result.stderr and result.stdout == ""
+    line, hint = MAIN_TEXT[portal_code]
+    assert result.stderr == f"{line}\n  hint: {hint}\n" and result.stdout == ""
+
+
+def test_text_debug_shows_mains_context_without_the_new_keys(portal) -> None:
+    body = refusal("NODE_RENTED")
+    portal.route("DELETE", f"/executors/{NODE}", body, status=400)
+    result = run(portal.url, "--debug", "node", "rm", NODE, "--yes")
+    context = {"url": f"{portal.url}/executors/{NODE}", "method": "DELETE", "status": 400, "body": body}
+    line, hint = MAIN_TEXT["NODE_RENTED"]
+    assert result.stderr == f"{line}\n  hint: {hint}\n  context: {context}\n"
+    error = json.loads(run(portal.url, "--json", "--debug", "node", "rm", NODE, "--yes").stdout)["error"]
+    assert error["data"]["portal_code"] == "NODE_RENTED"
 
 
 @pytest.mark.parametrize("route, args, status, portal_code, text_exit, json_exit, code, legacy", CODED, ids=IDS)
@@ -121,6 +151,8 @@ def test_an_unreachable_portal_reads_and_exits_as_before_in_text_and_4_under_jso
     result = run(url, "node", "listing")
     assert result.exit_code == 3 and "[PORTAL_SERVER_ERROR] network error reaching portal: " in result.stderr
     assert "hint: Portal 5xx." in result.stderr and "net.unreachable" not in result.stderr
+    debug = run(url, "--debug", "node", "listing").stderr
+    assert debug.endswith(f"  context: {{'url': '{url}/executors/listing', 'method': 'GET'}}\n"), debug
     error = json.loads(run(url, "--json", "node", "listing").stdout)["error"]
     assert (error["code"], error["legacy_code"], error["exit_code"]) == ("net.unreachable", "PORTAL_SERVER_ERROR", 4)
 

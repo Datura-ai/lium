@@ -1068,7 +1068,7 @@ def _run_mine(ctx, hotkey, dir_, branch, auto, verbose, register_token, portal_u
     console.print("\n[bold cyan]Register this node in the Provider Portal:[/bold cyan]")
     console.print(f"[yellow]{add_url}[/yellow]\n")
     console.print("[bold cyan]…or from this terminal:[/bold cyan]")
-    console.print(f"[yellow]{escape(add_command)}[/yellow]")   # the GPU name is nvidia-smi's text
+    console.print(f"[yellow]{add_command}[/yellow]")
     console.dim(_registration_note())
     return 0
 

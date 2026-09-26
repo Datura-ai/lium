@@ -200,3 +200,20 @@ def test_auto_help_says_what_it_does() -> None:
     result = _invoke(["--help"])
     flat = " ".join(result.output.split())
     assert "--auto" in flat and "input.input_required" in flat and "--json" in flat
+
+
+
+def _add_block(output: str) -> str:
+    tail = output.split("…or from this terminal:\n", 1)[1]
+    return tail.split("\nValidators only reach", 1)[0]
+
+
+def test_text_mode_prints_the_add_command_as_main_does(monkeypatch, tmp_path: Path) -> None:
+    # main prints it as Rich markup, unescaped: a `[b]` in nvidia-smi's GPU name styles rather than shows, as on main
+    for smi in ("NVIDIA L4\n", "NVIDIA [b]L4\n"):
+        target, _ = _stub_host(monkeypatch, tmp_path, nvidia_smi=smi)
+        result = _invoke(["-k", HOTKEY, "--auto", "--dir", str(target)], env=_TEXT)
+        assert result.exit_code == 0, result.output
+        assert _add_block(result.output) == (
+            "lium provider node add --gpu-type 'NVIDIA L4' --gpu-count 1 --ip 203.0.113.7 \n--port 8080 --yes"
+        ), result.output

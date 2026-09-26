@@ -100,6 +100,39 @@ def test_connect_discord_in_text_mode_with_wait_is_the_handoff(portal) -> None:
     assert HANDOFF["message_for_human"] in " ".join(result.stderr.split())
 
 
+def test_connect_discord_in_text_mode_with_wait_falls_back_to_the_browser_flow_without_handoff_sessions(portal) -> None:
+    portal.route("GET", "/auth/me/discord/oauth-url", {"authorization_url": OAUTH_URL})
+    portal.route("GET", "/auth/me", {"discord_id": "123"})
+    result = run(portal, "config", "connect-discord", "--wait", "--poll-interval", "0.1")
+    assert result.exit_code == 0, result.output
+    assert portal.calls() == [("POST", "/auth/handoffs"), ("GET", "/auth/me/discord/oauth-url"), ("GET", "/auth/me")]
+    assert "The portal does not serve handoffs yet; using the browser link." in result.stderr
+    assert OAUTH_URL in result.output and "Discord connected" in result.stdout
+
+
+# main's `connect-discord --help` at 100 columns, byte for byte; --wait is the one addition
+MAIN_HELP = """Usage: provider config connect-discord [OPTIONS]
+
+Options:
+  --no-wait                    Return immediately after printing the Discord authorization URL.
+  --timeout INTEGER RANGE      Seconds to wait for Discord linking outside --no-wait.  [default:
+                               120; x>=0]
+  --poll-interval FLOAT RANGE  Seconds between Discord status checks while waiting.  [default: 3.0;
+                               x>=0.1]
+  --help                       Show this message and exit.
+"""
+
+
+def test_connect_discord_help_is_mains_plus_the_wait_option() -> None:
+    lines = CliRunner().invoke(provider_command, ["config", "connect-discord", "--help"], terminal_width=100).output
+    lines = lines.splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if line.startswith("  --wait "))
+    end = next(i for i in range(start + 1, len(lines)) if not lines[i].startswith("   "))
+    assert "".join(lines[:start] + lines[end:]) == MAIN_HELP
+    listing = CliRunner().invoke(provider_command, ["config", "--help"], terminal_width=100).output
+    assert "  connect-discord    Start Discord OAuth linking for extra incentive eligibility.\n" in listing
+
+
 @pytest.mark.parametrize("args, env", [(("--json",), {}), ((), {"LIUM_OUTPUT": "json"}), ((), {"LIUM_NONINTERACTIVE": "1"})])
 def test_connect_discord_in_agent_mode_is_the_handoff_exit_12(portal, args, env) -> None:
     portal.route("POST", "/auth/handoffs", created(), status=201)

@@ -232,8 +232,8 @@ def emit_error(ctx: click.Context, err: ProviderError) -> int:
         click.echo(f"{prefix} {shown.message}", err=True)
         if shown.hint:
             click.echo(f"  hint: {shown.hint}", err=True)
-        if _debug_mode(ctx) and err.context:
-            click.echo(f"  context: {err.context}", err=True)
+        if _debug_mode(ctx) and shown.context:
+            click.echo(f"  context: {shown.context}", err=True)
     return code
 
 
