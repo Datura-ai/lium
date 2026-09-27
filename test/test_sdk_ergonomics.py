@@ -85,6 +85,118 @@ def test_up_with_wait_returns_the_ready_pod():
     assert pod.status == "RUNNING" and pod.ssh_cmd
 
 
+def test_up_verify_gpus_checks_visible_5090(monkeypatch):
+    pod = _pod()
+    pod.gpu_count = 1
+    client = _Client(ps_sequence=[[pod]])
+    seen = []
+    monkeypatch.setattr(client, "exec", lambda ready, *, command: (
+        seen.append((ready.id, command)) or {
+            "success": True, "exit_code": 0,
+            "stdout": "GPU 0: NVIDIA GeForce RTX 5090 (UUID: GPU-abc)\n", "stderr": "",
+        }
+    ))
+
+    assert client.up(executor_id="exec-1", wait=True, gpu_count=1, verify_gpus=True) == pod
+    assert seen == [("pod-1", "nvidia-smi -L")]
+
+
+def test_up_verify_gpus_rejects_billed_count_before_ssh(monkeypatch):
+    pod = _pod()
+    pod.gpu_count = 1
+    client = _Client(ps_sequence=[[pod]])
+    monkeypatch.setattr(client, "exec", lambda *args, **kwargs: pytest.fail("SSH should not run"))
+
+    with pytest.raises(LiumError, match="requested 2.*billed for 1.*pod-1"):
+        client.up(executor_id="exec-1", wait=True, gpu_count=2, verify_gpus=True)
+
+
+def test_up_verify_gpus_reports_visible_mismatch_and_billing(monkeypatch):
+    pod = _pod()
+    pod.gpu_count = 2
+    client = _Client(ps_sequence=[[pod]])
+    monkeypatch.setattr(client, "exec", lambda *args, **kwargs: {
+        "success": True, "exit_code": 0,
+        "stdout": "GPU 0: NVIDIA GeForce RTX 5090 (UUID: GPU-abc)\n", "stderr": "",
+    })
+
+    with pytest.raises(LiumError, match="billed for 2.*nvidia-smi reports 1.*pod-1"):
+        client.up(executor_id="exec-1", wait=True, gpu_count=2, verify_gpus=True)
+
+
+def test_up_verify_gpus_uses_split_pod_count_not_host_count(monkeypatch):
+    pod = _pod()
+    pod.gpu_count = 2
+    pod.executor.gpu_count = 8
+    client = _Client(ps_sequence=[[pod]])
+    monkeypatch.setattr(client, "exec", lambda *args, **kwargs: {
+        "success": True, "exit_code": 0,
+        "stdout": "GPU 0: RTX 5090\nGPU 1: RTX 5090\n",
+    })
+
+    assert client.up(executor_id="exec-1", wait=True, gpu_count=2, verify_gpus=True) == pod
+
+
+def test_up_verify_gpus_reports_missing_billed_count(monkeypatch):
+    pod = _pod()
+    client = _Client(ps_sequence=[[pod]])
+    monkeypatch.setattr(client, "exec", lambda *args, **kwargs: pytest.fail("SSH should not run"))
+
+    with pytest.raises(LiumError, match="did not report a billed GPU count.*pod-1"):
+        client.up(executor_id="exec-1", wait=True, verify_gpus=True)
+
+
+def test_up_verify_gpus_reports_uncheckable_pod_without_claiming_mismatch(monkeypatch):
+    pod = _pod()
+    pod.gpu_count = 1
+    client = _Client(ps_sequence=[[pod]])
+    monkeypatch.setattr(client, "exec", lambda *args, **kwargs: {
+        "success": False, "exit_code": 127, "stdout": "",
+        "stderr": "nvidia-smi: command not found\n",
+    })
+
+    with pytest.raises(LiumError, match="could not verify.*pod-1.*still billing"):
+        client.up(executor_id="exec-1", wait=True, verify_gpus=True)
+
+
+def test_up_verify_gpus_retries_ssh_before_accepting_pod(monkeypatch):
+    pod = _pod()
+    pod.gpu_count = 1
+    client = _Client(ps_sequence=[[pod]])
+    calls = []
+
+    def eventually_ready(*args, **kwargs):
+        calls.append(kwargs["command"])
+        if len(calls) == 1:
+            raise OSError("connection refused")
+        return {"success": True, "exit_code": 0, "stdout": "GPU 0: RTX 5090\n"}
+
+    monkeypatch.setattr(client, "exec", eventually_ready)
+
+    assert client.up(executor_id="exec-1", wait=True, verify_gpus=True) == pod
+    assert calls == ["nvidia-smi -L", "nvidia-smi -L"]
+
+
+def test_up_verify_gpus_rejects_empty_success_output(monkeypatch):
+    pod = _pod()
+    pod.gpu_count = 1
+    client = _Client(ps_sequence=[[pod]])
+    monkeypatch.setattr(client, "exec", lambda *args, **kwargs: {
+        "success": True, "exit_code": 0, "stdout": "No devices were found\n",
+    })
+
+    with pytest.raises(LiumError, match="listed no GPUs.*pod-1"):
+        client.up(executor_id="exec-1", wait=True, verify_gpus=True)
+
+
+def test_up_verify_gpus_requires_wait_before_renting():
+    client = _Client()
+
+    with pytest.raises(ValueError, match="wait=True"):
+        client.up(executor_id="exec-1", verify_gpus=True)
+    assert client.calls == []
+
+
 def test_up_with_wait_names_the_billing_pod_when_it_never_becomes_ready(monkeypatch):
     client = _Client(ps_sequence=[[_pod("PENDING", None)]])
     clock = iter([0, 0, 1000, 1000, 1000])
