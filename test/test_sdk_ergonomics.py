@@ -146,6 +146,15 @@ def test_up_verify_gpus_reports_missing_billed_count(monkeypatch):
         client.up(executor_id="exec-1", wait=True, verify_gpus=True)
 
 
+def test_up_verify_gpus_rejects_missing_billed_count_with_requested_count(monkeypatch):
+    pod = _pod()
+    client = _Client(ps_sequence=[[pod]])
+    monkeypatch.setattr(client, "exec", lambda *args, **kwargs: pytest.fail("SSH should not run"))
+
+    with pytest.raises(LiumError, match="did not report a billed GPU count.*pod-1"):
+        client.up(executor_id="exec-1", wait=True, gpu_count=1, verify_gpus=True)
+
+
 def test_up_verify_gpus_reports_uncheckable_pod_without_claiming_mismatch(monkeypatch):
     pod = _pod()
     pod.gpu_count = 1

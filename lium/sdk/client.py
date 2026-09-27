@@ -1138,7 +1138,7 @@ class Lium:
                 code="gpu_count_mismatch",
             )
 
-        if billed is None and requested is None:
+        if billed is None:
             raise LiumError(
                 f"could not verify GPUs: pod did not report a billed GPU count; {billing_note}",
                 code="gpu_verification_failed",
@@ -1174,7 +1174,7 @@ class Lium:
                 f"could not verify GPUs: nvidia-smi -L listed no GPUs; {billing_note}",
                 code="gpu_verification_failed",
             )
-        reference = billed if billed is not None else requested
+        reference = billed
         if reference is not None and visible != reference:
             raise LiumError(
                 f"GPU count mismatch: billed for {reference}, nvidia-smi reports {visible}; {billing_note}",
