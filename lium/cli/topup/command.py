@@ -156,6 +156,8 @@ _CARD_HINTS = {
     "CARD_DECLINED": "Use another saved card (--card <pm_id>) or fix the card on the Billing page",
     "NO_SAVED_CARD": "Add a card, or top up once by card, on the Billing page; then retry",
     "NO_DEFAULT_CARD": "Pass --card <pm_id>, or set a default card on the Billing page",
+    "WALLET_NOT_SUPPORTED": "Pass --card <pm_id> of a card saved as a card (not Link, Apple Pay or "
+                            "Google Pay), or set such a card as the default on the Billing page",
 }
 
 
@@ -395,8 +397,9 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
 
     A bank that wants a one-time confirmation (3-D Secure) cannot get one through this path:
     the command fails with CARD_AUTHENTICATION_REQUIRED and the Billing page to confirm the
-    card on; a decline fails with CARD_DECLINED and the bank's reason. Nothing is charged
-    in either case.
+    card on; a decline fails with CARD_DECLINED and the bank's reason. A saved wallet (Link,
+    Apple Pay, Google Pay) fails with WALLET_NOT_SUPPORTED: pass `--card <pm_id>` of a plain
+    saved card. Nothing is charged in any of these cases.
 
     The request is sent once, always with an idempotency key. If the answer is lost (a
     timeout, a 5xx) the charge may still have gone through: the command exits 6 with

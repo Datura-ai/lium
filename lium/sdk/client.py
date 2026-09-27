@@ -338,6 +338,7 @@ CARD_TOPUP_ERROR_CODES = frozenset(
         "CARD_DECLINED",
         "NO_SAVED_CARD",
         "NO_DEFAULT_CARD",
+        "WALLET_NOT_SUPPORTED",
     }
 )
 # 502s from the same route that fire before Stripe is asked to charge (or that Stripe refused

@@ -203,7 +203,8 @@ class LiumCardTopUpError(LiumError):
 
     ``code`` says why: ``CARD_AUTHENTICATION_REQUIRED`` (the bank wants a one-time confirmation
     the API cannot show — top up once by card at ``dashboard_url``, then retry), ``CARD_DECLINED``
-    (``decline_code`` is the bank's reason), ``NO_SAVED_CARD``, or ``NO_DEFAULT_CARD``. A key
+    (``decline_code`` is the bank's reason), ``NO_SAVED_CARD``, ``NO_DEFAULT_CARD``, or
+    ``WALLET_NOT_SUPPORTED`` (the saved method is Link, Apple Pay or Google Pay). A key
     budget refusal is not this class. The message is the server's plain sentence; the balance
     did not change.
     """
