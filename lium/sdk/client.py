@@ -2916,7 +2916,7 @@ class Lium:
                 given value wins.
             workdir: Directory to ``cd`` into first.
             job_dir: Where the job files live (default ``/workspace/logs``, the
-                fast local volume).
+                fast local volume, not the encrypted ``/root``).
             timeout: Seconds allowed for the launcher itself (not the job).
 
         Raises:
