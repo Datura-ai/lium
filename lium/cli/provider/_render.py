@@ -47,6 +47,7 @@ from lium.provider.errors import (
     PORTAL_SERVER_ERROR,
     PORTS_INVALID,
     EXECUTOR_UUID_MISMATCH,
+    INPUT_INTERRUPTED,
     INSTALLER_PARTIAL_FAIL,
     SSH_AUTH_FAILED,
     SSH_UNREACHABLE,
@@ -89,6 +90,8 @@ _EXIT_CODES: dict[str, int] = {
     CONFIG_MISSING: 6,
     # 7: token-cache contention
     PORTAL_AUTH_REFRESH_RACE: 7,
+    # 130: Ctrl-C (128 + SIGINT) where exit 0 would read as success
+    INPUT_INTERRUPTED: 130,
 }
 
 
@@ -199,7 +202,8 @@ def emit_error(ctx: click.Context, err: ProviderError) -> int:
     if _json_mode(ctx):
         error = {
             "code": error_code_for(err.code),
-            "legacy_code": err.code,
+            # a code born namespaced (`input.interrupted`) never had an UPPER_CASE one
+            "legacy_code": None if "." in err.code else err.code,
             "message": err.message,
             "hint": err.hint,
             "exit_code": code,

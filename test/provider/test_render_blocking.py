@@ -16,6 +16,7 @@ import pytest
 from click.testing import CliRunner
 from rich.console import Console
 
+from lium.cli import interactive
 from lium.cli.provider import _blocking
 from lium.cli.provider._blocking import LEGACY_GATING_CODES, fallback_reasons
 from lium.cli.provider.command import provider_command
@@ -832,7 +833,7 @@ def test_watch_until_clear_exits_10_at_the_timeout(portal_for, clock):
     assert clock.sleeps == [5, 5, 2]   # the last wait is cut to the deadline
 
 
-def test_plain_watch_ignores_a_clear_node_and_keeps_refreshing(portal_for, clock):
+def test_plain_watch_ignores_a_clear_node_and_keeps_refreshing(portal_for, clock, terminal):
     portal_for(_SequencePortal([_node(blocking_reasons=[])]))
 
     def _interrupt(seconds):
@@ -855,6 +856,107 @@ def test_until_clear_needs_watch_and_timeout_needs_until_clear(portal_for):
     assert result.exit_code == 1 and json.loads(result.stdout)["error"]["code"] == "input.arg_invalid"
     result = _run("--json", "node", "status", "e-1", "--watch", "--timeout", "5")
     assert result.exit_code == 1 and "--timeout needs --until-clear" in result.stdout
+
+
+@pytest.fixture
+def terminal(monkeypatch):
+    """A person at a terminal with LIUM_NONINTERACTIVE unset: not agent mode."""
+    monkeypatch.delenv(interactive.NONINTERACTIVE_ENV, raising=False)
+    monkeypatch.setattr(interactive, "stdin_is_terminal", lambda: True)
+
+
+def _interrupt_at_sleep(clock, n):
+    def _sleep(seconds):
+        clock.sleeps.append(seconds)
+        if len(clock.sleeps) == n:
+            raise KeyboardInterrupt
+
+    clock.sleep = _sleep
+
+
+class _InterruptedPortal(_Portal):
+    """Ctrl-C lands during the first fetch, before any refresh is printed."""
+
+    def get(self, path, *, params=None, auth=True):
+        raise KeyboardInterrupt
+
+
+def _assert_interrupted(stdout: str) -> dict:
+    error = _envelopes(stdout)[-1]
+    assert error["ok"] is False
+    assert (error["error"]["code"], error["error"]["exit_code"], error["error"]["legacy_code"]) == ("input.interrupted", 130, None)
+    assert error["error"]["hint"] and error["error"]["context"] == {}
+    return error["error"]
+
+
+def test_ctrl_c_under_until_clear_on_a_blocked_node_exits_130_not_0(portal_for, clock, terminal):
+    """Exit 0 under --until-clear means clear: Ctrl-C on a node still blocked must not look like it,
+    even for a person at a terminal."""
+    portal_for(_SequencePortal([_node(blocking_reasons=[DRIVER_GATING])]))
+    _interrupt_at_sleep(clock, 2)
+
+    result = _run("--json", "node", "status", "e-1", "--watch", "--until-clear", "--timeout", "600")
+
+    assert result.exit_code == 130, result.output
+    frames = _envelopes(result.stdout)
+    assert [f["ok"] for f in frames] == [True, True, False]   # one frame per refresh, then the interrupt
+    assert "before the node was clear" in _assert_interrupted(result.stdout)["message"]
+
+    _interrupt_at_sleep(clock, len(clock.sleeps) + 1)
+    result = _run("node", "status", "e-1", "--watch", "--until-clear")
+    assert result.exit_code == 130
+    assert "[input.interrupted] node status e-1 was interrupted before the node was clear" in result.stderr
+
+
+def test_ctrl_c_under_until_clear_during_the_first_fetch_prints_no_ok_envelope(portal_for, clock, terminal):
+    portal_for(_InterruptedPortal())
+
+    result = _run("--json", "node", "status", "e-1", "--watch", "--until-clear")
+
+    assert result.exit_code == 130
+    assert len(_envelopes(result.stdout)) == 1 and '"ok": true' not in result.stdout
+    _assert_interrupted(result.stdout)
+
+
+@pytest.mark.parametrize("agent", ["LIUM_NONINTERACTIVE", "no-terminal"])
+def test_ctrl_c_in_agent_mode_without_until_clear_exits_130(portal_for, clock, monkeypatch, agent):
+    if agent == "LIUM_NONINTERACTIVE":
+        monkeypatch.setattr(interactive, "stdin_is_terminal", lambda: True)
+        monkeypatch.setenv(interactive.NONINTERACTIVE_ENV, "1")
+    else:
+        monkeypatch.delenv(interactive.NONINTERACTIVE_ENV, raising=False)
+        monkeypatch.setattr(interactive, "stdin_is_terminal", lambda: False)
+    portal_for(_SequencePortal([_node(blocking_reasons=[])]))
+    _interrupt_at_sleep(clock, 1)
+
+    result = _run("--json", "node", "status", "e-1", "--watch")
+
+    assert result.exit_code == 130, result.output
+    assert "before it finished" in _assert_interrupted(result.stdout)["message"]
+
+
+def test_ctrl_c_on_plain_interactive_watch_still_exits_0(portal_for, clock, terminal):
+    portal_for(_SequencePortal([_node(blocking_reasons=[DRIVER_GATING])]))
+    _interrupt_at_sleep(clock, 1)
+
+    result = _run("--json", "node", "status", "e-1", "--watch")
+
+    assert result.exit_code == 0, result.output
+    assert [f["ok"] for f in _envelopes(result.stdout)] == [True]
+    assert "input.interrupted" not in result.output
+
+
+def test_agent_mode_leaves_until_clears_clear_and_timeout_exits_alone(portal_for, clock, monkeypatch):
+    monkeypatch.setenv(interactive.NONINTERACTIVE_ENV, "1")
+    blocked, clear = _node(blocking_reasons=[DRIVER_GATING]), _node(blocking_reasons=[])
+
+    portal_for(_SequencePortal([blocked, clear]))
+    assert _run("--json", "node", "status", "e-1", "--watch", "--until-clear").exit_code == 0
+
+    portal_for(_SequencePortal([blocked]))
+    result = _run("--json", "node", "status", "e-1", "--watch", "--until-clear", "--timeout", "7")
+    assert result.exit_code == 10
+    assert _envelopes(result.stdout)[-1]["error"]["code"] == "node.blocked.nvidia_driver_below_minimum"
 
 
 def test_the_panel_prints_requires_and_the_verify_command(portal_for):

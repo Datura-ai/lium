@@ -163,6 +163,10 @@ def test_node_status_json_returns_the_body(patched_client):
 
 
 def test_node_status_watch_refreshes_until_interrupted(patched_client, monkeypatch):
+    from lium.cli import interactive
+
+    monkeypatch.delenv(interactive.NONINTERACTIVE_ENV, raising=False)
+    monkeypatch.setattr(interactive, "stdin_is_terminal", lambda: True)   # a person at a terminal: Ctrl-C is exit 0
     portal = patched_client(VERIFYING)
     calls = {"n": 0}
 

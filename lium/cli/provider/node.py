@@ -39,15 +39,17 @@ from lium.cli.provider._guards import (
     require_persona_ack,
 )
 from lium.cli.provider._overrides import with_provider_overrides
+from lium.cli.interactive import is_interactive
 from lium.cli.provider._render import (
     EXIT_NODE_BLOCKED,
+    emit_error,
     emit_node_blocked,
     fatal,
     render,
 )
 from lium.cli.provider._verification import render_text
 from lium.provider._shared_config import default_price_for_gpu, fetch_shared_config
-from lium.provider.errors import ARG_INVALID, ProviderError
+from lium.provider.errors import ARG_INVALID, INPUT_INTERRUPTED, ProviderError
 
 
 @click.group("node")
@@ -157,12 +159,18 @@ def get_node(ctx: click.Context, node_id: str, fail_on_blocked: bool) -> None:
 @click.option(
     "--watch",
     is_flag=True,
-    help="Refresh until interrupted (Ctrl-C). In --json mode prints one object per refresh.",
+    help=(
+        "Refresh until interrupted (Ctrl-C: exit 0, or 130 under --until-clear or with no terminal /"
+        " LIUM_NONINTERACTIVE). In --json mode prints one object per refresh."
+    ),
 )
 @click.option(
     "--until-clear",
     is_flag=True,
-    help=f"With --watch: stop and exit 0 once no gating blocking reason is left (exit {EXIT_NODE_BLOCKED} at --timeout).",
+    help=(
+        f"With --watch: stop and exit 0 once no gating blocking reason is left (exit {EXIT_NODE_BLOCKED} at"
+        " --timeout, 130 on Ctrl-C)."
+    ),
 )
 @click.option(
     "--timeout",
@@ -212,8 +220,11 @@ def status_node(
     client = build_client(ctx)
     json_mode = _json_mode(ctx)
     deadline = time.monotonic() + timeout if timeout is not None else None
-    # One guard around the whole loop: Ctrl-C exits 0 whether it lands during the fetch,
-    # the print or the sleep (click would otherwise print "Aborted!" and exit 1 mid-fetch).
+    # One guard around the whole loop, so Ctrl-C is handled the same whether it lands during the
+    # fetch, the print or the sleep (click would otherwise print "Aborted!" and exit 1 mid-fetch).
+    # Ctrl-C is how a person stops plain --watch, so that exits 0. With --until-clear, exit 0 means
+    # the node is clear, and an agent (not is_interactive()) reads only the exit status: in both of
+    # those cases Ctrl-C exits 130 with input.interrupted.
     try:
         while True:
             try:
@@ -251,6 +262,9 @@ def status_node(
             sleep = interval if deadline is None else max(0.0, min(interval, deadline - time.monotonic()))
             time.sleep(sleep)
     except KeyboardInterrupt:
+        if until_clear or not is_interactive():
+            what = "before the node was clear" if until_clear else "before it finished"
+            ctx.exit(emit_error(ctx, ProviderError(f"node status {node_id} was interrupted {what}", code=INPUT_INTERRUPTED)))
         return
 
 
