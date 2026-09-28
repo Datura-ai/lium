@@ -62,9 +62,10 @@ def client(fake_signer, tmp_token_store):
 # Profile / config
 
 
-def test_set_email_posts_payload(client) -> None:
+def test_set_email_posts_payload(client, monkeypatch) -> None:
     portal = _Portal(post_body={"data": {}})
     c = client(portal)
+    monkeypatch.setattr(c, "login", lambda force=False: None)
     c.set_email("a@b.co")
     assert portal.posts[0] == ("/auth/set-email", {"email": "a@b.co"}, True)
 

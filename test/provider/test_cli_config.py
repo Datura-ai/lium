@@ -186,9 +186,10 @@ def test_config_opt_in_json_envelope(patched_build_client) -> None:
     assert payload["data"]["central_miner_ip"] == "1.2.3.4"
 
 
-def test_config_set_email(patched_build_client) -> None:
+def test_config_set_email(patched_build_client, monkeypatch) -> None:
     portal = _Portal(post_body={"data": {}})
     patched_build_client(portal)
+    monkeypatch.setattr(ProviderClient, "login", lambda self, force=False: None)
     runner = CliRunner()
     result = runner.invoke(
         provider_command,

@@ -14,6 +14,7 @@ from lium.provider.client import ProviderClient
 from lium.provider.errors import (
     PORTAL_AUTH_INVALID,
     ProviderAuthError,
+    ProviderServerError,
 )
 from lium.provider.token_store import TokenStore
 
@@ -27,6 +28,7 @@ class _FakePortal:
         self.next_post: dict | None = None
         self.next_post_raises: BaseException | None = None
         self.next_get: dict | None = None
+        self.next_get_raises: BaseException | None = None
 
     def post(
         self,
@@ -42,6 +44,8 @@ class _FakePortal:
 
     def get(self, path: str, *, params: dict | None = None, auth: bool = True) -> dict:
         self.gets.append((path, auth))
+        if self.next_get_raises is not None:
+            raise self.next_get_raises
         return self.next_get or {}
 
     # Unused stubs to satisfy structural typing if anything depends on them.
@@ -124,7 +128,7 @@ def test_login_posts_login_flexible_with_correct_payload(
     assert not body["signature"].startswith("0x")
 
 
-def test_login_caches_token_and_subsequent_call_skips_network(
+def test_login_caches_token_and_subsequent_call_skips_sign_in(
     fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
 ) -> None:
     portal = _FakePortal()
@@ -137,7 +141,91 @@ def test_login_caches_token_and_subsequent_call_skips_network(
     response_b = client.login()  # should hit the cache
 
     assert response_a.token == response_b.token
-    assert len(portal.posts) == 1, "second login must not call portal again"
+    assert len(portal.posts) == 1, "second login must not sign in again"
+    assert portal.gets == [("/auth/me", True)], "the cached token is checked once"
+
+
+def test_login_signs_in_again_when_the_portal_ended_the_cached_session(
+    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
+) -> None:
+    """Sign-out everywhere, a password or e-mail change and an admin revoke end a token before its expiry."""
+    portal = _FakePortal()
+    ended = _make_jwt(int(time.time()) + 3600)
+    tmp_token_store.save(fake_signer.ss58_address, ended, provider_id="m-1")
+    portal.next_get_raises = ProviderAuthError(
+        "portal rejected credentials", code=PORTAL_AUTH_INVALID
+    )
+    fresh = _make_jwt(int(time.time()) + 7200)
+    portal.next_post = _login_response_body(fresh, fake_signer.ss58_address)
+    client = _build_client(portal, tmp_token_store, fake_signer)
+
+    response = client.login()
+
+    assert response.token == fresh
+    assert [path for path, _, _ in portal.posts] == ["/auth/login-flexible"]
+    assert tmp_token_store.load(fake_signer.ss58_address).token == fresh
+
+
+def test_login_ended_session_and_failed_sign_in_leaves_no_cached_token(
+    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
+) -> None:
+    portal = _FakePortal()
+    tmp_token_store.save(
+        fake_signer.ss58_address, _make_jwt(int(time.time()) + 3600), provider_id="m-1"
+    )
+    portal.next_get_raises = ProviderAuthError(
+        "portal rejected credentials", code=PORTAL_AUTH_INVALID
+    )
+    portal.next_post_raises = ProviderServerError("portal returned 503")
+    client = _build_client(portal, tmp_token_store, fake_signer)
+
+    with pytest.raises(ProviderServerError):
+        client.login()
+
+    assert tmp_token_store.load(fake_signer.ss58_address) is None
+
+
+def test_login_keeps_the_cached_token_when_the_check_cannot_reach_the_portal(
+    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
+) -> None:
+    portal = _FakePortal()
+    cached = _make_jwt(int(time.time()) + 3600)
+    tmp_token_store.save(fake_signer.ss58_address, cached, provider_id="m-1")
+    portal.next_get_raises = ProviderServerError("portal returned 503")
+    client = _build_client(portal, tmp_token_store, fake_signer)
+
+    assert client.login().token == cached
+    assert portal.posts == []
+
+
+def test_set_email_signs_in_first_and_stores_the_reissued_token(
+    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
+) -> None:
+    """The portal takes a new address only from a recent sign-in, ends every earlier session and answers with the
+    caller's new token; the CLI keeps that token and never hands it to the renderer."""
+    signed_in = _make_jwt(int(time.time()) + 3600)
+    reissued = _make_jwt(int(time.time()) + 3500)
+    login_body = _login_response_body(signed_in, fake_signer.ss58_address)
+
+    class _Portal(_FakePortal):
+        def post(self, path, *, json_body=None, auth=True):
+            self.posts.append((path, json_body or {}, auth))
+            if path == "/auth/login-flexible":
+                return login_body
+            return {"email": "a@b.co", "token": reissued}
+
+    portal = _Portal()
+    client = _build_client(portal, tmp_token_store, fake_signer)
+
+    body = client.set_email("a@b.co")
+
+    assert [path for path, _, _ in portal.posts] == [
+        "/auth/login-flexible",
+        "/auth/set-email",
+    ]
+    assert body == {"email": "a@b.co"}
+    stored = tmp_token_store.load(fake_signer.ss58_address)
+    assert stored.token == reissued and stored.provider_id == "m-1"
 
 
 def test_login_force_re_authenticates(

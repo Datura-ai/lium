@@ -106,6 +106,21 @@ def _gpu_config(pod: PodInfo) -> Optional[str]:
     return f"{count}×{pod.executor.gpu_type}" if count and count > 1 else pod.executor.gpu_type
 
 
+def _is_pending(pod: PodInfo) -> bool:
+    return (pod.status or "").upper() == "PENDING"
+
+
+def pending_eta_lines(pods: List[PodInfo]) -> List[str]:
+    """``<huid> PENDING · est. ready in ~18 s (phase: pulling image)`` for each PENDING pod the
+    backend sent an estimate or phase for — the wording of `lium up`'s wait lines."""
+    lines = []
+    for pod in pods:
+        hint = pod.eta_hint() if _is_pending(pod) else None
+        if hint:
+            lines.append(f"{pod.huid} PENDING · {hint}")
+    return lines
+
+
 def compact_pod(pod: PodInfo, index: Optional[int] = None) -> dict:
     """Slim, table-equivalent JSON view of a pod.
 
@@ -138,10 +153,18 @@ def compact_pod(pod: PodInfo, index: Optional[int] = None) -> dict:
         "removal_scheduled_at": pod.removal_scheduled_at,
         "jupyter_url": pod.jupyter_url,
     }
+    if _is_pending(pod):
+        # PENDING rows only: null when the backend sent neither an estimate nor a phase
+        view["eta_hint"] = pod.eta_hint()
     workspace_id = getattr(pod, "workspace_id", None)  # a pod-shaped stub without the field is a pod outside any workspace
     if workspace_id is not None:
         # only when the server has workspaces: a server without them keeps today's JSON exactly
         view["workspace_id"] = workspace_id
+    api_key_id = getattr(pod, "api_key_id", None)
+    if api_key_id is not None:
+        # the key that rented the pod (per-key budgets); absent, not null, from a server without the field
+        view["api_key_id"] = api_key_id
+        view["api_key_name"] = getattr(pod, "api_key_name", None)
     return view
 
 

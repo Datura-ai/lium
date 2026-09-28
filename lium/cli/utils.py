@@ -17,8 +17,10 @@ from lium.sdk import (
     Lium,
     LiumAuthError,
     LiumError,
+    LiumBudgetExceededError,
     LiumHostKeyError,
     LiumInsufficientBalanceError,
+    LiumScopeError,
     LiumNotFoundError,
     LiumPermissionError,
     LiumRateLimitError,
@@ -327,6 +329,11 @@ _HINTS_BY_CODE: Dict[str, str] = {
                          "fixed with 'lium topup' or 'lium fund', a pending verification on https://lium.io",
     "insufficient_balance": "Add funds with 'lium topup' or 'lium fund', or pick a cheaper node "
                             "('lium ls --sort price_total')",
+    # a 402 from the rent path: the key's own budget, not the account's balance
+    "budget_exceeded": "This API key is over its budget: 'lium keys show <name>' shows the figures; "
+                       "raise or clear it with 'lium keys budget <name>' (a signed-in session) or use another key",
+    "missing_scope": "This API key lacks the scope the command needs: 'lium keys scopes' explains each one; "
+                     "mint a key that holds it with 'lium keys create <name> --scope <scope>'",
     "pod_not_found": "Run 'lium ps' to list pods; a name, huid, id or 1-based index is accepted",
     "not_found": "The resource is gone or the id is wrong; list it again and retry",
     "rate_limited": "Wait a few seconds and retry; back off if it repeats",
@@ -500,6 +507,11 @@ def _classify_sdk_error(error: LiumError) -> tuple[str, int]:
         return "ssh_host_key_changed", EXIT_SSH_ERROR
     if isinstance(error, LiumInsufficientBalanceError):
         return "insufficient_balance", EXIT_PERMISSION_DENIED
+    if isinstance(error, LiumBudgetExceededError):
+        # 402: the key's daily/total budget refused a new rental — the same family as a balance refusal
+        return "budget_exceeded", EXIT_PERMISSION_DENIED
+    if isinstance(error, LiumScopeError):
+        return "missing_scope", EXIT_PERMISSION_DENIED
     if isinstance(error, LiumPermissionError):
         return "permission_denied", EXIT_PERMISSION_DENIED
     if isinstance(error, LiumSessionError):
@@ -541,7 +553,15 @@ def sdk_error_failure(error: LiumError, data: dict | None = None, *, note: str =
 def _api_error_data(e: LiumError) -> dict | None:
     """The server's request_id, for the JSON envelope's ``data`` (the hint has its own
     field in the envelope; see :func:`error_envelope`)."""
-    return {"request_id": e.request_id} if e.request_id else None
+    data: dict = {"request_id": e.request_id} if e.request_id else {}
+    if isinstance(e, LiumBudgetExceededError):
+        # the figures a script acts on (which budget, how much of it) — None when the server sent none
+        data.update({"window": e.window, "budget_usd": e.budget_usd, "spent_usd": e.spent_usd})
+        if e.api_key_id:
+            data["api_key_id"] = e.api_key_id
+    if isinstance(e, LiumScopeError) and e.scope:
+        data["scope"] = e.scope
+    return data or None
 
 
 def handle_errors(func):
@@ -593,8 +613,10 @@ def handle_errors(func):
         except LiumError as e:
             code, exit_code = _classify_sdk_error(e)
             # the API's own code, hint and request_id when it sent them (DAH-3057); the
-            # class-derived code and the default hint otherwise
-            fail(e.code or code, str(e), exit_code, _api_error_data(e), e.hint,
+            # class-derived code and the default hint otherwise — a server code this table does not
+            # know (API_KEY_BUDGET_EXCEEDED) still gets its class's hint, not the exit family's
+            hint = e.hint or _HINTS_BY_CODE.get(e.code or "") or default_hint(code, exit_code)
+            fail(e.code or code, str(e), exit_code, _api_error_data(e), hint,
                  request_id=e.request_id, prefix="Error: ")
         except Exception as e:
             # a bug, not a usage or API error: the only branch crash reporting sees (DAH-2057)

@@ -146,6 +146,58 @@ class LiumInsufficientBalanceError(LiumPermissionError):
         self.available = available
 
 
+class LiumScopeError(LiumPermissionError):
+    """The API key lacks the scope the route needs (403 ``API key '<name>' does not have the '<scope>' scope``).
+
+    ``scope`` is the missing scope (``read``, ``rent``, ``manage``, ``billing``) when the server named it,
+    else ``None``. Another key with that scope fixes this, not funds or verification.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        scope: str | None = None,
+        code: str | None = None,
+        hint: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message, code=code, hint=hint, request_id=request_id)
+        self.scope = scope
+
+
+class LiumBudgetExceededError(LiumPermissionError):
+    """The API key's budget refused the request (402, ``error.code`` ``API_KEY_BUDGET_EXCEEDED``).
+
+    A per-key daily, monthly or lifetime budget (``lium keys create --daily-budget / --monthly-budget /
+    --max-budget``, ``lium keys budget``) is reached: the billing tick deletes the key's pods (data outside
+    a volume is lost), and a rent, a pod extend / schedule change or a key-initiated top-up (``lium fund``,
+    ``lium topup``, ``lium topup card``) through that key is refused with this one error (server support
+    pending). The message names the window hit.
+    ``budget_usd``, ``spent_usd``, ``window`` (``daily``, ``monthly`` or ``max``) and ``api_key_id`` are filled when the
+    server's error body carried them, else ``None``. A :class:`LiumPermissionError` handler keeps working; this
+    class is for callers that want the numbers.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        budget_usd: float | None = None,
+        spent_usd: float | None = None,
+        window: str | None = None,
+        api_key_id: str | None = None,
+        code: str | None = None,
+        hint: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message, code=code, hint=hint, request_id=request_id)
+        self.budget_usd = budget_usd
+        self.spent_usd = spent_usd
+        self.window = window
+        self.api_key_id = api_key_id
+
+
 class LiumCardTopUpError(LiumError):
     """A card top-up (``POST /payments/topup``, :meth:`Lium.topup_card`) did not charge (402).
 
@@ -195,12 +247,9 @@ class LiumChargeOutcomeUnknownError(LiumError):
         super().__init__(message, code=code, hint=hint, request_id=request_id)
         self.idempotency_key = idempotency_key
 
-
 __all__ = [
     "LiumError",
     "LiumAuthError",
-    "LiumCardTopUpError",
-    "LiumChargeOutcomeUnknownError",
     "LiumRateLimitError",
     "LiumServerError",
     "LiumNotFoundError",
@@ -208,5 +257,9 @@ __all__ = [
     "PodStartError",
     "LiumHostKeyError",
     "LiumInsufficientBalanceError",
+    "LiumScopeError",
+    "LiumBudgetExceededError",
     "RemoteExecutionError",
+    "LiumCardTopUpError",
+    "LiumChargeOutcomeUnknownError",
 ]

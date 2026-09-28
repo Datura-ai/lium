@@ -3,7 +3,7 @@
 #
 #   E2E_API_URL / E2E_API_KEY  the target (default staging.lium.io; a funded account's key — CI: secret LIUM_E2E_API_KEY)
 #   E2E_MAX_PRICE              cap on $/h for the node rented (default 0.50)
-#   SUITES                     default "renter sdk" (test_<suite>_journey.py); T_INSTALL / T_SUITE timeouts (5m / 25m)
+#   SUITES                     default "renter sdk keys_scopes" (test_<suite>_journey.py); T_INSTALL / T_SUITE timeouts (5m / 25m)
 #
 # Like lium-platform's and lium-io's gate.sh: GNU timeout (or macOS gtimeout) on every step, every suite runs even after a failure,
 # artifacts/ always holds timings.txt, summary.md, <suite>-junit.xml and commands.json (every CLI call, exit code,
@@ -16,7 +16,7 @@ if command -v timeout >/dev/null 2>&1; then TIMEOUT=timeout
 elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT=gtimeout
 else TIMEOUT=""; echo "e2e: no GNU timeout on PATH (macOS: brew install coreutils) — steps run without a time limit" >&2; fi
 A=artifacts; mkdir -p "$A"; : > "$A/timings.txt"; rm -f "$A"/*-junit.xml "$A/summary.md" "$A/commands.json"
-SUITES=${SUITES:-renter sdk}
+SUITES=${SUITES:-renter sdk keys_scopes}
 T_INSTALL=${T_INSTALL:-5m}; T_SUITE=${T_SUITE:-25m}
 FAILED=""
 export E2E_ARTIFACTS="$PWD/$A"
