@@ -100,8 +100,8 @@ def ls_command(
     --sort picks another key.
 
     Link shows how the GPUs of a node are wired to each other (NV18 = NVLink with
-    18 links, PCIe/SYS = PCIe only, worst class shown); it is "—" until the node's
-    validator reports it.
+    18 links, PCIe/SYS = PCIe only, worst class shown); it is "—" until Lium's node
+    checks report it.
 
     ↓W after a node's Id means a reduced GPU power limit: it is set below the
     card's default, so expect somewhat lower peak performance than the same GPU at

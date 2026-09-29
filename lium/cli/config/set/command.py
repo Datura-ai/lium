@@ -10,7 +10,10 @@ from .actions import SetConfigAction
 
 
 def mask_value(value: str, key: str) -> str:
-    """Mask sensitive values (API keys, the `[session] token` from `lium workspaces login`)."""
+    """Mask sensitive values (API keys, the `[session] token` from `lium workspaces login`, and the
+    `[account] fingerprint` of an e-mail-less account, which is its only login)."""
+    if key == 'account.fingerprint' and value:
+        return '***' + value[-4:] if len(value) > 12 else '***'
     if (key.endswith('api_key') or key == 'session.token') and value:
         return value[:8] + '...' + value[-4:] if len(value) > 12 else '***'
     return value
