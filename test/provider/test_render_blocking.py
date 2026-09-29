@@ -833,6 +833,23 @@ def test_watch_until_clear_exits_10_at_the_timeout(portal_for, clock):
     assert clock.sleeps == [5, 5, 2]   # the last wait is cut to the deadline
 
 
+class _OverviewDownPortal(_Portal):
+    def get(self, path, *, params=None, auth=True):
+        if path == "/miners/overview":
+            self.gets.append(path)
+            raise ProviderError("overview down", code="PORTAL_UNAVAILABLE")
+        return super().get(path, params=params, auth=auth)
+
+
+def test_watch_until_clear_never_reads_a_failed_overview_as_clear(portal_for, clock):
+    portal_for(_OverviewDownPortal(node=_node()))   # no portal list: idle pay comes from the overview
+
+    result = _run("--json", "node", "status", "e-1", "--watch", "--until-clear", "--timeout", "7")
+
+    assert result.exit_code == 10, result.output
+    assert _envelopes(result.stdout)[-1]["ok"] is False
+
+
 def test_plain_watch_ignores_a_clear_node_and_keeps_refreshing(portal_for, clock, terminal):
     portal_for(_SequencePortal([_node(blocking_reasons=[])]))
 

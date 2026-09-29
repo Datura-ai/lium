@@ -430,12 +430,13 @@ def idle_pay_reasons_by_node(overview: Mapping[str, Any] | None) -> dict[str, li
     return out
 
 
-def fetch_idle_pay_reasons(client: Any) -> dict[str, list[Mapping[str, Any]]]:
-    """The overview's idle-pay reasons; an overview that fails leaves only the other two sources."""
+def fetch_idle_pay_reasons(client: Any) -> dict[str, list[Mapping[str, Any]]] | None:
+    """The overview's idle-pay reasons; None when the overview fails, so a caller can tell "no idle-pay
+    reason" from "unknown" (the other two sources still attach)."""
     try:
         return idle_pay_reasons_by_node(client.provider_overview())
     except ProviderError:
-        return {}
+        return None
 
 
 def attach(rows: Iterable[Any], idle_by_node: Mapping[str, list[Mapping[str, Any]]] | None = None) -> None:

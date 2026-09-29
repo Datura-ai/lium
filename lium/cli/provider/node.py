@@ -272,13 +272,16 @@ def _json_mode(ctx: click.Context) -> bool:
     return bool(((ctx.obj or {}).get("provider_opts") or {}).get("json"))
 
 
-def _attach_blocking(client, node: dict) -> None:
+def _attach_blocking(client, node: dict) -> bool:
+    """Attach the node's blocking reasons; False when its idle-pay reasons could not be read."""
     idle = _blocking.fetch_idle_pay_reasons(client) if _blocking.needs_fallback([node]) else {}
     _blocking.attach([node], idle)
+    return idle is not None
 
 
 def _node_with_blocking(client, node_id: str) -> dict | None:
-    """The node record with its blocking reasons; None when the portal does not return it (the
+    """The node record with its blocking reasons; None when the portal does not return it or its
+    idle-pay reasons could not be read, so --until-clear never reads that refresh as clear (the
     verification view still prints)."""
     try:
         node = client.get_node(node_id)
@@ -286,7 +289,8 @@ def _node_with_blocking(client, node_id: str) -> dict | None:
         return None
     if not isinstance(node, dict):
         return None
-    _attach_blocking(client, node)
+    if not _attach_blocking(client, node):
+        return None
     return node
 
 
