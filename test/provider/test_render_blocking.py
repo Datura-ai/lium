@@ -850,6 +850,25 @@ def test_watch_until_clear_never_reads_a_failed_overview_as_clear(portal_for, cl
     assert _envelopes(result.stdout)[-1]["ok"] is False
 
 
+@pytest.mark.parametrize("watch", [(), ("--watch", "--until-clear", "--timeout", "7")], ids=["once", "until-clear"])
+@pytest.mark.parametrize(
+    "known",
+    [
+        {"hidden_reasons": [{"code": "DISK_TOO_FULL", "message": "Hidden from renters: disk 95% used"}]},
+        {"status": "VALIDATION_FAILED", "computed_status": {"status": "VALIDATION_FAILED", "message": None, "last_error": {
+            "title": "Network too slow", "reason_code": "VERIFYX_FAILED_NETWORK_SPEED_TOO_SLOW", "source": "Validator"}}},
+    ],
+    ids=["hidden_reasons", "last_error"],
+)
+def test_a_failed_overview_keeps_the_blockers_the_other_sources_found(portal_for, clock, known, watch):
+    portal_for(_OverviewDownPortal(node=_node(**known)))
+
+    result = _run("--json", "node", "status", "e-1", "--fail-on-blocked", *watch)
+
+    assert result.exit_code == 10, result.output
+    assert _envelopes(result.stdout)[-1]["error"]["code"].startswith("node.blocked.")
+
+
 def test_plain_watch_ignores_a_clear_node_and_keeps_refreshing(portal_for, clock, terminal):
     portal_for(_SequencePortal([_node(blocking_reasons=[])]))
 

@@ -232,11 +232,11 @@ def status_node(
             except ProviderError as e:
                 ctx.exit(handle_provider_error(ctx, e))
                 return
-            node = _node_with_blocking(client, node_id)
+            node, idle_read = _node_with_blocking(client, node_id)
             reasons = _blocking.node_reasons(node) if node is not None else []
             if isinstance(body, dict) and node is not None:
                 body = {**body, "blocking_reasons": node["blocking_reasons"]}
-            last = not watch or (until_clear and node is not None and not reasons)
+            last = not watch or (until_clear and node is not None and idle_read and not reasons)
             timed_out = deadline is not None and not last and time.monotonic() >= deadline
             # plain --watch never reaches `last`: --fail-on-blocked there stops at the first blocked refresh
             fail = reasons and (timed_out or (fail_on_blocked and (last or not until_clear)))
@@ -256,7 +256,7 @@ def status_node(
             if last:
                 return
             if timed_out:
-                unknown = [{"code": "", "title": "the node record did not come back, so nothing shows it clear"}]
+                unknown = [{"code": "", "title": "the node record or its idle-pay reasons did not come back, so nothing shows it clear"}]
                 ctx.exit(emit_node_blocked(ctx, node_id, unknown, body))
                 return
             sleep = interval if deadline is None else max(0.0, min(interval, deadline - time.monotonic()))
@@ -279,19 +279,17 @@ def _attach_blocking(client, node: dict) -> bool:
     return idle is not None
 
 
-def _node_with_blocking(client, node_id: str) -> dict | None:
-    """The node record with its blocking reasons; None when the portal does not return it or its
-    idle-pay reasons could not be read, so --until-clear never reads that refresh as clear (the
-    verification view still prints)."""
+def _node_with_blocking(client, node_id: str) -> tuple[dict | None, bool]:
+    """The node record with its blocking reasons (None when the portal does not return it) and
+    whether its idle-pay reasons were read. A node whose overview failed keeps the blockers the
+    other sources found, but --until-clear never reads that refresh as clear."""
     try:
         node = client.get_node(node_id)
     except ProviderError:
-        return None
+        return None, False
     if not isinstance(node, dict):
-        return None
-    if not _attach_blocking(client, node):
-        return None
-    return node
+        return None, False
+    return node, _attach_blocking(client, node)
 
 
 @node_command.command("add", short_help="Queue a new node addition.")
