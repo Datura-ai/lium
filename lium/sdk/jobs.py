@@ -307,8 +307,8 @@ class Job:
 
         The probe and the job's liveness are read in the same SSH round trip, and
         the job's state is judged first: a server that crashed while loading fails
-        this call at once, with its exit code and the last log lines, instead of
-        burning the whole timeout — even when another process holds the port. A
+        this call at once with its exit code and the last log lines, even when
+        another process holds the port. A
         job that exited 0 with the port open counts as ready (it forked its
         server and left).
 
@@ -371,8 +371,8 @@ class Job:
     def kill(self, signal: str = "TERM") -> bool:
         """Send ``signal`` to the job's whole process group. Returns whether anything received it.
 
-        Nothing is signalled when the PID no longer belongs to the job (the pod
-        restarted and another process took the number) or when the job has no
+        Nothing is signaled when the PID belongs to a different process (the pod
+        restarted and that process took the number) or when the job has no
         ``.id`` file to check it against; the call returns ``False``.
         """
         sig = signal.upper().removeprefix("SIG")
