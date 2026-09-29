@@ -125,6 +125,8 @@ def list_nodes(
 
 
 _FAIL_ON_BLOCKED_HELP = f"Exit {EXIT_NODE_BLOCKED} when the node has a gating blocking reason."
+# --fail-on-blocked never exits 0 unless every source was read
+_UNREAD = [{"code": "", "title": "the node record or its idle-pay reasons did not come back, so nothing shows it clear"}]
 
 
 @node_command.command("get", short_help="Show one node.")
@@ -140,9 +142,10 @@ def get_node(ctx: click.Context, node_id: str, fail_on_blocked: bool) -> None:
     except ProviderError as e:
         ctx.exit(handle_provider_error(ctx, e))
         return
-    if isinstance(body, dict):
-        _attach_blocking(client, body)
+    idle_read = _attach_blocking(client, body) if isinstance(body, dict) else True
     reasons = _blocking.node_reasons(body) if isinstance(body, dict) else []
+    if fail_on_blocked and not reasons and not idle_read:
+        reasons = _UNREAD
     if fail_on_blocked and reasons and _json_mode(ctx):
         ctx.exit(emit_node_blocked(ctx, node_id, reasons, body))
         return
@@ -234,6 +237,8 @@ def status_node(
                 return
             node, idle_read = _node_with_blocking(client, node_id)
             reasons = _blocking.node_reasons(node) if node is not None else []
+            if fail_on_blocked and not watch and not reasons and (node is None or not idle_read):
+                reasons = _UNREAD
             if isinstance(body, dict) and node is not None:
                 body = {**body, "blocking_reasons": node["blocking_reasons"]}
             last = not watch or (until_clear and node is not None and idle_read and not reasons)
@@ -256,8 +261,7 @@ def status_node(
             if last:
                 return
             if timed_out:
-                unknown = [{"code": "", "title": "the node record or its idle-pay reasons did not come back, so nothing shows it clear"}]
-                ctx.exit(emit_node_blocked(ctx, node_id, unknown, body))
+                ctx.exit(emit_node_blocked(ctx, node_id, _UNREAD, body))
                 return
             sleep = interval if deadline is None else max(0.0, min(interval, deadline - time.monotonic()))
             time.sleep(sleep)

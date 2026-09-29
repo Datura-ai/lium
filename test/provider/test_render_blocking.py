@@ -850,6 +850,19 @@ def test_watch_until_clear_never_reads_a_failed_overview_as_clear(portal_for, cl
     assert _envelopes(result.stdout)[-1]["ok"] is False
 
 
+@pytest.mark.parametrize("command", ["get", "status"])
+def test_one_shot_fail_on_blocked_never_reads_a_failed_overview_as_clear(portal_for, command):
+    portal_for(_OverviewDownPortal(node=_node()))   # no portal list: idle pay comes from the overview
+
+    result = _run("--json", "node", command, "e-1", "--fail-on-blocked")
+
+    assert result.exit_code == 10, result.output
+    envelope = _envelopes(result.stdout)[-1]
+    assert envelope["ok"] is False and envelope["error"]["code"] == "node.blocked"
+    assert "nothing shows it clear" in envelope["error"]["message"]
+    assert _run("--json", "node", command, "e-1").exit_code == 0   # without the flag it only reports
+
+
 @pytest.mark.parametrize("watch", [(), ("--watch", "--until-clear", "--timeout", "7")], ids=["once", "until-clear"])
 @pytest.mark.parametrize(
     "known",

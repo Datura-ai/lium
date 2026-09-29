@@ -242,6 +242,8 @@ lium provider node status "$NODE" --json --watch --until-clear --timeout 1800
 lium provider node status "$NODE" --json --watch --fail-on-blocked
 ```
 
+`--fail-on-blocked` and `--until-clear` never exit 0 unless every source was read: when the node record or the idle-pay overview does not come back and nothing else blocks, they exit 10 with `node.blocked` and a message that says nothing shows the node clear.
+
 A reason whose `requires` lists `reboot` (or a fix that needs `sudo` on a host you do not control) is a step for a person: stop and hand it over.
 
 `no_rentals` means the fix stops every pod on the host: pause new rentals first (the portal's Pause New Rentals, or the provider CLI's pause command, coming with the next CLI release), wait until no rental runs, apply the fix, then resume rentals. An agent that cannot pause the node hands the step over.
