@@ -122,7 +122,7 @@ def provider_command(
     yes_flag: bool,
     dry_run: bool,
 ) -> None:
-    """Provider-side commands for Subnet 51 mining.
+    """Provider-side commands.
 
     Use ``lium mine`` for renter workflows. ``lium provider ...`` is the
     provider persona: portal session management, managing nodes,
