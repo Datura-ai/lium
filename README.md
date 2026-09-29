@@ -213,13 +213,13 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 ### Core Commands
 
 - `lium signup` - Create an account from the terminal and store its API key
-- `lium init` - Initialize configuration for an existing account (API key, SSH keys); `--api-key <key>` for machines without a browser
+- `lium init` - Initialize configuration for an existing account (API key, SSH keys); `--api-key <key>` for machines without a browser; `--force` to log in again
 - `lium completion [bash|zsh|fish] [--install]` - Print or install shell tab completion
 - `lium balance` - Show the account balance (add `--format json` for machine-readable output)
 - `lium whoami` - Show which API key is in use, where it came from, and the account it belongs to
 - `lium ls [--gpu TYPE] [--count N] [--country CODE] [--min-vram GB] [--max-price USD] [--tier spot|secure] [--format json]` - List available nodes
 - `lium up [NODE_ID]` - Create a pod (NODE_ID is the HUID or UUID from `lium ls`, or its row number; or use filters like `--gpu`, `--count`, `--country`; cap it with `--ttl 6h` or `--budget 12.50`; `--json` prints the ready pod as JSON instead of opening SSH)
-- `lium ps [--sort KEY] [--filter KEY=VALUE] [--key NAME|ID] [--watch N] [--wide] [--format json]` - List active pods; the `#` column is the row number `rm`/`ssh`/`exec`/`scp` accept in the same shell, for 10 minutes, and only while the pod shown on that row is still listed — the rows of the last listing, in the order shown (sorted or filtered). Use the huid in scripts.
+- `lium ps [--sort KEY] [--filter KEY=VALUE] [--key NAME|ID] [--watch N] [--wide] [--format json]` - List active pods; the `#` column is the row number `rm`/`ssh`/`exec`/`scp` accept in the same shell, for 10 minutes, and only while the pod shown on that row is still listed — the rows of the last listing, in the order shown (sorted or filtered). Use the huid in scripts. A PENDING pod gets a line under the table with the backend's start estimate and phase, worded as `lium up` words it (`eager-wolf-aa PENDING · est. ready in ~18 s (phase: pulling image)`); its `--format json` row carries the same text as `eta_hint` (`null` when the backend sent neither).
 - `lium spend [--format json]` - Hourly burn, estimated spend per pod, balance and runway
 - `lium describe <POD>` - Full manifest of one pod: ports, GPU, template, billing, last lifecycle event (why it is REBOOT_FAILED/BROKEN) and the node's disk health (add `--json` for machine-readable output). A deleted pod can still be described by its id: you get the events the backend kept for it and the reason it went away.
 - `lium ssh <POD>` - SSH into a pod
@@ -235,7 +235,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium audit --account [--action pod.] [--source cli] [--since 7d] [--cursor <next_cursor>]` - The account audit log: every request that changed something (pods, keys, logins, balance, settings, team members) with the client and IP it came from; your own IPs only, 90 days (`--json` prints the page with `next_cursor`)
 - `lium update <POD> --jupyter <PORT>` - Install Jupyter Notebook on a pod, served on that internal port (`--jupyter` is the only update; without it the command prints `No updates specified`)
 - `lium templates [SEARCH] [--arch hopper|blackwell] [--format json]` - List Docker templates with the CUDA build and the GPU generations it runs on
-- `lium fund` - Fund account with TAO from your wallet
+- `lium fund` - Fund account with TAO from your wallet (`--alpha -k <hotkey> -a <USD>` pays with alpha stake instead; add `--netuid <N>` to pay from any subnet Lium accepts, the primary subnet otherwise)
 - `lium topup create -a <USD> -c <COIN> -n <NETWORK>` - Top up with a stablecoin (`lium topup currencies` lists them)
 - `lium topup card -a <USD> [--card <pm_id>] [--yes]` - Charge a card saved on the account, with no browser; the API key needs the `billing` scope (not released: the platform switch is off). Asks first; `--yes` skips the question and `--json` needs it. Sent once with an idempotency key; a lost answer or a 202 without a payment_intent_id exits 6 ("the charge may have gone through" / "still being confirmed") with the key and the same amount to re-run with, never a bare retry. A 202 with a payment_intent_id is success (exit 0). The same key with a different amount is a new charge
 - `lium ssh-keys list|sync` - SSH public keys registered on the account
@@ -304,7 +304,7 @@ Teams share a workspace whose billing owner pays. An API key is bound to one wor
 
 ### Provider Commands
 
-`lium provider …` is the provider-side CLI for Bittensor Subnet 51 — full automation parity with the portal frontend at lium.io/portal: portal authentication, node lifecycle, central-miner-server configuration, batch sync, billing, and machine-request queries. Hotkey registration is still handled separately via `btcli subnet register`.
+`lium provider …` is the provider-side CLI — full automation parity with the portal frontend at lium.io/portal: portal authentication, node lifecycle, central-miner-server configuration, batch sync, billing, and machine-request queries. Hotkey registration is still handled separately via `btcli subnet register`.
 
 Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, `--portal-url`, `--json`, `--debug`, `-y/--yes`, `--dry-run`. Persist wallet identity once with `lium config set provider.coldkey <NAME>` and `lium config set provider.hotkey <NAME>`. Spend-affecting subcommands run a persona prompt unless `--yes` or `LIUM_PROVIDER_ACK=1` is set.
 
@@ -327,7 +327,7 @@ Full reference with every flag and runnable examples: <https://docs.lium.io/deve
 ### Other Commands
 
 - `lium theme dark|light` - Set the CLI colour theme (the argument is required; there is no `auto`; the value is stored as `[ui] theme` — `lium config get ui.theme` reads it back)
-- `lium mine` - Set up a compute subnet node/miner
+- `lium mine` - Set up this host as a provider node
 - `lium mine --register <TOKEN>` - Same, then add the node to your portal account from what the host reports and wait until it is listed (token from the portal's Add Node page; the account, and what the node reports under, come from the token — no `-k`)
 - `sudo lium gpu-splitting setup [--device /dev/...] [--yes]` - Prepare Docker storage for LIUM GPU splitting
 - `lium gpu-splitting check [--device /dev/...]` - Inspect the host and print the GPU-splitting plan
@@ -481,6 +481,10 @@ lium theme light    # Set to light theme
 lium fund                           # Interactive mode
 lium fund -w default -a 1.5        # Fund with specific wallet and amount
 lium fund -w mywal -a 0.5 -y       # Skip confirmation
+
+# Fund account with alpha stake (-a is USD)
+lium fund --alpha -k <hotkey> -a 25              # Lium's primary subnet
+lium fund --alpha -k <hotkey> -a 25 --netuid 64  # Any subnet Lium accepts
 ```
 
 ### `lium ls --format json` fields
@@ -573,6 +577,15 @@ exits 2 (`empty_api_key`); none of them saves anything, and the hint says so. Wi
 `lium keys create <name> --workspace <ws> --save`. With `LIUM_API_KEY` (or `LIUM_API_API_KEY`) already exported,
 `lium init` skips the browser, sets up the SSH key and says the key is coming from the environment — the SSH path
 is written to the file, the key is not; `--api-key` warns when a key is also exported (`env_key` in the JSON).
+
+Login keys can expire or be revoked, so `lium init` next to a saved key checks it against
+`/users/me` first. When the API rejects it (401, or a 403 saying the key's workspace is gone or its creator left it) the normal login runs
+(`Your saved API key has expired or was revoked. Starting a new login…`); without a terminal no browser is opened
+and `lium init` exits 6 (`saved_key_rejected`). Any other 403 (a blocked account, a firewall page), a 429, a 5xx or
+no answer keeps the key with a warning. `lium init --force` logs in again even when the key still works, and
+`lium init --session <ID>` exchanges the session even next to a saved key. The saved key is replaced only once the
+new login has produced a key (the config file is written to a temporary file and renamed over the old one), so an
+aborted browser login or an unapproved session leaves the old key in place.
 
 SSH host keys of pods are pinned on first use under `~/.lium/known_hosts/<pod-id>`
 (`lium ssh`, `lium up`, and the SDK's `exec`, `stream_exec`, `rsync`). `reboot`, `edit`,
