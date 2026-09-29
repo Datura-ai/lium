@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -9,12 +10,19 @@ from lium.cli import ui
 
 
 class SetupApiKeyAction:
-    """Setup API key using browser authentication."""
+    """Setup API key using browser authentication.
+
+    ``replace``: log in even though a key is saved; the saved key is overwritten only once the
+    browser login has returned a new one, so a failed or interrupted login leaves it in place.
+    """
+
+    def __init__(self, replace: bool = False):
+        self.replace = replace
 
     def execute(self, ctx: dict) -> ActionResult:
         """Execute API key setup with browser flow."""
         current_key = config.get('api.api_key')
-        if current_key:
+        if current_key and not self.replace:
             return ActionResult(ok=True, data={"already_configured": True})
 
         api_key = browser_auth()
@@ -79,12 +87,72 @@ class SaveApiKeyAction:
         return ActionResult(ok=True, data={"already_configured": False})
 
 
+# The platform's 403s for a key that no longer acts for anyone (lium-platform utils/auth.py,
+# authenticate_api_key): its workspace is gone, or the account that created it left the workspace.
+_DEAD_KEY_403 = re.compile(r"belongs to a workspace that is gone|no longer a member of its workspace", re.I)
+
+
+class CheckSavedApiKeyAction:
+    """Ask the API whether the saved key still works, before init trusts it.
+
+    Login keys can expire or be revoked; a dead saved key used to
+    make every later ``lium init`` say "already saved" and never log in again. ``data["status"]``:
+    ``valid`` (including balance/budget/scope refusals: the server knows the key), ``rejected`` (401, or
+    a 403 that says the key's workspace is gone or its creator left it — a new login is the fix),
+    ``refused`` (any other 403: a blocked account, a WAF page — a new login would not help, so the key
+    is kept) or ``unreachable`` (no answer, or an answer not about the key).
+    """
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    def execute(self, ctx: dict) -> ActionResult:
+        import requests
+
+        from lium.sdk import Lium, LiumAuthError, LiumError
+        from lium.sdk.config import Config
+        from lium.sdk.exceptions import (
+            LiumBudgetExceededError,
+            LiumInsufficientBalanceError,
+            LiumPermissionError,
+            LiumScopeError,
+        )
+
+        client = Lium(Config(
+            api_key=self.api_key,
+            api_key_source=f"config:{config.get_config_path()}",
+            base_url=os.getenv("LIUM_BASE_URL", Config.base_url),
+            base_pay_url=os.getenv("LIUM_PAY_URL", Config.base_pay_url),
+        ), source="cli")
+        try:
+            client.balance()
+        except (LiumInsufficientBalanceError, LiumBudgetExceededError, LiumScopeError):
+            return ActionResult(ok=True, data={"status": "valid"})
+        except LiumAuthError as e:
+            return ActionResult(ok=False, data={"status": "rejected"}, error=str(e))
+        except LiumPermissionError as e:
+            status = "rejected" if _DEAD_KEY_403.search(str(e)) else "refused"
+            return ActionResult(ok=False, data={"status": status}, error=str(e))
+        except (LiumError, requests.RequestException) as e:
+            return ActionResult(
+                ok=False, data={"status": "unreachable"},
+                error=f"Could not check the saved API key against {client.config.base_url}: {e}",
+            )
+        return ActionResult(ok=True, data={"status": "valid"})
+
+
 class RequestAuthUrlAction:
-    """Request auth URL and print it (step 1 of headless auth)."""
+    """Request auth URL and print it (step 1 of headless auth).
+
+    ``replace``: print the URL even though a key is saved; the key stays until ``--session`` saves the new one.
+    """
+
+    def __init__(self, replace: bool = False):
+        self.replace = replace
 
     def execute(self, ctx: dict) -> ActionResult:
         current_key = config.get('api.api_key')
-        if current_key:
+        if current_key and not self.replace:
             return ActionResult(ok=True, data={"already_configured": True})
 
         browser_url, session_id = init_auth()
@@ -98,14 +166,19 @@ class RequestAuthUrlAction:
 
 
 class VerifySessionAction:
-    """Verify auth session and save API key (step 2 of headless auth)."""
+    """Verify auth session and save API key (step 2 of headless auth).
 
-    def __init__(self, session_id: str):
+    ``replace``: exchange the session even though a key is saved; the saved key is overwritten only
+    when the session is approved, so an unapproved or expired session leaves it in place.
+    """
+
+    def __init__(self, session_id: str, replace: bool = False):
         self.session_id = session_id
+        self.replace = replace
 
     def execute(self, ctx: dict) -> ActionResult:
         current_key = config.get('api.api_key')
-        if current_key:
+        if current_key and not self.replace:
             return ActionResult(ok=True, data={"already_configured": True})
 
         ui.dim("Checking authentication status...")

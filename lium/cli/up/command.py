@@ -941,11 +941,29 @@ def up_command(
     ssh_argv = result.data["ssh_argv"]
     pod = result.data["pod"]
 
-    from lium.cli.ssh.command import ssh_session_connected
+    from lium.cli.ssh.command import (
+        ssh_never_answered, ssh_session_connected, ssh_wait_data, try_once_options, wait_for_ssh_banner,
+    )
+    from lium.cli.ssh.actions import with_ssh_options
 
-    if not ssh_session_connected(ssh_argv):
+    # sshd started by the image can come up seconds after RUNNING
+    try:
+        ssh_ready = wait_for_ssh_banner(pod, ssh_argv)
+    except KeyboardInterrupt:
+        raise CliFailure(
+            "ssh_wait_interrupted",
+            f"Stopped waiting for SSH; pod {pod.huid} is RUNNING and billing",
+            EXIT_GENERAL_ERROR,
+            data=billing_pod,
+            hint=f"Connect with 'lium ssh {pod.huid}', or remove it with 'lium rm {pod.huid}'",
+        ) from None
+
+    if not ssh_session_connected(with_ssh_options(ssh_argv, try_once_options(ssh_ready))):
+        if not ssh_ready.ok:
+            raise ssh_never_answered(pod, ssh_ready, billing_pod)
         raise CliFailure(
             "ssh_connection_failed",
             f"Pod {pod.huid} is running but the SSH connection failed",
             EXIT_SSH_ERROR,
+            data={**billing_pod, **ssh_wait_data(ssh_ready)},
         )
