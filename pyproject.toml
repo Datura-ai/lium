@@ -13,7 +13,7 @@ keywords = [
     "gpu", "cloud-gpu", "gpu-cloud", "gpu-rental", "gpu-marketplace", "cloud-compute", "decentralized-compute",
     "h100", "h200", "b200", "b300", "rtx-4090", "rtx-5090", "rtx-pro-6000",
     "machine-learning", "deep-learning", "ai-infrastructure", "ai-agents", "agent-skills",
-    "bittensor", "cli", "sdk",
+    "cli", "sdk",
 ]
 authors = [{ name = "Lium", email = "support@lium.io" }]
 classifiers = [
