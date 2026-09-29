@@ -104,6 +104,8 @@ def _render(
     table, header = display.build_pods_table(pods, short=short, show_index=show_index)
     ui.info(header)
     ui.print(table)
+    for line in display.pending_eta_lines(pods):
+        ui.dim(escape(line))
     if short:
         ui.dim("Ports hidden on a narrow terminal; use --wide or --format json")
     if last_event:
@@ -163,6 +165,9 @@ def ps_command(
     that row of this listing, sorted or filtered as shown. It is honored only in
     this shell, for 10 minutes and while that pod is still listed; the huid is
     the stable identifier for scripts.
+
+    A PENDING pod gets a line under the table with the backend's start
+    estimate and phase ("eta_hint" in --format json), as `lium up` shows them.
 
     \b
     Examples:
