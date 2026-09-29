@@ -235,7 +235,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium audit --account [--action pod.] [--source cli] [--since 7d] [--cursor <next_cursor>]` - The account audit log: every request that changed something (pods, keys, logins, balance, settings, team members) with the client and IP it came from; your own IPs only, 90 days (`--json` prints the page with `next_cursor`)
 - `lium update <POD> --jupyter <PORT>` - Install Jupyter Notebook on a pod, served on that internal port (`--jupyter` is the only update; without it the command prints `No updates specified`)
 - `lium templates [SEARCH] [--arch hopper|blackwell] [--format json]` - List Docker templates with the CUDA build and the GPU generations it runs on
-- `lium fund` - Fund account with TAO from your wallet
+- `lium fund` - Fund account with TAO from your wallet (`--alpha -k <hotkey> -a <USD>` pays with alpha stake instead; add `--netuid <N>` to pay from any subnet Lium accepts, the primary subnet otherwise)
 - `lium topup create -a <USD> -c <COIN> -n <NETWORK>` - Top up with a stablecoin (`lium topup currencies` lists them)
 - `lium topup card -a <USD> [--card <pm_id>] [--yes]` - Charge a card saved on the account, with no browser; the API key needs the `billing` scope (not released: the platform switch is off). Asks first; `--yes` skips the question and `--json` needs it. Sent once with an idempotency key; a lost answer or a 202 without a payment_intent_id exits 6 ("the charge may have gone through" / "still being confirmed") with the key and the same amount to re-run with, never a bare retry. A 202 with a payment_intent_id is success (exit 0). The same key with a different amount is a new charge
 - `lium ssh-keys list|sync` - SSH public keys registered on the account
@@ -481,6 +481,10 @@ lium theme light    # Set to light theme
 lium fund                           # Interactive mode
 lium fund -w default -a 1.5        # Fund with specific wallet and amount
 lium fund -w mywal -a 0.5 -y       # Skip confirmation
+
+# Fund account with alpha stake (-a is USD)
+lium fund --alpha -k <hotkey> -a 25              # Lium's primary subnet
+lium fund --alpha -k <hotkey> -a 25 --netuid 64  # Any subnet Lium accepts
 ```
 
 ### `lium ls --format json` fields
