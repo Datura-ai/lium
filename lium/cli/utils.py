@@ -310,7 +310,7 @@ EXIT_CONFIGURATION_ERROR = 2  # bad arguments, missing or unreadable configurati
 EXIT_API_ERROR = 3            # the API refused or failed the call
 EXIT_SSH_ERROR = 4            # ssh could not connect, or no client is installed
 EXIT_POD_NOT_FOUND = 5        # the named pod does not exist
-EXIT_PERMISSION_DENIED = 6    # the account is not allowed to do this
+EXIT_PERMISSION_DENIED = 6    # the account is not allowed to do this; `init`: saved key rejected, re-login required
 
 OUTPUT_ENV = "LIUM_OUTPUT"    # LIUM_OUTPUT=json: every failure is a JSON envelope
 
