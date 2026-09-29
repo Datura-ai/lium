@@ -1,0 +1,5 @@
+### Fixed
+- `lium up` and `lium ssh` wait up to 60 s for the pod's SSH port to send an SSH banner before they open the session ("Waiting for SSH on <host>:<port>..."). A pod reports RUNNING before an sshd started by the image is listening, and the single ssh attempt used to fail. If the port still doesn't answer after 60 s, ssh is tried once anyway, with `ConnectTimeout=15`. The pod is never removed.
+- The wait is skipped when `ssh -G` shows the session doesn't dial the pod directly (ProxyJump, ProxyCommand or another HostName). `lium ssh` also skips it for a pod whose later of `created_at` / `updated_at` is more than 10 min old.
+- When that last attempt fails, `lium up` exits 4 with `ssh_connection_failed`: the message says the pod is RUNNING and billing and names `lium ssh <huid>` and `lium rm <huid>`. `lium ssh` keeps `ssh_failed`. Both envelopes carry `pod_id`, `pod_name`, `ssh_port_answered` and `ssh_wait` in `data`.
+- Ctrl-C during `lium up`'s wait exits 1 with `ssh_wait_interrupted`, naming the pod that is billing. `lium up --json` and `--no-ssh` don't wait, because they open no session.
