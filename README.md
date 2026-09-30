@@ -328,7 +328,7 @@ Full reference with every flag and runnable examples: <https://docs.lium.io/deve
 
 - `lium theme dark|light` - Set the CLI colour theme (the argument is required; there is no `auto`; the value is stored as `[ui] theme` — `lium config get ui.theme` reads it back)
 - `lium mine` - Set up this host as a provider node
-- `lium mine --register <TOKEN>` - Same, then add the node to your portal account from what the host reports and wait until it is listed (token from the portal's Add Node page; the account, and what the node reports under, come from the token — no `-k`)
+- `lium mine --register <TOKEN>` - Same, then add the node to your portal account from what the host reports and wait until it is listed (token from the portal's Add Node page; the account, and what the node reports under, come from the token — no `-k`). `LIUM_REGISTER_TOKEN` is read when `--register` is absent, which keeps the token out of the process list on a shared host
 - `sudo lium gpu-splitting setup [--device /dev/...] [--yes]` - Prepare Docker storage for LIUM GPU splitting
 - `lium gpu-splitting check [--device /dev/...]` - Inspect the host and print the GPU-splitting plan
 - `lium gpu-splitting verify` - Verify Docker storage matches LIUM GPU-splitting requirements

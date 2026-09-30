@@ -896,17 +896,23 @@ def _run_mine(ctx, hotkey, dir_, branch, auto, verbose, register_token, portal_u
         if given:
             raise click.UsageError(f"{', '.join(given)}: only with --register TOKEN.")
     if register_token:
+        from click.core import ParameterSource
+
+        # a one-hour token left exported turns a plain `lium mine` into a registration: say where it came from
+        from_env = ctx.get_parameter_source("register_token") == ParameterSource.ENVIRONMENT
+        env_note = " (read from LIUM_REGISTER_TOKEN; unset it for a plain install)" if from_env else ""
         # fail on a bad or expired token before the ten-minute install, not after it
         try:
             token = reg.parse_register_token(register_token)
         except reg.RegisterError as e:
             if json_mode:
-                return _json_failure("input.register_token_invalid", str(e), 2,
+                return _json_failure("input.register_token_invalid", f"{e}{env_note}", 2,
                                      "Copy a fresh command from the portal's Add Node page.")
-            console.error(f"❌ {escape(str(e))}")
+            console.error(f"❌ {escape(f'{e}{env_note}')}")
             return 2 if agent else 1
         if hotkey and hotkey != token.node_hotkey:
-            message = "--hotkey differs from what the register token says this node reports under; drop -k, the token decides."
+            message = ("--hotkey differs from what the register token says this node reports under; drop -k, "
+                       f"the token decides.{env_note}")
             if json_mode:
                 return _json_failure("input.hotkey_conflicts_with_token", message, 2, "Drop -k.")
             console.error(f"❌ {escape(message)}")

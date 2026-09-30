@@ -198,7 +198,7 @@ progress, when a command has any, is one JSON object per line on stderr. `--json
   So under `LIUM_NONINTERACTIVE=1` with text output, every row above whose two exits differ now exits by the
   right-hand column, and so do these, which exit differently in plain text: no sign-in at all (1 → 6,
   `auth.not_signed_in`), Ctrl-C (1 → 130, `input.interrupted`; `node status` and `lium mine status` stay 0), `config set-password` without `--password`
-  (a prompt → `input.arg_invalid`, 2), and `lium mine --register` with an unreadable token or a `-k` the token
+  (a prompt → `input.arg_invalid`, 2), and `lium mine --register` (or `LIUM_REGISTER_TOKEN`) with an unreadable token or a `-k` the token
   does not name (1 → 2) or a node registered but not listed (2 → 11).
 
   In text mode the persona gate prompts as it always has: off a terminal it reads the answer from stdin, so a
@@ -244,8 +244,8 @@ for a 400 or 409, `PORTAL_FORBIDDEN` for a 403, `PORTAL_NOT_FOUND` for a 404, `P
 | `input.confirmation_required` | 2 | The persona gate under `--json`, `LIUM_OUTPUT=json` or `LIUM_NONINTERACTIVE=1`, where piped input is ignored. Re-run with `--yes` or `LIUM_PROVIDER_ACK=1`. |
 | `input.interrupted` | 130 | Ctrl-C during a `lium provider` command in agent mode (`node status`, with or without `--watch`, and `lium mine status` exit 0 on Ctrl-C in every mode). |
 | `input.input_required` | 2 | A value the command does not ask for: `lium mine` without `-k` under `--json` or `LIUM_NONINTERACTIVE=1`, `portal login --email` without `LIUM_PROVIDER_PASSWORD` off a terminal. |
-| `input.register_token_invalid` | 2 | `lium mine --register` in agent mode with an expired or unreadable token; nothing on the host was touched. |
-| `input.hotkey_conflicts_with_token` | 2 | `lium mine --register … -k` in agent mode with a hotkey the token does not name. |
+| `input.register_token_invalid` | 2 | `lium mine --register` (or `LIUM_REGISTER_TOKEN`) in agent mode with an expired or unreadable token; nothing on the host was touched. |
+| `input.hotkey_conflicts_with_token` | 2 | `lium mine --register … -k` (or `LIUM_REGISTER_TOKEN` with `-k`) in agent mode with a hotkey the token does not name. |
 | `human.handoff_required` | 12 | A one-time human step (`lium provider config connect-discord`, `lium provider portal confirm-email`). `data`: `step` (`discord_link`, `email_confirm`), `handoff_url`, `code`, `expires_at`, `message_for_human`. Relay `message_for_human` to the person, then re-run with `--wait`. With `--wait --timeout N`, also when N seconds pass first (`data.waited_s`). |
 | `human.handoff_expired` | 12 | `--wait`: the code expired before the person finished, or the portal answers 404 for the handoff (`data.status: not_found`); run the command again for a new code. A poll the portal could not answer (5xx, 429, unreachable) is retried with backoff until `--timeout`. |
 | `auth.not_signed_in` | 6 | Any `lium provider` command that needs a sign-in, in agent mode, with no `LIUM_PROVIDER_TOKEN`, no hotkey and no live `portal login --email` session (`data.session_email` is the configured address when it has no live session); `lium mine status` too. The hint names all three ways in; `legacy_code` is `ARG_INVALID`. Plain text mode prints `ARG_INVALID` and exits 1 as before (`portal whoami` says "not signed in to the provider portal" with the same hint). `status`, `portal login`, `portal logout`, `config set-email` and `config set-password` need the hotkey itself and stay `input.arg_invalid` (exit 2), with a token or e-mail session too: the last two sign with the hotkey's wallet (plain text: the old `config commands require --hotkey` line, exit 1). |

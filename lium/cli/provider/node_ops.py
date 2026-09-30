@@ -33,7 +33,9 @@ TIERS = ("secure", "spot")
 def register_token(ctx: click.Context) -> None:
     """Mint a register token: it can only add a node to this account and watch its status, for one hour.
 
-    Run the printed install line on the GPU host (or pass the token to `lium mine --register`).
+    Run the printed install line on the GPU host (or pass the token to `lium mine --register`). On a shared
+    host, set LIUM_REGISTER_TOKEN and run `lium mine` without --register instead: the install line carries the
+    token in the process arguments, which other users can read.
     A register token cannot mint another one; sign in with a hotkey, `portal login --email` or an API token.
     """
     require_hotkey(ctx, group="node")

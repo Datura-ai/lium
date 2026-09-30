@@ -19,6 +19,11 @@ from provider._agent_mode import AGENT_SWITCHES, PLAIN_TEXT
 from test_mine_register import HOTKEY, _Portal, _Resp, _http, _listing, _status, _stub_host, _token, _wait_no_sleep
 
 
+@pytest.fixture(autouse=True)
+def _no_register_token_env(monkeypatch) -> None:
+    monkeypatch.delenv("LIUM_REGISTER_TOKEN", raising=False)
+
+
 def _invoke(args: list[str], env: dict | None = None, input: str | None = None):
     return CliRunner().invoke(mine.mine_command, args, env=env, input=input)
 
@@ -182,8 +187,23 @@ def test_an_expired_register_token_from_the_environment_is_input_exit_two(monkey
     calls = _no_clone(monkeypatch)
     result = _invoke(["--json"], env={"LIUM_REGISTER_TOKEN": _token(exp=int(time.time()) - 5)})
     assert result.exit_code == 2, result.output
-    assert json.loads(result.stdout)["error"]["code"] == "input.register_token_invalid"
+    error = json.loads(result.stdout)["error"]
+    assert error["code"] == "input.register_token_invalid"
+    assert "read from LIUM_REGISTER_TOKEN; unset it for a plain install" in error["message"]
     assert calls == []
+
+
+def test_text_mode_names_the_variable_when_a_stale_env_token_stops_a_plain_install(monkeypatch) -> None:
+    calls = _no_clone(monkeypatch)
+    result = _invoke(["-k", HOTKEY], env={**_TEXT, "LIUM_REGISTER_TOKEN": _token(exp=int(time.time()) - 5)})
+    assert result.exit_code == 1, result.output
+    assert "LIUM_REGISTER_TOKEN" in " ".join(result.output.split()) and calls == []
+
+
+def test_a_flag_token_says_nothing_about_the_variable(monkeypatch) -> None:
+    _no_clone(monkeypatch)
+    result = _invoke(["--json", "--register", _token(exp=int(time.time()) - 5)])
+    assert "LIUM_REGISTER_TOKEN" not in json.loads(result.stdout)["error"]["message"]
 
 
 def test_json_register_named_fix_is_node_status_exit_one(monkeypatch, tmp_path: Path) -> None:
