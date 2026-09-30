@@ -96,8 +96,9 @@ install_lium() {
         hash -r
     fi
 
-    # Install lium-cli using uv tool (isolated environment in ~/.local/bin)
-    run_with_timer "Installing lium-cli" uv tool install lium.io
+    # Install lium-cli using uv tool (isolated environment in ~/.local/bin). The provider extra: the next
+    # command a provider runs is `lium provider ...`, which needs the chain stack the plain install leaves out.
+    run_with_timer "Installing lium-cli" uv tool install 'lium.io[provider]'
 
     # CRITICAL: Reset bash hash table to find the new command
     hash -r
@@ -148,15 +149,26 @@ main() {
 
     # --register needs a lium that knows the flag: an older one would treat the token as a stray argument
     # (`lium mine` passes unknown options on to the preflight image). Upgrade an installed lium once, then refuse.
-    if [[ " ${LIUM_ARGS[*]} " == *" --register "* || " ${LIUM_ARGS[*]} " == *" --register="* ]] && ! "$LIUM_BIN" mine --help 2>/dev/null | grep -q -- '--register'; then
+    # A token in LIUM_REGISTER_TOKEN alone needs a lium that reads it: an older one would run a plain install.
+    REGISTER_NEEDS=""
+    if [[ " ${LIUM_ARGS[*]} " == *" --register "* || " ${LIUM_ARGS[*]} " == *" --register="* ]]; then
+        REGISTER_NEEDS="--register"
+    elif [[ -n "${LIUM_REGISTER_TOKEN:-}" ]]; then
+        REGISTER_NEEDS="LIUM_REGISTER_TOKEN"
+    fi
+    if [[ -n "$REGISTER_NEEDS" ]] && ! "$LIUM_BIN" mine --help 2>/dev/null | grep -q -- "$REGISTER_NEEDS"; then
         if command_exists uv; then
             # soft: a pip/pipx-installed lium is not uv's to upgrade; the refusal below is then what the provider reads
             uv tool upgrade lium.io >/dev/null 2>&1 || true
             hash -r
             LIUM_BIN=$(find_lium) || LIUM_BIN="$LIUM_BIN"
         fi
-        if ! "$LIUM_BIN" mine --help 2>/dev/null | grep -q -- '--register'; then
-            log_err "This lium ($("$LIUM_BIN" --version 2>/dev/null)) has no 'mine --register'. Upgrade it (uv tool upgrade lium.io) and re-run."
+        if ! "$LIUM_BIN" mine --help 2>/dev/null | grep -q -- "$REGISTER_NEEDS"; then
+            if [[ "$REGISTER_NEEDS" == "LIUM_REGISTER_TOKEN" ]]; then
+                log_err "This lium ($("$LIUM_BIN" --version 2>/dev/null)) does not read LIUM_REGISTER_TOKEN. Upgrade it (uv tool upgrade lium.io) and re-run, or unset LIUM_REGISTER_TOKEN for a plain install."
+            else
+                log_err "This lium ($("$LIUM_BIN" --version 2>/dev/null)) has no 'mine --register'. Upgrade it (uv tool upgrade lium.io) and re-run."
+            fi
             exit 1
         fi
     fi

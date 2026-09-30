@@ -205,6 +205,22 @@ def test_status_degrades_when_whoami_fails(
     assert any(w.startswith("whoami:") for w in snapshot.warnings)
 
 
+def test_status_warnings_keep_the_legacy_code_for_coded_portal_errors(
+    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
+) -> None:
+    portal = _Portal(
+        me_body=ProviderAuthError(
+            "portal rejected credentials", code="portal.session_revoked", legacy_code="PORTAL_AUTH_INVALID"
+        ),
+        executors=[],
+    )
+    metagraph = _stub_metagraph_factory(hotkeys=[], weights=[])
+    client = _client(portal, tmp_token_store, fake_signer)
+    snapshot = client.status(metagraph_factory=metagraph)
+    assert "whoami: PORTAL_AUTH_INVALID" in snapshot.warnings
+    assert not any("portal.session_revoked" in w for w in snapshot.warnings)
+
+
 def test_status_handles_missing_hotkey_in_metagraph(
     fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
 ) -> None:

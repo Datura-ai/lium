@@ -14,6 +14,10 @@ Acks short-circuit on:
 Otherwise the CLI prints a one-liner and reads ``y`` from stdin. State lives
 at ``~/.lium/state/provider-ack.json`` keyed by ``(coldkey, hotkey, ppid)``
 so a fresh shell re-prompts but child commands within the same shell don't.
+
+In agent mode (``--json``, ``LIUM_OUTPUT=json`` or ``LIUM_NONINTERACTIVE=1``)
+nothing is asked and stdin is not read: :class:`ConfirmationRequired` is raised
+and the command fails with ``input.confirmation_required`` (exit 2).
 """
 
 from __future__ import annotations
@@ -25,6 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import click
+
+from lium.cli.interactive import NONINTERACTIVE_ENV, noninteractive_requested
 
 DEFAULT_ACK_PATH = Path.home() / ".lium" / "state" / "provider-ack.json"
 
@@ -39,6 +45,10 @@ SPEND_AFFECTING_SUBCOMMANDS: frozenset[str] = frozenset(
         "validator-switch",
     }
 )
+
+
+class ConfirmationRequired(Exception):
+    """Agent mode and no ack: stdin is not read, so only ``--yes`` or ``LIUM_PROVIDER_ACK=1`` confirms."""
 
 
 @dataclass(frozen=True)
@@ -130,6 +140,7 @@ def confirm_persona(
     hotkey: str | None,
     yes_flag: bool = False,
     auto_ack: bool = False,
+    json_mode: bool = False,
     env: dict[str, str] | None = None,
     path: Path | None = None,
     input_func=None,
@@ -142,11 +153,16 @@ def confirm_persona(
         coldkey/hotkey: persona components for the ack key.
         yes_flag: if True (``--yes`` passed), confirms without prompting.
         auto_ack: if True (test seam), confirms without prompting.
+        json_mode: ``--json``/``LIUM_OUTPUT=json``: agent mode, never prompt.
         env: env mapping override.
         path: ack-cache path override.
         input_func: callable used to read stdin (defaults to ``click.prompt``).
         output_func: callable used for the prompt banner (defaults to
             ``click.echo`` writing to stderr).
+
+    Raises:
+        ConfirmationRequired: no ack in agent mode (``--json``,
+            ``LIUM_OUTPUT=json`` or ``LIUM_NONINTERACTIVE=1``).
     """
     del ctx  # currently unused; reserved for ``--debug`` plumbing.
     persona = PersonaContext(
@@ -156,6 +172,10 @@ def confirm_persona(
     )
     if yes_flag or auto_ack or is_acked(persona, env=env, path=path):
         return True
+    if json_mode:
+        raise ConfirmationRequired("no prompt is shown under --json")
+    if noninteractive_requested():
+        raise ConfirmationRequired(f"no prompt is shown because {NONINTERACTIVE_ENV} is set")
 
     output = output_func or (lambda m: click.echo(m, err=True))
     output(
@@ -183,6 +203,7 @@ def confirm_persona(
 __all__ = [
     "DEFAULT_ACK_PATH",
     "SPEND_AFFECTING_SUBCOMMANDS",
+    "ConfirmationRequired",
     "PersonaContext",
     "confirm_persona",
     "is_acked",

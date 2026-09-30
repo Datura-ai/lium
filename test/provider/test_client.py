@@ -166,6 +166,23 @@ def test_login_signs_in_again_when_the_portal_ended_the_cached_session(
     assert tmp_token_store.load(fake_signer.ss58_address).token == fresh
 
 
+def test_login_signs_in_again_when_the_ended_session_401_carries_a_portal_code(
+    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
+) -> None:
+    """A 401 whose body names ``detail.code`` is raised as ``portal.<code>``; it still ends the cached session."""
+    portal = _FakePortal()
+    tmp_token_store.save(fake_signer.ss58_address, _make_jwt(int(time.time()) + 3600), provider_id="m-1")
+    portal.next_get_raises = ProviderAuthError(
+        "session revoked", code="portal.session_revoked", context={"status": 401}
+    )
+    fresh = _make_jwt(int(time.time()) + 7200)
+    portal.next_post = _login_response_body(fresh, fake_signer.ss58_address)
+    client = _build_client(portal, tmp_token_store, fake_signer)
+
+    assert client.login().token == fresh
+    assert [path for path, _, _ in portal.posts] == ["/auth/login-flexible"]
+
+
 def test_login_ended_session_and_failed_sign_in_leaves_no_cached_token(
     fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
 ) -> None:

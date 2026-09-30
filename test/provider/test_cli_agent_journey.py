@@ -1,0 +1,548 @@
+"""The provider journey an agent runs unattended, end to end against a local portal stub.
+
+Every command signs in with a synthetic ``LIUM_PROVIDER_TOKEN`` (no wallet), prints one ``--json`` envelope
+with ``exit_code`` on failure, and exits by the unified map: 2 input, 3 portal, 4 network, 5 not found, 6 auth.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+from click.testing import CliRunner
+
+from lium.cli.provider.command import provider_command
+from lium.provider.client import email_session_key
+from lium.provider.token_store import TokenStore
+from ._portal_stub import PortalStub, closed_port_url, detail_response
+
+TOKEN = "lpk_stub"
+HOTKEY = "5StubHotkeyForTheAgentJourneyTests"
+NODE = "7c1f0e2a-0000-4000-8000-000000000001"
+
+
+@pytest.fixture
+def portal(tmp_path, monkeypatch):
+    monkeypatch.setattr("lium.provider.token_store.DEFAULT_TOKEN_PATH", tmp_path / "tokens.json")
+    stub = PortalStub()
+    yield stub
+    stub.close()
+
+
+def run(portal: PortalStub | str, *args: str, env: dict | None = None):
+    url = portal if isinstance(portal, str) else portal.url
+    base_env = {"LIUM_PROVIDER_TOKEN": TOKEN, "LIUM_PROVIDER_ACK": "", "LIUM_OUTPUT": "", "LIUM_PROVIDER_PASSWORD": ""}
+    return CliRunner().invoke(provider_command, ["--portal-url", url, *args], env={**base_env, **(env or {})})
+
+
+def ok(result) -> object:
+    assert result.exit_code == 0, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is True
+    return envelope["data"]
+
+
+def error(result, exit_code: int) -> dict:
+    assert result.exit_code == exit_code, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is False and envelope["error"]["exit_code"] == exit_code
+    return envelope["error"]
+
+
+# --- auth: LIUM_PROVIDER_TOKEN is the bearer token, no wallet needed --------------------------
+
+
+def test_the_provider_token_env_is_sent_as_the_bearer_token(portal) -> None:
+    portal.route("GET", "/executors/listing", [])
+    ok(run(portal, "--json", "node", "listing"))
+    assert portal.requests[0]["authorization"] == f"Bearer {TOKEN}"
+
+
+def test_no_hotkey_and_no_token_names_the_token_env_in_the_hint(portal) -> None:
+    err = error(run(portal, "--json", "node", "listing", env={"LIUM_PROVIDER_TOKEN": ""}), 6)
+    assert (err["code"], err["legacy_code"]) == ("auth.not_signed_in", "ARG_INVALID") and "LIUM_PROVIDER_TOKEN" in err["hint"]
+    assert portal.requests == []
+
+
+# --- node register-token / tier / pause / resume / listing -------------------------------------
+
+
+def test_register_token_mints_the_token_and_prints_the_install_line(portal) -> None:
+    portal.route(
+        "POST",
+        "/executors/register-token",
+        {"success": True, "data": {"token": "rt_stub", "issued_at": "2026-09-26T03:00:00Z", "expires_at": "2026-09-26T04:00:00Z"}},
+    )
+    data = ok(run(portal, "--json", "node", "register-token", "--yes"))
+    assert data["token"] == "rt_stub" and data["expires_at"] == "2026-09-26T04:00:00Z"
+    assert data["install_command"].endswith("mine.sh | bash -s -- --register rt_stub")
+
+
+def test_register_token_under_json_without_yes_asks_for_confirmation_and_mints_nothing(portal) -> None:
+    err = error(run(portal, "--json", "node", "register-token"), 2)
+    assert err["code"] == "input.confirmation_required"
+    assert portal.requests == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("node", "tier", "set", NODE, "secure"),
+        ("node", "pause", NODE),
+        ("node", "resume", NODE),
+        ("token", "create", "--name", "ci", "--scope", "read"),
+    ],
+    ids=["tier-set", "pause", "resume", "token-create"],
+)
+def test_each_change_under_json_without_yes_asks_for_confirmation_and_sends_nothing(portal, args) -> None:
+    err = error(run(portal, "--json", *args), 2)
+    assert err["code"] == "input.confirmation_required"
+    assert portal.requests == []
+
+
+def test_tier_eligibility_returns_allowed_and_the_blockers(portal) -> None:
+    blockers = [{"code": "rented", "message": "The node is rented."}]
+    portal.route("GET", f"/executors/{NODE}/tier-change-eligibility", {"success": True, "data": {"allowed": False, "blockers": blockers}})
+    assert ok(run(portal, "--json", "node", "tier", "eligibility", NODE)) == {"allowed": False, "blockers": blockers}
+
+
+def test_tier_set_posts_the_tier(portal) -> None:
+    portal.route("POST", f"/executors/{NODE}/update-tier", {"success": True, "data": {"id": NODE, "tier": "secure"}})
+    assert ok(run(portal, "--json", "node", "tier", "set", NODE, "secure", "--yes"))["tier"] == "secure"
+    assert portal.requests[0]["json"] == {"tier": "secure"}
+
+
+def test_a_refused_tier_change_is_the_portals_own_code_with_its_blocker(portal) -> None:
+    detail = {"message": "The node is rented.", "code": "tier_change_blocked", "blocker": "rented"}
+    portal.route("POST", f"/executors/{NODE}/update-tier", {"detail": detail}, status=400)
+    err = error(run(portal, "--json", "node", "tier", "set", NODE, "spot", "--yes"), 3)
+    assert err["code"] == "portal.tier_change_blocked"
+    assert err["message"] == "The node is rented."
+    assert err["data"]["detail"] == {"blocker": "rented"}
+
+
+def test_pause_and_resume_hit_the_new_rentals_pause_route(portal) -> None:
+    path = f"/executors/{NODE}/new-rentals/pause"
+    portal.route("POST", path, {"id": NODE, "new_rentals_pause_requested_at": "2026-09-26T03:00:00Z"})
+    portal.route("DELETE", path, {"id": NODE, "new_rentals_pause_requested_at": None})
+    ok(run(portal, "--json", "node", "pause", NODE, "--yes"))
+    ok(run(portal, "--json", "node", "resume", NODE, "--yes"))
+    assert portal.calls() == [("POST", path), ("DELETE", path)]
+
+
+def test_pausing_an_idle_node_is_portal_node_not_rented(portal) -> None:
+    detail = {"message": "Node must be rented before pausing new rentals.", "code": "node_not_rented"}
+    portal.route("POST", f"/executors/{NODE}/new-rentals/pause", {"detail": detail}, status=400)
+    assert error(run(portal, "--json", "node", "pause", NODE, "--yes"), 3)["code"] == "portal.node_not_rented"
+
+
+def _listing_row(node_id: str, state: str, *, gpus: int = 8, rented: int = 0, reasons: list | None = None) -> dict:
+    """One row of the portal's ``GET /executors/listing``, as it answers today."""
+    return {
+        "id": node_id,
+        "listing_state": state,
+        "hidden_reasons": reasons or [],
+        "gpu_count": gpus,
+        "rented_gpu_count": rented,
+        "rented_since": "2026-09-26T08:00:00Z" if rented else None,
+        "computed_status": None,
+    }
+
+
+def test_listing_shows_each_nodes_state_and_hidden_reasons(portal) -> None:
+    rows = [
+        _listing_row(NODE, "hidden", reasons=[{"code": "price_above_p90", "message": "Price above the p90"}]),
+        _listing_row("other", "listed"),
+    ]
+    portal.route("GET", "/executors/listing", rows)
+    assert ok(run(portal, "--json", "node", "listing")) == rows
+    assert ok(run(portal, "--json", "node", "listing", NODE)) == rows[0]
+
+
+def test_listing_shows_a_partly_rented_node_as_listed_with_its_rented_gpus(portal) -> None:
+    portal.route("GET", "/executors/listing", [_listing_row(NODE, "listed", gpus=8, rented=2), _listing_row("idle", "listed")])
+    one = ok(run(portal, "--json", "node", "listing", NODE))
+    assert (one["listing_state"], one["rented_gpu_count"], one["gpu_count"]) == ("listed", 2, 8)
+
+    text = run(portal, "node", "listing", NODE)
+    assert text.exit_code == 0, text.output
+    assert f"node {NODE}: listed, 2/8 GPUs rented" in text.output
+    assert "nodes=2, listed=2, with a renter=1" in run(portal, "node", "listing").output
+
+
+def test_listing_from_a_portal_without_gpu_counts_says_they_are_unknown(portal) -> None:
+    portal.route("GET", "/executors/listing", [{"id": NODE, "listing_state": "listed", "hidden_reasons": []}])
+    one = ok(run(portal, "--json", "node", "listing", NODE))
+    assert one["rented_gpu_count"] is None and one["gpu_count"] is None
+    assert run(portal, "node", "listing", NODE).output.splitlines()[0] == f"node {NODE}: listed"
+
+
+def test_listing_a_node_that_is_not_yours_is_node_not_found_exit_5(portal) -> None:
+    portal.route("GET", "/executors/listing", [])
+    assert error(run(portal, "--json", "node", "listing", NODE), 5)["code"] == "node.not_found"
+
+
+# --- earnings / idle-pay / ledger ---------------------------------------------------------------
+
+
+def test_earnings_reads_the_accounts_hotkey_then_its_daily_rows(portal) -> None:
+    portal.route("GET", "/auth/me", {"miner_hotkey": HOTKEY})
+    rows = {"rows": [{"date": "2026-09-25", "net_usd": 12.5}]}
+    portal.route("GET", f"/provider-earnings/{HOTKEY}/daily", {"success": True, "data": rows})
+    data = ok(run(portal, "--json", "earnings", "--from", "2026-09-20", "--to", "2026-09-25", "--node", NODE))
+    assert data == rows
+    request = portal.requests[-1]
+    assert request["query"] == {"from": ["2026-09-20"], "to": ["2026-09-25"], "executor_ids": [NODE]}
+
+
+def test_earnings_emissions_and_another_hotkey(portal) -> None:
+    portal.route("GET", "/provider-earnings/5Other/emissions/daily", {"success": True, "data": {"rows": []}})
+    ok(run(portal, "--json", "earnings", "--emissions", "--miner-hotkey", "5Other"))
+    assert portal.calls() == [("GET", "/provider-earnings/5Other/emissions/daily")]
+
+
+def test_a_bad_date_is_a_usage_error_before_any_call(portal) -> None:
+    result = run(portal, "--json", "earnings", "--from", "25/09/2026")
+    assert result.exit_code == 2 and portal.requests == []
+
+
+OVERVIEW = {
+    "as_of": "2026-09-26T03:00:00Z",
+    "nodes": {"idle": 2, "idle_earning": 1, "idle_unpaid": 1},
+    "earned": {"window_days": 30, "idle_pay_usd": 4.2},
+    "node_rows": [
+        {"executor_id": NODE, "gpu_label": "H100", "gpu_count": 8, "idle_pay": "not_paid",
+         "idle_pay_reasons": [{"code": "nvidia_driver_below_minimum", "context": {}, "message": "Driver too old"}],
+         "idle_pay_checked_at": "2026-09-26T02:50:00Z", "address": "ignored"},
+        {"executor_id": "n-2", "gpu_label": "A100", "gpu_count": 1, "idle_pay": "paid", "idle_pay_reasons": []},
+    ],
+}
+
+
+def test_idle_pay_lists_each_nodes_state_and_the_validators_reasons(portal) -> None:
+    portal.route("GET", "/miners/overview", {"success": True, "data": OVERVIEW})
+    data = ok(run(portal, "--json", "idle-pay"))
+    assert (data["idle_pay_usd"], data["idle_earning"], data["idle_unpaid"]) == (4.2, 1, 1)
+    assert [n["idle_pay"] for n in data["nodes"]] == ["not_paid", "paid"]
+    assert "address" not in data["nodes"][0]
+    one = ok(run(portal, "--json", "idle-pay", NODE))
+    assert one["idle_pay_reasons"][0]["code"] == "nvidia_driver_below_minimum"
+
+
+def test_idle_pay_for_a_node_that_is_not_yours_is_exit_5(portal) -> None:
+    portal.route("GET", "/miners/overview", {"success": True, "data": OVERVIEW})
+    assert error(run(portal, "--json", "idle-pay", "nope"), 5)["code"] == "node.not_found"
+
+
+def test_idle_pay_for_an_account_without_the_overview_passes_the_portal_code_through(portal) -> None:
+    detail = {"message": "This account's earnings are on its Overview page.", "code": "overview_not_for_custodied_account"}
+    portal.route("GET", "/miners/overview", {"detail": detail}, status=403)
+    assert error(run(portal, "--json", "idle-pay"), 6)["code"] == "portal.overview_not_for_custodied_account"
+
+
+def test_idle_pay_for_an_email_or_google_account_names_the_limit(portal) -> None:
+    portal.route("GET", "/miners/overview", {"detail": "Forbidden"}, status=403)
+    err = error(run(portal, "--json", "idle-pay"), 6)
+    assert (err["code"], err["legacy_code"]) == ("portal.overview_not_for_custodied_account", "PORTAL_FORBIDDEN")
+    assert "hotkey" in err["hint"] and "e-mail or Google" in err["message"]
+    assert run(portal, "idle-pay").exit_code == 2
+
+
+def test_ledger_passes_the_range(portal) -> None:
+    portal.route("GET", "/provider-ledger/daily", {"success": True, "data": {"rows": [{"date": "2026-09-25", "kind": "rental"}]}})
+    assert ok(run(portal, "--json", "ledger", "--from", "2026-09-01", "--to", "2026-09-25"))["rows"][0]["kind"] == "rental"
+    assert portal.requests[0]["query"] == {"from": ["2026-09-01"], "to": ["2026-09-25"]}
+
+
+# --- portal login --email -----------------------------------------------------------------------
+
+
+def test_email_login_uses_the_password_env_and_later_commands_use_the_session(portal) -> None:
+    portal.route("POST", "/auth/login-email", {"success": True, "data": {"miner": {"id": "m-1", "miner_hotkey": HOTKEY}, "token": "session-stub"}})
+    portal.route("GET", "/executors/listing", [])
+    env = {"LIUM_PROVIDER_TOKEN": "", "LIUM_PROVIDER_PASSWORD": "pw-stub"}
+    data = ok(run(portal, "--json", "portal", "login", "--email", "agent@example.invalid", env=env))
+    assert data == {"email": "agent@example.invalid", "provider_id": "m-1", "hotkey": HOTKEY, "token_present": True}
+    assert portal.requests[0]["json"] == {"email": "agent@example.invalid", "password": "pw-stub"}
+    assert portal.requests[0]["authorization"] is None
+
+    ok(run(portal, "--json", "node", "listing", env={"LIUM_PROVIDER_TOKEN": ""}))
+    assert portal.requests[-1]["authorization"] == "Bearer session-stub"
+
+
+def test_email_login_without_the_password_env_is_input_required_not_a_prompt(portal) -> None:
+    err = error(run(portal, "--json", "portal", "login", "--email", "agent@example.invalid"), 2)
+    assert err["code"] == "input.input_required" and "LIUM_PROVIDER_PASSWORD" in err["hint"]
+    assert portal.requests == []
+
+
+def test_a_wrong_password_is_an_auth_error(portal) -> None:
+    portal.route("POST", "/auth/login-email", {"detail": "Invalid credentials"}, status=401)
+    err = error(run(portal, "--json", "portal", "login", "--email", "agent@example.invalid", env={"LIUM_PROVIDER_PASSWORD": "x"}), 6)
+    assert err["legacy_code"] == "PORTAL_AUTH_INVALID"
+    assert "LIUM_PROVIDER_PASSWORD" in err["hint"] and "Token rejected" not in err["hint"]
+    assert err["message"] == "the portal refused this e-mail and password"
+
+
+# --- portal whoami: any sign-in in agent mode ---------------------------------------------------
+
+ME = {"miner_id": "m-1", "miner_hotkey": HOTKEY, "email": "agent@example.invalid", "custody": None}
+SESSION_EMAIL = "agent@example.invalid"
+
+
+def _email_session(token: str = "session-stub") -> None:
+    TokenStore().save(email_session_key(SESSION_EMAIL), token, provider_id="m-1")
+
+
+def test_whoami_with_the_provider_token_says_token(portal) -> None:
+    portal.route("GET", "/auth/me", detail_response(ME))
+    data = ok(run(portal, "--json", "portal", "whoami"))
+    assert data == {**ME, "auth_method": "token"}
+    assert portal.requests[0]["authorization"] == f"Bearer {TOKEN}"
+
+
+def test_whoami_with_an_email_session_says_email_session(portal) -> None:
+    _email_session()
+    portal.route("GET", "/auth/me", detail_response(ME))
+    env = {"LIUM_PROVIDER_TOKEN": "", "LIUM_PROVIDER_EMAIL": SESSION_EMAIL}
+    data = ok(run(portal, "--json", "portal", "whoami", env=env))
+    assert data["auth_method"] == "email_session" and data["email"] == SESSION_EMAIL
+    assert portal.requests[0]["authorization"] == "Bearer session-stub"
+
+
+def test_whoami_prefers_the_provider_token_over_an_email_session(portal) -> None:
+    _email_session()
+    portal.route("GET", "/auth/me", detail_response(ME))
+    data = ok(run(portal, "--json", "portal", "whoami", env={"LIUM_PROVIDER_EMAIL": SESSION_EMAIL}))
+    assert data["auth_method"] == "token"
+    assert portal.requests[0]["authorization"] == f"Bearer {TOKEN}"
+
+
+def test_whoami_signed_in_nowhere_is_auth_not_signed_in_exit_6(portal) -> None:
+    err = error(run(portal, "--json", "portal", "whoami", env={"LIUM_PROVIDER_TOKEN": ""}), 6)
+    assert (err["code"], err["legacy_code"]) == ("auth.not_signed_in", "ARG_INVALID")
+    assert "LIUM_PROVIDER_TOKEN" in err["hint"] and "portal login --email" in err["hint"] and "--hotkey" in err["hint"]
+    assert portal.requests == []
+
+
+def test_whoami_after_the_email_session_ended_names_the_address(portal) -> None:
+    env = {"LIUM_PROVIDER_TOKEN": "", "LIUM_PROVIDER_EMAIL": SESSION_EMAIL}
+    err = error(run(portal, "--json", "portal", "whoami", env=env), 6)
+    assert err["code"] == "auth.not_signed_in" and SESSION_EMAIL in err["message"]
+    assert f"portal login --email {SESSION_EMAIL}" in err["hint"] and err["data"] == {"session_email": SESSION_EMAIL}
+
+
+def test_whoami_with_a_refused_token_is_the_portals_auth_error(portal) -> None:
+    portal.route("GET", "/auth/me", {"detail": {"message": "Token revoked", "code": "token_revoked"}}, status=401)
+    assert error(run(portal, "--json", "portal", "whoami"), 6)["code"] == "portal.token_revoked"
+
+
+def test_whoami_noninteractive_text_names_the_sign_in(portal) -> None:
+    portal.route("GET", "/auth/me", detail_response(ME))
+    result = run(portal, "portal", "whoami", env={"LIUM_NONINTERACTIVE": "1"})
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines()[0] == "portal session active, signed in by API token (LIUM_PROVIDER_TOKEN)"
+
+
+def test_whoami_in_text_mode_with_the_provider_token_names_it_and_the_account(portal) -> None:
+    portal.route("GET", "/auth/me", detail_response(ME))
+    result = run(portal, "portal", "whoami")
+    assert result.exit_code == 0, result.output
+    lines = [line.strip() for line in result.output.splitlines()]
+    assert lines[0] == "portal session active, signed in by API token (LIUM_PROVIDER_TOKEN)"
+    assert "Auth Method   token" in lines and f"Miner Hotkey   {HOTKEY}" in lines and "Miner Id   m-1" in lines
+    assert portal.requests[0]["authorization"] == f"Bearer {TOKEN}"
+
+
+def test_whoami_in_text_mode_with_an_email_session_names_it_and_the_account(portal) -> None:
+    _email_session()
+    portal.route("GET", "/auth/me", detail_response(ME))
+    result = run(portal, "portal", "whoami", env={"LIUM_PROVIDER_TOKEN": "", "LIUM_PROVIDER_EMAIL": SESSION_EMAIL})
+    assert result.exit_code == 0, result.output
+    lines = [line.strip() for line in result.output.splitlines()]
+    assert lines[0] == "portal session active, signed in by e-mail session"
+    assert "Auth Method   email_session" in lines and f"Email   {SESSION_EMAIL}" in lines
+    assert portal.requests[0]["authorization"] == "Bearer session-stub"
+
+
+def test_whoami_in_text_mode_signed_in_nowhere_says_so_with_the_old_label_and_exit(portal) -> None:
+    result = run(portal, "portal", "whoami", env={"LIUM_PROVIDER_TOKEN": ""})
+    assert result.exit_code == 1
+    first, hint = result.stderr.splitlines()
+    assert first == "[ARG_INVALID] not signed in to the provider portal"
+    assert hint.startswith("  hint: Set LIUM_PROVIDER_TOKEN") and "portal login --email <address>" in hint and "--hotkey" in hint
+    assert portal.requests == []
+
+
+# --- which sign-in wins: token > hotkey > e-mail session ------------------------------------------
+
+
+@pytest.fixture
+def wallet(monkeypatch, fake_signer):
+    """``--hotkey hk`` signs with ``fake_signer``; its portal session is already in the token store."""
+    from lium.provider.client import ProviderClient
+
+    monkeypatch.setattr(ProviderClient, "_default_signer", lambda self: fake_signer)
+    TokenStore().save(fake_signer.ss58_address, "hotkey-session", provider_id="m-1")
+    return fake_signer
+
+
+def test_the_provider_token_wins_over_the_hotkey(portal, wallet) -> None:
+    portal.route("GET", "/auth/me", detail_response(ME))
+    data = ok(run(portal, "--json", "--hotkey", "hk", "portal", "whoami"))
+    assert data["auth_method"] == "token"
+    assert {r["authorization"] for r in portal.requests} == {f"Bearer {TOKEN}"}
+
+
+def test_the_hotkey_wins_over_an_email_session(portal, wallet) -> None:
+    _email_session()
+    portal.route("GET", "/auth/me", detail_response(ME))
+    env = {"LIUM_PROVIDER_TOKEN": "", "LIUM_PROVIDER_EMAIL": SESSION_EMAIL}
+    data = ok(run(portal, "--json", "--hotkey", "hk", "portal", "whoami", env=env))
+    assert data["auth_method"] == "hotkey"
+    assert {r["authorization"] for r in portal.requests} == {"Bearer hotkey-session"}
+
+
+def test_the_hotkey_wins_over_an_email_session_in_text_mode_too(portal, wallet) -> None:
+    _email_session()
+    portal.route("GET", "/auth/me", detail_response(ME))
+    env = {"LIUM_PROVIDER_TOKEN": "", "LIUM_PROVIDER_EMAIL": SESSION_EMAIL}
+    result = run(portal, "--hotkey", "hk", "portal", "whoami", env=env)
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines()[0] == "portal session active"
+    assert "Auth Method" not in result.output
+    assert {r["authorization"] for r in portal.requests} == {"Bearer hotkey-session"}
+
+
+def test_set_email_with_a_token_and_a_hotkey_sends_the_fresh_hotkey_session_not_the_token(portal, wallet) -> None:
+    portal.route("POST", "/auth/login-flexible", {
+        "provider": {"id": "m-1", "miner_hotkey": wallet.ss58_address, "provider_coldkey": "5CK",
+                     "created_at": "2026-09-26T00:00:00", "updated_at": "2026-09-26T00:00:00"},
+        "token": "fresh-hotkey-session",
+    })
+    portal.route("POST", "/auth/set-email", {"email": "ops@example.com"})
+    ok(run(portal, "--json", "--hotkey", "hk", "-y", "config", "set-email", "ops@example.com"))
+    sent = [r for r in portal.requests if r["path"] == "/auth/set-email"]
+    assert len(sent) == 1 and sent[0]["authorization"] == "Bearer fresh-hotkey-session"
+    assert all(r["authorization"] != f"Bearer {TOKEN}" for r in portal.requests)
+
+
+# --- node list / billing list scope to the account's hotkey without a wallet ----------------------
+
+LIST_ENVELOPE = {"data": [], "total": 0, "page": 1, "limit": 20}
+
+
+@pytest.mark.parametrize("args, path", [(("node", "list"), "/executors"), (("billing", "list"), "/billing")])
+def test_default_lists_signed_in_by_token_scope_to_the_hotkey_auth_me_names(portal, args, path) -> None:
+    portal.route("GET", "/auth/me", detail_response(ME))
+    portal.route("GET", path, LIST_ENVELOPE)
+    ok(run(portal, "--json", *args))
+    listed = [r for r in portal.requests if r["path"] == path]
+    assert len(listed) == 1 and listed[0]["query"]["miner_hotkey"] == [HOTKEY]
+
+
+@pytest.mark.parametrize("args, path", [(("node", "list"), "/executors"), (("billing", "list"), "/billing")])
+def test_default_lists_signed_in_by_an_email_session_scope_to_the_hotkey_auth_me_names(portal, args, path) -> None:
+    _email_session()
+    portal.route("GET", "/auth/me", detail_response(ME))
+    portal.route("GET", path, LIST_ENVELOPE)
+    ok(run(portal, "--json", *args, env={"LIUM_PROVIDER_TOKEN": "", "LIUM_PROVIDER_EMAIL": SESSION_EMAIL}))
+    listed = [r for r in portal.requests if r["path"] == path]
+    assert len(listed) == 1 and listed[0]["query"]["miner_hotkey"] == [HOTKEY]
+    assert listed[0]["authorization"] == "Bearer session-stub"
+
+
+# --- provider API tokens ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "args",
+    [("token", "list"), ("token", "create", "--name", "ci", "--scope", "read", "--yes"), ("token", "revoke", "t-1", "--yes")],
+)
+def test_token_commands_say_not_supported_until_the_portal_serves_them(portal, args) -> None:
+    err = error(run(portal, "--json", *args), 3)
+    assert err["code"] == "portal.not_supported"
+
+
+TOKEN_ID = "0b9f3c1e-6a2d-4f57-9c8e-2d1a7b4e5f60"
+TOKEN_VIEW = {
+    "id": TOKEN_ID,
+    "name": "ci",
+    "token_prefix": "lpk_Q7mZ2xRk",
+    "scopes": ["node", "read"],
+    "created_at": "2026-09-26T04:00:00Z",
+    "expires_at": "2026-10-26T04:00:00Z",
+    "last_used_at": None,
+    "revoked_at": None,
+}
+
+
+def test_token_create_list_and_revoke_once_the_portal_serves_them(portal) -> None:
+    portal.route("POST", "/auth/api-tokens", detail_response({**TOKEN_VIEW, "token": "lpk_Q7mZ2xRk_secret"}), status=201)
+    portal.route("GET", "/auth/api-tokens", detail_response([TOKEN_VIEW]))
+    portal.route("DELETE", f"/auth/api-tokens/{TOKEN_ID}", detail_response({**TOKEN_VIEW, "revoked_at": "2026-09-26T05:00:00Z"}))
+    created = ok(run(portal, "--json", "token", "create", "--name", "ci", "--scope", "read", "--scope", "node", "--expires-days", "30", "--yes"))
+    assert created["token"] == "lpk_Q7mZ2xRk_secret" and created["token_prefix"] == "lpk_Q7mZ2xRk"
+    assert portal.requests[0]["json"] == {"name": "ci", "scopes": ["read", "node"], "expires_in_days": 30}
+    assert ok(run(portal, "--json", "token", "list")) == [TOKEN_VIEW]
+    assert ok(run(portal, "--json", "token", "revoke", TOKEN_ID, "--yes"))["revoked_at"] == "2026-09-26T05:00:00Z"
+
+
+def test_token_expiry_past_365_days_is_refused_before_the_portal(portal) -> None:
+    result = run(portal, "--json", "token", "create", "--name", "ci", "--scope", "read", "--expires-days", "366", "--yes")
+    assert result.exit_code == 2 and portal.requests == []
+
+
+def test_token_commands_with_an_api_token_say_sign_in(portal) -> None:
+    portal.route(
+        "GET", "/auth/api-tokens",
+        {"detail": {"code": "api_token_needs_session", "message": "An API token cannot do this; sign in to the portal."}},
+        status=403,
+    )
+    err = error(run(portal, "--json", "token", "list"), 6)
+    assert err["code"] == "portal.api_token_needs_session"
+    assert "unset LIUM_PROVIDER_TOKEN" in err["hint"]
+
+
+def test_a_token_without_the_scope_names_the_scope_it_needs(portal) -> None:
+    portal.route(
+        "GET", "/executors/listing",
+        {"detail": {"code": "api_token_scope_missing", "message": "This API token lacks the scope this call needs (read).",
+                    "required_scopes": ["read"]}},
+        status=403,
+    )
+    err = error(run(portal, "--json", "node", "listing"), 6)
+    assert err["code"] == "portal.api_token_scope_missing" and err["data"]["detail"]["required_scopes"] == ["read"]
+    assert "token create --scope" in err["hint"]
+
+
+def test_token_revoke_without_yes_under_json_revokes_nothing(portal) -> None:
+    assert error(run(portal, "--json", "token", "revoke", "t-1"), 2)["code"] == "input.confirmation_required"
+    assert portal.requests == []
+
+
+# --- network and portal error codes --------------------------------------------------------------
+
+
+def test_connection_refused_is_net_unreachable_exit_4(portal) -> None:
+    err = error(run(closed_port_url(), "--json", "node", "listing"), 4)
+    assert err["code"] == "net.unreachable"
+
+
+def test_a_coded_404_is_exit_5_and_a_coded_401_exit_6(portal) -> None:
+    portal.route("GET", f"/executors/{NODE}/tier-change-eligibility", {"detail": {"message": "Not found node", "code": "node_not_found"}}, status=404)
+    assert error(run(portal, "--json", "node", "tier", "eligibility", NODE), 5)["code"] == "portal.node_not_found"
+    portal.route("GET", "/executors/listing", {"detail": {"message": "Token revoked", "code": "token_revoked"}}, status=401)
+    assert error(run(portal, "--json", "node", "listing"), 6)["code"] == "portal.token_revoked"
+
+
+def test_an_uncoded_portal_error_keeps_its_old_exit_status(portal) -> None:
+    portal.route("GET", "/executors/listing", {"detail": "boom"}, status=500)
+    err = error(run(portal, "--json", "node", "listing"), 3)
+    assert (err["code"], err["legacy_code"]) == ("portal.server_error", "PORTAL_SERVER_ERROR")
+
+
+def test_text_mode_prints_the_old_code_on_stderr(portal) -> None:
+    result = run(closed_port_url(), "node", "listing")
+    assert result.exit_code == 3, "text mode keeps the old exit of a refused connection (PORTAL_SERVER_ERROR)"
+    assert "[PORTAL_SERVER_ERROR]" in result.stderr and result.stdout == ""

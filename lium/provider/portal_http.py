@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Callable
+import re
+from typing import Any, Callable, NoReturn
 
 import requests
 
 from lium.provider.errors import (
+    NET_UNREACHABLE,
     PORTAL_AUTH_EXPIRED,
     PORTAL_AUTH_INVALID,
     PORTAL_FORBIDDEN,
@@ -140,9 +142,19 @@ class PortalHTTP:
                 code=PORTAL_REQUEST_REJECTED,
                 context={"url": url, "method": method},
             ) from e
+        except (requests.ConnectionError, requests.Timeout) as e:
+            # nothing answered (refused, DNS, unroutable, timed out): not a portal fault, and not a 5xx to report
+            raise ProviderError(
+                f"could not reach the portal at {self.base_url}: {e}",
+                code=NET_UNREACHABLE,
+                legacy_code=PORTAL_SERVER_ERROR,
+                legacy_error=ProviderServerError(
+                    f"network error reaching portal: {e}", code=PORTAL_SERVER_ERROR, context={"url": url, "method": method}
+                ),
+                cause=e,
+                context={"url": url, "method": method},
+            ) from e
         except requests.RequestException as e:
-            # Network-level failure: with_retry will retry; on the final
-            # attempt the exception bubbles up. Wrap into ProviderError.
             raise ProviderServerError(
                 f"network error reaching portal: {e}",
                 code=PORTAL_SERVER_ERROR,
@@ -196,6 +208,17 @@ def _parse_response(
 
     context = {"url": url, "method": method, "status": status, "body": body}
 
+    coded = _coded_detail(body)
+    if coded is not None:
+        try:
+            _raise_for_status(status, body, context)
+        except ProviderError as legacy:
+            raise _coded_error(status, coded, context, legacy) from None
+    _raise_for_status(status, body, context)
+
+
+def _raise_for_status(status: int, body: Any, context: dict[str, Any]) -> NoReturn:
+    """The UPPER_CASE error for a non-2xx answer, from its status alone."""
     if status == 401:
         raise ProviderAuthError(
             "portal rejected credentials",
@@ -254,6 +277,32 @@ def _parse_response(
         code=PORTAL_SERVER_ERROR,
         context=context,
     )
+
+
+def _coded_detail(body: Any) -> dict[str, Any] | None:
+    """The portal's ``detail`` when it names a stable ``code`` (``{"message", "code", …}``), else None."""
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, dict) and isinstance(detail.get("code"), str) and detail["code"].strip():
+        return detail
+    return None
+
+
+def _coded_error(status: int, detail: dict[str, Any], context: dict[str, Any], legacy: ProviderError) -> ProviderError:
+    """``portal.<detail.code>`` in snake_case (``EXECUTOR_NOT_FOUND`` -> ``portal.executor_not_found``); the class
+    and ``legacy_code`` still follow the status, and ``legacy`` (the uncoded error for the same answer) is what text
+    mode prints, so text mode reads and exits as it did before the portal coded it."""
+    code = "portal." + (re.sub(r"[^a-z0-9]+", "_", detail["code"].strip().lower()).strip("_") or "request_rejected")
+    message = str(detail.get("message") or f"portal refused the request ({status})")
+    extra = {k: v for k, v in detail.items() if k not in ("code", "message")}
+    ctx = {**context, "portal_code": detail["code"].strip(), **({"detail": extra} if extra else {})}
+    kwargs = {"code": code, "context": ctx, "legacy_code": legacy.code, "legacy_error": legacy}
+    if status in (401, 403, 419, 440):
+        return ProviderAuthError(message, **kwargs)
+    if status == 404:
+        return ProviderNotFoundError(message, **kwargs)
+    if 500 <= status < 600:
+        return ProviderServerError(message, **kwargs)
+    return ProviderError(message, **kwargs)
 
 
 def _portal_detail(body: Any) -> str:

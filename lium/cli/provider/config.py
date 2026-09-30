@@ -6,7 +6,7 @@ Subcommands:
 - ``opt-in / opt-out``           -- toggle the lium.io central miner server.
 - ``set-email <email>``          -- update contact email.
 - ``set-password``               -- set password using signature authentication.
-- ``connect-discord``            -- start Discord OAuth linking.
+- ``connect-discord``            -- start Discord OAuth linking; with ``--wait`` or in agent mode, a human handoff (URL + code).
 - ``set-subscriptions``          -- machine-request notification subscriptions.
 
 Distinction from ``lium config`` (CLI-side ConfigManager) and
@@ -22,15 +22,17 @@ import webbrowser
 import click
 
 from lium.cli.provider._client import build_client
+from lium.cli.provider._handoff import run_handoff
 from lium.cli.provider._guards import (
     handle_provider_error,
     require_hotkey,
     require_persona_ack,
+    require_wallet_hotkey,
 )
 from lium.cli.provider._overrides import with_provider_overrides
-from lium.cli.provider._render import discord_incentive_warnings, render
+from lium.cli.provider._render import agent_mode, discord_incentive_warnings, render
 from lium.provider.client import discord_connected_from_profile, with_discord_eligibility
-from lium.provider.errors import ARG_INVALID, ProviderError
+from lium.provider.errors import ARG_INVALID, PORTAL_NOT_SUPPORTED, ProviderError
 
 
 @click.group("config")
@@ -107,9 +109,9 @@ def opt_out(ctx: click.Context) -> None:
 @with_provider_overrides
 @click.pass_context
 def set_email(ctx: click.Context, email: str) -> None:
-    require_hotkey(ctx, group="config")
+    require_wallet_hotkey(ctx, command="config set-email")
     require_persona_ack(ctx)
-    client = build_client(ctx)
+    client = build_client(ctx, wallet_only=True)
     try:
         body = client.set_email(email)
     except ProviderError as e:
@@ -126,19 +128,21 @@ def set_email(ctx: click.Context, email: str) -> None:
     "--password",
     "new_password",
     envvar="LIUM_PROVIDER_NEW_PASSWORD",
-    help="New password. Prompts when omitted outside --json.",
+    help="New password. When omitted, prompts only in plain interactive text mode "
+    "(not under --json, LIUM_OUTPUT=json or LIUM_NONINTERACTIVE=1).",
 )
 @with_provider_overrides
 @click.pass_context
 def set_password(ctx: click.Context, new_password: str | None) -> None:
-    require_hotkey(ctx, group="config")
+    require_wallet_hotkey(ctx, command="config set-password")
     if not new_password:
-        if _json_mode(ctx):
+        if agent_mode(ctx):
             ctx.exit(
                 handle_provider_error(
                     ctx,
                     ProviderError(
-                        "config set-password requires --password or LIUM_PROVIDER_NEW_PASSWORD under --json",
+                        "config set-password requires --password or LIUM_PROVIDER_NEW_PASSWORD "
+                        "(no prompt under --json, LIUM_OUTPUT=json or LIUM_NONINTERACTIVE=1)",
                         code=ARG_INVALID,
                     ),
                 )
@@ -150,7 +154,7 @@ def set_password(ctx: click.Context, new_password: str | None) -> None:
             confirmation_prompt=True,
         )
 
-    client = build_client(ctx)
+    client = build_client(ctx, wallet_only=True)
     try:
         body = client.set_password(new_password)
     except ProviderError as e:
@@ -182,6 +186,13 @@ def set_password(ctx: click.Context, new_password: str | None) -> None:
     show_default=True,
     help="Seconds between Discord status checks while waiting.",
 )
+@click.option(
+    "--wait",
+    is_flag=True,
+    help="Link through a portal handoff (one URL plus a short code for the person) and poll until it is done "
+    "(exit 0) or the code expires (human.handoff_expired, exit 12); --timeout counts only when given. "
+    "--json, LIUM_OUTPUT=json and LIUM_NONINTERACTIVE=1 use the handoff too (human.handoff_required, exit 12).",
+)
 @with_provider_overrides
 @click.pass_context
 def connect_discord(
@@ -189,11 +200,41 @@ def connect_discord(
     no_wait: bool,
     timeout: int,
     poll_interval: float,
+    wait: bool,
 ) -> None:
+    # No docstring: `--help` keeps the text it always had; the handoff is described on --wait.
+    # Text mode without --wait is the browser flow, unchanged. With --wait, or in agent mode, the portal hands out
+    # a handoff (human.handoff_required / human.handoff_expired, exit 12); a portal without handoff sessions is
+    # portal.not_supported in agent mode, and text mode with --wait falls back to the browser flow.
     require_hotkey(ctx, group="config")
     client = build_client(ctx)
+    agent = agent_mode(ctx)
+    fallback_url = None
+    if wait or agent:
+        explicit_timeout = ctx.get_parameter_source("timeout") is not click.core.ParameterSource.DEFAULT
+        try:
+            result = run_handoff(
+                client,
+                step="discord_link",
+                wait=wait,
+                timeout=timeout if explicit_timeout else None,
+                poll_interval=poll_interval,
+                json_mode=_json_mode(ctx),
+                legacy_url=client.create_discord_oauth_authorization_url,
+            )
+        except ProviderError as e:
+            if e.code != PORTAL_NOT_SUPPORTED or agent:
+                ctx.exit(handle_provider_error(ctx, e))
+                return
+            click.echo("The portal does not serve handoffs yet; using the browser link.", err=True)
+            fallback_url = e.context.get("legacy_browser_url")
+        else:
+            render(ctx, {**result, "discord_connected": True, "extra_incentive_eligible": True},
+                   summary="Discord connected; extra incentives enabled")
+            return
+
     try:
-        authorization_url = client.create_discord_oauth_authorization_url()
+        authorization_url = fallback_url or client.create_discord_oauth_authorization_url()
         browser_opened = _open_authorization_url(authorization_url)
         discord_connected = _wait_for_discord_connection(
             client,
@@ -203,28 +244,6 @@ def connect_discord(
         )
     except ProviderError as e:
         ctx.exit(handle_provider_error(ctx, e))
-        return
-
-    next_action = (
-        "discord_connected"
-        if discord_connected is True
-        else "open_authorization_url_and_complete_discord_oauth"
-    )
-    json_payload = {
-        "authorization_url": authorization_url,
-        "browser_opened": bool(browser_opened),
-        "discord_connected": discord_connected,
-        "extra_incentive_eligible": discord_connected
-        if discord_connected is not None
-        else None,
-        "next_action": next_action,
-    }
-    if _json_mode(ctx):
-        render(
-            ctx,
-            json_payload,
-            warnings=discord_incentive_warnings(discord_connected),
-        )
         return
 
     human_payload = {
