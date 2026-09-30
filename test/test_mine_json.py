@@ -167,6 +167,25 @@ def test_json_register_listed_is_ok_with_the_node(monkeypatch, tmp_path: Path) -
     assert [e["status"] for e in events if e["event"] == "node_status"][-1] == "AVAILABLE"
 
 
+def test_the_register_token_from_the_environment_registers_like_the_flag(monkeypatch, tmp_path: Path) -> None:
+    target, _ = _stub_host(monkeypatch, tmp_path)
+    _register_portal(monkeypatch, _status("AVAILABLE"))
+    token = _token(exp=int(time.time()) + 3600)
+    result = _invoke(["--json", "--dir", str(target), "--wait", "5"], env={"LIUM_REGISTER_TOKEN": token})
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.stdout)["data"]
+    assert data["node_id"] == "node-1" and data["listed"] is True
+    assert token not in result.stdout and token not in result.stderr
+
+
+def test_an_expired_register_token_from_the_environment_is_input_exit_two(monkeypatch) -> None:
+    calls = _no_clone(monkeypatch)
+    result = _invoke(["--json"], env={"LIUM_REGISTER_TOKEN": _token(exp=int(time.time()) - 5)})
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout)["error"]["code"] == "input.register_token_invalid"
+    assert calls == []
+
+
 def test_json_register_named_fix_is_node_status_exit_one(monkeypatch, tmp_path: Path) -> None:
     target, _ = _stub_host(monkeypatch, tmp_path)
     _register_portal(monkeypatch, _status("OFFLINE", "Node not responding to ping."))

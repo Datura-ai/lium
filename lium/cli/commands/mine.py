@@ -782,8 +782,10 @@ def _register_result(code: int, report: dict) -> int:
     "--register",
     "register_token",
     metavar="TOKEN",
+    envvar="LIUM_REGISTER_TOKEN",
     help="Register token from the portal's Add Node page: after the node is up, add it to your account and "
-    "wait until it is listed. Implies --auto; the account comes from the token, so -k is not needed.",
+    "wait until it is listed. Implies --auto; the account comes from the token, so -k is not needed. "
+    "LIUM_REGISTER_TOKEN is read when the flag is absent, which keeps the token out of the process list on a shared host.",
 )
 @click.option(
     "--portal-url",
