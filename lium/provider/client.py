@@ -773,12 +773,24 @@ class ProviderClient:
         ))
 
     def pause_new_rentals(self, node_id: str) -> dict[str, Any]:
-        """``POST /executors/{id}/new-rentals/pause`` -- take no new rental once the current one ends."""
-        return self._http.post(EXECUTOR_NEW_RENTALS_PAUSE.format(id=_safe_id(node_id, label="node_id")))
+        """``POST /executors/{id}/new-rentals/pause`` -- take no new rental once the current one ends.
 
-    def resume_new_rentals(self, node_id: str) -> dict[str, Any]:
-        """``DELETE /executors/{id}/new-rentals/pause`` -- take new rentals again."""
-        return self._http.delete(EXECUTOR_NEW_RENTALS_PAUSE.format(id=_safe_id(node_id, label="node_id")))
+        ``paused_by_this_call`` is true only when this call set the pause, and ``pause_id`` is then this call's own;
+        on a node already paused it is false and ``pause_id`` is the existing pause's (null when that pause has
+        none). Both are None from a portal that does not send them -- never False: an older portal cannot say."""
+        body = self._http.post(EXECUTOR_NEW_RENTALS_PAUSE.format(id=_safe_id(node_id, label="node_id")))
+        return {"pause_id": None, "paused_by_this_call": None, **body}
+
+    def resume_new_rentals(self, node_id: str, pause_id: str | None = None) -> dict[str, Any]:
+        """``DELETE /executors/{id}/new-rentals/pause`` -- take new rentals again.
+
+        With ``pause_id`` the portal resumes only while that pause is still the node's current one, and answers 409
+        ``PAUSE_ID_MISMATCH`` (``detail.current_pause_id``) otherwise, changing nothing. A portal that predates
+        ``pause_id`` ignores it and resumes anyway: check that ``get_node`` has a ``pause_id`` key first."""
+        return self._http.delete(
+            EXECUTOR_NEW_RENTALS_PAUSE.format(id=_safe_id(node_id, label="node_id")),
+            params={"pause_id": pause_id} if pause_id is not None else None,
+        )
 
     def nodes_listing(self) -> list[dict[str, Any]]:
         """``GET /executors/listing`` -- each own node against the public listing: ``listing_state``
@@ -786,12 +798,14 @@ class ProviderClient:
 
         Every row has ``gpu_count`` and ``rented_gpu_count`` (None when the portal did not send them): a node
         rented in part is ``listed`` with ``rented_gpu_count`` above 0, so ``listing_state`` alone does not say
-        whether a renter is on it."""
+        whether a renter is on it. ``new_rentals_pause_requested_at`` and ``pause_id`` are None too when the portal
+        does not send them."""
         body = self._http.get(EXECUTORS_LISTING)
         rows = body.get("data") if isinstance(body, dict) else body
         if not isinstance(rows, list):
             return []
-        return [{"gpu_count": None, "rented_gpu_count": None, **r} for r in rows if isinstance(r, dict)]
+        defaults = {"gpu_count": None, "rented_gpu_count": None, "new_rentals_pause_requested_at": None, "pause_id": None}
+        return [{**defaults, **r} for r in rows if isinstance(r, dict)]
 
     def earnings_daily(
         self,

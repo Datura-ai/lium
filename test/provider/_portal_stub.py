@@ -10,13 +10,14 @@ import json
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
 
 class PortalStub:
     def __init__(self) -> None:
         self.routes: dict[tuple[str, str], list[tuple[int, Any]]] = {}
+        self.handlers: dict[tuple[str, str], Callable[[dict[str, Any]], tuple[int, Any]]] = {}
         self.requests: list[dict[str, Any]] = []
         stub = self
 
@@ -25,17 +26,20 @@ class PortalStub:
                 parts = urlsplit(self.path)
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length) if length else b""
-                stub.requests.append(
-                    {
-                        "method": self.command,
-                        "path": parts.path,
-                        "query": parse_qs(parts.query),
-                        "authorization": self.headers.get("Authorization"),
-                        "json": json.loads(raw) if raw else None,
-                    }
-                )
-                answers = stub.routes.get((self.command, parts.path), [(404, {"detail": "Not Found"})])
-                status, body = answers.pop(0) if len(answers) > 1 else answers[0]
+                request = {
+                    "method": self.command,
+                    "path": parts.path,
+                    "query": parse_qs(parts.query),
+                    "authorization": self.headers.get("Authorization"),
+                    "json": json.loads(raw) if raw else None,
+                }
+                stub.requests.append(request)
+                handler = stub.handlers.get((self.command, parts.path))
+                if handler is not None:
+                    status, body = handler(request)
+                else:
+                    answers = stub.routes.get((self.command, parts.path), [(404, {"detail": "Not Found"})])
+                    status, body = answers.pop(0) if len(answers) > 1 else answers[0]
                 data = json.dumps(body).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -59,6 +63,10 @@ class PortalStub:
     def route_sequence(self, method: str, path: str, *answers: tuple[int, Any]) -> None:
         """Answer in turn; the last answer repeats."""
         self.routes[(method, path)] = list(answers)
+
+    def handle(self, method: str, path: str, handler: Callable[[dict[str, Any]], tuple[int, Any]]) -> None:
+        """Answer with ``handler(request) -> (status, body)``, for a route whose answer depends on earlier calls."""
+        self.handlers[(method, path)] = handler
 
     def calls(self, method: str | None = None) -> list[tuple[str, str]]:
         return [(r["method"], r["path"]) for r in self.requests if method is None or r["method"] == method]
