@@ -164,7 +164,11 @@ main() {
             LIUM_BIN=$(find_lium) || LIUM_BIN="$LIUM_BIN"
         fi
         if ! "$LIUM_BIN" mine --help 2>/dev/null | grep -q -- "$REGISTER_NEEDS"; then
-            log_err "This lium ($("$LIUM_BIN" --version 2>/dev/null)) does not read '$REGISTER_NEEDS' on 'mine'. Upgrade it (uv tool upgrade lium.io) and re-run."
+            if [[ "$REGISTER_NEEDS" == "LIUM_REGISTER_TOKEN" ]]; then
+                log_err "This lium ($("$LIUM_BIN" --version 2>/dev/null)) does not read LIUM_REGISTER_TOKEN. Upgrade it (uv tool upgrade lium.io) and re-run, or unset LIUM_REGISTER_TOKEN for a plain install."
+            else
+                log_err "This lium ($("$LIUM_BIN" --version 2>/dev/null)) has no 'mine --register'. Upgrade it (uv tool upgrade lium.io) and re-run."
+            fi
             exit 1
         fi
     fi

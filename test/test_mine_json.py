@@ -19,11 +19,6 @@ from provider._agent_mode import AGENT_SWITCHES, PLAIN_TEXT
 from test_mine_register import HOTKEY, _Portal, _Resp, _http, _listing, _status, _stub_host, _token, _wait_no_sleep
 
 
-@pytest.fixture(autouse=True)
-def _no_register_token_env(monkeypatch) -> None:
-    monkeypatch.delenv("LIUM_REGISTER_TOKEN", raising=False)
-
-
 def _invoke(args: list[str], env: dict | None = None, input: str | None = None):
     return CliRunner().invoke(mine.mine_command, args, env=env, input=input)
 
@@ -189,7 +184,8 @@ def test_an_expired_register_token_from_the_environment_is_input_exit_two(monkey
     assert result.exit_code == 2, result.output
     error = json.loads(result.stdout)["error"]
     assert error["code"] == "input.register_token_invalid"
-    assert "read from LIUM_REGISTER_TOKEN; unset it for a plain install" in error["message"]
+    assert "read from LIUM_REGISTER_TOKEN: unset it for a plain install" in error["message"]
+    assert "unset LIUM_REGISTER_TOKEN" in error["hint"]
     assert calls == []
 
 

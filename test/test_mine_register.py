@@ -26,11 +26,6 @@ ACCOUNT_ID = "acct_7f3c2a"
 NOW = 1_800_000_000
 
 
-@pytest.fixture(autouse=True)
-def _no_register_token_env(monkeypatch) -> None:
-    monkeypatch.delenv("LIUM_REGISTER_TOKEN", raising=False)
-
-
 def _token(exp: int | None = NOW + 3600, hotkey: str | None = HOTKEY, opt_in: bool | None = True,
            node_hotkey: str | None = None, **extra) -> str:
     # the portal's fastapi_jwt layout (lium-platform#291): the miner's to_json() plus "scope" under "subject", exp on top;

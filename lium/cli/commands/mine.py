@@ -900,23 +900,26 @@ def _run_mine(ctx, hotkey, dir_, branch, auto, verbose, register_token, portal_u
 
         # a one-hour token left exported turns a plain `lium mine` into a registration: say where it came from
         from_env = ctx.get_parameter_source("register_token") == ParameterSource.ENVIRONMENT
-        env_note = " (read from LIUM_REGISTER_TOKEN; unset it for a plain install)" if from_env else ""
+        env_note = " This token was read from LIUM_REGISTER_TOKEN: unset it for a plain install." if from_env else ""
+        unset_hint = " Or unset LIUM_REGISTER_TOKEN for a plain install." if from_env else ""
         # fail on a bad or expired token before the ten-minute install, not after it
         try:
             token = reg.parse_register_token(register_token)
         except reg.RegisterError as e:
             if json_mode:
                 return _json_failure("input.register_token_invalid", f"{e}{env_note}", 2,
-                                     "Copy a fresh command from the portal's Add Node page.")
+                                     f"Copy a fresh command from the portal's Add Node page.{unset_hint}")
             console.error(f"❌ {escape(f'{e}{env_note}')}")
             return 2 if agent else 1
         if hotkey and hotkey != token.node_hotkey:
             message = ("--hotkey differs from what the register token says this node reports under; drop -k, "
                        f"the token decides.{env_note}")
             if json_mode:
-                return _json_failure("input.hotkey_conflicts_with_token", message, 2, "Drop -k.")
+                return _json_failure("input.hotkey_conflicts_with_token", message, 2, f"Drop -k.{unset_hint}")
             console.error(f"❌ {escape(message)}")
             return 2 if agent else 1
+        if from_env:
+            console.warning("Registering this node with the register token from LIUM_REGISTER_TOKEN.")
         # what the executor reports under: the account's own key, or the portal's for an account without one;
         # the SS58 check in _setup_executor_env applies to this value, not to the account id
         hotkey = token.node_hotkey
