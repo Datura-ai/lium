@@ -22,7 +22,7 @@ a defective node — 8 Sep 2026, `brave-shark-ff` billed 2 GPUs and exposed 1 (B
 it is excluded or fixed. Nor is a node whose public-listing `reliability_score` is under `E2E_MIN_RELIABILITY`
 (default 90; a node with no score yet is kept; `E2E_MIN_RELIABILITY=0` lifts it, e.g. for a staging node with a low
 score): on 10 Sep 2026 a 2×3090 at $0.32/h scoring 72 had an unreachable SSH port map and was the cheapest pick for
-three PRs in a row (DAH-3383). The score is not in `ls --format json` or the SDK's `ExecutorInfo`, so
+three PRs in a row. The score is not in `ls --format json` or the SDK's `ExecutorInfo`, so
 `conftest.reliability_scores()` reads the public `GET /executors` once per journey (three attempts on a 429/5xx/network error, like the SDK's `ls()`). The
 platform's own rental check (`rental_check_verified_status`) would be the natural rule, but the field is not on
 `GET /executors` and 452 of 473 verified executors were still `PENDING` that day — it does not separate a dead node
