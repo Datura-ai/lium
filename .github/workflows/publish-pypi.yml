@@ -113,7 +113,7 @@ jobs:
           fail "can_admins_bypass is not false; a repository admin could start this job without a reviewer's approval"
 
     - name: Download artifact
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: pypi-dist
         path: dist/
