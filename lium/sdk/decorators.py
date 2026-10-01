@@ -502,11 +502,11 @@ def machine(
     Only the function's own ``def`` is sent: import what it needs inside the body and
     pass everything else as arguments. Whatever the function prints is relayed to this
     process's stdout/stderr while it runs. An exception raised on the pod is re-raised
-    here with the same type when that type is a builtin (``except ValueError`` works;
-    its args come along when they are plain data, else its message); other types come
-    back as :class:`RemoteExecutionError`. Either way the ``__cause__`` is a
-    :class:`RemoteExecutionError` carrying the remote traceback, exit code and captured
-    output.
+    here with the same type when the builtin can be reconstructed (``except ValueError``
+    works; its args come along when they are plain data, else its message). Its
+    ``__cause__``, like that of :class:`ResultEncodingError`, is a
+    :class:`RemoteExecutionError` with the remote traceback, exit code and captured
+    output. Other remote exceptions raise :class:`RemoteExecutionError` directly.
 
     Args:
         machine: ``"<count>x<gpu>"`` or ``"<gpu>"`` — e.g. ``"1xH200"``, ``"RTX4090"``,
