@@ -23,6 +23,17 @@ Target (env):
                 `up` itself never returned (killed between the rent and its --ttl call, or before DAH-3331 any time
                 before RUNNING), the fixture schedules a 30-min removal instead. With no failure the journey removes its pod as usual.
 
+A node that refuses the rent gives way to the next one (DAH-3488). Both journeys keep every rentable node, cheapest
+first, and rent the first that accepts: when `lium up` exits 3 with the CLI's "could not be rented" text (the API
+answered the rent with a 400 such as "Can't rent node. Try again later.", or the node was taken meanwhile), or the
+SDK's `up()` raises the plain `LiumError` that wraps the same answer, the journey makes sure no pod with its name
+exists, records the refusal and tries the next candidate with a different executor id — at most MAX_UP_TRIES (3)
+`up` calls per journey, all inside the step's one 540 s budget. A timeout, a pod that did not start, an
+auth/permission/server/rate-limit error and every other exit are not retried anywhere. Each refusal is a `rent refused: <huid> (<id>) at $<price>/h: <message>` pytest
+warning in the job log (and, in the CLI journey, a note in commands.json) (the fleet team reads which nodes refused); when every try
+refused, the failure lists them. On 14 Sep 2026 the single candidate answered 400 on two PRs (lium#152, lium#164);
+each cost a human a rerun.
+
 Every command runs with HOME set to a temp dir, so `up` mints its SSH key there and the first-run shell-completion
 hook edits a shell rc nobody uses (L-65: never the runner's ~/.lium). The key travels only as LIUM_API_KEY.
 """
@@ -36,6 +47,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -50,6 +62,11 @@ EXCLUDE_EXECUTORS = {e.strip().lower() for e in os.environ.get("E2E_EXCLUDE_EXEC
 MIN_RELIABILITY = float(os.environ.get("E2E_MIN_RELIABILITY", "90"))
 KEEP_POD = os.environ.get("E2E_KEEP_POD", "") == "1"
 ARTIFACTS = Path(os.environ.get("E2E_ARTIFACTS", Path(__file__).parent / "artifacts"))
+
+MAX_UP_TRIES = 3   # `up` calls per journey, each on a different executor, before the rent step fails
+OUTPUT_HEAD_CHARS = 1500   # of a command's stdout/stderr kept in commands.json and in a Result's repr (the failure line)
+EXIT_API_ERROR = 3   # lium/cli/utils.py: "the API refused or failed the call" (test_e2e_rentable.py pins the value)
+REFUSED_TEXT = "could not be rented"   # lium/cli/up/command.py's rent_rejected message: the API answered the rent and said no
 
 FAILED_STEPS: list[str] = []   # node ids of the steps that failed so far in this process (setup, call or teardown)
 
@@ -111,8 +128,9 @@ class Result:
     def json(self):
         return json.loads(self.out)
 
-    def __repr__(self) -> str:  # short, key-free
-        return f"<lium {' '.join(self.argv)} rc={self.rc} {self.seconds:.1f}s out={self.out[:200]!r} err={self.err[:200]!r}>"
+    def __repr__(self) -> str:  # key-free (the key travels in the environment, never in argv or the output)
+        head = OUTPUT_HEAD_CHARS   # 200 cut the API's answer out of the failure line on 14 Sep 2026 (r142)
+        return f"<lium {' '.join(self.argv)} rc={self.rc} {self.seconds:.1f}s out={self.out[:head]!r} err={self.err[:head]!r}>"
 
 
 @dataclass
@@ -137,7 +155,8 @@ class Session:
         t0 = time.monotonic()
         p = subprocess.run([LIUM, *args], env=env, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
         r = Result(list(args), p.returncode, p.stdout, p.stderr, time.monotonic() - t0)
-        self.log.append({"argv": r.argv, "rc": r.rc, "seconds": round(r.seconds, 2), "stdout_head": r.out[:400], "stderr_head": r.err[:400]})
+        self.log.append({"argv": r.argv, "rc": r.rc, "seconds": round(r.seconds, 2),
+                         "stdout_head": r.out[:OUTPUT_HEAD_CHARS], "stderr_head": r.err[:OUTPUT_HEAD_CHARS]})
         if check and r.rc != 0:
             raise AssertionError(f"expected exit 0: {r!r}")
         return r
@@ -170,9 +189,11 @@ class Rental:
     """One pod rented for the suite, removed no matter what (fixture finalizer + a sweep of stale e2e- pods)."""
 
     name: str
-    executor_id: str = ""
+    executor_id: str = ""        # the node `up` is (or was last) sent to; after a rent, the node that took it
     price_per_hour: float = 0.0
     gpu_type: str = ""
+    candidates: list[dict] = field(default_factory=list)   # every rentable `ls` row, cheapest first, one per executor id
+    refused: list[str] = field(default_factory=list)       # the `rent refused: …` notes of this run, in order
     pod: dict = field(default_factory=dict)
     up_called_at: float = 0.0
     running_at: float = 0.0
@@ -182,6 +203,74 @@ class Rental:
 def ps(session: Session) -> list[dict]:
     r = session.lium("ps", "--format", "json", check=True)
     return r.json()
+
+
+def cheapest_first(nodes: list[dict]) -> list[dict]:
+    """The rentable `ls --format json` rows by price, one row per executor id (the first seen keeps its place)."""
+    seen: set[str] = set()
+    ordered = []
+    for n in sorted(nodes, key=lambda n: float(n["price_per_hour"])):
+        if str(n.get("id")) not in seen:
+            seen.add(str(n.get("id")))
+            ordered.append(n)
+    return ordered
+
+
+def refusal_note(huid: str, executor_id: str, price_per_hour: float | str | None, message: str) -> str:
+    """One refused rent, the way the fleet team reads it in commands.json and the job's warnings summary."""
+    price = f"${float(price_per_hour):.2f}/h" if price_per_hour not in (None, "") else "price unknown"
+    return f"rent refused: {huid} ({executor_id}) at {price}: {' '.join(message.split())}"
+
+
+def rent_refused(r: Result) -> bool:
+    """`lium up` exit 3 carrying the CLI's rent_rejected text: the API answered the rent and said no (400 "Can't rent
+    node", the node taken meanwhile). An api_timeout is exit 3 too but says "got no answer" — a pod may exist, so it is
+    not one; nor is pod_start_failed (a pod was created) or any exit 1/2."""
+    return r.rc == EXIT_API_ERROR and REFUSED_TEXT in (r.out + r.err)
+
+
+MIN_RETRY_BUDGET_S = 60   # a further `up` starts only with at least this much of the step's budget left
+
+
+def up_first_accepting(session: Session, rental: Rental, budget_s: float = 540, clock=time.monotonic) -> Result:
+    """`lium up` on the cheapest candidate; a node that refuses the rent gives way to the next one, a different executor
+    id each time, at most MAX_UP_TRIES `up` calls — all inside ONE budget of `budget_s` (the caller's 540 s, under the
+    module's 600 s pytest-timeout): each `up` gets the time left, the `ps` after a refusal too, and a further try starts
+    only with MIN_RETRY_BUDGET_S left. Returns the `up` that was not a refusal, with `rental.executor_id`,
+    `price_per_hour` and `gpu_type` set to the node it went to; the caller asserts on its exit code as before, so a
+    timeout, a pod that did not start or an exit 1/2 fails there and is never retried. When every try refused, or a
+    refusal left a pod named `rental.name` behind (a retried rent must never rent twice), the step fails naming them.
+    The `ps` after a refusal fails closed: a `ps` that exits non-zero is an AssertionError (`check=True`), not a rent
+    elsewhere. Every refusal is a note in commands.json, a pytest warning and a line of `rental.refused`."""
+    deadline = clock() + budget_s
+    tried: set[str] = set()
+    stopped = ""
+    for node in rental.candidates:
+        node_id, huid = str(node.get("id")), str(node.get("huid") or node.get("id"))
+        if node_id in tried:
+            continue
+        if len(tried) >= MAX_UP_TRIES:
+            break
+        left_s = deadline - clock()
+        if tried and left_s < MIN_RETRY_BUDGET_S:
+            stopped = f"; {left_s:.0f} s of the {budget_s:.0f} s step budget left, no further node tried"
+            break
+        tried.add(node_id)
+        rental.executor_id, rental.price_per_hour, rental.gpu_type = node_id, float(node.get("price_per_hour") or 0), str(node.get("gpu_type"))
+        r = session.lium("up", node_id, "--name", rental.name, "--ttl", "30m", "-y", "--no-ssh", timeout=max(1, int(left_s)))
+        if not rent_refused(r):
+            return r
+        note = refusal_note(huid, node_id, node.get("price_per_hour"), (r.out + r.err).strip())
+        rental.refused.append(note)
+        session.log.append({"note": note})
+        warnings.warn(note, stacklevel=2)
+        listed = session.lium("ps", "--format", "json", check=True, timeout=max(1, min(180, int(deadline - clock())))).json()
+        if any(p.get("name") == rental.name for p in listed):
+            pytest.fail(f"{huid} refused the rent but a pod named {rental.name} exists — not renting elsewhere "
+                        f"(the rental fixture removes it by name): {r!r}")
+    left = len({str(n.get("id")) for n in rental.candidates} - tried)
+    pytest.fail(f"{len(tried)} node(s) refused the rent, none accepted (MAX_UP_TRIES={MAX_UP_TRIES}"
+                + (f", {left} rentable candidate(s) left untried" if left else "") + stopped + "):\n  " + "\n  ".join(rental.refused))
 
 
 def rm_pods_named(session: Session, prefix: str, older_than_s: float = 0) -> int:
