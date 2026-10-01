@@ -80,6 +80,11 @@ class FakeLium:
         self.calls.append(("ps",))
         return list(self.pods.values())
 
+    open_connections: set = set()   # pod ids Lium.has_open_connection() answers True for
+
+    def has_open_connection(self, pod):
+        return pod.id in self.open_connections
+
     def up(self, **kw):
         self.calls.append(("up", kw))
         self.rented += 1
@@ -300,9 +305,23 @@ def test_call_rents_cheapest_sets_ttl_bounds_run_and_cleans_up(fake, capsys):
     assert "[lium] double: pod removed" in err
 
 
-def test_the_ttl_is_re_armed_after_setup_so_the_run_gets_its_full_window(fake):
+class _SetupClock:
+    """``time.monotonic`` for the decorator, jumping ``setup_seconds`` while the environment step runs."""
+
+    def __init__(self, fake, setup_seconds):
+        self.now, self.fake, self.setup_seconds, self.seen = 1000.0, fake, setup_seconds, 0
+
+    def __call__(self):
+        setups = sum(1 for c in self.fake.calls if c[0] == "exec" and "LIUM_ENV_CACHED" in c[1])
+        if setups > self.seen:
+            self.seen, self.now = setups, self.now + self.setup_seconds
+        return self.now
+
+
+def test_the_ttl_is_re_armed_after_setup_so_the_run_gets_its_full_window(fake, monkeypatch):
     # armed at rent time, the TTL runs while the pod boots and pip installs; a setup longer than the
     # 15 min margin would remove the pod mid-run, so it is armed again right before the runner starts
+    monkeypatch.setattr(D.time, "monotonic", _SetupClock(fake, setup_seconds=240))
     remote = D.machine(machine="A100", timeout=600)(double)
 
     assert remote(21) == 42
@@ -316,6 +335,34 @@ def test_the_ttl_is_re_armed_after_setup_so_the_run_gets_its_full_window(fake):
     for i in (first_arm, re_arm[0]):
         ttl = datetime.fromisoformat(fake.calls[i][2]) - datetime.now(timezone.utc)
         assert 600 + 14 * 60 < ttl.total_seconds() <= 600 + 15 * 60
+
+
+def test_a_setup_of_seconds_sends_no_second_ttl_before_the_run(fake, monkeypatch):
+    # armed seconds ago, the window is whole; the second POST was a round trip per call for nothing
+    monkeypatch.setattr(D.time, "monotonic", _SetupClock(fake, setup_seconds=5))
+    remote = D.machine(machine="A100", timeout=600)(double)
+
+    assert remote(21) == 42
+
+    runner = next(i for i, c in enumerate(fake.calls) if c[0] in ("exec", "stream_exec") and c[1].endswith(".py"))
+    assert [c[0] for c in fake.calls[:runner]].count("schedule_termination") == 1
+
+
+def test_a_warm_pod_this_process_is_still_connected_to_is_used_without_listing_pods(fake):
+    # an open SSH connection to the pod proves it is up; GET /pods before every warm call is not needed
+    f = D.machine(machine="A100", keep_warm=300, timeout=600)(double)
+    assert f(1) == 2
+    listings = sum(1 for c in fake.calls if c[0] == "ps")
+
+    fake.open_connections = {"pod-1"}
+    assert f(2) == 4
+    assert sum(1 for c in fake.calls if c[0] == "ps") == listings
+
+    fake.open_connections = set()   # connection gone: the pod is looked up again before it is used
+    assert f(3) == 6
+    assert sum(1 for c in fake.calls if c[0] == "ps") == listings + 1
+    assert len(_rents(fake)) == 1
+    f.close()
 
 
 def test_a_backend_with_rent_by_spec_gets_one_rent_call_and_no_listing(fake, capsys):
@@ -1002,13 +1049,13 @@ def test_keep_warm_reuses_the_pod_and_rearms_its_ttl(fake, capsys):
     assert _rents(fake)[0][1]["name"] == f"lium-fn-{D._warm_key('A100', None)}"   # findable by the next run
     assert not any(c[0] == "down" for c in fake.calls)
     ttls = [c for c in fake.calls if c[0] == "schedule_termination"]
-    # rent: timeout + keep_warm + 15 min; again once setup is done; after call: keep_warm + 2 min;
-    # call 2 on the found pod: re-armed, again after its setup; after: keep_warm + 2 min again
+    # rent: timeout + keep_warm + 15 min; after call: keep_warm + 2 min; call 2 on the found pod:
+    # re-armed; after: keep_warm + 2 min again. Setup took seconds, so neither call arms again before its run.
     delays = [(datetime.fromisoformat(c[2]) - datetime.now(timezone.utc)).total_seconds() for c in ttls]
-    assert len(delays) == 6
-    for full in (delays[0], delays[1], delays[3], delays[4]):
+    assert len(delays) == 4
+    for full in (delays[0], delays[2]):
         assert 600 + 300 + 14 * 60 < full <= 600 + 300 + 15 * 60
-    for warm in (delays[2], delays[5]):
+    for warm in (delays[1], delays[3]):
         assert 300 + 60 < warm <= 300 + 120
     err = capsys.readouterr().err
     assert "pod stays warm 300s" in err
