@@ -22,6 +22,7 @@ SET_PASSWORD = "/auth/set-password"
 PROVIDER_OPT_IN = "/providers/opt-in"
 MINER_OPT_IN = "/miners/opt-in"
 MINERS = "/miners"
+MINERS_OVERVIEW = "/miners/overview"
 
 # Executors -- collection
 EXECUTORS = "/executors"
@@ -75,6 +76,7 @@ __all__ = [
     "ME",
     "MINER_OPT_IN",
     "MINERS",
+    "MINERS_OVERVIEW",
     "PROVIDER_OPT_IN",
     "SET_EMAIL",
     "SET_MACHINE_REQUEST_SUBSCRIPTION",

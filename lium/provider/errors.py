@@ -13,6 +13,7 @@ Exit-code mapping (used by ``lium/cli/provider/_render.py``):
     5  SSH error
     6  config error
     7  token-cache contention (PORTAL_AUTH_REFRESH_RACE)
+    130  Ctrl-C where exit 0 would read as success (INPUT_INTERRUPTED)
 
 Each error code is exported as a string constant so callers can do::
 
@@ -54,6 +55,9 @@ PORTS_INVALID = "PORTS_INVALID"
 ARG_INVALID = "ARG_INVALID"
 CONFIG_MISSING = "CONFIG_MISSING"
 
+# Namespaced from the start, so it has no UPPER_CASE legacy code.
+INPUT_INTERRUPTED = "input.interrupted"
+
 # Default hint table -- keep human and short. Empty string => no hint.
 _HINTS: dict[str, str] = {
     WALLET_NOT_FOUND: "Run `btcli wallet new_coldkey` then `btcli wallet new_hotkey`, or check --coldkey/--hotkey names.",
@@ -75,6 +79,7 @@ _HINTS: dict[str, str] = {
     PORTS_INVALID: "Use the form HTTP=8080,SSH=2200,RANGE=2000-2005 with positive integers.",
     ARG_INVALID: "Check the argument value and consult --help.",
     CONFIG_MISSING: "Run `lium init` or set the missing config value.",
+    INPUT_INTERRUPTED: "Interrupted before the command finished; re-run it to carry on.",
 }
 
 

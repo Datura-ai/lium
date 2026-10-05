@@ -38,6 +38,7 @@ from lium.cli.provider.queries import (
 from lium.cli.provider.status import status_command
 from lium.cli.provider.sync import sync_command
 from lium.cli.settings import ConfigManager
+from lium.cli.utils import json_output_requested
 from lium.provider.errors import ProviderError
 
 
@@ -68,7 +69,7 @@ from lium.provider.errors import ProviderError
     "--json",
     "json_mode",
     is_flag=True,
-    help="Emit machine-readable JSON output (one envelope per command).",
+    help="Emit machine-readable JSON output (one envelope per command). LIUM_OUTPUT=json does the same.",
 )
 @click.option(
     "--debug",
@@ -120,7 +121,7 @@ def provider_command(
         "coldkey": coldkey or cfg.get("provider.coldkey"),
         "hotkey": hotkey or cfg.get("provider.hotkey"),
         "portal_url": portal_url or cfg.get("provider.portal_url"),
-        "json": json_mode,
+        "json": json_mode or json_output_requested(),
         "debug": debug,
         "yes": yes_flag,
         "dry_run": dry_run,

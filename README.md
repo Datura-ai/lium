@@ -213,7 +213,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 ### Core Commands
 
 - `lium signup` - Create an account from the terminal and store its API key
-- `lium init` - Initialize configuration for an existing account (API key, SSH keys); `--api-key <key>` for machines without a browser
+- `lium init` - Initialize configuration for an existing account (API key, SSH keys); `--api-key <key>` for machines without a browser; `--force` to log in again
 - `lium completion [bash|zsh|fish] [--install]` - Print or install shell tab completion
 - `lium balance` - Show the account balance (add `--format json` for machine-readable output)
 - `lium whoami` - Show which API key is in use, where it came from, and the account it belongs to
@@ -235,7 +235,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium audit --account [--action pod.] [--source cli] [--since 7d] [--cursor <next_cursor>]` - The account audit log: every request that changed something (pods, keys, logins, balance, settings, team members) with the client and IP it came from; your own IPs only, 90 days (`--json` prints the page with `next_cursor`)
 - `lium update <POD> --jupyter <PORT>` - Install Jupyter Notebook on a pod, served on that internal port (`--jupyter` is the only update; without it the command prints `No updates specified`)
 - `lium templates [SEARCH] [--arch hopper|blackwell] [--format json]` - List Docker templates with the CUDA build and the GPU generations it runs on
-- `lium fund` - Fund account with TAO from your wallet
+- `lium fund` - Fund account with TAO from your wallet (`--alpha -k <hotkey> -a <USD>` pays with alpha stake instead; add `--netuid <N>` to pay from any subnet Lium accepts, the primary subnet otherwise)
 - `lium topup create -a <USD> -c <COIN> -n <NETWORK>` - Top up with a stablecoin (`lium topup currencies` lists them)
 - `lium topup card -a <USD> [--card <pm_id>] [--yes]` - Charge a card saved on the account, with no browser; the API key needs the `billing` scope (not released: the platform switch is off). Asks first; `--yes` skips the question and `--json` needs it. Sent once with an idempotency key; a lost answer or a 202 without a payment_intent_id exits 6 ("the charge may have gone through" / "still being confirmed") with the key and the same amount to re-run with, never a bare retry. A 202 with a payment_intent_id is success (exit 0). The same key with a different amount is a new charge
 - `lium ssh-keys list|sync` - SSH public keys registered on the account
@@ -482,6 +482,10 @@ lium theme light    # Set to light theme
 lium fund                           # Interactive mode
 lium fund -w default -a 1.5        # Fund with specific wallet and amount
 lium fund -w mywal -a 0.5 -y       # Skip confirmation
+
+# Fund account with alpha stake (-a is USD)
+lium fund --alpha -k <hotkey> -a 25              # Lium's primary subnet
+lium fund --alpha -k <hotkey> -a 25 --netuid 64  # Any subnet Lium accepts
 ```
 
 ### `lium ls --format json` fields
@@ -497,7 +501,8 @@ One object per node, sorted as the table is; the names are stable and pinned by 
 | `country`, `country_code`, `city` | country name, ISO code, city |
 | `vram_gb`, `ram_gb`, `cpu_count` | per-GPU VRAM (GiB), host RAM (GiB), CPU threads |
 | `disk_gb`, `disk_total_gb` | free and total host disk (GiB) |
-| `upload_mbps`, `download_mbps` | the backend's effective speeds |
+| `upload_mbps`, `download_mbps` | the backend's effective speeds: a VerifyX download or an average over the validator's cycles when it has one, else the node's latest speed-test sample |
+| `upload_source`, `download_source` | `measured` (checked or averaged) or `reported` (a single speed-test sample — the table's `~`); `null` with no figure |
 | `available_ports` | ports free for `--ports` |
 | `docker_in_docker` | sysbox runtime, i.e. `docker run` works inside the pod |
 | `is_pareto` | the ★ mark |
@@ -574,6 +579,15 @@ exits 2 (`empty_api_key`); none of them saves anything, and the hint says so. Wi
 `lium keys create <name> --workspace <ws> --save`. With `LIUM_API_KEY` (or `LIUM_API_API_KEY`) already exported,
 `lium init` skips the browser, sets up the SSH key and says the key is coming from the environment — the SSH path
 is written to the file, the key is not; `--api-key` warns when a key is also exported (`env_key` in the JSON).
+
+Login keys can expire or be revoked, so `lium init` next to a saved key checks it against
+`/users/me` first. When the API rejects it (401, or a 403 saying the key's workspace is gone or its creator left it) the normal login runs
+(`Your saved API key has expired or was revoked. Starting a new login…`); without a terminal no browser is opened
+and `lium init` exits 6 (`saved_key_rejected`). Any other 403 (a blocked account, a firewall page), a 429, a 5xx or
+no answer keeps the key with a warning. `lium init --force` logs in again even when the key still works, and
+`lium init --session <ID>` exchanges the session even next to a saved key. The saved key is replaced only once the
+new login has produced a key (the config file is written to a temporary file and renamed over the old one), so an
+aborted browser login or an unapproved session leaves the old key in place.
 
 SSH host keys of pods are pinned on first use under `~/.lium/known_hosts/<pod-id>`
 (`lium ssh`, `lium up`, and the SDK's `exec`, `stream_exec`, `rsync`). `reboot`, `edit`,

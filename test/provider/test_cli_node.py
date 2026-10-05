@@ -224,7 +224,7 @@ def test_node_list_all_and_miner_hotkey_are_exclusive(patched_build_client) -> N
     assert result.exit_code != 0
     payload = json.loads(result.output.strip())
     assert payload["ok"] is False
-    assert payload["error"]["code"] == "ARG_INVALID"
+    assert (payload["error"]["code"], payload["error"]["legacy_code"]) == ("input.arg_invalid", "ARG_INVALID")
     assert portal.gets == []
 
 

@@ -92,6 +92,18 @@ NO_SAVED_CARD = _error_body(
         "dashboard_url": BILLING,
     },
 )
+# a saved Link / Apple Pay / Google Pay method is refused before anything is created
+WALLET_NOT_SUPPORTED = _error_body(
+    402,
+    {
+        "code": "WALLET_NOT_SUPPORTED",
+        "message": "The payment method is a wallet (link); a top-up by API charges a saved card only, so "
+        "nothing was charged.",
+        "status": "failed",
+        "wallet": "link",
+        "dashboard_url": BILLING,
+    },
+)
 # the platform's 403 for a key without the scope: `require_api_key_scope` (utils/auth.py), which
 # errors/codes.py classifies as `forbidden`
 SCOPE_MISSING_MESSAGE = "API key 'agent' does not have the 'billing' scope"
@@ -200,6 +212,20 @@ def test_no_saved_card_is_a_card_topup_error_too(client):
     assert raised.value.code == "NO_SAVED_CARD"
     assert raised.value.dashboard_url == BILLING
     assert raised.value.status is None
+
+
+@responses.activate
+def test_a_saved_wallet_is_a_card_topup_error(client):
+    responses.post(TOPUP, json=WALLET_NOT_SUPPORTED, status=402)
+
+    with pytest.raises(LiumCardTopUpError) as raised:
+        client.topup_card(50)
+
+    assert raised.value.code == "WALLET_NOT_SUPPORTED"
+    assert raised.value.status == "failed"
+    assert raised.value.dashboard_url == BILLING
+    assert raised.value.payment_intent_id is None
+    assert "a wallet (link)" in str(raised.value)
 
 
 @responses.activate
@@ -626,6 +652,22 @@ def test_an_older_server_without_a_hint_gets_the_clis_own(fake_lium):
     payload = json.loads(result.stderr)
     assert payload["error"]["code"] == "NO_SAVED_CARD"
     assert payload["error"]["hint"] == topup_module._CARD_HINTS["NO_SAVED_CARD"]
+
+
+def test_a_saved_wallet_exits_3_with_a_hint_to_pass_a_plain_card(fake_lium):
+    fake_lium.charge = _card_error(WALLET_NOT_SUPPORTED)
+
+    result = _run("-a", "10", "--json")
+
+    assert result.exit_code == EXIT_API_ERROR
+    assert result.stdout == ""
+    payload = json.loads(result.stderr)
+    assert payload["error"]["code"] == "WALLET_NOT_SUPPORTED"
+    assert payload["error"]["exit_code"] == EXIT_API_ERROR
+    assert "--card" in payload["error"]["hint"]
+    assert payload["data"]["dashboard_url"] == BILLING
+    assert "payment_intent_id" not in payload["data"]
+    assert fake_lium.calls == [(10.0, None, None)]
 
 
 def test_a_budget_refusal_is_a_plain_lium_error(fake_lium):

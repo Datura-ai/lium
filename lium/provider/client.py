@@ -41,6 +41,7 @@ from lium.provider._routes import (
     MACHINES,
     ME,
     MINER_OPT_IN,
+    MINERS_OVERVIEW,
     SET_EMAIL,
     SET_MACHINE_REQUEST_SUBSCRIPTION,
     SET_PASSWORD,
@@ -491,6 +492,17 @@ class ProviderClient:
         return self._http.get(
             EXECUTOR_BY_ID.format(id=_safe_id(node_id, label="node_id"))
         )
+
+    def provider_overview(self) -> dict[str, Any]:
+        """``GET /miners/overview`` -- the signed-in provider's Overview page in one call.
+
+        Returns the unwrapped object; ``node_rows[].idle_pay_reasons`` carries the
+        validator's reasons an idle node earned nothing in its last cycle.
+        """
+        body = self._http.get(MINERS_OVERVIEW)
+        if isinstance(body, dict) and isinstance(body.get("data"), dict):
+            return body["data"]
+        return body if isinstance(body, dict) else {}
 
     def get_node_verification(self, node_id: str) -> dict[str, Any]:
         """``GET /executors/{id}/verification`` -- which validator step the

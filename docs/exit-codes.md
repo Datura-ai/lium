@@ -15,7 +15,7 @@ mirrors it and a unit test keeps the two in step.
 | 3 | `EXIT_API_ERROR` | The API refused or failed the call (5xx, 404 on a resource, rate limit, any other non-2xx). |
 | 4 | `EXIT_SSH_ERROR` | ssh could not connect, the pod has no SSH endpoint yet, or no ssh client is installed. |
 | 5 | `EXIT_POD_NOT_FOUND` | The pod, cluster or fabric named on the command line does not exist (`lium clusters rm`: also a cluster the API answered 404 for). |
-| 6 | `EXIT_PERMISSION_DENIED` | The account is not allowed to do this: unverified account, insufficient balance, an API key without the scope (403); an API key over its budget (402). Overloaded by `topup card` (not released yet) for "outcome unknown": the answer to the charge was lost (`charge_outcome_unknown`) or the platform answered 202 without a `payment_intent_id` (`charge_pending`) — a person must check the balance before the command runs again. A 202 with a `payment_intent_id` is success (exit 0). A script branching on the exit code alone cannot tell these from a 403; `error.code` in the JSON envelope does. |
+| 6 | `EXIT_PERMISSION_DENIED` | The account is not allowed to do this: unverified account, insufficient balance, an API key without the scope (403); an API key over its budget (402). Overloaded by `topup card` (not released yet) for "outcome unknown": the answer to the charge was lost (`charge_outcome_unknown`) or the platform answered 202 without a `payment_intent_id` (`charge_pending`) — a person must check the balance before the command runs again. A 202 with a `payment_intent_id` is success (exit 0). Also `lium init` without a terminal when the saved API key is rejected (401, or a 403 saying the key's workspace is gone or its creator left it: expired or revoked): saved credentials rejected, a new login is required (`saved_key_rejected`). A script branching on the exit code alone cannot tell these from a 403; `error.code` in the JSON envelope does. |
 
 `lium exec` exits with the remote command's own exit status, so `lium exec pod
 "cmd" && next` behaves like `cmd && next` would on the pod. Usage errors caught
@@ -49,11 +49,22 @@ When a command is run for a machine reader, every failure is one JSON object:
 - `code` is a stable `snake_case` identifier to branch on; `message` is for people and may change wording. When the API refused with its own `error.code` (`insufficient_balance`, `pod_not_found`, …) that code is the one you get; the CLI's code for the failure class (table below) otherwise. `exit_code` is always the CLI's, by class.
 - `hint` is always present: the next command or option to try. When the API sent a hint with its refusal, that is the one you get; the CLI's own hint for the code otherwise.
 - `exit_code` repeats the process exit status for readers that only see the streams.
-- `data` (optional) carries anything the caller must not lose along with the failure — `lium signup --json`, for one, returns the credentials it generated; an API refusal puts the server's `request_id` here (also printed as `request_id: …` in the text rendering) to quote to support; `lium up` puts the pod it rented in `data.pod_id` / `data.pod_name` on the failures it raises after the rent (`pod_not_ready`, `pod_start_failed`, `gpu_count_mismatch` with `data.pod_removed` true or false under `--strict-gpus`, `gpu_verification_failed`, `jupyter_install_failed`) and on an API error (`server_error`, `rate_limited`, …) or an API that stops answering (`api_timeout`: the transport error `Lium.ps()` and `schedule_termination` re-raise once their retries run out, `install_jupyter` on the first lost connection) during the wait, the `--ttl` retry or the Jupyter install, because that pod exists and bills; a lost connection on the `--strict-gpus` removal is `gpu_count_mismatch` with `data.pod_removed` false; when `--volume new:…` created a volume, `lium up` puts it in `data.volume_id` (the API id) and `data.volume_huid` (what `--volume id:<HUID>` takes) on `timeout_before_rent` and on the failures at the rent itself (`api_timeout`, `rent_rejected`, and an API error such as `server_error`), because the volume exists and is kept.
+- `data` (optional) carries anything the caller must not lose along with the failure — `lium signup --json`, for one, returns the credentials it generated; an API refusal puts the server's `request_id` here (also printed as `request_id: …` in the text rendering) to quote to support; `lium up` puts the pod it rented in `data.pod_id` / `data.pod_name` on the failures it raises after the rent (`pod_not_ready`, `pod_start_failed`, `gpu_count_mismatch` with `data.pod_removed` true or false under `--strict-gpus`, `gpu_verification_failed`, `jupyter_install_failed`, `ssh_connection_failed` with `data.ssh_port_answered` / `data.ssh_wait`, `ssh_wait_interrupted`) and on an API error (`server_error`, `rate_limited`, …) or an API that stops answering (`api_timeout`: the transport error `Lium.ps()` and `schedule_termination` re-raise once their retries run out, `install_jupyter` on the first lost connection) during the wait, the `--ttl` retry or the Jupyter install, because that pod exists and bills; a lost connection on the `--strict-gpus` removal is `gpu_count_mismatch` with `data.pod_removed` false; when `--volume new:…` created a volume, `lium up` puts it in `data.volume_id` (the API id) and `data.volume_huid` (what `--volume id:<HUID>` takes) on `timeout_before_rent` and on the failures at the rent itself (`api_timeout`, `rent_rejected`, and an API error such as `server_error`), because the volume exists and is kept.
 
 The envelope goes to **stderr**, stdout is left empty, and the process exits
 with `exit_code`. On success stdout carries the result JSON. Read both streams;
 do not `2>/dev/null`.
+
+Under `--wait` (`topup link`, `topup create`, `topup card`), stderr may first
+carry the progress line (`"event": "handoff"`, `"invoice_created"` or
+`"charged"`, once the page, invoice or charge exists); the envelope is always
+the **last line** of stderr. Parse the last line, not the whole stream. After
+a card charge that timed out (`credit_not_seen`, exit 6, `data.charged: true`)
+the card was charged: do not run the charge again, keep waiting with
+`lium topup wait --above <data.balance_before>`. A repeat of `topup card` must
+carry that line's `data.idempotency_key` and the same amount
+(`data.amount_usd`) within 24 h; the same key with a different amount is a new
+charge.
 
 `lium up --json` acts before it answers, so its progress lines (the node
 picked, the rent, the wait, the price prompt) go to stderr and stdout holds
@@ -108,7 +119,9 @@ Codes raised by the shared error handler (any command can produce them) when the
 | `server_error` | 3 | The API returned 5xx. | Retry; `LIUM_DEBUG=1` prints the traceback on stderr. |
 | `lium_error` | 3 | Any other API failure. | Retry; `LIUM_DEBUG=1` prints the traceback on stderr. |
 | `ssh_unavailable` | 4 | The pod has no SSH endpoint yet. | Wait for `lium ps` to show it RUNNING with an SSH command. |
-| `ssh_connection_failed` | 4 | ssh could not connect to a RUNNING pod. | Check `lium config get ssh.key_path` and `lium ssh-keys`. |
+| `ssh_connection_failed` | 4 | ssh could not connect to a RUNNING pod (`lium up`). Before the session `up` waits up to 60 s for the pod's SSH port to send an SSH banner: `data.ssh_port_answered` is `true` when it did, `false` when it never did (then ssh was tried once with `ConnectTimeout=15`), and absent when the wait was skipped because `ssh -G` shows a ProxyJump, ProxyCommand or other HostName (`data.ssh_wait.skipped` says which). When the wait ran, `data.ssh_wait` carries `host`, `port`, `attempts`, `wait_seconds` and, after a failed wait, `last_problem`; a skipped wait carries only `skipped`. The pod is left running. | Port answered: check `lium config get ssh.key_path` and `lium ssh-keys`. Port never answered: retry `lium ssh <huid>`, or `lium rm <huid>` and rent another node. |
+| `ssh_failed` | 4 | `lium ssh`: ssh itself failed (exit 255). After the banner wait, `data` carries `pod_id`, `pod_name` and `ssh_wait`, plus `ssh_port_answered` as for `ssh_connection_failed`. `lium ssh` skips the wait for the same ssh config routes and for a pod whose later of `created_at` / `updated_at` is more than 10 min old (`ssh_wait.skipped`). `lium up`: the ssh binary could not be run (no `data`). | Check the pod is RUNNING in `lium ps`, and `lium config get ssh.key_path` / `lium ssh-keys`. If `data.ssh_port_answered` is `false`, retry `lium ssh <huid>`, or `lium rm <huid>` and rent another node. |
+| `ssh_wait_interrupted` | 1 | `lium up`: Ctrl-C while waiting for the pod's SSH banner. The pod is RUNNING, billing and named in `data.pod_id` / `data.pod_name`. | `lium ssh <huid>` to connect, or `lium rm <huid>`. |
 | `copy_failed` | 1 | `lium cp`: the copy failed on a pod — rsync missing on either side, the one-off transfer key could not be authorised, or rsync exited non-zero; the message carries the pod's stderr. | Both pods need rsync (`apt-get install -y rsync`) and the destination needs `flock` (util-linux); fix what the message names and re-run. |
 | `ssh_host_key_unknown` | 4 | `lium cp`: the destination pod's host key was never pinned under `~/.lium/known_hosts/`, so the source pod cannot verify it; nothing was copied. | Connect to the destination once with `lium ssh <huid>` (pins its key), or set `LIUM_SSH_INSECURE=1` to skip host key checks. |
 | `ssh_host_key_changed` | 4 | The pod presented an ssh host key that differs from the one pinned under `~/.lium/known_hosts/` (`lium exec` on one pod; SDK callers of `Lium.exec`, `scp`, `download`). | Not a retry: if the pod was rebooted or re-templated and the new key is trusted, delete the file the message names and reconnect. |
@@ -117,9 +130,11 @@ Codes raised by the shared error handler (any command can produce them) when the
 Commands add their own codes for the failures only they can have — for example
 `up` raises `node_selection_failed`, `template_failed`, `jupyter_install_failed`,
 `unreadable_dockerfile`; `exec` raises `unreadable_script`; `rm` raises
-`removal_failed`; `fund` raises `transfer_failed`; `topup card` (not released yet) passes on the platform's own
-`CARD_AUTHENTICATION_REQUIRED`, `CARD_DECLINED`, `NO_SAVED_CARD` and
-`NO_DEFAULT_CARD` (3: the
+`removal_failed`; `fund` raises `transfer_failed`, `netuid_not_accepted` (2: `--netuid` names a subnet whose alpha
+Lium does not accept right now; `data` carries `netuid` and the `accepted` list) and `netuid_needs_alpha` (2: `--netuid`
+without `--alpha`); `topup link`, `topup create`, `topup card` and `topup wait` with `--wait` raise `balance_unreadable` (3: the balance could not be read before the payment, so nothing was created or charged) and `credit_not_seen` (the balance did not rise in time; `data.charged` says whether money already left: 3 with `charged: null` (not known: a payment may be made and its credit on the way) after a payment page, an invoice or `topup wait` — keep waiting with `lium topup wait --above <data.balance_before>`; 6 with `charged: true` after `topup card` — the card was charged, do not run the charge again except with `data.idempotency_key` and the same amount within 24 h); `topup card` (not released yet) passes on the platform's own
+`CARD_AUTHENTICATION_REQUIRED`, `CARD_DECLINED`, `NO_SAVED_CARD`,
+`NO_DEFAULT_CARD` and `WALLET_NOT_SUPPORTED` (a saved Link, Apple Pay or Google Pay wallet) (3: the
 API refused the charge and the balance did not move; `data` carries `dashboard_url`, the bank's
 `decline_code` and the `payment_intent_id`) and raises `charge_outcome_unknown` (6: a timeout or
 5xx after the charge was posted — it may have gone through; the message says to check `lium
@@ -132,7 +147,9 @@ answer, `status: processing`, the key and the amount included, and a repeat with
 same amount within 24 h shows the charge's
 status without making a second one); `init` raises `api_unreachable` (3, the
 key passed with `--api-key` was not checked) and `empty_api_key` (2), and its `invalid_api_key` hint says
-nothing was saved. They follow the same envelope
+nothing was saved; `init` also raises `saved_key_rejected` (6: the saved key was rejected and no terminal
+can finish a browser login; the key is left as it was, and the hint names `lium init --api-key <key>` and
+`lium init --force --no-browser` then `lium init --session <ID>`). They follow the same envelope
 and use the exit code of their family from the table above. Where re-running
 the command would not be safe the hint says so: `jupyter_install_failed` from
 `up` points at `lium update <pod> --jupyter` (the pod exists and bills), and
@@ -148,10 +165,11 @@ the detail the hints promise.
 ```bash
 set -o pipefail
 if ! out=$(LIUM_OUTPUT=json lium ps --format json 2>err.json); then
-  code=$(jq -r .error.code err.json)
-  hint=$(jq -r .error.hint err.json)
+  err=$(tail -n 1 err.json)   # the envelope is the last line of stderr
+  code=$(jq -r .error.code <<<"$err")
+  hint=$(jq -r .error.hint <<<"$err")
   echo "lium failed: $code — $hint" >&2
-  exit $(jq -r .error.exit_code err.json)
+  exit $(jq -r .error.exit_code <<<"$err")
 fi
 echo "$out" | jq '.[0].huid'
 ```
@@ -164,7 +182,7 @@ proc = subprocess.run(
     capture_output=True, text=True, env={**os.environ, "LIUM_OUTPUT": "json"},
 )
 if proc.returncode != 0:
-    error = json.loads(proc.stderr)["error"]
+    error = json.loads(proc.stderr.strip().splitlines()[-1])["error"]   # the envelope is the last line
     raise RuntimeError(f"{error['code']}: {error['message']} ({error['hint']})")
 pods = json.loads(proc.stdout)
 ```
