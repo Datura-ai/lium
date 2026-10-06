@@ -75,7 +75,10 @@ class ResolveExecutorAction:
                 # server's hint and request_id ride along in data (DAH-3057); the command lifts
                 # the hint out into the failure's own.
                 data = {**(_api_error_data(exc) or {}), **({"hint": exc.hint} if exc.hint else {})}
-                return ActionResult(ok=False, data=data, error=str(exc))
+                error = str(exc)
+                if gpu:
+                    error += f". Ask providers for it: lium request {gpu}" + (f" -n {count}" if count else "")
+                return ActionResult(ok=False, data=data, error=error)
             return ActionResult(
                 ok=True,
                 data={

@@ -87,6 +87,7 @@ def test_no_match_on_the_spec_path_is_a_selection_failure_not_an_api_error():
 
     assert not result.ok
     assert "no_executor_matches_spec" in result.error
+    assert result.error.endswith("Ask providers for it: lium request RTX4090 -n 8")
 
 
 def test_the_servers_hint_and_request_id_ride_along_with_a_spec_refusal():
