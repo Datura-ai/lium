@@ -123,7 +123,10 @@ class ResolveExecutorAction:
                 if ports:
                     filters.append(f"min ports={ports}")
                 filter_desc = ', '.join(filters) if filters else "specified filters"
-                return ActionResult(ok=False, data={}, error=f"No nodes available with {filter_desc}")
+                error = f"No nodes available with {filter_desc}"
+                if gpu:
+                    error += f". Ask providers for it: lium request {gpu}" + (f" -n {count}" if count else "")
+                return ActionResult(ok=False, data={}, error=error)
 
             from lium.cli.ls.command import ls_store_executor
             from lium.cli.ls.display import sort_executors
