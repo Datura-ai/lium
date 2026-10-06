@@ -3219,6 +3219,10 @@ class Lium:
     # DAH-3002: the backend marks a cached-template pod RUNNING at p50 22.5 s after the rent
     # (7 d to 6 Sep 2026); polled every 10 s the caller learnt it 0–10 s late. Poll every
     # 2 s while a normal start is still plausible, then fall back to the old 10 s.
+    # A 2 s poll still reports RUNNING 1 s late on average; cached pods are RUNNING at p50 16 s /
+    # p90 31 s (6 Oct 2026), so the first 40 s poll every second.
+    FIRST_POLL_SECONDS = 1
+    FIRST_POLL_WINDOW_SECONDS = 40
     FAST_POLL_SECONDS = 2
     FAST_POLL_WINDOW_SECONDS = 90
     SLOW_POLL_SECONDS = 10
@@ -3228,11 +3232,14 @@ class Lium:
         """Seconds to sleep between two ``wait_ready`` polls.
 
         A caller-given ``poll_interval`` is used as-is; ``None`` selects the adaptive
-        schedule (:attr:`FAST_POLL_SECONDS` for the first :attr:`FAST_POLL_WINDOW_SECONDS`
-        seconds, :attr:`SLOW_POLL_SECONDS` after that).
+        schedule (:attr:`FIRST_POLL_SECONDS` for the first :attr:`FIRST_POLL_WINDOW_SECONDS`
+        seconds, :attr:`FAST_POLL_SECONDS` until :attr:`FAST_POLL_WINDOW_SECONDS`,
+        :attr:`SLOW_POLL_SECONDS` after that).
         """
         if poll_interval is not None:
             return poll_interval
+        if elapsed < cls.FIRST_POLL_WINDOW_SECONDS:
+            return cls.FIRST_POLL_SECONDS
         return cls.FAST_POLL_SECONDS if elapsed < cls.FAST_POLL_WINDOW_SECONDS else cls.SLOW_POLL_SECONDS
 
     def pod_events(self, pod_id: str) -> List[Dict[str, Any]]:
@@ -3295,8 +3302,9 @@ class Lium:
             timeout: Maximum number of seconds to wait; ``None`` waits until the
                 pod is ready or fails.
             poll_interval: Fixed interval between successive ``ps`` calls; ``None``
-                (default) polls every :attr:`FAST_POLL_SECONDS` for the first
-                :attr:`FAST_POLL_WINDOW_SECONDS` seconds, then every
+                (default) polls every :attr:`FIRST_POLL_SECONDS` for the first
+                :attr:`FIRST_POLL_WINDOW_SECONDS` seconds, every :attr:`FAST_POLL_SECONDS`
+                until :attr:`FAST_POLL_WINDOW_SECONDS`, then every
                 :attr:`SLOW_POLL_SECONDS` — see :meth:`poll_delay`.
             on_poll: Called after every poll with the pod as last listed (or
                 ``None``), its status (``"missing"`` when not listed) and the
