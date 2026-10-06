@@ -11,9 +11,10 @@ the renter-distributed CLI runtime.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from lium.provider.errors import PORTS_INVALID, ProviderError
 
@@ -105,15 +106,51 @@ class SetMinGpuCountForRentalPayload(BaseModel):
     min_gpu_count_for_rental: int = Field(ge=1, le=64)
 
 
+NOTICE_PERIOD_MAX_MINUTES = 60
+
+
 class NoticePeriodPayload(BaseModel):
     """Payload for ``POST /executors/{id}/notice-period``.
 
-    The portal accepts an empty body today; we forbid extras so a future
-    portal change requires an SDK model bump rather than silently honouring
-    smuggled keys from a caller dict.
+    ``starting_at`` is an ISO 8601 time with a UTC offset. A maintenance
+    notice carries ``period_in_minute`` (1-60); a permanent removal carries
+    ``permanent_removal=True`` and no period. The portal wants the start at
+    least 24 hours ahead for maintenance and 48 hours ahead for a permanent
+    removal, and answers 400 otherwise. Extras are forbidden so a portal
+    field change needs an SDK model bump.
     """
 
     model_config = {"extra": "forbid"}
+
+    starting_at: str
+    period_in_minute: int | None = Field(default=None, ge=1, le=NOTICE_PERIOD_MAX_MINUTES)
+    reason: str | None = Field(default=None, max_length=500)
+    permanent_removal: bool = False
+
+    @field_validator("starting_at")
+    @classmethod
+    def _starting_at_is_iso_with_offset(cls, v: str) -> str:
+        text = v.strip()
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00") if text.endswith("Z") else text)
+        except ValueError as e:
+            raise ValueError(
+                f"starting_at must be an ISO 8601 time, e.g. 2026-10-01T09:00:00+00:00 (got {v!r})"
+            ) from e
+        if parsed.tzinfo is None:
+            raise ValueError(f"starting_at needs a UTC offset, e.g. {text}+00:00")
+        return parsed.isoformat()
+
+    @model_validator(mode="after")
+    def _period_set_only_for_maintenance(self) -> NoticePeriodPayload:
+        if self.permanent_removal and self.period_in_minute is not None:
+            raise ValueError("a permanent removal takes no period_in_minute")
+        if not self.permanent_removal and self.period_in_minute is None:
+            raise ValueError(
+                f"a maintenance notice needs period_in_minute (1-{NOTICE_PERIOD_MAX_MINUTES}); "
+                "set permanent_removal for a removal"
+            )
+        return self
 
 
 class NotifyMachineAddedPayload(BaseModel):
