@@ -34,7 +34,7 @@ jobs:
       with:
         fetch-depth: 0   # hatch-vcs: the version is git describe against the tags
 
-    - uses: astral-sh/setup-uv@v5
+    - uses: astral-sh/setup-uv@v7
       with:
         python-version: ${{ matrix.python-version }}
         enable-cache: true
@@ -153,7 +153,7 @@ jobs:
       with:
         fetch-depth: 0   # hatch-vcs: the version is git describe against the tags
 
-    - uses: astral-sh/setup-uv@v6
+    - uses: astral-sh/setup-uv@v7
 
     # the build image has no git (Dockerfile.build): the version hatch-vcs derives from the tags here is handed in
     - name: Bundle version (hatch-vcs, from the tags)
@@ -348,7 +348,7 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: "3.12"
-    - uses: astral-sh/setup-uv@v6
+    - uses: astral-sh/setup-uv@v7
     - name: install this checkout, CLI journey, SDK journey — each under a hard timeout (e2e/run.sh)
       id: live
       timeout-minutes: 60

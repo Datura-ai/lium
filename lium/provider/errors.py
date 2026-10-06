@@ -14,6 +14,7 @@ codes keep the old provider map while scripts migrate:
     5  SSH error
     6  config error
     7  token-cache contention (PORTAL_AUTH_REFRESH_RACE)
+    130  Ctrl-C where exit 0 would read as success (INPUT_INTERRUPTED)
 
 A namespaced snake_case code (``input.confirmation_required``, ``net.unreachable``,
 ``portal.<the portal's detail.code>``) exits by the unified map instead
@@ -64,6 +65,7 @@ CONFIG_MISSING = "CONFIG_MISSING"
 INPUT_REQUIRED = "input.input_required"
 CONFIRMATION_REQUIRED = "input.confirmation_required"
 INTERRUPTED = "input.interrupted"
+INPUT_INTERRUPTED = INTERRUPTED  # same code, kept for callers that import this name
 AUTH_REFRESH_RACE = "auth.refresh_race"
 NOT_SIGNED_IN = "auth.not_signed_in"
 NET_UNREACHABLE = "net.unreachable"
@@ -158,6 +160,7 @@ _HINTS: dict[str, str] = {
     PORTAL_NOT_SUPPORTED: "This portal does not serve that yet; sign in with `lium provider portal login` instead.",
     API_TOKEN_NEEDS_SESSION: "An API token cannot create, list or revoke tokens: unset LIUM_PROVIDER_TOKEN and sign in (hotkey, or `lium provider portal login --email`).",
     API_TOKEN_SCOPE_MISSING: "The token lacks the scope in data.detail.required_scopes; create one with it (`lium provider token create --scope …`).",
+    INPUT_INTERRUPTED: "Interrupted before the command finished; re-run it to carry on.",
 }
 
 
@@ -273,6 +276,7 @@ __all__ = [
     "HOTKEY_NOT_REGISTERED",
     "INPUT_REQUIRED",
     "INSTALLER_PARTIAL_FAIL",
+    "INPUT_INTERRUPTED",
     "INTERRUPTED",
     "NET_UNREACHABLE",
     "NODE_NOT_LISTED",
