@@ -7,7 +7,9 @@ from .rm.command import bk_rm_command
 from .set.command import bk_set_command
 from .now.command import bk_now_command
 from .logs.command import bk_logs_command
+from .restore_logs.command import bk_restore_logs_command
 from .restore.command import bk_restore_command
+from .lifecycle import bk_cancel_command, bk_delete_command, bk_restore_cancel_command
 
 
 @click.group()
@@ -21,6 +23,10 @@ bk_command.add_command(bk_rm_command)
 bk_command.add_command(bk_set_command)
 bk_command.add_command(bk_now_command)
 bk_command.add_command(bk_logs_command)
+bk_command.add_command(bk_restore_logs_command)
 bk_command.add_command(bk_restore_command)
+bk_command.add_command(bk_cancel_command)
+bk_command.add_command(bk_delete_command)
+bk_command.add_command(bk_restore_cancel_command)
 
 __all__ = ["bk_command"]

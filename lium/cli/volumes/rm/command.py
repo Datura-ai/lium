@@ -4,7 +4,14 @@ import click
 
 from lium.sdk import Lium
 from lium.cli import ui
-from lium.cli.utils import handle_errors, ensure_config, get_last_volume_selection
+from lium.cli.utils import (
+    CliFailure,
+    EXIT_CONFIGURATION_ERROR,
+    EXIT_GENERAL_ERROR,
+    handle_errors,
+    ensure_config,
+    get_last_volume_selection,
+)
 from . import validation, parsing
 from .actions import RemoveVolumesAction
 
@@ -20,22 +27,23 @@ def volumes_rm_command(indices: str, yes: bool):
     # Validate
     valid, error = validation.validate(indices)
     if not valid:
-        ui.error(error)
-        return
+        raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
 
     # Get cached volumes
     last_selection = get_last_volume_selection()
     if not last_selection or not last_selection.get('volumes', []):
-        ui.error("No volumes cached. Run 'lium volumes' first.")
-        return
+        raise CliFailure(
+            "no_volumes_cached",
+            "No volumes cached. Run 'lium volumes' first.",
+            EXIT_GENERAL_ERROR,
+        )
 
     volumes_data = last_selection.get('volumes', [])
 
     # Parse
     parsed, error = parsing.parse(indices, volumes_data)
     if error:
-        ui.error(error)
-        return
+        raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
 
     volumes_to_remove = parsed["volumes_to_remove"]
 
@@ -55,4 +63,8 @@ def volumes_rm_command(indices: str, yes: bool):
 
     if not result.ok:
         failed_huids = result.data.get("failed_huids", [])
-        ui.error(f"Failed to remove volumes: {', '.join(failed_huids)}")
+        raise CliFailure(
+            "volume_removal_failed",
+            f"Failed to remove volumes: {', '.join(failed_huids)}",
+            EXIT_GENERAL_ERROR,
+        )

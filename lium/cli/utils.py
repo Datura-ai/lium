@@ -3,18 +3,54 @@ from functools import wraps
 from contextlib import contextmanager
 from typing import List, Dict, Any, Tuple, Optional, Callable, TypeVar
 import json
+import os
+import sys
+import traceback
 from pathlib import Path
+import click
+from lium.cli.interactive import is_interactive, noninteractive_reason
 from lium.cli.settings import config
-from datetime import datetime
+from datetime import datetime, timezone
 from rich.status import Status
-from lium.sdk import LiumError, ExecutorInfo, PodInfo,Lium
+from lium.sdk import (
+    ExecutorInfo,
+    Lium,
+    LiumAuthError,
+    LiumError,
+    LiumBudgetExceededError,
+    LiumHostKeyError,
+    LiumInsufficientBalanceError,
+    LiumScopeError,
+    LiumNotFoundError,
+    LiumPermissionError,
+    LiumRateLimitError,
+    LiumServerError,
+    LiumSessionError,
+    PodInfo,
+)
+from . import telemetry
 from .themed_console import ThemedConsole
 from dataclasses import dataclass
+from rich.markup import escape
 from rich.prompt import Prompt
 
 T = TypeVar("T")
 
 console = ThemedConsole()
+_notice_console = None
+
+
+def notice_console() -> ThemedConsole:
+    """Return the stderr console for startup notices, building it on first use.
+
+    Startup notices print before argument parsing, so they must not pollute the
+    stdout of a command invoked with ``--json``. Built lazily because resolving
+    the theme costs a subprocess on macOS and most commands never print one.
+    """
+    global _notice_console
+    if _notice_console is None:
+        _notice_console = ThemedConsole(stderr=True)
+    return _notice_console
 
 
 # Text formatting helpers
@@ -29,6 +65,21 @@ def mid_ellipsize(s: str, width: int = 28) -> str:
     left = keep // 2
     right = keep - left
     return f"{s[:left]}…{s[-right:]}"
+
+
+def pod_gpu_count(pod: PodInfo) -> Optional[int]:
+    """GPUs to show for a pod: ``PodInfo.gpu_count`` when the API sent one, else the host's.
+
+    ``PodInfo.gpu_count`` is the pod row's own billed count from ``/pods`` (DAH-2877);
+    ``pod.executor`` describes the whole host. ``ps``, ``describe`` and their JSON
+    views read this so a GPU-split rental (1 GPU of a 3×RTX 3090 node) reads
+    ``RTX3090``, not ``3×RTX3090``. ``getattr`` because the CLI tests' pod doubles
+    predate the field.
+    """
+    billed = getattr(pod, "gpu_count", None)
+    if billed:
+        return billed
+    return pod.executor.gpu_count if pod.executor else None
 
 
 def parse_timestamp(timestamp: str) -> Optional[datetime]:
@@ -81,9 +132,12 @@ def _prompt_value(
     cast: Callable[[str], T],
     validate: Callable[[T], bool],
 ) -> T:
-    """Loop: Enter -> default, invalid -> reprompt until valid."""
+    """Loop: Enter -> default, invalid -> reprompt until valid.
+
+    Without a terminal there is no loop: the default is the answer.
+    """
     default_str = str(default_value)
-    if value != default_value:
+    if value != default_value or not is_interactive():
         return value
     while True:
         raw = Prompt.ask(prompt_text, default=default_str)
@@ -136,16 +190,18 @@ class BackupParams:
 
 @contextmanager
 def loading_status(message: str, success_message: str = ""):
-    """Universal context manager to show loading status."""
+    """Universal context manager to show loading status.
+
+    A failure is not reported here. ``handle_errors`` is the one place that
+    renders an error, and a spinner that prints its own line first makes a
+    single failure read as two separate problems.
+    """
     status = Status(f"{console.get_styled(message + '...', 'info')}", console=console)
     status.start()
     try:
         yield
         if success_message:
             console.success(f"✓ {success_message}")
-    except Exception as e:
-        console.error(f"✗ Failed: {e}")
-        raise
     finally:
         status.stop()
 
@@ -242,24 +298,334 @@ def timed_step_status(step: int = 0, total_steps: int = 0, message: str = ""):
         raise
 
 
-def handle_errors(func):
-    """Decorator to handle CLI errors gracefully."""
+# The exit-code taxonomy every command shares. Commands import these rather than
+# spelling the numbers, so this table is the one source of truth and
+# docs/exit-codes.md mirrors it (test_cli_errors.py checks that it does).
+#
+# ``lium provider …`` is the one exception: it keeps its own map in
+# lium/cli/provider/_render.py, where the same numbers carry different meanings
+# (2 auth, 3 portal, 5 ssh, 6 config missing, 7 token-cache contention).
+EXIT_GENERAL_ERROR = 1        # a failure with no better classification
+EXIT_CONFIGURATION_ERROR = 2  # bad arguments, missing or unreadable configuration
+EXIT_API_ERROR = 3            # the API refused or failed the call
+EXIT_SSH_ERROR = 4            # ssh could not connect, or no client is installed
+EXIT_POD_NOT_FOUND = 5        # the named pod does not exist
+EXIT_PERMISSION_DENIED = 6    # the account is not allowed to do this; `init`: saved key rejected, re-login required
+
+OUTPUT_ENV = "LIUM_OUTPUT"    # LIUM_OUTPUT=json: every failure is a JSON envelope
+
+# What to do next, by error code. A failure without a next step leaves an agent
+# (or a person) guessing; a code that has no entry here falls back to the
+# exit-code family below, so no error leaves without one.
+_HINTS_BY_CODE: Dict[str, str] = {
+    "no_api_key": "Set LIUM_API_KEY, or run 'lium init' (headless: 'lium init --api-key <key>', "
+                  "or 'lium init --no-browser'); "
+                  "no account yet? 'lium signup --email you@example.com' creates one and stores its key",
+    "invalid_api_key": "Check the key: 'lium config get api.api_key' shows which one is used; "
+                       "a new one comes from https://lium.io/api-keys",
+    "session_required": "Run 'lium workspaces login' (or set LIUM_SESSION_TOKEN); "
+                        "an API key does not open the session-only commands",
+    "permission_denied": "Check the account with 'lium balance'; an insufficient balance is "
+                         "fixed with 'lium topup' or 'lium fund', a pending verification on https://lium.io",
+    "insufficient_balance": "Add funds with 'lium topup' or 'lium fund', or pick a cheaper node "
+                            "('lium ls --sort price_total')",
+    # a 402 from the rent path: the key's own budget, not the account's balance
+    "budget_exceeded": "This API key is over its budget: 'lium keys show <name>' shows the figures; "
+                       "raise or clear it with 'lium keys budget <name>' (a signed-in session) or use another key",
+    "missing_scope": "This API key lacks the scope the command needs: 'lium keys scopes' explains each one; "
+                     "mint a key that holds it with 'lium keys create <name> --scope <scope>'",
+    "pod_not_found": "Run 'lium ps' to list pods; a name, huid, id or 1-based index is accepted",
+    "not_found": "The resource is gone or the id is wrong; list it again and retry",
+    "rate_limited": "Wait a few seconds and retry; back off if it repeats",
+    "server_error": "Retry; if it persists, re-run with LIUM_DEBUG=1 and report the request",
+    # Raised by the non-interactive guard (lium/cli/ui.py confirm/prompt, DAH-2883).
+    "confirmation_required": "Re-run with --yes",
+    "input_required": "Pass the value as an option instead of answering a prompt",
+    "invalid_arguments": "See 'lium <command> --help' for the accepted options",
+    "ssh_unavailable": "Wait for 'lium ps' to show the pod RUNNING with an SSH command, then retry",
+    "ssh_connection_failed": "Check 'lium config get ssh.key_path' points at the key registered with "
+                             "'lium ssh-keys', and that the pod is RUNNING in 'lium ps'",
+    # not a retry: the message names the pinned file to delete once the new key is trusted
+    "ssh_host_key_changed": "Do not retry blindly; if the pod was rebooted or re-templated and you trust the "
+                            "new key, delete the known_hosts file named in the message and reconnect",
+    "unexpected_error": "Re-run with LIUM_DEBUG=1 for details and report the issue",
+}
+
+_HINTS_BY_EXIT_CODE: Dict[int, str] = {
+    EXIT_GENERAL_ERROR: "Re-run with LIUM_DEBUG=1 for details",
+    EXIT_CONFIGURATION_ERROR: "Check the options and configuration ('lium <command> --help', 'lium config show')",
+    EXIT_API_ERROR: "Retry; if it persists, re-run with LIUM_DEBUG=1 and report the request",
+    EXIT_SSH_ERROR: "Check the pod is RUNNING in 'lium ps' and that 'lium config get ssh.key_path' "
+                    "names a key registered with 'lium ssh-keys'",
+    EXIT_POD_NOT_FOUND: "Run 'lium ps' to list pods; a name, huid, id or 1-based index is accepted",
+    EXIT_PERMISSION_DENIED: "Check the account with 'lium balance'",
+}
+
+
+def default_hint(code: str, exit_code: int = EXIT_GENERAL_ERROR) -> str:
+    """The next step for an error that did not bring its own."""
+    return _HINTS_BY_CODE.get(code) or _HINTS_BY_EXIT_CODE.get(exit_code) or _HINTS_BY_EXIT_CODE[EXIT_GENERAL_ERROR]
+
+
+class CliFailure(Exception):
+    """A command failing for a reason it can name.
+
+    Raised instead of exiting inline so that rendering — JSON envelope for a
+    machine caller, Rich text for a human — and the exit code are decided in one
+    place, ``handle_errors``, rather than at every error site in every command.
+
+    ``hint`` is what to do next. Sites that know a better next step than the
+    generic one for their code pass it; the rest get :func:`default_hint`.
+    """
+
+    def __init__(self, code: str, message: str, exit_code: int = EXIT_GENERAL_ERROR,
+                 data: dict | None = None, hint: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.exit_code = exit_code
+        self.data = data or {}
+        self.hint = hint or default_hint(code, exit_code)
+
+
+def error_envelope(code: str, message: str, exit_code: int = EXIT_GENERAL_ERROR,
+                   data: dict | None = None, hint: str | None = None) -> dict:
+    """The one shape every machine-readable failure has.
+
+    ``{"ok": false, "error": {"code", "message", "hint", "exit_code"}}`` plus
+    ``data`` when the caller has something the reader must not lose.
+    """
+    envelope = {
+        "ok": False,
+        "error": {
+            "code": code,
+            "message": message,
+            "hint": hint or default_hint(code, exit_code),
+            "exit_code": exit_code,
+        },
+    }
+    if data:
+        envelope["data"] = data
+    return envelope
+
+
+def _emit_json_error(code: str, message: str, exit_code: int = EXIT_GENERAL_ERROR,
+                     data: dict | None = None, hint: str | None = None) -> None:
+    """Print a machine-readable error envelope to stderr and exit non-zero.
+
+    Keeps stdout clean for JSON consumers (agents): on success stdout carries
+    the result JSON, on failure stdout is empty, the error JSON goes to stderr,
+    and the process exits with a non-zero status so callers can detect it.
+    ``data`` carries whatever the caller must not lose along with the failure
+    (signup, for one, has to hand back the credentials it generated).
+    """
+    click.echo(json.dumps(error_envelope(code, message, exit_code, data, hint), sort_keys=True), err=True)
+    raise SystemExit(exit_code)
+
+
+def _render_human_error(message: str, hint: str, request_id: str | None = None) -> None:
+    """The text rendering: the error, then the next step underneath it, then the id to
+    quote to support when the API sent one (DAH-3057)."""
+    console.error(escape(message))
+    if hint and hint.lower() not in message.lower():
+        console.dim(escape(hint))
+    if request_id:
+        console.dim(escape(f"request_id: {request_id}"))
+
+
+@contextmanager
+def console_on_stderr():
+    """Every Rich line written inside (spinners, notes, warnings, prompts) goes to stderr.
+
+    A command invoked with ``--json`` promises one JSON document on stdout. ``up``
+    narrates what it does through ``console`` (the pick, the rent, the wait, the price
+    prompt); that narration still has a reader, a person tailing stderr, so under
+    ``--json`` it moves there instead of being dropped. Rich resolves ``sys.stderr`` at
+    write time, so the switch also holds under a test runner that swaps the streams.
+    (``rm --format json`` keeps its few lines off stdout with per-call ``on_stderr``/``quiet``
+    flags instead; it has three, ``up`` has about twenty and eight spinners.)
+    """
+    previous = console.stderr
+    console.stderr = True
+    try:
+        yield
+    finally:
+        console.stderr = previous
+
+
+def narrate_on_stderr_under_json(func):
+    """Decorator: run the command inside :func:`console_on_stderr` when it got ``--json``.
+
+    Sits under ``handle_errors``: the JSON error envelope already goes to stderr on its own.
+    """
     @wraps(func)
     def wrapper(*args, **kwargs):
+        if kwargs.get("json_output"):
+            with console_on_stderr():
+                return func(*args, **kwargs)
+        return func(*args, **kwargs)
+    return wrapper
+
+
+def resolve_output_format(output_format: Optional[str], json_output: bool) -> str:
+    """The format a command should render: ``--json`` is an alias for ``--format json``.
+
+    Commands grew two spellings for the same thing (``describe --json`` versus
+    ``ps --format json``), and a caller who learned one kept trying it on the
+    other. Both are accepted; the ``--format`` value wins only when no alias
+    was given.
+    """
+    if json_output:
+        return "json"
+    return output_format or "table"
+
+
+def debug_enabled() -> bool:
+    """``LIUM_DEBUG=1`` (or true): failures also print their traceback to stderr."""
+    return os.environ.get("LIUM_DEBUG", "").strip().lower() in ("1", "true")
+
+
+def json_output_requested() -> bool:
+    """``LIUM_OUTPUT=json`` asks for machine-readable failures without a per-command flag."""
+    return os.environ.get(OUTPUT_ENV, "").strip().lower() == "json"
+
+
+def _wants_json(kwargs: dict) -> bool:
+    """Whether the command was invoked for a machine reader, under any spelling."""
+    return (
+        bool(kwargs.get("json_output"))
+        or kwargs.get("output_format") == "json"
+        or json_output_requested()
+    )
+
+
+def _classify_sdk_error(error: LiumError) -> tuple[str, int]:
+    """``(code, exit_code)`` for an SDK exception, most specific class first."""
+    if isinstance(error, LiumHostKeyError):
+        # the pod's pinned ssh host key changed (client.py ssh_connection): an ssh failure the
+        # user must look at, not an API call to retry — exit 4 like the other ssh errors
+        return "ssh_host_key_changed", EXIT_SSH_ERROR
+    if isinstance(error, LiumInsufficientBalanceError):
+        return "insufficient_balance", EXIT_PERMISSION_DENIED
+    if isinstance(error, LiumBudgetExceededError):
+        # 402: the key's daily/total budget refused a new rental — the same family as a balance refusal
+        return "budget_exceeded", EXIT_PERMISSION_DENIED
+    if isinstance(error, LiumScopeError):
+        return "missing_scope", EXIT_PERMISSION_DENIED
+    if isinstance(error, LiumPermissionError):
+        return "permission_denied", EXIT_PERMISSION_DENIED
+    if isinstance(error, LiumSessionError):
+        # a missing/refused browser session (workspaces, keys): same exit 3 as any other
+        # refused call, but the hint must name the login, not an API key
+        return "session_required", EXIT_API_ERROR
+    if isinstance(error, LiumAuthError):
+        # Exit 3, as before: a 401 is the API refusing the call, and callers
+        # (the live e2e suite among them) pin that number.
+        return "invalid_api_key", EXIT_API_ERROR
+    if isinstance(error, LiumNotFoundError):
+        return "not_found", EXIT_API_ERROR
+    if isinstance(error, LiumRateLimitError):
+        return "rate_limited", EXIT_API_ERROR
+    if isinstance(error, LiumServerError):
+        return "server_error", EXIT_API_ERROR
+    return "lium_error", EXIT_API_ERROR
+
+
+def sdk_error_failure(error: LiumError, data: dict | None = None, *, note: str = "") -> CliFailure:
+    """The failure ``handle_errors`` raises for an SDK error, with ``data`` attached.
+
+    For a command that caught the error to finish its report first (``whoami``) and must still fail
+    with the same code, exit status and hint as every other command — plus the report as ``data``.
+    Like ``handle_errors``, it prefers the API's own code, hint and request_id when the
+    server sent them (DAH-3057).
+
+    ``note`` is appended to the message: what the caller knows and the error does not (``up``: that
+    the volume it created is kept), so the text reader learns it too, not only the ``data`` reader.
+    """
+    code, exit_code = _classify_sdk_error(error)
+    merged = {**(_api_error_data(error) or {}), **(data or {})} or None
+    message = str(error)
+    if note and not message.endswith((".", "!", "?")):
+        message += "."  # API messages carry no full stop; the note is a sentence of its own
+    return CliFailure(error.code or code, message + note, exit_code, data=merged, hint=error.hint)
+
+
+def _api_error_data(e: LiumError) -> dict | None:
+    """The server's request_id, for the JSON envelope's ``data`` (the hint has its own
+    field in the envelope; see :func:`error_envelope`)."""
+    data: dict = {"request_id": e.request_id} if e.request_id else {}
+    if isinstance(e, LiumBudgetExceededError):
+        # the figures a script acts on (which budget, how much of it) — None when the server sent none
+        data.update({"window": e.window, "budget_usd": e.budget_usd, "spent_usd": e.spent_usd})
+        if e.api_key_id:
+            data["api_key_id"] = e.api_key_id
+    if isinstance(e, LiumScopeError) and e.scope:
+        data["scope"] = e.scope
+    return data or None
+
+
+def handle_errors(func):
+    """Decorator to handle CLI errors gracefully.
+
+    Messages are escaped before rendering: they carry things like
+    ``lium.io[provider]``, and Rich reads square brackets as style tags.
+
+    Every handled error exits non-zero. A caller chaining commands with ``&&``
+    can only see failure through the exit code, so reporting an error and then
+    exiting 0 tells it the command worked.
+
+    When the wrapped command was invoked with ``--json`` (a ``json_output``
+    flag), ``--format json`` (an ``output_format`` option), or under
+    ``LIUM_OUTPUT=json``, errors are rendered as a JSON envelope on stderr, so
+    machine consumers get parseable output instead of Rich-formatted text on
+    stdout. Otherwise the human-readable rendering is preserved, with the hint
+    on its own line under the error.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        json_output = _wants_json(kwargs)
+
+        def fail(code: str, message: str, exit_code: int, data: dict | None = None,
+                 hint: str | None = None, request_id: str | None = None, prefix: str = "") -> None:
+            # ``prefix`` ("Error: ") is for the human line only; the JSON
+            # message stays the bare text a program can match on.
+            if debug_enabled():
+                # The hints say "re-run with LIUM_DEBUG=1 for details": this is
+                # the detail. Always stderr, so JSON on stdout stays clean.
+                traceback.print_exc(file=sys.stderr)
+            if json_output:
+                _emit_json_error(code, message, exit_code, data, hint)
+            _render_human_error(prefix + message, hint or default_hint(code, exit_code), request_id)
+            raise SystemExit(exit_code)
+
         try:
             return func(*args, **kwargs)
+        except (click.ClickException, click.Abort):
+            raise
+        except CliFailure as e:
+            # a command that wrapped an API refusal (lium up → rent_rejected) hands the server's
+            # request_id over in ``data`` and its hint as the failure's own (DAH-3057)
+            fail(e.code, e.message, e.exit_code, e.data, e.hint, request_id=(e.data or {}).get("request_id"))
         except ValueError as e:
-            # Check if it's the API key error from SDK
             if "No API key found" in str(e):
-                console.error("No API key configured")
-                console.warning("Please run 'lium init' to set up your API key")
-                console.dim("Or set LIUM_API_KEY environment variable")
-            else:
-                console.error(f"Error: {e}")
+                fail("no_api_key", str(e), EXIT_CONFIGURATION_ERROR)
+            fail("value_error", str(e), EXIT_CONFIGURATION_ERROR, prefix="Error: ")
         except LiumError as e:
-            console.error(f"Error: {e}")
+            code, exit_code = _classify_sdk_error(e)
+            # the API's own code, hint and request_id when it sent them (DAH-3057); the
+            # class-derived code and the default hint otherwise — a server code this table does not
+            # know (API_KEY_BUDGET_EXCEEDED) still gets its class's hint, not the exit family's
+            hint = e.hint or _HINTS_BY_CODE.get(e.code or "") or default_hint(code, exit_code)
+            fail(e.code or code, str(e), exit_code, _api_error_data(e), hint,
+                 request_id=e.request_id, prefix="Error: ")
         except Exception as e:
-            console.error(f"Unexpected error: {e}")
+            # a bug, not a usage or API error: the only branch crash reporting sees (DAH-2057)
+            reported = telemetry.report(e)
+            hint = default_hint("unexpected_error", EXIT_GENERAL_ERROR)
+            if not reported and not json_output:
+                # the nudge is for a person; the JSON envelope keeps the generic next step
+                hint = f"{hint}\n{telemetry.OPT_IN_HINT}"
+            fail("unexpected_error", str(e), EXIT_GENERAL_ERROR, prefix="Unexpected error: ", hint=hint)
     return wrapper
 
 
@@ -274,114 +640,140 @@ def extract_executor_metrics(executor: ExecutorInfo) -> Dict[str, float]:
     # System metrics
     ram_data = specs.get("ram", {})
     disk_data = specs.get("hard_disk", {})
-    network = specs.get("network", {})
-    
+
     # Location preference (US gets a bonus)
     location = executor.location or {}
     country = location.get("country", "").upper()
     country_code = location.get("country_code", "").upper()
     is_us = country == "UNITED STATES" or country_code == "US"
-    
+
+    net_up = executor.upload_speed
+    net_down = executor.download_speed
+
     return {
-        'price_per_gpu_hour': executor.price_per_gpu_hour or float('inf'),
-        'vram_gb': (gpu_details.get("capacity", 0) / 1024) if gpu_details else 0,  # MiB to GB
-        'ram_gb': (ram_data.get("total", 0) / (1024 * 1024)) if ram_data else 0,  # KB to GB
-        'disk_gb': (disk_data.get("total", 0) / (1024 * 1024)) if disk_data else 0,  # KB to GB
-        'pcie_speed': gpu_details.get("pcie_speed", 0),
-        'memory_bandwidth': gpu_details.get("memory_speed", 0),
-        'tflops': gpu_details.get("graphics_speed", 0),
-        'net_up': network.get("upload_speed") or 0,
-        'net_down': network.get("download_speed") or 0,
+        'price_per_gpu': executor.price_per_gpu or float('inf'),
+        'vram_gb': ((gpu_details.get("capacity") or 0) / 1024) if gpu_details else 0,  # MiB to GB
+        'ram_gb': ((ram_data.get("total") or 0) / (1024 * 1024)) if ram_data else 0,  # KB to GB
+        'disk_gb': ((disk_data.get("total") or 0) / (1024 * 1024)) if disk_data else 0,  # KB to GB
+        'pcie_speed': gpu_details.get("pcie_speed") or 0,
+        'memory_bandwidth': gpu_details.get("memory_speed") or 0,
+        'tflops': gpu_details.get("graphics_speed") or 0,
+        'net_up': net_up,
+        'net_down': net_down,
         'location_score': 1.0 if is_us else 0.0,  # US locations get higher score
-        'total_bandwidth': (network.get("upload_speed") or 0) + (network.get("download_speed") or 0),  # Combined bandwidth
+        'total_bandwidth': net_up + net_down,  # Combined bandwidth
     }
 
 
+_MINIMIZE_METRICS = frozenset({'price_per_gpu'})
+_SECONDARY_METRICS = ('total_bandwidth', 'location_score', 'net_up')
+# Metrics excluded from the equal-price residual sweep: already handled above, or
+# minimize-metrics whose direction the residual loop does not account for.
+_EQUAL_PRICE_SKIP = frozenset({'net_down'} | set(_SECONDARY_METRICS) | _MINIMIZE_METRICS)
+
+
 def dominates(metrics_a: Dict[str, float], metrics_b: Dict[str, float]) -> bool:
-    """Check if executor A dominates executor B in Pareto sense."""
-    # Metrics to minimize (lower is better)
-    minimize_metrics = {'price_per_gpu_hour'}
-    
-    # Priority metrics when prices are equal
-    priority_metrics = ['total_bandwidth', 'location_score', 'net_down', 'net_up']
-    
-    price_a = metrics_a.get('price_per_gpu_hour', float('inf'))
-    price_b = metrics_b.get('price_per_gpu_hour', float('inf'))
-    
-    # Special handling when prices are equal (common with GPU filtering)
+    """Check if executor A dominates executor B in Pareto sense.
+
+    Download speed is always evaluated first: if A is >10% faster than B, A
+    dominates immediately. If B is >10% faster, A cannot dominate. Only when
+    speeds are within 10% of each other does the rest of the comparison run.
+    """
+    # --- Download speed: unconditional first priority ---
+    net_down_a = metrics_a.get('net_down') or 0
+    net_down_b = metrics_b.get('net_down') or 0
+    dl_threshold = 0.1 * max(net_down_a, net_down_b)
+
+    if net_down_a > net_down_b + dl_threshold:
+        return True   # A is significantly faster — A dominates
+    if net_down_b > net_down_a + dl_threshold:
+        return False  # B is significantly faster — A cannot dominate
+
+    # --- Download speeds are similar; fall back to price-based logic ---
+    price_a_value = metrics_a.get('price_per_gpu')
+    price_b_value = metrics_b.get('price_per_gpu')
+    price_a = price_a_value if price_a_value is not None else float('inf')
+    price_b = price_b_value if price_b_value is not None else float('inf')
+
     if abs(price_a - price_b) < 0.01:  # Prices are effectively equal
-        # Compare based on priority metrics
-        for metric in priority_metrics:
+        # Check secondary metrics in priority order; both A and B must be
+        # compared across ALL of them before declaring domination.
+        at_least_one_better = False
+        for metric in _SECONDARY_METRICS:
             val_a = metrics_a.get(metric, 0) or 0
             val_b = metrics_b.get(metric, 0) or 0
-            
-            # Significant difference threshold (10% for bandwidth, any diff for location)
             threshold = 0.1 * max(val_a, val_b) if metric != 'location_score' else 0
-            
+
             if val_a > val_b + threshold:
-                # A is significantly better in this priority metric
-                return True
+                at_least_one_better = True
             elif val_b > val_a + threshold:
-                # B is significantly better in this priority metric
                 return False
-        
-        # If all priority metrics are similar, compare all metrics
-        at_least_one_better = False
+
+        if at_least_one_better:
+            return True
+
+        # All secondary metrics similar — compare remaining maximize-metrics
         for metric in metrics_a:
-            if metric in priority_metrics:
-                continue  # Already checked
-            
+            if metric in _EQUAL_PRICE_SKIP:
+                continue
             val_a = metrics_a[metric] or 0
             val_b = metrics_b.get(metric, 0) or 0
-            
             if val_a > val_b:
                 at_least_one_better = True
             elif val_a < val_b:
                 return False
-        
         return at_least_one_better
-    
-    # Standard Pareto domination when prices differ
+
+    # Standard Pareto domination when prices differ.
+    # Use a 0.1% relative tolerance to absorb floating-point noise from unit
+    # conversions (e.g. KB→GB for RAM), so a 7 MB difference on a 1.5 TB node
+    # doesn't block a genuine domination.
     at_least_one_better = False
-    
     for metric in metrics_a:
+        if metric == 'net_down':
+            continue  # already decided above
         val_a = metrics_a[metric] or 0
         val_b = metrics_b.get(metric, 0) or 0
+        eps = 0.001 * max(abs(val_a), abs(val_b))
 
-        if metric in minimize_metrics:
-            # For minimize metrics, A is better if it's lower
-            if val_a < val_b:
+        if metric in _MINIMIZE_METRICS:
+            if val_a < val_b - eps:
                 at_least_one_better = True
-            elif val_a > val_b:
-                return False  # B is better in this metric
+            elif val_a > val_b + eps:
+                return False
         else:
-            # For maximize metrics, A is better if it's higher
-            if val_a > val_b:
+            if val_a > val_b + eps:
                 at_least_one_better = True
-            elif val_a < val_b:
-                return False  # B is better in this metric
-    
+            elif val_a < val_b - eps:
+                return False
+
     return at_least_one_better
+
+
+MIN_DOWNLOAD_MBPS = 100.0  # mirrors MIN_VERIFYX_EMA_DOWNLOAD_SPEED_MBPS in the validator
 
 
 def calculate_pareto_frontier(executors: List[ExecutorInfo]) -> List[bool]:
     """Calculate which executors are on the Pareto frontier.
-    
+
     Returns a list of booleans indicating if each executor is Pareto-optimal.
+    Executors below MIN_DOWNLOAD_MBPS are disqualified before domination checks.
     """
-    # Extract metrics for all executors
     metrics_list = [extract_executor_metrics(e) for e in executors]
-    
-    # Mark each executor as Pareto-optimal or not
+
     is_pareto = []
     for i, metrics_i in enumerate(metrics_list):
+        if (metrics_i.get('net_down') or 0) < MIN_DOWNLOAD_MBPS:
+            is_pareto.append(False)
+            continue
+
         dominated = False
         for j, metrics_j in enumerate(metrics_list):
             if i != j and dominates(metrics_j, metrics_i):
                 dominated = True
                 break
         is_pareto.append(not dominated)
-    
+
     return is_pareto
 
 
@@ -400,14 +792,8 @@ def store_executor_selection(executors: List[ExecutorInfo]) -> None:
             'huid': executor.huid,
             'gpu_type': executor.gpu_type,
             'gpu_count': executor.gpu_count,
-            'available_gpu_count': executor.available_gpu_count,
-            'price_per_gpu_hour': executor.price_per_gpu_hour,
-            'min_gpu_count_for_rental': executor.min_gpu_count_for_rental,
-            'location': executor.location.get('country', 'Unknown') if executor.location else 'Unknown',
-            'status': executor.status,
-            'docker_in_docker': executor.docker_in_docker,
-            'ip': executor.ip,
-            'available_port_count': executor.available_port_count,
+            'price_per_hour': executor.price_per_hour,
+            'location': executor.location.get('country', 'Unknown') if executor.location else 'Unknown'
         })
     
     # Store in config directory
@@ -563,7 +949,7 @@ def resolve_executor_indices(indices: List[str]) -> Tuple[List[str], Optional[st
     
     executors = last_selection.get('executors', [])
     if not executors:
-        return [], "No executors in last selection."
+        return [], "No nodes in last selection."
     
     resolved_ids = []
     failed_resolutions = []
@@ -586,45 +972,229 @@ def resolve_executor_indices(indices: List[str]) -> Tuple[List[str], Optional[st
     return resolved_ids, error_msg
 
 
-def parse_targets(targets: str, all_pods: List[PodInfo]) -> List[PodInfo]:
-    """Parse target specification and return matching pods."""
+# Pod indexes ("lium rm 1") are the row numbers of the last `lium ps` *in this
+# shell*. The pod list is account-wide and changes as pods come and go — on a
+# shared account another caller's pod can move into row 1 between the `ps` and
+# the `rm` — and `GET /pods` has no fixed order, so a row number is never taken
+# at face value: it is translated to the pod id `ps` showed on that row, and
+# that pod must still be listed. The snapshot is keyed by the parent process
+# (the shell or agent that ran `ps`), so another agent's `lium ps` in the same
+# home directory does not redefine this shell's numbers.
+POD_INDEX_TTL_SECONDS = 600
+POD_INDEX_ENV = "LIUM_NO_POD_INDEX"
+_PS_SNAPSHOT_PREFIX = "last_ps."
+_PS_SNAPSHOT_SUFFIX = ".json"
+
+
+def pod_indexes_allowed() -> bool:
+    """``LIUM_NO_POD_INDEX=1`` makes every command treat numeric targets as names only."""
+    return os.environ.get(POD_INDEX_ENV, "").strip().lower() not in ("1", "true", "yes", "on")
+
+
+def pod_index_session() -> str:
+    """The key the `lium ps` snapshot is filed under: the parent process (shell, agent) of this run."""
+    return str(os.getppid())
+
+
+def pod_snapshot_path(session: Optional[str] = None) -> Path:
+    from lium.cli.settings import config
+
+    return config.config_dir / f"{_PS_SNAPSHOT_PREFIX}{session or pod_index_session()}{_PS_SNAPSHOT_SUFFIX}"
+
+
+def _prune_pod_snapshots(keep: Path, now: datetime) -> None:
+    """Drop other shells' snapshots once they are past the TTL; they can never be used again."""
+    try:
+        for path in keep.parent.glob(f"{_PS_SNAPSHOT_PREFIX}*{_PS_SNAPSHOT_SUFFIX}"):
+            if path == keep:
+                continue
+            if now.timestamp() - path.stat().st_mtime > POD_INDEX_TTL_SECONDS:
+                path.unlink()
+    except OSError:
+        # Pruning other shells' stale snapshots is best-effort housekeeping: a stat/unlink race with
+        # another lium process, or an unreadable file, must never fail the command that ran `lium ps`.
+        pass
+
+
+def store_pod_selection(pods: List[PodInfo], now: Optional[datetime] = None) -> None:
+    """Remember which pod `lium ps` showed on which row, so indexes can be checked later."""
+    now = now or datetime.now(timezone.utc)
+    snapshot = {
+        "timestamp": now.isoformat(),
+        "pods": [{"id": pod.id, "huid": pod.huid, "name": pod.name} for pod in pods],
+    }
+    path = pod_snapshot_path()
+    try:
+        with open(path, "w") as f:
+            json.dump(snapshot, f, indent=2)
+    except OSError:
+        # Not being able to remember the list only means indexes will be refused.
+        return
+    _prune_pod_snapshots(path, now)
+
+
+def get_pod_selection() -> Optional[Dict[str, Any]]:
+    """This shell's last `lium ps` snapshot, or None when there is none or it is unreadable."""
+    snapshot_file = pod_snapshot_path()
+    if not snapshot_file.exists():
+        return None
+    try:
+        with open(snapshot_file) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("pods"), list):
+        return None
+    return data
+
+
+def _snapshot_age_seconds(snapshot: Dict[str, Any], now: datetime) -> Optional[float]:
+    try:
+        stamp = datetime.fromisoformat(snapshot["timestamp"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return (now - stamp).total_seconds()
+
+
+@dataclass(frozen=True)
+class TargetMatch:
+    """One resolved target: the pod, the text that named it, and how it matched."""
+
+    pod: PodInfo
+    target: str
+    via_index: bool = False
+
+
+def _resolve_pod_index(
+    target: str, all_pods: List[PodInfo], snapshot: Optional[Dict[str, Any]], now: datetime
+) -> Optional[PodInfo]:
+    """The pod a `lium ps` row number stands for, or None when TARGET is not an index.
+
+    The number is translated to the pod id the last `lium ps` in this shell showed
+    on that row, and that pod is looked up by id in the live list — its position
+    today does not matter. Raises CliFailure when the number *looks* like an index
+    but cannot be trusted: no `lium ps` in this shell, a `ps` too long ago, or a
+    pod that is no longer listed. Refusing is the safe answer — the alternative is
+    acting on a pod the caller never saw.
+    """
+    try:
+        idx = int(target) - 1
+    except ValueError:
+        return None
+    if idx < 0:
+        return None
+
+    example = f" (e.g. {all_pods[0].huid})" if all_pods else ""
+    hint = f"Run 'lium ps' and retry, or name the pod by its huid{example}"
+
+    if snapshot is None:
+        raise CliFailure(
+            "stale_pod_index",
+            f"Pod index {target} cannot be used before 'lium ps' has shown the list in this shell. {hint}",
+            EXIT_CONFIGURATION_ERROR,
+        )
+    age = _snapshot_age_seconds(snapshot, now)
+    if age is None or age > POD_INDEX_TTL_SECONDS or age < 0:
+        raise CliFailure(
+            "stale_pod_index",
+            f"Pod index {target} refers to a 'lium ps' listing older than {POD_INDEX_TTL_SECONDS // 60} minutes. {hint}",
+            EXIT_CONFIGURATION_ERROR,
+        )
+
+    shown = snapshot["pods"]
+    if idx >= len(shown):
+        # The last ps had no such row; fall through to id/name/huid matching.
+        return None
+    seen_id, seen_huid = shown[idx].get("id"), shown[idx].get("huid")
+    current = next((pod for pod in all_pods if pod.id == seen_id), None)
+    if current is None:
+        raise CliFailure(
+            "stale_pod_index",
+            f"Pod index {target} was {seen_huid} in the last 'lium ps' but that pod is no longer "
+            f"listed — the pod list changed. {hint}",
+            EXIT_CONFIGURATION_ERROR,
+        )
+    return current
+
+
+def _exact_match(target: str, all_pods: List[PodInfo]) -> Optional[PodInfo]:
+    return next((pod for pod in all_pods if target in (pod.id, pod.name, pod.huid)), None)
+
+
+def resolve_targets(
+    targets: str,
+    all_pods: List[PodInfo],
+    *,
+    allow_index: Optional[bool] = None,
+    now: Optional[datetime] = None,
+) -> List[TargetMatch]:
+    """Resolve a comma-separated TARGETS spec against the live pod list.
+
+    Each target is a pod id, name, huid, or — when indexes are allowed and the
+    last `lium ps` in this shell still applies — a row number of that listing.
+    ``allow_index`` defaults to the ``LIUM_NO_POD_INDEX`` environment setting.
+    A number that cannot be honoured as an index is still accepted when it is
+    literally a pod's name, id or huid; otherwise it is refused.
+    """
     if targets.lower() == "all":
-        return all_pods
-    
-    selected = []
+        return [TargetMatch(pod, "all") for pod in all_pods]
+
+    if allow_index is None:
+        allow_index = pod_indexes_allowed()
+    now = now or datetime.now(timezone.utc)
+    snapshot = get_pod_selection() if allow_index else None
+
+    matches: List[TargetMatch] = []
     for target in targets.split(","):
         target = target.strip()
-        
-        # Try as index (1-based from ps output)
-        try:
-            idx = int(target) - 1
-            if 0 <= idx < len(all_pods):
-                selected.append(all_pods[idx])
+        if not target:
+            continue
+
+        if allow_index:
+            try:
+                pod = _resolve_pod_index(target, all_pods, snapshot, now)
+            except CliFailure:
+                # "42" with no usable listing may still be the pod literally named 42.
+                pod = _exact_match(target, all_pods)
+                if pod is None:
+                    raise
+                matches.append(TargetMatch(pod, target))
                 continue
-        except ValueError:
-            pass
-        
-        # Try as pod ID/name/huid
-        for pod in all_pods:
-            if target in (pod.id, pod.name, pod.huid):
-                selected.append(pod)
-                break
-    
-    return selected
+            if pod is not None:
+                matches.append(TargetMatch(pod, target, via_index=True))
+                continue
+
+        pod = _exact_match(target, all_pods)
+        if pod is not None:
+            matches.append(TargetMatch(pod, target))
+
+    return matches
 
 
-def wait_ready_no_timeout(lium_client, pod_id: str):
-    """Wait indefinitely for pod to be ready (RUNNING with SSH)."""
-    import time
-    
-    while True:
-        fresh_pods = lium_client.ps()
-        pod = next((p for p in fresh_pods if p.id == pod_id), None)
-        
-        if pod and pod.status.upper() == "RUNNING" and pod.ssh_cmd:
-            return pod
-        
-        time.sleep(10)  # Check every 10 seconds
+def parse_targets(targets: str, all_pods: List[PodInfo], *, allow_index: Optional[bool] = None) -> List[PodInfo]:
+    """Parse target specification and return matching pods (see :func:`resolve_targets`)."""
+    return [match.pod for match in resolve_targets(targets, all_pods, allow_index=allow_index)]
+
+
+def wait_for_pod_ready(
+    lium_client, pod_id: str, timeout: Optional[int] = None, on_poll: Optional[Callable[..., None]] = None
+) -> Optional[PodInfo]:
+    """Wait for a pod to be ready (RUNNING with SSH); without ``timeout`` there is no time limit.
+
+    Delegates to :meth:`Lium.wait_ready`, so a pod that fails or disappears
+    raises ``PodStartError`` instead of being polled forever. Returns ``None``
+    only when ``timeout`` is given and the pod is still starting when it runs out.
+    ``on_poll`` is forwarded so the caller can show progress between polls.
+    """
+    # poll_interval=None: 2 s for the first 90 s, then 10 s (DAH-3002, Lium.poll_delay).
+    return lium_client.wait_ready(pod_id, timeout=timeout, poll_interval=None, on_poll=on_poll)
+
+
+# The old name, kept only until the open PRs that still import it (lium#141, #155, #172) land;
+# then it goes.
+wait_ready_no_timeout = wait_for_pod_ready
 
 
 def get_pytorch_template_id() -> Optional[str]:
@@ -669,14 +1239,31 @@ def ensure_config():
     from lium.cli.settings import config
 
     if not config.get('api.api_key'):
+        if not is_interactive():
+            # The browser login needs a person at the keyboard. Without one it
+            # would open a browser nobody sees and poll for half a minute
+            # before failing — name the fix instead.
+            raise CliFailure(
+                "no_api_key",
+                "No API key configured and the browser login cannot run because "
+                f"{noninteractive_reason()}.",
+                EXIT_CONFIGURATION_ERROR,
+                hint="Set LIUM_API_KEY, or run 'lium init --api-key <key>' with a key from https://lium.io/api-keys "
+                     "(or 'lium init --no-browser' and then 'lium init --session <ID>'); "
+                     "no account yet? 'lium signup --email you@example.com' creates one and stores its key",
+            )
         # Setup API key
         action = SetupApiKeyAction()
-        action.execute({})
+        result = action.execute({})
+        if not result.ok:
+            raise CliFailure("api_key_setup_failed", result.error, EXIT_CONFIGURATION_ERROR)
 
     if not config.get('ssh.key_path'):
         # Setup SSH key
         action = SetupSshKeyAction()
-        action.execute({})
+        result = action.execute({})
+        if not result.ok:
+            raise CliFailure("ssh_key_setup_failed", result.error, EXIT_CONFIGURATION_ERROR)
 
 
 def ensure_backup_params(

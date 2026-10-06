@@ -1,0 +1,605 @@
+"""``lium provider node …`` -- node lifecycle on the portal.
+
+Subcommands:
+
+- ``list``                    -- paginated node listing.
+- ``get <id>``                -- single node record.
+- ``status <id> [--watch [--until-clear [--timeout N]]] [--fail-on-blocked]``
+                              -- verification step in progress / last run timeline.
+- ``add``                     -- queue a new node (calls /executors).
+- ``rm <id>``                 -- delete a node.
+- ``update-price <id>``       -- set price-per-GPU.
+- ``update-gpu <id>``         -- change GPU type/count.
+- ``min-gpu set/unset <id>``  -- min GPU count for rental.
+- ``pods <id>``               -- rented pods on the node.
+- ``machine-requests <id>``   -- pending tenant requests on this node.
+- ``notice-period set/unset`` -- create/delete a notice period.
+- ``notify-added <id>``       -- post /machine-added for a request.
+
+Mutating commands (add/rm/update-*/min-gpu set-unset/notice-period
+set-unset/notify-added) call the persona gate. ``--yes`` and
+``LIUM_PROVIDER_ACK=1`` short-circuit the prompt.
+
+Note: the HTTP routes the portal exposes still spell this concept
+``/executors/...`` -- the CLI verb and SDK method names use ``node``
+because that's the user-facing terminology.
+"""
+
+from __future__ import annotations
+
+import time
+
+import click
+
+from lium.cli.provider import _blocking
+from lium.cli.provider._client import build_client
+from lium.cli.provider._guards import (
+    handle_provider_error,
+    require_hotkey,
+    require_persona_ack,
+)
+from lium.cli.provider._overrides import with_provider_overrides
+from lium.cli.interactive import is_interactive
+from lium.cli.provider._render import (
+    EXIT_NODE_BLOCKED,
+    emit_error,
+    emit_node_blocked,
+    fatal,
+    render,
+)
+from lium.cli.provider._verification import render_text
+from lium.provider._shared_config import default_price_for_gpu, fetch_shared_config
+from lium.provider.errors import ARG_INVALID, INPUT_INTERRUPTED, ProviderError
+from lium.provider.models import NOTICE_PERIOD_MAX_MINUTES
+
+
+@click.group("node")
+def node_command() -> None:
+    """Manage GPU nodes registered with the portal."""
+
+
+@node_command.command("list", short_help="List nodes for this provider.")
+@click.option(
+    "--miner-hotkey",
+    "miner_hotkey",
+    help="Show another provider's nodes (ss58). Defaults to the active hotkey.",
+)
+@click.option(
+    "--all",
+    "all_miners",
+    is_flag=True,
+    default=False,
+    help="List every provider's nodes (the portal's global view), not only yours.",
+)
+@click.option("--page", type=int, default=None, help="1-indexed page number.")
+@click.option("--limit", type=int, default=None, help="Page size.")
+@with_provider_overrides
+@click.pass_context
+def list_nodes(
+    ctx: click.Context,
+    miner_hotkey: str | None,
+    all_miners: bool,
+    page: int | None,
+    limit: int | None,
+) -> None:
+    """List nodes registered with the portal.
+
+    By default only the active hotkey's nodes are listed. The portal's
+    listing is global, so ``--all`` shows every provider's nodes and
+    ``--miner-hotkey`` shows one other provider's.
+    """
+    require_hotkey(ctx, group="node")
+    if all_miners and miner_hotkey:
+        fatal(
+            ctx,
+            ProviderError(
+                "--all and --miner-hotkey are mutually exclusive",
+                code=ARG_INVALID,
+                hint="Use --all for every provider, or --miner-hotkey for one.",
+            ),
+        )
+    client = build_client(ctx)
+    try:
+        body = client.list_nodes(
+            miner_hotkey=miner_hotkey, page=page, limit=limit, all_miners=all_miners
+        )
+    except ProviderError as e:
+        ctx.exit(handle_provider_error(ctx, e))
+        return
+    rows = body.get("data") if isinstance(body, dict) else body
+    total = body.get("total") if isinstance(body, dict) else None
+    summary_parts = [f"nodes={len(rows) if isinstance(rows, list) else 0}"]
+    if total is not None:
+        summary_parts.append(f"total={total}")
+    # the global listing is every provider's fleet: a panel per blocked node there is noise
+    blocking = isinstance(rows, list) and not all_miners
+    if blocking:
+        # the overview is the signed-in provider's own: another provider's nodes get no idle-pay reasons
+        own = miner_hotkey is None or miner_hotkey == client._safe_hotkey()
+        idle = _blocking.fetch_idle_pay_reasons(client) if own and _blocking.needs_fallback(rows) else {}
+        _blocking.attach(rows, idle)
+        summary_parts.append(f"blocked={_blocking.blocked_count(rows)}")
+    render(ctx, body, summary="node list: " + ", ".join(summary_parts))
+    if blocking and not _json_mode(ctx):
+        _blocking.print_panels(rows)
+        _blocking.print_not_eligible(rows, short=True)
+
+
+_FAIL_ON_BLOCKED_HELP = f"Exit {EXIT_NODE_BLOCKED} when the node has a gating blocking reason."
+# --fail-on-blocked never exits 0 unless every source was read
+_UNREAD = [{"code": "", "title": "the node record or its idle-pay reasons did not come back, so nothing shows it clear"}]
+
+
+@node_command.command("get", short_help="Show one node.")
+@click.argument("node_id", required=True)
+@click.option("--fail-on-blocked", is_flag=True, help=_FAIL_ON_BLOCKED_HELP)
+@with_provider_overrides
+@click.pass_context
+def get_node(ctx: click.Context, node_id: str, fail_on_blocked: bool) -> None:
+    require_hotkey(ctx, group="node")
+    client = build_client(ctx)
+    try:
+        body = client.get_node(node_id)
+    except ProviderError as e:
+        ctx.exit(handle_provider_error(ctx, e))
+        return
+    idle_read = _attach_blocking(client, body) if isinstance(body, dict) else True
+    reasons = _blocking.node_reasons(body) if isinstance(body, dict) else []
+    if fail_on_blocked and not reasons and not idle_read:
+        reasons = _UNREAD
+    if fail_on_blocked and reasons and _json_mode(ctx):
+        ctx.exit(emit_node_blocked(ctx, node_id, reasons, body))
+        return
+    render(ctx, body, summary=f"node {node_id}")
+    if isinstance(body, dict) and not _json_mode(ctx):
+        _blocking.print_panels([body])
+        _blocking.print_not_eligible([body], short=False)
+    if fail_on_blocked and reasons:
+        ctx.exit(emit_node_blocked(ctx, node_id, reasons, body))
+
+
+@node_command.command("status", short_help="Verification progress of one node.")
+@click.argument("node_id", required=True)
+@click.option(
+    "--watch",
+    is_flag=True,
+    help=(
+        "Refresh until interrupted (Ctrl-C: exit 0, or 130 under --until-clear or with no terminal /"
+        " LIUM_NONINTERACTIVE). In --json mode prints one object per refresh."
+    ),
+)
+@click.option(
+    "--until-clear",
+    is_flag=True,
+    help=(
+        f"With --watch: stop and exit 0 once no gating blocking reason is left (exit {EXIT_NODE_BLOCKED} at"
+        " --timeout, 130 on Ctrl-C)."
+    ),
+)
+@click.option(
+    "--timeout",
+    type=click.IntRange(min=1),
+    default=None,
+    help=f"Seconds --until-clear waits before it exits {EXIT_NODE_BLOCKED}; unset waits until clear.",
+)
+@click.option(
+    "--fail-on-blocked",
+    is_flag=True,
+    help=f"{_FAIL_ON_BLOCKED_HELP} With plain --watch: exit {EXIT_NODE_BLOCKED} at the first blocked refresh.",
+)
+@click.option(
+    "--interval",
+    type=click.IntRange(min=2),
+    default=5,
+    show_default=True,
+    help="Seconds between refreshes with --watch.",
+)
+@with_provider_overrides
+@click.pass_context
+def status_node(
+    ctx: click.Context,
+    node_id: str,
+    watch: bool,
+    until_clear: bool,
+    timeout: int | None,
+    fail_on_blocked: bool,
+    interval: int,
+) -> None:
+    """Which validator step the node is on, elapsed and estimated time left
+    while a check runs; the last run's per-step timeline otherwise.
+
+    \b
+      verifying · step 3/6 Bandwidth & GPU proof · 42 s elapsed · ~1 min 10 s left
+        ✓ 1. Upload checks — 4 s (estimated)
+        …
+
+    The position is an estimate from this node's (or the fleet's) recent runs;
+    the verdict itself lands when the validator publishes the cycle.
+    """
+    require_hotkey(ctx, group="node")
+    if until_clear and not watch:
+        fatal(ctx, ProviderError("--until-clear needs --watch", code=ARG_INVALID, hint="Re-run with --watch --until-clear."))
+    if timeout is not None and not until_clear:
+        fatal(ctx, ProviderError("--timeout needs --until-clear", code=ARG_INVALID, hint="Re-run with --watch --until-clear --timeout N."))
+    client = build_client(ctx)
+    json_mode = _json_mode(ctx)
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    # One guard around the whole loop, so Ctrl-C is handled the same whether it lands during the
+    # fetch, the print or the sleep (click would otherwise print "Aborted!" and exit 1 mid-fetch).
+    # Ctrl-C is how a person stops plain --watch, so that exits 0. With --until-clear, exit 0 means
+    # the node is clear, and an agent (not is_interactive()) reads only the exit status: in both of
+    # those cases Ctrl-C exits 130 with input.interrupted.
+    try:
+        while True:
+            try:
+                body = client.get_node_verification(node_id)
+            except ProviderError as e:
+                ctx.exit(handle_provider_error(ctx, e))
+                return
+            node, idle_read = _node_with_blocking(client, node_id)
+            reasons = _blocking.node_reasons(node) if node is not None else []
+            if fail_on_blocked and not watch and not reasons and (node is None or not idle_read):
+                reasons = _UNREAD
+            if isinstance(body, dict) and node is not None:
+                body = {**body, "blocking_reasons": node["blocking_reasons"]}
+            last = not watch or (until_clear and node is not None and idle_read and not reasons)
+            timed_out = deadline is not None and not last and time.monotonic() >= deadline
+            # plain --watch never reaches `last`: --fail-on-blocked there stops at the first blocked refresh
+            fail = reasons and (timed_out or (fail_on_blocked and (last or not until_clear)))
+            if json_mode:
+                if not fail:
+                    render(ctx, body)
+            else:
+                if watch:
+                    click.clear()
+                click.echo(render_text(body))
+                if node is not None:
+                    _blocking.print_panels([node])
+                    _blocking.print_not_eligible([node], short=False)
+            if fail:
+                ctx.exit(emit_node_blocked(ctx, node_id, reasons, body))
+                return
+            if last:
+                return
+            if timed_out:
+                ctx.exit(emit_node_blocked(ctx, node_id, _UNREAD, body))
+                return
+            sleep = interval if deadline is None else max(0.0, min(interval, deadline - time.monotonic()))
+            time.sleep(sleep)
+    except KeyboardInterrupt:
+        if until_clear or not is_interactive():
+            what = "before the node was clear" if until_clear else "before it finished"
+            ctx.exit(emit_error(ctx, ProviderError(f"node status {node_id} was interrupted {what}", code=INPUT_INTERRUPTED)))
+        return
+
+
+def _json_mode(ctx: click.Context) -> bool:
+    return bool(((ctx.obj or {}).get("provider_opts") or {}).get("json"))
+
+
+def _attach_blocking(client, node: dict) -> bool:
+    """Attach the node's blocking reasons; False when its idle-pay reasons could not be read."""
+    idle = _blocking.fetch_idle_pay_reasons(client) if _blocking.needs_fallback([node]) else {}
+    _blocking.attach([node], idle)
+    return idle is not None
+
+
+def _node_with_blocking(client, node_id: str) -> tuple[dict | None, bool]:
+    """The node record with its blocking reasons (None when the portal does not return it) and
+    whether its idle-pay reasons were read. A node whose overview failed keeps the blockers the
+    other sources found, but --until-clear never reads that refresh as clear."""
+    try:
+        node = client.get_node(node_id)
+    except ProviderError:
+        return None, False
+    if not isinstance(node, dict):
+        return None, False
+    return node, _attach_blocking(client, node)
+
+
+@node_command.command("add", short_help="Queue a new node addition.")
+@click.option("--gpu-type", required=True, help="GPU model (e.g. H100, RTX 4090).")
+@click.option("--ip", "ip_address", required=True, help="Node IPv4 address.")
+@click.option(
+    "--port",
+    type=int,
+    default=8080,
+    show_default=True,
+    help="Node port the validator will reach.",
+)
+@click.option(
+    "--price",
+    "price_per_gpu",
+    type=float,
+    default=None,
+    help=(
+        "USD/GPU/hour. If omitted, the CLI fetches the public shared-config "
+        "default for --gpu-type (matches the provider-portal Add-Node modal)."
+    ),
+)
+@click.option(
+    "--gpu-count", type=int, default=1, show_default=True, help="Number of GPUs."
+)
+@with_provider_overrides
+@click.pass_context
+def add_node(
+    ctx: click.Context,
+    gpu_type: str,
+    ip_address: str,
+    port: int,
+    price_per_gpu: float | None,
+    gpu_count: int,
+) -> None:
+    require_hotkey(ctx, group="node")
+    require_persona_ack(ctx)
+    if price_per_gpu is None:
+        try:
+            snapshot = fetch_shared_config()
+            price_per_gpu = default_price_for_gpu(snapshot, gpu_type)
+        except ProviderError as e:
+            ctx.exit(handle_provider_error(ctx, e))
+            return
+        click.echo(
+            f"Using default price for {gpu_type}: ${price_per_gpu:g}/GPU/hour "
+            "(from public shared-config; pass --price to override).",
+            err=True,
+        )
+    client = build_client(ctx)
+    try:
+        body = client.add_node(
+            gpu_type=gpu_type,
+            ip_address=ip_address,
+            port=port,
+            price_per_gpu=price_per_gpu,
+            gpu_count=gpu_count,
+        )
+    except ProviderError as e:
+        ctx.exit(handle_provider_error(ctx, e))
+        return
+    render(
+        ctx,
+        body,
+        summary=f"queued add node {gpu_count}x{gpu_type} @ {ip_address}:{port}",
+    )
+
+
+@node_command.command("rm", short_help="Delete a node.")
+@click.argument("node_id", required=True)
+@with_provider_overrides
+@click.pass_context
+def remove_node(ctx: click.Context, node_id: str) -> None:
+    require_hotkey(ctx, group="node")
+    require_persona_ack(ctx)
+    client = build_client(ctx)
+    try:
+        body = client.delete_node(node_id)
+    except ProviderError as e:
+        ctx.exit(handle_provider_error(ctx, e))
+        return
+    render(ctx, body, summary=f"deleted node {node_id}")
+
+
+@node_command.command("update-price", short_help="Set price-per-GPU.")
+@click.argument("node_id", required=True)
+@click.option("--price", "price_per_gpu", type=float, required=True)
+@with_provider_overrides
+@click.pass_context
+def update_price(ctx: click.Context, node_id: str, price_per_gpu: float) -> None:
+    require_hotkey(ctx, group="node")
+    require_persona_ack(ctx)
+    client = build_client(ctx)
+    try:
+        body = client.update_node_price(node_id, price_per_gpu)
+    except ProviderError as e:
+        ctx.exit(handle_provider_error(ctx, e))
+        return
+    render(ctx, body, summary=f"price updated: {node_id} -> ${price_per_gpu}/GPU/hr")
+
+
+@node_command.command("update-gpu", short_help="Change GPU type/count.")
+@click.argument("node_id", required=True)
+@click.option("--gpu-type", required=True)
+@click.option("--gpu-count", type=int, required=True)
+@with_provider_overrides
+@click.pass_context
+def update_gpu(
+    ctx: click.Context, node_id: str, gpu_type: str, gpu_count: int
+) -> None:
+    require_hotkey(ctx, group="node")
+    require_persona_ack(ctx)
+    client = build_client(ctx)
+    try:
+        body = client.update_node_gpu(node_id, gpu_type=gpu_type, gpu_count=gpu_count)
+    except ProviderError as e:
+        ctx.exit(handle_provider_error(ctx, e))
+        return
+    render(
+        ctx,
+        body,
+        summary=f"gpu updated: {node_id} -> {gpu_count}x{gpu_type}",
+    )
+
+
+@node_command.group("min-gpu")
+def min_gpu_command() -> None:
+    """Min GPU count for rental matchmaking."""
+
+
+@min_gpu_command.command("set", short_help="Set min GPUs for rental.")
+@click.argument("node_id", required=True)
+@click.argument("count", type=int, required=True)
+@with_provider_overrides
+@click.pass_context
+def set_min_gpu(ctx: click.Context, node_id: str, count: int) -> None:
+    require_hotkey(ctx, group="node")
+    require_persona_ack(ctx)
+    client = build_client(ctx)
+    try:
+        body = client.set_min_gpu_for_rental(node_id, count)
+    except ProviderError as e:
+        ctx.exit(handle_provider_error(ctx, e))
+        return
+    render(ctx, body, summary=f"min-gpu set: {node_id} -> {count}")
+
+
+@min_gpu_command.command("unset", short_help="Clear min GPUs for rental.")
+@click.argument("node_id", required=True)
+@with_provider_overrides
+@click.pass_context
+def unset_min_gpu(ctx: click.Context, node_id: str) -> None:
+    require_hotkey(ctx, group="node")
+    require_persona_ack(ctx)
+    client = build_client(ctx)
+    try:
+        body = client.unset_min_gpu_for_rental(node_id)
+    except ProviderError as e:
+        ctx.exit(handle_provider_error(ctx, e))
+        return
+    render(ctx, body, summary=f"min-gpu cleared: {node_id}")
+
+
+@node_command.command("pods", short_help="List pods rented on a node.")
+@click.argument("node_id", required=True)
+@with_provider_overrides
+@click.pass_context
+def list_pods(ctx: click.Context, node_id: str) -> None:
+    require_hotkey(ctx, group="node")
+    client = build_client(ctx)
+    try:
+        body = client.node_pods(node_id)
+    except ProviderError as e:
+        ctx.exit(handle_provider_error(ctx, e))
+        return
+    rows = body.get("data") if isinstance(body, dict) else body
+    count = len(rows) if isinstance(rows, list) else 0
+    render(ctx, body, summary=f"pods on {node_id}: {count}")
+
+
+@node_command.command("machine-requests", short_help="List pending tenant asks.")
+@click.argument("node_id", required=True)
+@with_provider_overrides
+@click.pass_context
+def machine_requests(ctx: click.Context, node_id: str) -> None:
+    require_hotkey(ctx, group="node")
+    client = build_client(ctx)
+    try:
+        body = client.node_machine_requests(node_id)
+    except ProviderError as e:
+        ctx.exit(handle_provider_error(ctx, e))
+        return
+    rows = body.get("data") if isinstance(body, dict) else body
+    count = len(rows) if isinstance(rows, list) else 0
+    render(ctx, body, summary=f"machine requests for {node_id}: {count}")
+
+
+@node_command.group("notice-period")
+def notice_period_command() -> None:
+    """Notice-period scheduling for a node."""
+
+
+@notice_period_command.command("set", short_help="Open a notice period.")
+@click.argument("node_id", required=True)
+@click.option(
+    "--start",
+    "starting_at",
+    required=True,
+    help="Start time, ISO 8601 with a UTC offset (2026-10-01T09:00:00+00:00). "
+    "At least 24 h ahead for maintenance, 48 h for --permanent.",
+)
+@click.option(
+    "--minutes",
+    "period_in_minute",
+    type=click.IntRange(1, NOTICE_PERIOD_MAX_MINUTES),
+    default=None,
+    help=f"Maintenance window length in minutes (1-{NOTICE_PERIOD_MAX_MINUTES}).",
+)
+@click.option(
+    "--permanent",
+    "permanent_removal",
+    is_flag=True,
+    default=False,
+    help="Permanent removal: at the start time the renter's pod is deleted and the node is marked removed.",
+)
+@click.option("--reason", default=None, help="Reason shown to the renters of the node.")
+@with_provider_overrides
+@click.pass_context
+def set_notice_period(
+    ctx: click.Context,
+    node_id: str,
+    starting_at: str,
+    period_in_minute: int | None,
+    permanent_removal: bool,
+    reason: str | None,
+) -> None:
+    """Tell the node's renters it will be down, and tell the platform you planned it.
+
+    \b
+      lium provider node notice-period set NODE --start 2026-10-01T09:00:00+00:00 --minutes 60
+      lium provider node notice-period set NODE --start 2026-10-02T09:00:00+00:00 --permanent
+
+    Every renter with a pod on the node gets an e-mail when the notice is saved.
+    """
+    require_hotkey(ctx, group="node")
+    if permanent_removal == (period_in_minute is not None):
+        fatal(
+            ctx,
+            ProviderError(
+                "pass exactly one of --minutes and --permanent",
+                code=ARG_INVALID,
+                hint="--minutes N for a maintenance window of N minutes; --permanent to remove the node.",
+            ),
+        )
+    require_persona_ack(ctx)
+    client = build_client(ctx)
+    try:
+        body = client.create_notice_period(
+            node_id,
+            starting_at=starting_at,
+            period_in_minute=period_in_minute,
+            reason=reason or None,
+            permanent_removal=permanent_removal,
+        )
+    except ProviderError as e:
+        ctx.exit(handle_provider_error(ctx, e))
+        return
+    render(ctx, body, summary=f"notice period opened: {node_id}")
+
+
+@notice_period_command.command("unset", short_help="Cancel the notice period.")
+@click.argument("node_id", required=True)
+@with_provider_overrides
+@click.pass_context
+def unset_notice_period(ctx: click.Context, node_id: str) -> None:
+    require_hotkey(ctx, group="node")
+    require_persona_ack(ctx)
+    client = build_client(ctx)
+    try:
+        body = client.delete_notice_period(node_id)
+    except ProviderError as e:
+        ctx.exit(handle_provider_error(ctx, e))
+        return
+    render(ctx, body, summary=f"notice period cleared: {node_id}")
+
+
+@node_command.command("notify-added", short_help="Mark a machine request fulfilled.")
+@click.argument("node_id", required=True)
+@click.option("--request-id", "machine_request_id", required=True)
+@with_provider_overrides
+@click.pass_context
+def notify_added(ctx: click.Context, node_id: str, machine_request_id: str) -> None:
+    require_hotkey(ctx, group="node")
+    require_persona_ack(ctx)
+    client = build_client(ctx)
+    try:
+        body = client.notify_machine_added(node_id, machine_request_id)
+    except ProviderError as e:
+        ctx.exit(handle_provider_error(ctx, e))
+        return
+    render(
+        ctx,
+        body,
+        summary=f"notified machine added: node={node_id} request={machine_request_id}",
+    )
+
+
+__all__ = ["node_command"]

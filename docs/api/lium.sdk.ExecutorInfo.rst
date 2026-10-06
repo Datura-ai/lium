@@ -33,6 +33,7 @@
       ~ExecutorInfo.gpu_count
       ~ExecutorInfo.price_per_hour
       ~ExecutorInfo.price_per_gpu_hour
+      ~ExecutorInfo.price_per_gpu
       ~ExecutorInfo.location
       ~ExecutorInfo.specs
       ~ExecutorInfo.status

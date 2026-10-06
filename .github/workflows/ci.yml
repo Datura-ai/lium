@@ -1,0 +1,428 @@
+name: CI - Build Verification
+
+on:
+  # No `paths:` filter: `ci-ok` is to be a required status check, and a check that never
+  # reports blocks the merge button (a docs-only PR would sit unmergeable). Which heavy
+  # build jobs run for a given change is decided per job, not here.
+  pull_request:
+  # `gh workflow run ci.yml --ref <branch>` runs the whole workflow on the branch head with the full
+  # binary matrix — the on-demand path for a PR whose diff does not touch a packaging input.
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * *'   # the live e2e once a day against the configured API even when nobody pushes
+
+concurrency:
+  group: ci-build-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # the suite (39 files under test/) was never run by CI; only the binary-target
+    # matrix test was. Same install the macOS build already does, minus pyinstaller.
+    name: pytest
+    if: github.event_name != 'schedule'   # the daily cron is for e2e-live only
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0   # hatch-vcs: the version is git describe against the tags
+
+    - uses: astral-sh/setup-uv@v7
+      with:
+        python-version: ${{ matrix.python-version }}
+        enable-cache: true
+
+    - name: Install
+      run: uv sync --frozen --extra dev --extra provider
+
+    # the runner has no ~/.lium and no LIUM_API_KEY, like a fresh laptop: a test that
+    # needs either fails here instead of passing on the author's machine only
+    - name: Run the test suite
+      run: uv run pytest test/ -q -p no:cacheprovider --durations=10
+
+  packaging:
+    # Did this change touch anything that changes how the binaries are packaged? The two macOS jobs bill at
+    # GitHub's 10x macOS rate and the arm64 Docker build repeats the amd64 one, so those three run only when a
+    # packaging input moved or on a manual dispatch. The amd64 Docker build, the wheel and the target-matrix
+    # test run on every push.
+    name: Packaging inputs changed?
+    if: github.event_name != 'schedule'   # the daily cron is for e2e-live only
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      full-matrix: ${{ steps.check.outputs.full-matrix }}
+      linux-matrix: ${{ steps.check.outputs.linux-matrix }}
+    steps:
+    - id: check
+      env:
+        GH_TOKEN: ${{ github.token }}
+        EVENT: ${{ github.event_name }}
+        PR: ${{ github.event.pull_request.number }}
+      run: |
+        amd64='{"runner":"ubuntu-latest","platform":"linux/amd64","asset_name":"lium-linux-amd64"}'
+        arm64='{"runner":"ubuntu-24.04-arm","platform":"linux/arm64","asset_name":"lium-linux-arm64"}'
+        full() { echo "full-matrix=true" >> "$GITHUB_OUTPUT"; echo "linux-matrix=[$amd64,$arm64]" >> "$GITHUB_OUTPUT"; }
+        amd_only() { echo "full-matrix=false" >> "$GITHUB_OUTPUT"; echo "linux-matrix=[$amd64]" >> "$GITHUB_OUTPUT"; }
+        # only a pull_request has a file list to inspect; any other event (a manual dispatch) builds everything
+        if [[ "$EVENT" != "pull_request" ]]; then full; exit 0; fi
+        files="$(gh api --paginate "repos/${{ github.repository }}/pulls/$PR/files" -q '.[].filename')"
+        printf '%s\n' "$files"
+        if printf '%s\n' "$files" | grep -Eq '^(pyproject\.toml|uv\.lock|lium\.spec|lium_entry\.py|Dockerfile\.build|scripts/install\.sh|scripts/linux_bundle_report\.py|\.github/workflows/(ci|release)\.yml)$'; then
+          full
+        else
+          amd_only
+        fi
+
+  build-python:
+    name: Build Python distribution
+    needs: packaging
+    if: github.event_name != 'schedule'   # the daily cron is for e2e-live only
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0   # hatch-vcs: the version is git describe against the tags
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install setuptools wheel build toml
+
+    - name: Build package
+      run: python -m build --sdist --wheel --outdir dist/
+
+    - name: Upload Python artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: python-dist
+        path: dist/
+        retention-days: 7
+
+  validate-binary-targets:
+    name: Validate binary target matrix
+    needs: packaging
+    if: github.event_name != 'schedule'   # the daily cron is for e2e-live only
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install pytest
+      run: python -m pip install --upgrade pip pytest pyyaml
+
+    - name: Verify installer and workflow target coverage
+      run: pytest test/test_release_binary_targets.py
+
+  build-linux-binary:
+    name: Build Linux binary (${{ matrix.asset_name }})
+    needs: packaging
+    if: github.event_name != 'schedule'   # the daily cron is for e2e-live only
+    # amd64 on every push, drafts included: the cheap smoke that catches an import or PyInstaller break. arm64
+    # joins the matrix only when `packaging` says so.
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.packaging.outputs.linux-matrix) }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0   # hatch-vcs: the version is git describe against the tags
+
+    - uses: astral-sh/setup-uv@v7
+
+    # the build image has no git (Dockerfile.build): the version hatch-vcs derives from the tags here is handed in
+    - name: Bundle version (hatch-vcs, from the tags)
+      id: version
+      run: |
+        version="$(uvx --from hatchling --with hatch-vcs hatchling version)"
+        echo "version $version"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    # docker-container builder: the one that can export its layer cache (the default `docker` driver cannot)
+    - uses: docker/setup-buildx-action@v3
+
+    # Layers cached in the GitHub Actions cache, one scope per asset (amd64 and arm64 layers differ). Dockerfile.build
+    # installs the dependencies from the lockfile before it copies the source, so a push that changes only code
+    # reuses the apt, libssl, uv and dependency layers; the source copy, the project install and PyInstaller rerun.
+    # `ignore-error`: a cache export the cache service refuses (429, timeout) must not fail a build that produced
+    # the image — release-assets needs this job. `load` puts the image in the engine for the extract and the report.
+    - name: Build Linux bundle in Docker
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: Dockerfile.build
+        platforms: ${{ matrix.platform }}
+        build-args: LIUM_VERSION=${{ steps.version.outputs.version }}
+        tags: lium-build:${{ github.sha }}-${{ matrix.asset_name }}
+        load: true
+        cache-from: type=gha,scope=linux-bundle-${{ matrix.asset_name }}
+        cache-to: type=gha,scope=linux-bundle-${{ matrix.asset_name }},ignore-error=true
+
+    - name: Extract the bundle from the image
+      run: |
+        mkdir -p dist
+        rm -rf dist/lium
+        docker rm -f lium-extract >/dev/null 2>&1 || true
+        docker create --name lium-extract "lium-build:${GITHUB_SHA}-${{ matrix.asset_name }}" true
+        docker cp lium-extract:/app/dist/lium dist/lium
+        docker rm -f lium-extract
+        tar -czf dist/${{ matrix.asset_name }}.tar.gz -C dist lium
+
+    - name: Smoke test Linux bundle
+      run: |
+        ./dist/lium/lium --version
+        ./dist/lium/lium --help >/dev/null
+
+    # what the bundle ships (OpenSSL package + runtime string, Python, requests/paramiko/cryptography) goes to the
+    # step summary; the step fails when libssl1.1 is below 1.1.1w-0+deb11u8 or a bundled library is not the image's
+    # file. 0.0.34 shipped deb11u3 after #150 and nobody saw it until after the release (#223).
+    - name: Report what the bundle ships, fail below the OpenSSL floor
+      run: python3 scripts/linux_bundle_report.py --bundle dist/lium --image lium-build:${GITHUB_SHA}-${{ matrix.asset_name }} --name ${{ matrix.asset_name }}
+
+    - name: Upload Linux artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.asset_name }}
+        path: |
+          dist/${{ matrix.asset_name }}.tar.gz
+          dist/${{ matrix.asset_name }}
+        retention-days: 7
+
+  build-macos-binary:
+    name: Build macOS binary (${{ matrix.asset_name }})
+    needs: packaging
+    # the two macOS jobs are the expensive ones (10x minutes): only when packaging inputs changed
+    if: github.event_name != 'schedule' && needs.packaging.outputs.full-matrix == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - runner: macos-14
+          asset_name: lium-darwin-arm64
+          expected_machine: arm64
+        - runner: macos-15-intel
+          asset_name: lium-darwin-amd64
+          expected_machine: x86_64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0   # hatch-vcs: the version is git describe against the tags
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install uv
+      run: python -m pip install --upgrade pip uv
+
+    - name: Build macOS binary
+      run: |
+        actual_machine="$(uname -m)"
+        if [[ "$actual_machine" != "${{ matrix.expected_machine }}" ]]; then
+          echo "Expected macOS runner architecture ${{ matrix.expected_machine }}, got $actual_machine" >&2
+          exit 1
+        fi
+        if [[ "$actual_machine" == "x86_64" ]]; then
+          # cryptography >= 49 ships no macOS Intel wheel, so uv builds it from source here. Link OpenSSL statically
+          # (openssl-sys reads OPENSSL_STATIC / OPENSSL_DIR) so the bundle carries no Homebrew libssl.3.dylib: with a dynamic
+          # link, PyInstaller kept python.org's older libssl.3.dylib under the same name and the binary died at import
+          # (`Symbol not found: _SSL_get0_group_name`, run 34155591936). arm64 installs the wheel, which is static already.
+          export OPENSSL_STATIC=1 OPENSSL_DIR="$(brew --prefix openssl@3)"
+        fi
+        uv sync --frozen --extra dev --extra provider
+        rm -rf dist/lium
+        uv run pyinstaller lium.spec --clean
+        tar -czf dist/${{ matrix.asset_name }}.tar.gz -C dist lium
+
+    - name: Smoke test macOS bundle
+      run: |
+        ./dist/lium/lium --version
+        ./dist/lium/lium --help >/dev/null
+        # cryptography must carry its OpenSSL inside _rust.abi3.so (static); a libssl/libcrypto dylib reference is the
+        # 0.0.37 Intel failure coming back.
+        so=dist/lium/_internal/cryptography/hazmat/bindings/_rust.abi3.so
+        test -f "$so"
+        deps="$(otool -L "$so")"
+        if grep -E 'libssl|libcrypto' <<<"$deps"; then
+          echo "cryptography links a shared OpenSSL; the bundle would ship a mismatched libssl.3.dylib" >&2
+          exit 1
+        fi
+        # the OpenSSL baked into cryptography (the wheel's on arm64, Homebrew openssl@3's on Intel), for the record
+        strings -a "$so" | grep -m1 -E '^OpenSSL [0-9]+\.[0-9]+\.[0-9]+' | tee -a "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload macOS artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.asset_name }}
+        path: |
+          dist/${{ matrix.asset_name }}.tar.gz
+          dist/${{ matrix.asset_name }}
+        retention-days: 7
+
+  e2e-inputs:
+    # Since #169 the workflow has no `paths:` filter (ci-ok must always report), so e2e-live decides for itself:
+    # on a pull_request it runs only when the change touches what it tests — the package, its dependencies, the
+    # suite or this workflow — never for a README- or test/-only change (each run rents two pods, ~$0.03).
+    # A manual dispatch and the daily cron always run it.
+    name: e2e-live inputs changed?
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+    - id: check
+      env:
+        GH_TOKEN: ${{ github.token }}
+        EVENT: ${{ github.event_name }}
+        PR: ${{ github.event.pull_request.number }}
+      run: |
+        if [[ "$EVENT" != "pull_request" ]]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+        files="$(gh api --paginate "repos/${{ github.repository }}/pulls/$PR/files" -q '.[].filename')"
+        printf '%s\n' "$files"
+        if printf '%s\n' "$files" | grep -Eq '^(lium/|e2e/|pyproject\.toml$|uv\.lock$|\.github/workflows/ci\.yml$)'; then
+          echo "run=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "run=false" >> "$GITHUB_OUTPUT"
+        fi
+
+  # This checkout's CLI and SDK against a LIVE Lium API (the variable LIUM_E2E_API_URL, today https://lium.io/api;
+  # staging when unset): balance → ls → up → RUNNING → exec (exit codes, the GPU paid for) → scp round trip →
+  # billing → rm → gone → final charge, plus the error contract (wrong key 3, no key 2, unknown pod 5), then the
+  # SDK's pod-lifecycle example. Rents the cheapest ≥1-GPU node under $0.50/h for a few minutes ($0.03 on 7 Sep 2026:
+  # two RTX 4090 rentals of 6 and 0.5 min). Needs the secret LIUM_E2E_API_KEY (the dedicated test account's key);
+  # without it the job skips every test and stays green, so fork PRs are unaffected. One run at a time repo-wide
+  # (the job's `concurrency:` group, explained at the job). e2e/run.sh puts a timeout on every step and always
+  # leaves e2e/artifacts (timings, summary.md, junit, commands.json); summarised in one sticky PR comment.
+  # Reproduce: E2E_API_KEY=… e2e/run.sh
+  e2e-live:
+    name: e2e-live
+    needs: e2e-inputs
+    if: needs.e2e-inputs.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 65   # run.sh's own budget is 5 + 25 + 25 min; this and the step below sit above it
+    permissions:
+      contents: read
+      pull-requests: write
+    # The group stays repo-wide, never per PR: two suites on one account would sweep each other's pods (the cleanup
+    # step below removes every e2e-… pod it sees). `queue: max` queues the waiting jobs as `pending`; the default
+    # (`queue: single`) keeps one pending job and cancels it when another PR's job arrives. `cancel-in-progress: true`
+    # cannot be combined with `queue: max`; a newer push on the same PR is cancelled by the workflow-level group.
+    concurrency:
+      group: e2e-live-staging
+      queue: max
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0   # hatch-vcs: the version is git describe against the tags
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - uses: astral-sh/setup-uv@v7
+    - name: install this checkout, CLI journey, SDK journey — each under a hard timeout (e2e/run.sh)
+      id: live
+      timeout-minutes: 60
+      env:
+        E2E_API_URL: ${{ vars.LIUM_E2E_API_URL || 'https://staging.lium.io/api' }}
+        E2E_API_KEY: ${{ secrets.LIUM_E2E_API_KEY }}
+        E2E_MAX_PRICE: "0.50"
+        E2E_EXCLUDE_COUNTRIES: "Russia,Belarus,RU,BY"   # conftest's default too; stated here so the job says it
+        E2E_EXCLUDE_EXECUTORS: ${{ vars.LIUM_E2E_EXCLUDE_EXECUTORS }}   # ids/huids of nodes known to be defective (B-119)
+      run: ./e2e/run.sh
+    - name: remove this run's pods when the suite did not finish its own cleanup
+      # pytest's finalizers do not run when the runner kills a cancelled run, when run.sh's `timeout` kills a suite
+      # (the step is then `failure`, not `cancelled`) or when pytest-timeout's thread method fires; anything named
+      # e2e-… that this run rented goes here (the pod's 30-min TTL is the last resort). `rm` takes ONE target
+      # argument, so the names are removed one per call. bash → pipefail: a failing `lium ps` fails the step
+      # instead of "removing" nothing.
+      if: always() && (steps.live.outcome == 'failure' || steps.live.outcome == 'cancelled')
+      shell: bash
+      env:
+        LIUM_API_KEY: ${{ secrets.LIUM_E2E_API_KEY }}
+        LIUM_BASE_URL: ${{ vars.LIUM_E2E_API_URL || 'https://staging.lium.io/api' }}
+      run: |
+        test -n "$LIUM_API_KEY" || exit 0
+        export HOME="$(mktemp -d)"
+        ./e2e/.venv/bin/lium ps --format json | jq -r '.[] | select(.name | startswith("e2e-")) | .name' | xargs -r -n1 ./e2e/.venv/bin/lium rm -y
+    - uses: actions/upload-artifact@v4
+      id: artifacts
+      if: always()
+      with:
+        name: e2e-live-${{ github.event.pull_request.number || github.run_id }}-${{ github.run_attempt }}
+        path: e2e/artifacts
+        retention-days: 14
+    - name: result on the PR
+      if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+      continue-on-error: true
+      uses: actions/github-script@v7
+      env:
+        OUTCOME: ${{ steps.live.outcome }}
+        ARTIFACT_URL: ${{ steps.artifacts.outputs.artifact-url }}
+      with:
+        script: |
+          const fs = require('fs');
+          const marker = '<!-- e2e-live -->';
+          const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+          const summary = fs.existsSync('e2e/artifacts/summary.md')
+            ? fs.readFileSync('e2e/artifacts/summary.md', 'utf8')
+            : `**live e2e: FAIL** — no summary written (outcome ${process.env.OUTCOME}); see the run log.`;
+          const body = [
+            marker,
+            `### live e2e · ${context.payload.pull_request.head.sha.slice(0, 8)} · [run](${runUrl})${process.env.ARTIFACT_URL ? ` · [artifacts](${process.env.ARTIFACT_URL})` : ''}`,
+            '',
+            summary.trim(),
+            '',
+            `<sub>This checkout's CLI + SDK against the live API named above (e2e/README.md). Reproduce: \`E2E_API_KEY=… e2e/run.sh\`.</sub>`,
+          ].join('\n');
+          const comments = await github.paginate(github.rest.issues.listComments, { ...context.repo, issue_number: context.issue.number, per_page: 100 });
+          const mine = comments.find(c => c.body?.startsWith(marker));
+          if (mine) await github.rest.issues.updateComment({ ...context.repo, comment_id: mine.id, body });
+          else await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+
+  ci-ok:
+    # the one context to require in the ruleset (lium requires none today). The binary
+    # builds stay informational: a Debian mirror outage must not block every merge.
+    # `packaging` is in the list because a skipped job counts as passing: if the inputs
+    # check fails, the wheel and the target test are skipped and only `packaging`'s own
+    # failure makes this job red.
+    # e2e-live is not in the list on purpose: it is a live suite against a marketplace, and a red run caused
+    # by a platform defect (B-119: a node billing 2 GPUs and exposing 1) or an empty listing must not block
+    # every merge; its result stands on its own as the sticky PR comment.
+    name: ci-ok
+    needs: [packaging, test, build-python, validate-binary-targets]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}   # aggregator only: reads job results, needs no token scopes (CodeQL actions/missing-workflow-permissions)
+    steps:
+    - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+      run: exit 1

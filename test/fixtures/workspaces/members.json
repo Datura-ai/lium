@@ -1,0 +1,26 @@
+[
+  {
+    "user_id": "2f1c8a3e-6d4b-4a1f-9c2e-0b7d5e6f8a91",
+    "name": "Ana",
+    "email": "ana@example.com",
+    "role": "owner",
+    "is_billing_owner": true,
+    "joined_at": "2026-09-06T16:40:00"
+  },
+  {
+    "user_id": "7a9e2b1c-3d4f-4e5a-8b6c-1d2e3f4a5b6c",
+    "name": "Ben",
+    "email": "ben@example.com",
+    "role": "admin",
+    "is_billing_owner": false,
+    "joined_at": "2026-09-06T16:41:00"
+  },
+  {
+    "user_id": "c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f",
+    "name": "Cid",
+    "email": "cid@example.com",
+    "role": "member",
+    "is_billing_owner": false,
+    "joined_at": "2026-09-06T16:42:00"
+  }
+]

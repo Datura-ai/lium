@@ -1,0 +1,41 @@
+# Dependabot: one grouped PR per ecosystem per week, security fixes grouped too, at most 2 open PRs per
+# ecosystem, no automatic rebases (every rebase is a full CI run, the two macOS binary builds included).
+# Major version bumps are left out of the weekly group on purpose — they need a human decision.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 2
+    rebase-strategy: disabled
+    labels: [dependencies]
+    groups:
+      python:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+      python-security:
+        applies-to: security-updates
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 2
+    rebase-strategy: disabled
+    labels: [dependencies]
+    groups:
+      actions:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+      actions-security:
+        applies-to: security-updates
+        patterns: ["*"]

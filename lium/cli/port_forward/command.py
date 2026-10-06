@@ -7,7 +7,13 @@ import click
 
 from lium.sdk import Lium, PodInfo
 from lium.cli import ui
-from lium.cli.utils import handle_errors, parse_targets
+from lium.cli.utils import (
+    CliFailure,
+    EXIT_GENERAL_ERROR,
+    EXIT_POD_NOT_FOUND,
+    handle_errors,
+    parse_targets,
+)
 
 
 def get_port_mapping(pod: PodInfo, internal_port: int) -> Optional[int]:
@@ -78,32 +84,38 @@ def port_forward_command(target: str, port: int, local_port: Optional[int]):
     all_pods = ui.load("Loading pods", lambda: lium.ps())
 
     if not all_pods:
-        ui.warning("No active pods")
-        return
+        raise CliFailure("pod_not_found", "No active pods", EXIT_POD_NOT_FOUND)
 
     pods = parse_targets(target, all_pods)
     pod = pods[0] if pods else None
 
     if not pod:
-        ui.error(f"Pod '{target}' not found")
-        return
+        raise CliFailure("pod_not_found", f"Pod '{target}' not found", EXIT_POD_NOT_FOUND)
 
     if pod.status.lower() != "running":
-        ui.error(f"Pod '{pod.huid}' is not running (status: {pod.status})")
-        return
+        raise CliFailure(
+            "pod_not_running",
+            f"Pod '{pod.huid}' is not running (status: {pod.status})",
+            EXIT_GENERAL_ERROR,
+        )
 
     external_port = get_port_mapping(pod, port)
     if not external_port:
         available_ports = list(pod.ports.keys()) if pod.ports else []
-        ui.error(f"Port {port} is not exposed on pod '{pod.huid}'")
+        # The hint travels inside the message: printed on its own it would land
+        # above the error it explains, because the error is rendered on the way out.
+        message = f"Port {port} is not exposed on pod '{pod.huid}'"
         if available_ports:
-            ui.dim(f"Available internal ports: {', '.join(available_ports)}")
-        return
+            message += f"\nAvailable internal ports: {', '.join(available_ports)}"
+        raise CliFailure("port_not_exposed", message, EXIT_GENERAL_ERROR)
 
     host = pod.executor.ip if pod.executor else pod.host
     if not host:
-        ui.error(f"Cannot determine host IP for pod '{pod.huid}'")
-        return
+        raise CliFailure(
+            "host_unknown",
+            f"Cannot determine host IP for pod '{pod.huid}'",
+            EXIT_GENERAL_ERROR,
+        )
 
     ui.success(f"Forwarding localhost:{local_port} -> {host}:{external_port} (pod port {port})")
     ui.dim("Press Ctrl+C to stop")
@@ -127,6 +139,10 @@ def port_forward_command(target: str, port: int, local_port: Optional[int]):
     except KeyboardInterrupt:
         ui.dim("\nPort forwarding stopped")
     except OSError as e:
-        ui.error(f"Failed to bind to port {local_port}: {e}")
+        raise CliFailure(
+            "port_bind_failed",
+            f"Failed to bind to port {local_port}: {e}",
+            EXIT_GENERAL_ERROR,
+        )
     finally:
         server.close()

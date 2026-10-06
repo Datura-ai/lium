@@ -33,7 +33,7 @@ def format_file_count(count: int) -> str:
 
 def build_volumes_table(volumes: List[VolumeInfo]) -> tuple[Table, str, str]:
     header = f"{Text('Volumes', style='bold')}  ({len(volumes)} total)"
-    tip = f"Tip: {ui.styled('lium up <executor> --volume id:<HUID>', 'success')} {ui.styled('# attach volume to pod', 'dim')}"
+    tip = f"Tip: {ui.styled('lium up <node> --volume id:<HUID>', 'success')} {ui.styled('# attach volume to pod', 'dim')}"
 
     table = Table(
         show_header=True,

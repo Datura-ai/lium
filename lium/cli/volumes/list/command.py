@@ -21,10 +21,6 @@ def volumes_list_command():
     action = GetVolumesAction()
     result = ui.load("Loading volumes", lambda: action.execute(ctx))
 
-    if not result.ok:
-        ui.error(result.error)
-        return
-
     volumes = result.data["volumes"]
 
     if not volumes:

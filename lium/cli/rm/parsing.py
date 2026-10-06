@@ -5,7 +5,10 @@ from datetime import datetime, timedelta, timezone
 from typing import List
 
 from lium.sdk import PodInfo
-from lium.cli.utils import parse_targets
+from lium.cli.utils import resolve_targets
+
+# Shared with the command layer, which maps this one error to a distinct exit code.
+NO_MATCHING_PODS = "No pods match targets"
 
 
 def parse_duration(duration_str: str) -> tuple[timedelta | None, str | None]:
@@ -104,26 +107,35 @@ def parse(
     all_flag: bool,
     all_pods: List[PodInfo],
     in_duration: str | None,
-    at_time: str | None
+    at_time: str | None,
+    allow_index: bool | None = None,
 ) -> tuple[dict | None, str | None]:
-    """Parse rm command inputs, returns (parsed_data_dict, error_message)."""
+    """Parse rm command inputs, returns (parsed_data_dict, error_message).
+
+    ``index_matches`` in the result lists the targets that were given as `lium ps`
+    row numbers, so the command can say which pod each number stood for.
+    """
     # Check if pods exist
     if not all_pods:
         return None, "No active pods"
 
     # Parse targets
+    index_matches = []
     if all_flag:
         selected_pods = all_pods
     elif targets:
-        selected_pods = parse_targets(targets, all_pods)
+        matches = resolve_targets(targets, all_pods, allow_index=allow_index)
+        selected_pods = [m.pod for m in matches]
+        index_matches = [m for m in matches if m.via_index]
         if not selected_pods:
-            return None, f"No pods match targets: {targets}"
+            return None, f"{NO_MATCHING_PODS}: {targets}"
     else:
         # No targets specified - will need interactive selection in command
         return None, "No targets specified"
 
     result = {
         "selected_pods": selected_pods,
+        "index_matches": index_matches,
         "termination_time": None,
     }
 

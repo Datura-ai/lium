@@ -2,8 +2,7 @@
 
 import click
 
-from lium.cli import ui
-from lium.cli.utils import handle_errors
+from lium.cli.utils import CliFailure, EXIT_GENERAL_ERROR, handle_errors
 from .actions import EditConfigAction
 
 
@@ -19,4 +18,4 @@ def config_edit_command():
     result = action.execute(ctx)
 
     if not result.ok:
-        ui.error(result.error)
+        raise CliFailure("editor_failed", result.error, EXIT_GENERAL_ERROR)

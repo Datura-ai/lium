@@ -1,0 +1,58 @@
+FROM python:3.12-slim-bullseye
+
+# Debian 11 (bullseye) left LTS on 31 Aug 2026. Its pool is being purged from the live
+# mirrors (bullseye-security .deb files 404 on deb.debian.org and security.debian.org
+# alike since 5 Sep 2026, failing every Linux build) and the suites live on
+# archive.debian.org, whose Release files are no longer re-signed. Fetch from the
+# archive and skip the expiry check; drop bullseye-security, which the archive does
+# not carry yet and which nothing below needs.
+#
+# Every locked dependency ships a manylinux wheel for x86_64 and aarch64 (uv.lock), so
+# no compiler or Rust toolchain is installed; PyInstaller only needs objdump (binutils).
+# A future sdist-only dependency fails here with "no compiler" instead of building.
+RUN set -eu; \
+    sed -i -e '/bullseye-security/d' -e 's|http://deb.debian.org/debian|http://archive.debian.org/debian|' /etc/apt/sources.list; \
+    apt-get update -o Acquire::Check-Valid-Until=false -o Acquire::Retries=3; \
+    apt-get install -y --no-install-recommends -o Acquire::Retries=3 binutils; \
+    rm -rf /var/lib/apt/lists/*
+
+# PyInstaller bundles the image's libssl.so.1.1 / libcrypto.so.1.1 into the binary. The base
+# image ships 1.1.1w-0+deb11u3 and bullseye-security is gone from the mirrors (see above), so
+# without this step the release would carry a year of missed OpenSSL security fixes. Fetch the
+# last bullseye-security build (deb11u8) from snapshot.debian.org, pinned by sha256 per arch.
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) sha256=dcc68a543de6cb955a57077b66dcdb15f61d1e31e072f2c6cc4082c37da1b00d ;; \
+      arm64) sha256=0fba4e602e499c97c4b623bd56295115667c312ff583221a71b476dd6983a5e0 ;; \
+      *) echo "no pinned libssl1.1 for $arch" >&2; exit 1 ;; \
+    esac; \
+    deb="libssl1.1_1.1.1w-0+deb11u8_${arch}.deb"; \
+    python3 -c "import urllib.request, sys; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" \
+      "https://snapshot.debian.org/archive/debian-security/20260615T025018Z/pool/updates/main/o/openssl/$deb" "/tmp/$deb"; \
+    echo "$sha256  /tmp/$deb" | sha256sum -c -; \
+    dpkg -i "/tmp/$deb"; \
+    rm -f "/tmp/$deb"; \
+    dpkg-query -W -f='${Package} ${Version}\n' libssl1.1 | grep -q 'deb11u8$'
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+
+# Dependencies first, from the lockfile alone: this layer is reused by every build whose pyproject.toml
+# and uv.lock did not change (CI builds the bundle on every PR push; the deps are the slow part).
+# --no-install-project leaves lium itself out, so neither the source nor the version is needed yet —
+# the version ARG below must stay below this RUN: it changes with every commit and would bust the layer.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project --extra dev --extra provider
+
+# hatch-vcs derives the version from git, which this image does not have (bullseye's archive cannot
+# install git next to the image's perl-base); the runner computes it and hands it in (release.yml, ci.yml).
+ARG LIUM_VERSION
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=$LIUM_VERSION
+
+COPY . .
+# the same resolution as above plus the project itself: an editable install of the project (`.`, package lium/), built with hatchling + hatch-vcs
+# in uv's isolated build env (a few small wheels from the index; the dependency set above is untouched)
+RUN uv sync --frozen --extra dev --extra provider
+RUN uv run pyinstaller lium.spec --clean

@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import subprocess
+import sys
 from pathlib import Path
 from typing import Dict, Any
 from rich.console import Console as RichConsole
@@ -14,24 +15,47 @@ from lium.cli.settings import config
 class ThemedConsole(RichConsole):
     """Console with theme support and semantic color methods."""
     
-    def __init__(self):
-        super().__init__()
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self.themes = self._load_themes()
         self.current_theme_name = config.get('ui.theme', 'auto')
         self.theme = self._resolve_theme()
     
     def _load_themes(self) -> Dict[str, Dict[str, str]]:
         """Load themes from themes.json."""
-        themes_file = Path(__file__).parent / "themes.json"
-        try:
-            with open(themes_file) as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            # Fallback to basic themes
-            return {
-                "dark": {"success": "green", "error": "red", "warning": "yellow", "info": "cyan", "dim": "dim"},
-                "light": {"success": "green", "error": "red", "warning": "yellow", "info": "blue", "dim": "dim"}
-            }
+        candidates = [Path(__file__).parent / "themes.json"]
+        meipass_root = getattr(sys, "_MEIPASS", None)
+        if meipass_root:
+            candidates.append(Path(meipass_root) / "lium" / "cli" / "themes.json")
+
+        for themes_file in candidates:
+            try:
+                with open(themes_file, encoding="utf-8") as f:
+                    return json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                continue
+
+        # Fallback to basic themes
+        return {
+            "dark": {
+                "success": "green",
+                "error": "red",
+                "warning": "yellow",
+                "info": "cyan",
+                "pending": "cyan",
+                "id": "dim",
+                "dim": "dim",
+            },
+            "light": {
+                "success": "green",
+                "error": "red",
+                "warning": "yellow",
+                "info": "blue",
+                "pending": "blue",
+                "id": "dim",
+                "dim": "dim",
+            },
+        }
     
     
     def _resolve_theme(self) -> Dict[str, str]:

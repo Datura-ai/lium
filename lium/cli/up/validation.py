@@ -12,19 +12,36 @@ def validate(
     until: str | None,
     image: str | None = None,
     template_id: str | None = None,
+    dockerfile: str | None = None,
+    min_cpus: int | None = None,
 ) -> tuple[bool, str]:
     """Validate up command inputs."""
-    if executor_id and (gpu or country):
-        return False, "Cannot use filters (--gpu, --country) when specifying an executor ID"
+    # Checked first: 0 is falsy, so the filter checks below would otherwise read
+    # `--min-cpus 0` as "no filter given" and answer with the wrong sentence.
+    if min_cpus is not None and min_cpus <= 0:
+        return False, "--min-cpus must be a positive integer"
+    if count is not None and count < 1:
+        return False, "--count must be at least 1"
 
-    if not executor_id and not (gpu or count or country):
-        return False, "Must provide either EXECUTOR_ID or filters (--gpu, --count, --country)"
+    # With a node ID, -c/--count is not a filter: it is how many of that node's GPUs to rent (GPU splitting).
+    if executor_id and (gpu or country or min_cpus is not None):
+        return False, "Cannot use filters (--gpu, --country, --min-cpus) when specifying a node ID"
+
+    has_filters = bool(gpu or count or country) or min_cpus is not None
+    if not executor_id and not has_filters:
+        return False, "Must provide either NODE_ID or filters (--gpu, --count, --country, --min-cpus)"
 
     if ttl and until:
         return False, "Cannot specify both --ttl and --until"
 
     if image and template_id:
         return False, "Cannot specify both --image and --template_id"
+
+    if dockerfile and image:
+        return False, "Cannot specify both --dockerfile and --image"
+
+    if dockerfile and template_id:
+        return False, "Cannot specify both --dockerfile and --template_id"
 
     return True, ""
 

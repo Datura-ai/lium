@@ -1,68 +1,85 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "lium.io"
-version = "0.0.3"
-description = "A custom CLI tool for Lium. Lium CLI provides tools for interacting with the Lium ecosystem from the command line."
+dynamic = ["version"]
+description = "Rent cloud GPUs by the hour from the Lium marketplace (H200, B200, H100, RTX 5090, RTX 4090 and more). CLI and Python SDK to launch, manage and scale GPU pods."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10, <3.15"
 license = "MIT"
-authors = [
-    {name = "Lium", email = "support@lium.io"}
-]
+keywords = ["gpu", "cloud-gpu", "gpu-cloud", "gpu-rental", "cloud-compute", "h100", "h200", "b200", "rtx-4090", "machine-learning", "deep-learning", "cli", "sdk"]
+authors = [{ name = "Lium", email = "support@lium.io" }]
 classifiers = [
-  "Development Status :: 4 - Beta",
-  "Intended Audience :: Developers",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Operating System :: OS Independent"
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
 ]
 dependencies = [
+    "click>=8.4.2",
     "typer>=0.12",
     "rich>=13.7",
     "pycryptodome>=3.0.0,<4.0.0",
     "PyYAML~=6.0.1",
-    "aiohttp~=3.10.2",
+    "aiohttp>=3.13.4,<4",
     "backoff~=2.2.1",
-    "GitPython>=3.0.0",
-    "async-substrate-interface>=1.1.0",
-    "scalecodec==1.2.11",
-    "plotly>=6.0.0",
-    "plotille>=5.0.0",
-    "fuzzywuzzy~=0.18.0",
-    "python-Levenshtein",
-    "netaddr~=1.3.0",
-    "Jinja2",
-    "pywry>=0.6.2",
     "async-property==0.2.2",
-    "bittensor-cli>=9.1.0",
     "paramiko>=3.5.1",
     "docker>=7.1.0",
-    "bittensor>=9.8.3",
     # SDK dependencies (now embedded)
     "pydantic>=2.0.0",
     "requests>=2.31.0",
     "loguru>=0.7.0",
     "python-dotenv>=1.1.1",
+    # opt-in crash reporting (lium/cli/telemetry.py); imported only after the user turns it on
+    "sentry-sdk>=2.0",
+    # Provider subcommand dependencies (`lium provider ...` and ProviderClient SDK)
+    "asyncssh>=2.14",
+    "PyJWT~=2.8",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "black", "wheel"]
+provider = [
+    # The chain stack. Renting a pod never touches it. bittensor-drand does not
+    # build on 3.14, and its traceback names cargo and an unrelated repo rather
+    # than lium, so the marker keeps the install quiet and the CLI explains the
+    # gap in its own words when a provider command is actually run.
+    "bittensor>=9.10.1; python_version < '3.14'",
+    "bittensor-cli>=9.1.0; python_version < '3.14'",
+]
+dev = [
+    "pytest",
+    "pytest-asyncio>=0.23",
+    "pytest-mock>=3.12",
+    "responses>=0.25",
+    "black",
+    "wheel",
+    "pyinstaller>=6.0.0",
+]
 docs = ["sphinx>=7.3", "sphinx-rtd-theme>=1.3"]
 
 [project.scripts]
 lium = "lium.cli.cli:main"
+
+# The version is the git tag (vX.Y.Z): a GitHub release IS the version bump (DAH-3225).
+# hatch-vcs writes lium/_version.py at build time; __about__ re-exports it.
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "lium/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["lium"]
 
 
 [project.urls]
-Homepage = "https://github.com/Datura-ai/lium-cli"
-Repository = "https://github.com/Datura-ai/lium-cli"
-Issues = "https://github.com/Datura-ai/lium-cli/issues"
+Homepage = "https://lium.io"
+Documentation = "https://docs.lium.io"
+Repository = "https://github.com/Datura-ai/lium"
+Issues = "https://github.com/Datura-ai/lium/issues"

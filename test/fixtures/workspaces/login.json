@@ -1,0 +1,28 @@
+{
+  "user": {
+    "id": "2f1c8a3e-6d4b-4a1f-9c2e-0b7d5e6f8a91",
+    "name": "Ana",
+    "email": "ana@example.com",
+    "stripe_customer_id": null,
+    "stripe_connect_account_id": null,
+    "stripe_onboarding_completed": false,
+    "referral_payout_method": null,
+    "balance": 42.5,
+    "pending_referral_balance": 0.0,
+    "email_verified": true,
+    "discord_id": null,
+    "disable_incoming_connections": false,
+    "avatar_url": null,
+    "company_name": null,
+    "validator_hotkey": null,
+    "archive_hints": null,
+    "admin": false,
+    "internal_member": false,
+    "referral_code": "ANA123",
+    "custom_referral_info": null,
+    "expiring_credit_info": null,
+    "created_at": "2026-08-01T10:00:00",
+    "updated_at": "2026-09-06T10:00:00"
+  },
+  "token": "eyJ.fixture.session"
+}

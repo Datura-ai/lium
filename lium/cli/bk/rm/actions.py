@@ -10,14 +10,11 @@ class RemoveBackupAction:
         lium: Lium = ctx["lium"]
         pod: PodInfo = ctx["pod"]
 
-        try:
-            backup_config = lium.backup_config(pod)
+        backup_config = lium.backup_config(pod)
 
-            if not backup_config:
-                return ActionResult(ok=False, data={}, error="No backup configuration found")
+        if not backup_config:
+            return ActionResult(ok=False, data={}, error="No backup configuration found")
 
-            lium.backup_delete(backup_config.id)
+        lium.backup_delete(backup_config.id)
 
-            return ActionResult(ok=True, data={})
-        except Exception as e:
-            return ActionResult(ok=False, data={}, error=str(e))
+        return ActionResult(ok=True, data={"backup_config_id": backup_config.id})

@@ -6,7 +6,13 @@ import click
 
 from lium.sdk import Lium
 from lium.cli import ui
-from lium.cli.utils import handle_errors
+from lium.cli.utils import (
+    CliFailure,
+    EXIT_CONFIGURATION_ERROR,
+    EXIT_GENERAL_ERROR,
+    EXIT_POD_NOT_FOUND,
+    handle_errors,
+)
 from . import validation, parsing
 from .actions import ScpAction
 
@@ -30,8 +36,8 @@ def scp_command(
 
     \b
     TARGETS: Pod identifiers - can be:
-      - Pod name/ID (eager-wolf-aa)
-      - Index from 'lium ps' (1, 2, 3)
+      - Pod huid, name or ID (eager-wolf-aa) — the stable form for scripts
+      - Row number of your last 'lium ps' in this shell (1, 2) — refused if that pod is gone or the listing is >10 min old
       - Comma-separated (1,2,eager-wolf-aa)
       - All pods (all)
 
@@ -52,22 +58,19 @@ def scp_command(
     # Validate
     valid, error = validation.validate(targets, source_path, download)
     if not valid:
-        ui.error(error)
-        return
+        raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
 
     # Load data
     lium = Lium()
     all_pods = ui.load("Loading pods", lambda: lium.ps())
 
     if not all_pods:
-        ui.warning("No active pods")
-        return
+        raise CliFailure("pod_not_found", "No active pods", EXIT_POD_NOT_FOUND)
 
     # Parse
     parsed, error = parsing.parse(targets, source_path, destination_path, download, all_pods)
     if error:
-        ui.error(error)
-        return
+        raise CliFailure("pod_not_found", error, EXIT_POD_NOT_FOUND)
 
     pods = parsed.get("pods")
     download_mode = parsed.get("download")
@@ -86,4 +89,8 @@ def scp_command(
     if not result.ok:
         failed_huids = result.data.get("failed_huids", [])
         action_name = "download from" if download_mode else "upload to"
-        ui.error(f"Failed to {action_name}: {', '.join(failed_huids)}")
+        raise CliFailure(
+            "scp_failed",
+            f"Failed to {action_name}: {', '.join(failed_huids)}",
+            EXIT_GENERAL_ERROR,
+        )

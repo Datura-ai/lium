@@ -14,6 +14,7 @@
    .. autosummary::
    
       ~PodInfo.__init__
+      ~PodInfo.eta_hint
    
    
 
@@ -39,5 +40,8 @@
       ~PodInfo.removal_scheduled_at
       ~PodInfo.jupyter_installation_status
       ~PodInfo.jupyter_url
+      ~PodInfo.estimated_ready_seconds
+      ~PodInfo.eta_basis
+      ~PodInfo.phase
    
    

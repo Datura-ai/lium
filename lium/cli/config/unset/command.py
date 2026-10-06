@@ -19,5 +19,7 @@ def config_unset_command(key: str):
     action = UnsetConfigAction()
     result = action.execute(ctx)
 
-    if result.error:
+    # Clearing a key that is already absent leaves the config in the asked-for
+    # state, so it stays a success — the same call as `rm --all` on no pods.
+    if not result.ok:
         ui.warning(result.error)

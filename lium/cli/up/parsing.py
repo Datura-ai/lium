@@ -7,14 +7,21 @@ import re
 
 class ParseResult(TypedDict):
     termination_time: Optional[datetime]
+    ttl: Optional[timedelta]
     volume_id: Optional[str]
     volume_create_params: Optional[dict[str, str]]
 
 
 def parse(ttl: Optional[str], until: Optional[str], volume: Optional[str]) -> tuple[ParseResult | dict, str]:
-    """Parse all up command inputs."""
+    """Parse all up command inputs.
+
+    ``--ttl`` stays a duration (``ttl``); the command turns it into a time at the rent, after the
+    node lookup and the confirmation prompt, so the pod gets the whole duration. ``--until`` is
+    already a point in time (``termination_time``).
+    """
     result: ParseResult = {
         "termination_time": None,
+        "ttl": None,
         "volume_id": None,
         "volume_create_params": None
     }
@@ -23,8 +30,7 @@ def parse(ttl: Optional[str], until: Optional[str], volume: Optional[str]) -> tu
         duration, error = parse_duration(ttl)
         if error:
             return {}, error
-        if duration:
-            result["termination_time"] = datetime.now(timezone.utc) + duration
+        result["ttl"] = duration
 
     if until:
         termination_time, error = parse_time_spec(until)

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lium-cli"
+version = "0.7.0"
+description = "DEPRECATED: This package has been renamed to lium.io. Install lium.io instead."
+authors = [{ name = "Lium", email = "support@lium.io" }]
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 7 - Inactive",
+]
+dependencies = [
+    "lium.io",
+]
+
+[project.urls]
+homepage = "https://pypi.org/project/lium.io/"
+Repository = "https://github.com/Datura-ai/lium-io"

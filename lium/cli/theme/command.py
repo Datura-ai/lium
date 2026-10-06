@@ -3,7 +3,6 @@
 import click
 
 from lium.cli.themed_console import ThemedConsole
-from lium.cli import ui
 from lium.cli.utils import handle_errors
 from .actions import SwitchThemeAction
 
@@ -17,7 +16,4 @@ def theme_command(theme_name: str):
 
     ctx = {"console": console, "theme_name": theme_name}
     action = SwitchThemeAction()
-    result = action.execute(ctx)
-
-    if not result.ok:
-        ui.error(result.error)
+    action.execute(ctx)

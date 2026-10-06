@@ -1,24 +1,50 @@
 name: Build and Publish Python Package
+run-name: ${{ github.event_name == 'release' && format('Release {0}', github.event.release.tag_name) || 'Build only (manual run)' }}
 
 on:
+  # Publishing a GitHub release on tag vX.Y.Z builds that tag and ships it: the version is the
+  # tag (hatch-vcs, pyproject.toml), nothing in the tree is bumped (DAH-3225). Create it with
+  # --prerelease: `latest` must not point at it until the assets are uploaded below, or install.sh
+  # and self-update see a release without binaries for ~3 min. PyPI is not uploaded here: publish-pypi.yml runs
+  # after this workflow succeeds and uploads the tag only when it is on main.
+  release:
+    types: [published]
+  # A manual run only builds: no version input, nothing is published.
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version to release'
-        required: true
-        type: string
+
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name }}
 
 jobs:
-  build:
+  build-python:
     name: Build Python distribution
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
     - uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v4
       with:
-        python-version: '3.10'
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    # the tag is the version, so this is the only place that can say which tag a release may carry: the changelog.d
+    # fragments and the CHANGELOG.md sections added since the previous tag decide (### Added or no header → minor,
+    # ### Removed / a BREAKING bullet → major from 1.0, Changed / Fixed / Security / Deprecated → patch; RELEASING.md).
+    # Also refused: a tag not above every earlier release, and code under lium/ with no changelog entry. A line
+    # `allow-version-skip: <reason>` in the release notes at publish time, with the skipped minimum committed in
+    # changelog.d/.deferred_minimum, lets a hotfix patch ship on top of unreleased features (DAH-3328). Fails before
+    # the wheel is built, so nothing is published: delete the release and its tag, then tag the version the message names.
+    - name: Release tag must be ≥ the changelog minimum
+      if: github.event_name == 'release'
+      env:
+        RELEASE_BODY: ${{ github.event.release.body }}
+      run: |
+        printf '%s\n' "$RELEASE_BODY" > "$RUNNER_TEMP/release-notes.md"
+        python3 scripts/next_version.py --check "$RELEASE_TAG" --release-notes "$RUNNER_TEMP/release-notes.md"
 
     - name: Install dependencies
       run: |
@@ -28,29 +54,276 @@ jobs:
     - name: Build package
       run: python -m build --sdist --wheel --outdir dist/
 
-    - name: Upload artifact
+    # PyPI refuses a distribution whose metadata it cannot render; find out here, before the release goes out
+    - name: Check the distributions' metadata
+      run: twine check --strict dist/*
+
+    # a tag hatch-vcs cannot parse (v-less, extra suffix) would publish assets whose --version is not the release
+    - name: Built version must equal the release tag
+      if: github.event_name == 'release'
+      run: |
+        built="$(basename dist/lium_io-*.whl | cut -d- -f2)"
+        [[ "$built" == "${RELEASE_TAG#v}" ]] || { echo "built version $built, release tag $RELEASE_TAG" >&2; exit 1; }
+
+    - name: Upload Python artifact
       uses: actions/upload-artifact@v4
       with:
-        name: dist
+        name: python-dist
         path: dist/
 
-  approve-and-publish:
-    needs: build
+  validate-binary-targets:
+    name: Validate binary target matrix
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install pytest
+      run: python -m pip install --upgrade pip pytest pyyaml
+
+    - name: Verify installer and workflow target coverage
+      run: pytest test/test_release_binary_targets.py
+
+  build-linux-binary:
+    name: Build Linux binary (${{ matrix.asset_name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - runner: ubuntu-latest
+          platform: linux/amd64
+          asset_name: lium-linux-amd64
+        - runner: ubuntu-24.04-arm
+          platform: linux/arm64
+          asset_name: lium-linux-arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - uses: astral-sh/setup-uv@v7
+
+    # the build image has no git (Dockerfile.build): the version hatch-vcs derives from the tags here is handed in
+    - name: Bundle version (hatch-vcs, from the tags)
+      id: version
+      run: |
+        version="$(uvx --from hatchling --with hatch-vcs hatchling version)"
+        echo "version $version"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    # Release builds do not import or export GHA cache: a default-branch layer is mutable and
+    # must not enter a published CLI bundle. CI workflows still cache.
+    - uses: docker/setup-buildx-action@v3
+
+    # Dockerfile.build installs lockfile dependencies before COPY . . `load` puts the image
+    # in the engine for the extract and the report.
+    - name: Build Linux bundle in Docker
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: Dockerfile.build
+        platforms: ${{ matrix.platform }}
+        build-args: LIUM_VERSION=${{ steps.version.outputs.version }}
+        tags: lium-build:${{ github.sha }}-${{ matrix.asset_name }}
+        load: true
+
+    - name: Extract the bundle from the image
+      run: |
+        mkdir -p dist
+        rm -rf dist/lium
+        docker rm -f lium-extract >/dev/null 2>&1 || true
+        docker create --name lium-extract "lium-build:${GITHUB_SHA}-${{ matrix.asset_name }}" true
+        docker cp lium-extract:/app/dist/lium dist/lium
+        docker rm -f lium-extract
+        tar -czf dist/${{ matrix.asset_name }}.tar.gz -C dist lium
+
+    - name: Smoke test Linux bundle
+      run: |
+        ./dist/lium/lium --version
+        ./dist/lium/lium --help >/dev/null
+
+    # same check as ci.yml: release-assets needs this job, so a bundle with OpenSSL below 1.1.1w-0+deb11u8
+    # (what 0.0.34 shipped, #223) cannot be published.
+    - name: Report what the bundle ships, fail below the OpenSSL floor
+      run: python3 scripts/linux_bundle_report.py --bundle dist/lium --image lium-build:${GITHUB_SHA}-${{ matrix.asset_name }} --name ${{ matrix.asset_name }}
+
+    - name: Generate Linux checksums
+      run: |
+        cd dist
+        sha256sum ${{ matrix.asset_name }}.tar.gz > ${{ matrix.asset_name }}.tar.gz.sha256
+
+    - name: Upload Linux artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.asset_name }}
+        path: |
+          dist/${{ matrix.asset_name }}.tar.gz
+          dist/${{ matrix.asset_name }}.tar.gz.sha256
+
+  build-macos-binary:
+    name: Build macOS binary (${{ matrix.asset_name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - runner: macos-14
+          asset_name: lium-darwin-arm64
+          expected_machine: arm64
+        - runner: macos-15-intel
+          asset_name: lium-darwin-amd64
+          expected_machine: x86_64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install uv
+      run: python -m pip install --upgrade pip uv
+
+    - name: Build macOS binary
+      run: |
+        actual_machine="$(uname -m)"
+        if [[ "$actual_machine" != "${{ matrix.expected_machine }}" ]]; then
+          echo "Expected macOS runner architecture ${{ matrix.expected_machine }}, got $actual_machine" >&2
+          exit 1
+        fi
+        if [[ "$actual_machine" == "x86_64" ]]; then
+          # cryptography >= 49 ships no macOS Intel wheel, so uv builds it from source here. Link OpenSSL statically
+          # (openssl-sys reads OPENSSL_STATIC / OPENSSL_DIR) so the bundle carries no Homebrew libssl.3.dylib: with a dynamic
+          # link, PyInstaller kept python.org's older libssl.3.dylib under the same name and the binary died at import
+          # (`Symbol not found: _SSL_get0_group_name`, run 34155591936). arm64 installs the wheel, which is static already.
+          export OPENSSL_STATIC=1 OPENSSL_DIR="$(brew --prefix openssl@3)"
+        fi
+        uv sync --frozen --extra dev --extra provider
+        rm -rf dist/lium
+        uv run pyinstaller lium.spec --clean
+        tar -czf dist/${{ matrix.asset_name }}.tar.gz -C dist lium
+
+    - name: Smoke test macOS bundle
+      run: |
+        ./dist/lium/lium --version
+        ./dist/lium/lium --help >/dev/null
+        # cryptography must carry its OpenSSL inside _rust.abi3.so (static); a libssl/libcrypto dylib reference is the
+        # 0.0.37 Intel failure coming back.
+        so=dist/lium/_internal/cryptography/hazmat/bindings/_rust.abi3.so
+        test -f "$so"
+        deps="$(otool -L "$so")"
+        if grep -E 'libssl|libcrypto' <<<"$deps"; then
+          echo "cryptography links a shared OpenSSL; the bundle would ship a mismatched libssl.3.dylib" >&2
+          exit 1
+        fi
+        # the OpenSSL baked into cryptography (the wheel's on arm64, Homebrew openssl@3's on Intel), for the record
+        strings -a "$so" | grep -m1 -E '^OpenSSL [0-9]+\.[0-9]+\.[0-9]+' | tee -a "$GITHUB_STEP_SUMMARY"
+
+    - name: Generate macOS checksums
+      run: |
+        cd dist
+        shasum -a 256 ${{ matrix.asset_name }}.tar.gz > ${{ matrix.asset_name }}.tar.gz.sha256
+
+    - name: Upload macOS artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.asset_name }}
+        path: |
+          dist/${{ matrix.asset_name }}.tar.gz
+          dist/${{ matrix.asset_name }}.tar.gz.sha256
+
+  release-assets:
+    name: Publish GitHub release assets
+    if: github.event_name == 'release'
+    needs:
+    - build-python
+    - validate-binary-targets
+    - build-linux-binary
+    - build-macos-binary
     runs-on: ubuntu-latest
     environment: release
     permissions:
-      contents: read
-      id-token: write
-
+      contents: write
     steps:
-    - name: Download artifact
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Download Python artifact
       uses: actions/download-artifact@v4
       with:
-        name: dist
-        path: dist/
+        name: python-dist
+        path: release-assets/python-dist
 
-    - name: Publish package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
+    - name: Download Linux artifact
+      uses: actions/download-artifact@v4
       with:
-        verbose: true
-        print-hash: true
+        name: lium-linux-amd64
+        path: release-assets/linux-amd64
+
+    - name: Download Linux ARM64 artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: lium-linux-arm64
+        path: release-assets/linux-arm64
+
+    - name: Download macOS ARM64 artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: lium-darwin-arm64
+        path: release-assets/darwin-arm64
+
+    - name: Download macOS AMD64 artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: lium-darwin-amd64
+        path: release-assets/darwin-amd64
+
+    - name: Assemble release assets
+      run: |
+        cp scripts/install.sh release-assets/install.sh
+        chmod +x release-assets/install.sh
+        {
+          cat release-assets/linux-amd64/lium-linux-amd64.tar.gz.sha256
+          cat release-assets/linux-arm64/lium-linux-arm64.tar.gz.sha256
+          cat release-assets/darwin-amd64/lium-darwin-amd64.tar.gz.sha256
+          cat release-assets/darwin-arm64/lium-darwin-arm64.tar.gz.sha256
+        } > release-assets/checksums.txt
+
+    - name: Upload assets to the GitHub release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release upload "$RELEASE_TAG" \
+          release-assets/install.sh \
+          release-assets/checksums.txt \
+          release-assets/linux-amd64/lium-linux-amd64.tar.gz \
+          release-assets/linux-amd64/lium-linux-amd64.tar.gz.sha256 \
+          release-assets/linux-arm64/lium-linux-arm64.tar.gz \
+          release-assets/linux-arm64/lium-linux-arm64.tar.gz.sha256 \
+          release-assets/darwin-amd64/lium-darwin-amd64.tar.gz \
+          release-assets/darwin-amd64/lium-darwin-amd64.tar.gz.sha256 \
+          release-assets/darwin-arm64/lium-darwin-arm64.tar.gz \
+          release-assets/darwin-arm64/lium-darwin-arm64.tar.gz.sha256 \
+          release-assets/python-dist/* \
+          --clobber
+
+    - name: Mark the release latest now that the assets are in place
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: gh release edit "$RELEASE_TAG" --prerelease=false --latest

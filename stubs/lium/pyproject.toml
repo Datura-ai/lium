@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lium"
+version = "0.1.0"
+description = "Alias package for lium.io — the Lium CLI. Install lium.io for the full package."
+authors = [{ name = "Lium", email = "support@lium.io" }]
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 4 - Beta",
+]
+dependencies = [
+    "lium.io",
+]
+
+[project.urls]
+homepage = "https://pypi.org/project/lium.io/"
+Repository = "https://github.com/Datura-ai/lium-io"

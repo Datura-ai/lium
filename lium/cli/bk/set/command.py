@@ -4,14 +4,21 @@ import click
 
 from lium.sdk import Lium
 from lium.cli import ui
-from lium.cli.utils import handle_errors, ensure_config
+from lium.cli.utils import (
+    CliFailure,
+    EXIT_CONFIGURATION_ERROR,
+    EXIT_POD_NOT_FOUND,
+    handle_errors,
+    ensure_config,
+)
 from . import validation, parsing
 from .actions import SetBackupAction
+from ..path_warning import entire_volume_backup_warning
 
 
 @click.command("set")
 @click.argument("pod_id")
-@click.option("--path", default="/root", help="Backup path (default: /root)")
+@click.option("--path", required=True, help="Explicit path inside the pod volume to back up")
 @click.option("--every", help="Backup frequency (e.g., 1h, 6h, 24h)")
 @click.option("--keep", help="Retention period (e.g., 1d, 7d, 30d)")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
@@ -27,35 +34,36 @@ def bk_set_command(pod_id: str, path: str, every: str, keep: str, yes: bool):
     \b
     Examples:
       lium bk set 1 --path /root --every 6h --keep 7d
-      lium bk set eager-wolf-aa --every 1h --keep 1d
+      lium bk set eager-wolf-aa --path /root/checkpoints --every 1h --keep 1d
     """
     ensure_config()
 
     # Validate
     valid, error = validation.validate(pod_id, every, keep)
     if not valid:
-        ui.error(error)
-        return
+        raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
 
     # Load data
-    lium = Lium()
+    lium = Lium(source="cli")
     all_pods = ui.load("Loading pods", lambda: lium.ps())
 
     if not all_pods:
-        ui.warning("No active pods")
-        return
+        raise CliFailure("pod_not_found", "No active pods", EXIT_POD_NOT_FOUND)
 
     # Parse
     parsed, error = parsing.parse(pod_id, path, every, keep, all_pods)
     if error:
-        ui.error(error)
-        return
+        raise CliFailure("pod_not_found", error, EXIT_POD_NOT_FOUND)
 
     pod = parsed.get("pod")
     pod_name = parsed.get("pod_name")
     backup_path = parsed.get("path")
     frequency_hours = parsed.get("frequency_hours")
     retention_days = parsed.get("retention_days")
+
+    path_warning = entire_volume_backup_warning(pod, backup_path)
+    if path_warning:
+        ui.warning(path_warning)
 
     # Execute
     ctx = {
@@ -64,11 +72,13 @@ def bk_set_command(pod_id: str, path: str, every: str, keep: str, yes: bool):
         "pod_name": pod_name,
         "path": backup_path,
         "frequency_hours": frequency_hours,
-        "retention_days": retention_days
+        "retention_days": retention_days,
     }
 
     action = SetBackupAction()
-    result = ui.load("Setting backup configuration", lambda: action.execute(ctx))
+    ui.load("Setting backup configuration", lambda: action.execute(ctx))
 
-    if not result.ok:
-        ui.error(result.error)
+    ui.success(
+        f"Backup configured for {pod_name}: "
+        f"path={backup_path}, every={frequency_hours}h, keep={retention_days}d"
+    )

@@ -4,7 +4,13 @@ import click
 
 from lium.sdk import Lium
 from lium.cli import ui
-from lium.cli.utils import handle_errors, ensure_config
+from lium.cli.utils import (
+    CliFailure,
+    EXIT_CONFIGURATION_ERROR,
+    EXIT_POD_NOT_FOUND,
+    handle_errors,
+    ensure_config,
+)
 from . import validation, parsing
 from .actions import ShowBackupAction
 
@@ -30,22 +36,19 @@ def bk_show_command(pod_id: str):
     # Validate
     valid, error = validation.validate(pod_id)
     if not valid:
-        ui.error(error)
-        return
+        raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
 
     # Load data
     lium = Lium()
     all_pods = ui.load("Loading pods", lambda: lium.ps())
 
     if not all_pods:
-        ui.warning("No active pods")
-        return
+        raise CliFailure("pod_not_found", "No active pods", EXIT_POD_NOT_FOUND)
 
     # Parse
     parsed, error = parsing.parse(pod_id, all_pods)
     if error:
-        ui.error(error)
-        return
+        raise CliFailure("pod_not_found", error, EXIT_POD_NOT_FOUND)
 
     pod = parsed.get("pod")
     pod = parsed.get("pod")
@@ -57,11 +60,8 @@ def bk_show_command(pod_id: str):
     action = ShowBackupAction()
     result = ui.load("Loading backup config", lambda: action.execute(ctx))
 
-    if not result.ok:
-        ui.error(result.error)
-        return
-
     if not result.data.get("has_config"):
+        ui.warning(f"No backup configuration found for {pod_name}")
         return
 
     # Display

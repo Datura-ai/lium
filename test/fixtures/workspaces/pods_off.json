@@ -1,0 +1,80 @@
+[
+  {
+    "id": "0b6f2a7e-4c1d-4e0f-9a3b-2d5e6f708192",
+    "executor_id": "aa11bb22-cc33-4d44-8e55-ff6677889900",
+    "ports_mapping": {
+      "22": 31022
+    },
+    "pod_name": "trainer",
+    "ssh_connect_cmd": "ssh root@pod.example -p 31022",
+    "gpu_name": "H100",
+    "gpu_count": "1",
+    "cpu_name": "EPYC",
+    "cpu_count": 16,
+    "ram_total": 128000,
+    "status": "RUNNING",
+    "is_favorite": false,
+    "updated_at": "2026-09-06T19:00:00",
+    "created_at": "2026-09-06T18:00:00",
+    "removal_scheduled_at": null,
+    "termination_hours": null,
+    "jupyter_installation_status": null,
+    "jupyter_url": null,
+    "enable_jupyter": false,
+    "enable_volume_encryption": false,
+    "volume_encryption_status": null,
+    "price": 2.4,
+    "cluster_id": null,
+    "cluster_node_index": null,
+    "created_by_api_key_id": null,
+    "workspace_id": null,
+    "template": {
+      "id": "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+      "name": "PyTorch",
+      "description": null,
+      "docker_image": "lium/pytorch",
+      "docker_image_tag": "latest",
+      "category": "PYTORCH",
+      "docker_image_digest": null,
+      "volumes": [
+        "/workspace"
+      ],
+      "environment": {},
+      "entrypoint": null,
+      "internal_ports": [
+        22
+      ],
+      "is_private": false,
+      "startup_commands": null
+    },
+    "executor": {
+      "id": "aa11bb22-cc33-4d44-8e55-ff6677889900",
+      "machine_name": "NVIDIA H100 80GB HBM3",
+      "price_per_gpu": 2.4,
+      "executor_ip_address": "203.0.113.10",
+      "validator_hotkey": "5FixtureValidatorHotkeyNotARealKey000000000000000",
+      "gpu_count": 1,
+      "specs": {
+        "gpu": {
+          "count": 1,
+          "details": [
+            {
+              "name": "NVIDIA H100 80GB HBM3",
+              "capacity": 81920
+            }
+          ]
+        }
+      },
+      "active": true,
+      "location": {
+        "country": "Germany",
+        "country_code": "DE"
+      }
+    },
+    "volume": null,
+    "ssh_keys": [],
+    "notice_period": null,
+    "skip_add_agent_ssh_key": false,
+    "cluster_overlay_ip": null
+  }
+]

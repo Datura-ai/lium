@@ -4,15 +4,17 @@ from typing import Optional
 
 import click
 
-from lium.cli import ui
-from lium.cli.utils import handle_errors
+from lium.cli.utils import CliFailure, EXIT_CONFIGURATION_ERROR, EXIT_GENERAL_ERROR, handle_errors
 from . import validation
 from .actions import SetConfigAction
 
 
 def mask_value(value: str, key: str) -> str:
-    """Mask sensitive values."""
-    if key.endswith('api_key') and value:
+    """Mask sensitive values (API keys, the `[session] token` from `lium workspaces login`, and the
+    `[account] fingerprint` of an e-mail-less account, which is its only login)."""
+    if key == 'account.fingerprint' and value:
+        return '***' + value[-4:] if len(value) > 12 else '***'
+    if (key.endswith('api_key') or key == 'session.token') and value:
         return value[:8] + '...' + value[-4:] if len(value) > 12 else '***'
     return value
 
@@ -27,8 +29,7 @@ def config_set_command(key: str, value: Optional[str]):
     # Validate
     valid, error = validation.validate(key)
     if not valid:
-        ui.error(error)
-        return
+        raise CliFailure("invalid_key", error, EXIT_CONFIGURATION_ERROR)
 
     # Execute
     ctx = {"key": key, "value": value or ""}
@@ -37,4 +38,4 @@ def config_set_command(key: str, value: Optional[str]):
     result = action.execute(ctx)
 
     if not result.ok:
-        ui.error(result.error)
+        raise CliFailure("config_set_failed", result.error, EXIT_GENERAL_ERROR)

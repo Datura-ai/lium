@@ -6,7 +6,13 @@ import click
 
 from lium.sdk import Lium
 from lium.cli import ui
-from lium.cli.utils import handle_errors
+from lium.cli.utils import (
+    CliFailure,
+    EXIT_CONFIGURATION_ERROR,
+    EXIT_GENERAL_ERROR,
+    EXIT_POD_NOT_FOUND,
+    handle_errors,
+)
 from . import validation, parsing
 from .actions import InstallJupyterAction
 
@@ -32,22 +38,19 @@ def update_command(target: str, jupyter: Optional[int]):
     # Validate
     valid, error = validation.validate(target, jupyter)
     if not valid:
-        ui.error(error)
-        return
+        raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
 
     # Load data
     lium = Lium()
     all_pods = ui.load("Loading pods", lambda: lium.ps())
 
     if not all_pods:
-        ui.warning("No active pods")
-        return
+        raise CliFailure("pod_not_found", "No active pods", EXIT_POD_NOT_FOUND)
 
     # Parse
     parsed, error = parsing.parse(target, all_pods)
     if error:
-        ui.error(error)
-        return
+        raise CliFailure("pod_not_found", error, EXIT_POD_NOT_FOUND)
 
     pod = parsed.get("pod")
 
@@ -58,8 +61,12 @@ def update_command(target: str, jupyter: Optional[int]):
     result = ui.load("Installing Jupyter Notebook", lambda: action.execute(ctx))
 
     if not result.ok:
-        ui.error(result.error or "Failed to install Jupyter Notebook")
-        return
+        raise CliFailure(
+            "jupyter_install_failed",
+            result.error or "Failed to install Jupyter Notebook",
+            EXIT_GENERAL_ERROR,
+            hint=f"Check the pod is RUNNING in 'lium ps', then retry 'lium update {target} --jupyter {jupyter}'",
+        )
 
     jupyter_url = result.data.get("jupyter_url")
     if jupyter_url:

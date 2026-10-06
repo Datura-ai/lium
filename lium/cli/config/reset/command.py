@@ -8,7 +8,7 @@ from .actions import ResetConfigAction
 
 
 @click.command(name="reset")
-@click.option("--confirm", is_flag=True, help="Skip confirmation prompt.")
+@click.option("--yes", "-y", "--confirm", "confirm", is_flag=True, help="Skip confirmation prompt.")
 @handle_errors
 def config_reset_command(confirm: bool):
     """Reset configuration to defaults."""

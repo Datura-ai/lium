@@ -30,6 +30,7 @@
       ~Lium.edit
       ~Lium.exec
       ~Lium.exec_all
+      ~Lium.features
       ~Lium.get_default_images
       ~Lium.get_executor
       ~Lium.get_my_user_id
@@ -41,6 +42,7 @@
       ~Lium.pod
       ~Lium.ps
       ~Lium.reboot
+      ~Lium.rent
       ~Lium.restore
       ~Lium.rm
       ~Lium.rsync
@@ -49,6 +51,7 @@
       ~Lium.ssh
       ~Lium.ssh_connection
       ~Lium.stream_exec
+      ~Lium.supports
       ~Lium.switch_template
       ~Lium.templates
       ~Lium.up
