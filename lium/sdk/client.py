@@ -1231,10 +1231,9 @@ class Lium:
                 response = self._request(
                     "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
                 ).json()
-            except (LiumServerError, LiumRateLimitError, LiumPermissionError, LiumAuthError):
-                raise
             except LiumError as exc:
-                # A refusal of the repeat does not undo the first POST, which may still be running.
+                # Any failure of the repeat (auth, permission, 429, 5xx, a plain refusal) does not undo
+                # the first POST, which may still be running.
                 raise LiumRentOutcomeUnknownError(
                     f"The first rent request got no answer and its repeat was refused ({exc}); a pod may still appear. "
                     "Run 'lium ps' before renting again.",
