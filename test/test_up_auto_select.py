@@ -218,4 +218,3 @@ def test_help_states_the_one_rule():
     # option A (17 Sep): the --gpu path filters like `ls` too; the help no longer promises a floor
     assert "no download floor" in result.output
     assert "100 Mbps" not in result.output
-
