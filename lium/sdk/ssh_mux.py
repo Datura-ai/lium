@@ -133,6 +133,8 @@ class ControlMaster:
 
     def start(self) -> None:
         """Connect and leave the master in the background. Raises when ssh cannot connect."""
+        from .client import _SSH_INSECURE_ENV, ssh_insecure
+
         ensure_socket_dir(self.path.parent)
         try:
             self.path.unlink()   # a dead master's socket, or one that is not ours: ssh -M would refuse the path
@@ -150,10 +152,13 @@ class ControlMaster:
             )
             err.seek(0)
             message = err.read().decode("utf-8", errors="replace").strip()
+        # the pin notice is reported whether or not the connection then succeeded: a failed login still pinned the key
+        notices = [line for line in message.splitlines() if "Permanently added" in line]
+        for line in notices:
+            warnings.warn(line, stacklevel=2)   # first-use pin, or the unverified accept under LIUM_SSH_INSECURE
         if started.returncode == 0:
-            for line in message.splitlines():
-                if "Permanently added" in line:
-                    warnings.warn(line, stacklevel=2)   # first-use pin, or the unverified accept under LIUM_SSH_INSECURE
+            if ssh_insecure() and not notices:   # LogLevel QUIET hides ssh's own line; the opt-out is never silent
+                warnings.warn(f"{self.destination}: {_SSH_INSECURE_ENV}=1 disabled host key verification", stacklevel=2)
             return
         name = self.pod.name or self.pod.huid
         if any(marker in message for marker in _HOST_KEY_CHANGED):

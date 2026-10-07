@@ -113,6 +113,22 @@ def test_the_first_command_starts_a_background_master_with_the_pods_pinned_key(h
     assert oct((home / ".lium" / "ssh-mux").stat().st_mode & 0o777) == "0o700"
 
 
+def test_a_pin_notice_is_reported_when_the_login_then_fails(home, monkeypatch):
+    ssh = _Ssh(live=False, start_code=255, start_stderr=b"Warning: Permanently added '[203.0.113.10]:20299' (ED25519) to the list of known hosts.\nroot@203.0.113.10: Permission denied (publickey).\n")
+    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
+
+    with pytest.warns(UserWarning, match="Permanently added"), pytest.raises(LiumError):
+        ssh_mux.exec_over_master(_lium(home), _pod(), command="true")
+
+
+def test_insecure_accept_warns_even_when_ssh_prints_nothing(home, monkeypatch):
+    monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
+    monkeypatch.setattr(ssh_mux.subprocess, "run", _Ssh(live=False, start_stderr=b""))
+
+    with pytest.warns(UserWarning, match="disabled host key verification"):
+        ssh_mux.exec_over_master(_lium(home), _pod(), command="true")
+
+
 def test_a_command_goes_over_the_live_master_and_env_values_travel_on_stdin(home, monkeypatch):
     ssh = _Ssh(live=True)
     ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
