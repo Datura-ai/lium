@@ -218,3 +218,43 @@ def test_help_states_the_one_rule():
     # option A (17 Sep): the --gpu path filters like `ls` too; the help no longer promises a floor
     assert "no download floor" in result.output
     assert "100 Mbps" not in result.output
+
+
+def test_count_matches_the_free_gpus_a_rent_gets_not_the_host_total(monkeypatch):
+    # A rent with no NODE_ID names no count and takes the free GPUs: the 4-GPU host with
+    # 2 free would bill 2 GPUs to a renter who asked for 4, then fail gpu_count_mismatch.
+    half_free = _executor("half-free-node-aa", 0.10, gpu_count=4, available_gpu_count=2)
+    all_free = _executor("all-free-node-bb", 0.30, gpu_count=4, available_gpu_count=4)
+    monkeypatch.setattr(_FakeLium, "ls", lambda self, **kwargs: [half_free, all_free])
+
+    four = _resolve(monkeypatch, count=4)
+    two = _resolve(monkeypatch, count=2)
+
+    assert four.data["executor"].huid == "all-free-node-bb"
+    assert four.data["candidates"] == 1
+    assert two.data["executor"].huid == "half-free-node-aa"
+
+
+def test_count_with_no_node_that_has_that_many_free_gpus_rents_nothing(monkeypatch):
+    monkeypatch.setattr(
+        _FakeLium, "ls", lambda self, **kwargs: [_executor("half-free-node-aa", 0.10, gpu_count=4, available_gpu_count=2)]
+    )
+
+    result = _resolve(monkeypatch, count=4)
+
+    assert not result.ok
+    assert "GPU count=4" in result.error
+
+
+def test_auto_select_keeps_the_row_numbers_of_the_last_ls(monkeypatch):
+    # `lium up 3` reads the rows `lium ls` stored; picking a node must not overwrite them.
+    def _store(**kwargs):
+        raise AssertionError("up rewrote the `lium ls` row cache")
+
+    monkeypatch.setattr("lium.cli.ls.command.ls_store_executor", _store)
+    monkeypatch.setattr("lium.cli.ls.command.store_executor_selection", _store, raising=False)
+    monkeypatch.setattr("lium.cli.utils.store_executor_selection", _store, raising=False)
+
+    result = ResolveExecutorAction().execute({"lium": _FakeLium(), "gpu": "RTX4090"})
+
+    assert result.ok
