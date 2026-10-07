@@ -1237,7 +1237,9 @@ class Lium:
                 raise LiumRentOutcomeUnknownError(
                     f"The first rent request got no answer and its repeat was refused ({exc}); a pod may still appear. "
                     "Run 'lium ps' before renting again.",
-                    code=exc.code, hint=exc.hint, request_id=exc.request_id,
+                    code="rent_outcome_unknown",
+                    hint="Do not rent again until 'lium ps' shows whether the first request created a pod.",
+                    request_id=exc.request_id,
                 ) from exc
 
         # API should return pod info
