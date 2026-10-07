@@ -365,22 +365,59 @@ def test_step_message_shows_the_live_detail() -> None:
     assert str(msg) == "Validating node (GPU Matrix Multiplication)"
 
 
-def _disk(monkeypatch, free_bytes: float) -> None:
-    monkeypatch.setattr(mine, "_run", lambda cmd, check=True, capture=True, cwd=None: ("/var/lib/docker\n", ""))
+RUNNER = "daturaai/compute-subnet-executor-runner:latest"
+EXECUTOR = "daturaai/compute-subnet-executor@sha256:aa"
+BAKED_COMPOSE = f"services:\n  executor:\n    image: {EXECUTOR}\n  autoheal:\n    image: willfarrell/autoheal\n"
+CURRENT_NODE_IMAGES = {RUNNER, "daturaai/lium-watchtower:1.1.1", EXECUTOR, "willfarrell/autoheal", mine.PREFLIGHT_IMAGE}
+
+
+def _disk(monkeypatch, free_bytes: float, available_images: set = frozenset()) -> None:
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        if "DockerRootDir" in cmd:
+            return "/var/lib/docker\n", ""
+        if "config --images" in cmd:
+            # the unrendered app template is never asked: it needs EXECUTOR_IMAGE_SHA256, which only the runner sets
+            assert "app.yml" not in cmd
+            return f"{RUNNER}\ndaturaai/lium-watchtower:1.1.1\n", ""
+        if cmd.startswith("docker run"):
+            return (BAKED_COMPOSE, "") if RUNNER in available_images else ("", "")
+        if cmd.split()[-1].strip("'") not in available_images:  # docker image inspect <ref>
+            raise RuntimeError(f"Command failed (1): {cmd}")
+        return "[]", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
     monkeypatch.setattr(mine.shutil, "disk_usage", lambda path: SimpleNamespace(free=free_bytes))
 
 
-# 140e9 bytes is 130.4 GiB: under the 140 GiB the validator's GiB floor plus the image reserve needs; 110 GiB is
-# a rerun whose images may already be local, which the CLI cannot confirm
-@pytest.mark.parametrize("free_bytes", [96e9, 140e9, 110 * mine.GIB])
-def test_free_disk_check_refuses_a_disk_without_room_for_the_image_reserve(monkeypatch, free_bytes) -> None:
-    _disk(monkeypatch, free_bytes=free_bytes)
+# 140e9 bytes is 130.4 GiB: under the 140 GiB the validator's GiB floor plus the image reserve needs; a stale
+# executor image or a missing runner image leaves the current images to pull
+@pytest.mark.parametrize(
+    ("free_bytes", "available_images"),
+    [
+        (96e9, set()),
+        (140e9, set()),
+        (110 * mine.GIB, set()),
+        (110 * mine.GIB, {"daturaai/compute-subnet-executor:old"}),
+        (110 * mine.GIB, CURRENT_NODE_IMAGES - {EXECUTOR}),
+    ],
+)
+def test_free_disk_check_refuses_a_disk_too_small_before_the_image_pulls(
+    monkeypatch, tmp_path, free_bytes, available_images
+) -> None:
+    _disk(monkeypatch, free_bytes=free_bytes, available_images=available_images)
 
     with pytest.raises(Exception, match="140 GiB needed"):
-        mine._check_free_disk()
+        mine._check_free_disk(tmp_path)
 
 
-def test_free_disk_check_passes_a_disk_with_room_for_the_images(monkeypatch) -> None:
-    _disk(monkeypatch, free_bytes=140 * mine.GIB)
+def test_free_disk_check_passes_a_rerun_whose_runner_resolved_images_are_all_local(monkeypatch, tmp_path) -> None:
+    _disk(monkeypatch, free_bytes=110 * mine.GIB, available_images=CURRENT_NODE_IMAGES)
 
-    mine._check_free_disk()
+    mine._check_free_disk(tmp_path)
+
+
+def test_free_disk_check_refuses_below_the_validator_floor_even_when_the_images_are_local(monkeypatch, tmp_path) -> None:
+    _disk(monkeypatch, free_bytes=99 * mine.GIB, available_images=CURRENT_NODE_IMAGES)
+
+    with pytest.raises(Exception, match="100 GiB needed"):
+        mine._check_free_disk(tmp_path)

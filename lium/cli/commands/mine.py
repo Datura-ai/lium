@@ -2,6 +2,7 @@
 
 import json
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -221,12 +222,26 @@ NODE_IMAGES_GIB = 40
 GIB = 1024**3
 
 
-def _check_free_disk():
+def _node_images_present(executor_dir: Path) -> bool:
+    """Every image this run would pull is already local. The runner image carries the compose file with the executor
+    digest the runner injects at build, so that file, not the unrendered docker-compose.app.yml, names the images."""
+    try:
+        images = set(_run("docker compose config --images", cwd=str(executor_dir))[0].split())
+        runner = next(i for i in images if "executor-runner" in i)
+        baked = _run(f"docker run --rm --entrypoint cat {shlex.quote(runner)} /root/executor/docker-compose.yml")[0]
+        images.update(re.findall(r"^\s*image:\s*(\S+)", baked, re.MULTILINE))
+        images.add(PREFLIGHT_IMAGE)
+        for image in images:
+            _run(f"docker image inspect {shlex.quote(image)}")
+    except (RuntimeError, StopIteration):
+        return False
+    return True
+
+
+def _check_free_disk(executor_dir: Path):
     root = _run("docker info --format '{{.DockerRootDir}}'", check=False)[0].strip() or "/var/lib/docker"
     free = shutil.disk_usage(root if Path(root).exists() else "/").free
-    # The reserve stays even on a rerun: the executor image digest is resolved by the runner at start, so the CLI
-    # cannot tell whether the current images are already local.
-    needed_gib = NODE_FREE_DISK_GIB + NODE_IMAGES_GIB
+    needed_gib = NODE_FREE_DISK_GIB + (0 if _node_images_present(executor_dir) else NODE_IMAGES_GIB)
     if free < needed_gib * GIB:
         raise Exception(
             f"Not enough free disk: {free / GIB:.1f} GiB free on {root}, {needed_gib} GiB needed "
@@ -875,7 +890,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
 
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
             _check_prereqs(target_dir)
-            _check_free_disk()
+            _check_free_disk(target_dir / "neurons" / "executor")
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.
         preflight_pull = _start_preflight_pull()
