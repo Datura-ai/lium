@@ -17,6 +17,8 @@ import pytest
 from click.testing import CliRunner
 
 from lium.cli.provider.command import provider_command
+from lium.provider.client import ProviderClient
+from lium.provider.errors import ProviderError
 from ._agent_mode import AGENT_SWITCHES, PLAIN_TEXT, read_error
 from ._portal_stub import PortalStub, closed_port_url
 
@@ -207,10 +209,12 @@ def test_resume_sends_the_pause_id_in_canonical_form(stub, portal) -> None:
     assert stub.requests[-1]["query"] == {"pause_id": [own]}
 
 
-def test_resume_after_someone_resumed_and_paused_again_is_a_mismatch_and_changes_nothing(stub, portal) -> None:
+@pytest.mark.parametrize("older_resume", [False, True], ids=["new-instance", "old-instance"])
+def test_resume_after_someone_resumed_and_paused_again_is_a_mismatch_and_changes_nothing(stub, portal, older_resume) -> None:
     own = pause(stub)["pause_id"]
     portal.owner_resumes()
     owners = portal.owner_pauses()
+    portal.older_resume = older_resume
     err = error(run(stub, "--json", "node", "resume", NODE, "--pause-id", own, "--yes"), 3)
     assert (err["code"], err["legacy_code"]) == ("node.pause_id_mismatch", None)
     assert err["data"]["current_pause_id"] == owners
@@ -307,8 +311,6 @@ def test_an_unreachable_portal_on_the_node_read_sends_no_resume(stub, monkeypatc
 
 def test_a_resume_answered_without_pause_id_is_unverified_not_success(stub, portal) -> None:
     own = pause(stub)["pause_id"]
-    portal.owner_resumes()
-    portal.owner_pauses()
     portal.older_resume = True
     err = error(run(stub, "--json", "node", "resume", NODE, "--pause-id", own, "--yes"), 12)
     assert (err["code"], err["legacy_code"]) == ("node.resume_unverified", None)
@@ -405,3 +407,14 @@ def test_resume_help_documents_the_pause_id_flag() -> None:
 def test_help_says_a_null_pause_id_proves_no_pause(args) -> None:
     flat = " ".join(CliRunner().invoke(provider_command, list(args)).output.split())
     assert "A null `pause_id` proves no pause: new rentals are not paused, the pause was set without an id, or the portal does not send it" in flat
+
+
+def test_the_sdk_refuses_a_stale_pause_id_on_an_older_portal_and_changes_nothing(stub, portal) -> None:
+    own = pause(stub)["pause_id"]
+    portal.owner_resumes()
+    owners = portal.owner_pauses()
+    portal.older_resume = True
+    client = ProviderClient(api_token=TOKEN, portal_url=stub.url)
+    with pytest.raises(ProviderError):
+        client.resume_new_rentals(NODE, pause_id=own)
+    assert (portal.pause_id, portal.paused()) == (owners, True)

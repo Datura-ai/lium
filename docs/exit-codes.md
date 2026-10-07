@@ -256,8 +256,8 @@ for a 400 or 409, `PORTAL_FORBIDDEN` for a 403, `PORTAL_NOT_FOUND` for a 404, `P
 | `portal.overview_not_for_custodied_account` | 6 | `lium provider idle-pay` on an account created with e-mail or Google: the portal serves its overview to hotkey accounts only (plain text mode: exit 2, as `PORTAL_FORBIDDEN`). |
 | `portal.<code>` | by status | The portal's own code in snake_case (`portal.node_rented`), passed through; `legacy_code` is the old code for its status. |
 | `node.not_found` | 5 | `node listing` / `idle-pay` named a node the account does not have. |
-| `node.resume_unverified` | 12 | `node resume --pause-id`: the portal answered the resume without a `pause_id` field, so it did not confirm the id check (an instance without pause ids, while the portal is rolled out); new rentals may have been resumed whatever the pause was. `data`: `node_id`, `pause_id`, `pause_id_checked: false`, `may_have_resumed: true`, `new_rentals_pause_requested_at`, `message_for_human`. Relay the message; do not pause or resume again on your own. Same exit in plain text mode. |
-| `node.pause_id_mismatch` | 3 | `node resume --pause-id`: the portal answered 409 `PAUSE_ID_MISMATCH` because the node's current pause is another one, or none (someone resumed, or resumed and paused again). Nothing changed. `data`: `node_id`, `pause_id` (the one given), `current_pause_id` (a UUID, or `null` when the node is not paused or its pause has no id), `status` 409, `portal_code`. Same exit in plain text mode. |
+| `node.resume_unverified` | 12 | `node resume --pause-id`: the portal answered the resume without a `pause_id` field, so it did not confirm the id check; new rentals may have been resumed whatever the pause was. `data`: `node_id`, `pause_id`, `pause_id_checked: false`, `may_have_resumed: true`, `new_rentals_pause_requested_at`, `message_for_human`. Relay the message; do not pause or resume again on your own. Same exit in plain text mode. |
+| `node.pause_id_mismatch` | 3 | `node resume --pause-id`: the node's current pause is another one, or none (someone resumed, or resumed and paused again). Nothing changed. `data`: `node_id`, `pause_id` (the one given), `current_pause_id` (a UUID, or `null` when the node is not paused or its pause has no id); `status` and `portal_code` are present only when the portal answered 409. Same exit in plain text mode. |
 | `node.not_listed_yet` | 11 | `lium mine --register` in agent mode: registered, not listed within `--wait`. |
 | `node.<status>` | 1 | `lium mine --json --register`: the portal names a fix (`node.offline`, `node.validation_failed`). |
 | `host.nvidia_driver_missing`, `host.nvidia_container_toolkit_missing`, `host.docker_missing` | 1 | `lium mine` step 3. |
@@ -314,9 +314,8 @@ is). A portal that does not send them gives `null` for both, never `false`. `nod
   portal's, and the code, not the exit, tells it apart. Exit 10 stays for `node.blocked.*`.
 - A malformed id (not a UUID locally, or a portal 422) is `input.arg_invalid` (exit 2) in agent mode, `ARG_INVALID`
   (exit 1) in plain text mode, like every other bad argument; a locally malformed id sends nothing.
-- A resume the portal answers without a `pause_id` field is `node.resume_unverified` (exit 12). While the portal is
-  rolled out, the node read can reach an instance that checks the id and the resume one that does not, which lifts
-  any pause and answers success. The command cannot tell whose pause was lifted, so it does not report success: `data`
+- A resume the portal answers without a `pause_id` field is `node.resume_unverified` (exit 12). The command cannot
+  tell whose pause was lifted, so it does not report success: `data`
   has `node_id`, `pause_id`, `pause_id_checked: false`, `may_have_resumed: true`, the answer's
   `new_rentals_pause_requested_at` and `message_for_human`. It exits 12, the map's "a person has to act" class, not 3:
   exit 3 also covers portal failures an agent may retry, and here the node may already have changed, so the agent

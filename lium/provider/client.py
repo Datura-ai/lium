@@ -71,6 +71,7 @@ from lium.provider.errors import (
     ARG_INVALID,
     PORTAL_AUTH_EXPIRED,
     PORTAL_AUTH_INVALID,
+    PAUSE_ID_MISMATCH,
     PORTAL_NOT_SUPPORTED,
     ProviderAuthError,
     ProviderConfigError,
@@ -784,9 +785,27 @@ class ProviderClient:
     def resume_new_rentals(self, node_id: str, pause_id: str | None = None) -> dict[str, Any]:
         """``DELETE /executors/{id}/new-rentals/pause`` -- take new rentals again.
 
-        With ``pause_id`` the portal resumes only while that pause is still the node's current one, and answers 409
-        ``PAUSE_ID_MISMATCH`` (``detail.current_pause_id``) otherwise, changing nothing. A portal that predates
-        ``pause_id`` ignores it and resumes anyway: check that ``get_node`` has a ``pause_id`` key first."""
+        With ``pause_id`` the node is read first: a record without a ``pause_id`` key means the portal would ignore
+        the id (``PORTAL_NOT_SUPPORTED``), and a different current pause raises ``PAUSE_ID_MISMATCH``
+        (``context["current_pause_id"]``). Either way no resume is sent."""
+        if pause_id is not None:
+            node = self.get_node(node_id)
+            if not isinstance(node, dict) or "pause_id" not in node:
+                raise ProviderError(
+                    f"not resumed: this portal does not report pause ids, so it would resume node {node_id} "
+                    "whatever --pause-id says",
+                    code=PORTAL_NOT_SUPPORTED,
+                    hint="No resume was sent. Leave the node paused, or resume it without --pause-id only if you "
+                    "know the pause is yours.",
+                    context={"node_id": node_id, "pause_id": pause_id, "unsupported": "pause_id"},
+                )
+            if node["pause_id"] != pause_id:
+                raise ProviderError(
+                    f"Node {node_id} was not resumed: pause {pause_id} is not its current pause.",
+                    code=PAUSE_ID_MISMATCH,
+                    hint="Nothing changed.",
+                    context={"node_id": node_id, "pause_id": pause_id, "current_pause_id": node["pause_id"]},
+                )
         return self._http.delete(
             EXECUTOR_NEW_RENTALS_PAUSE.format(id=_safe_id(node_id, label="node_id")),
             params={"pause_id": pause_id} if pause_id is not None else None,

@@ -138,13 +138,11 @@ def pause(ctx: click.Context, node_id: str) -> None:
 def resume(ctx: click.Context, node_id: str, pause_id: str | None) -> None:
     """Undo `node pause`. Without --pause-id this lifts whatever pause is set.
 
-    With --pause-id the command first reads the node: a portal whose `node get` has no `pause_id` field would
-    ignore the id and resume anyway, so the command refuses there (portal.not_supported, exit 3) and sends
-    no resume. A malformed id is input.arg_invalid (exit 2 under --json, LIUM_OUTPUT=json or LIUM_NONINTERACTIVE=1).
+    With --pause-id the command first reads the node and sends no resume unless that pause is the current one
+    (node.pause_id_mismatch, exit 3), or when the portal reports no pause ids (portal.not_supported, exit 3). A malformed id is input.arg_invalid (exit 2 under --json, LIUM_OUTPUT=json or LIUM_NONINTERACTIVE=1).
 
-    A resume answer without a `pause_id` field came from a portal instance that does not check the id (the portal
-    mid-rollout): the pause may have been lifted whatever its id, so the command answers node.resume_unverified
-    (exit 12, a person has to check the node) instead of success."""
+    A resume answer without a `pause_id` field means the portal did not confirm the id check: the node may have
+    changed, so the command answers node.resume_unverified (exit 12, a person has to check the node)."""
     require_hotkey(ctx, group="node")
     if pause_id is not None:
         try:
@@ -155,8 +153,6 @@ def resume(ctx: click.Context, node_id: str, pause_id: str | None) -> None:
     require_persona_ack(ctx)
     client = build_client(ctx)
     try:
-        if pause_id is not None:
-            _require_pause_id_support(client, node_id, pause_id)
         body = client.resume_new_rentals(node_id, pause_id)
     except ProviderError as e:
         ctx.exit(handle_provider_error(ctx, _resume_error(e, node_id, pause_id)))
@@ -173,21 +169,6 @@ def _malformed_pause_id(value: str) -> ProviderError:
         code=ARG_INVALID,
         hint="Pass the `pause_id` that `lium provider node pause --json` returned.",
         context={"option": "--pause-id", "value": value},
-    )
-
-
-def _require_pause_id_support(client, node_id: str, pause_id: str) -> None:
-    """Raise unless the node's record has a `pause_id` key: a portal without one ignores `?pause_id=`."""
-    node = client.get_node(node_id)
-    if isinstance(node, dict) and "pause_id" in node:
-        return
-    raise ProviderError(
-        f"not resumed: this portal does not report pause ids, so it would resume node {node_id} whatever "
-        "--pause-id says",
-        code=PORTAL_NOT_SUPPORTED,
-        hint="No resume was sent. Leave the node paused, or resume it without --pause-id only if you know "
-        "the pause is yours.",
-        context={"node_id": node_id, "pause_id": pause_id, "unsupported": "pause_id"},
     )
 
 
