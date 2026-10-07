@@ -117,6 +117,31 @@ def test_backup_create_warns_for_explicit_whole_volume(monkeypatch):
     }
 
 
+def test_backup_update_puts_the_new_schedule_on_the_existing_config(monkeypatch):
+    client = Lium(Config(api_key="test"))
+    captured = {}
+
+    class Response:
+        def json(self):
+            return {"id": "config-1", "huid": "config-huid", "pod_executor_id": "pod-1",
+                    "backup_frequency_hours": 24, "retention_days": 30, "backup_path": "/root/data"}
+
+    def fake_request(method, endpoint, json=None, **kwargs):
+        captured.update(method=method, endpoint=endpoint, payload=json)
+        return Response()
+
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    config = client.backup_update("config-1", path="/root/data", frequency_hours=24, retention_days=30)
+
+    assert captured == {
+        "method": "PUT",
+        "endpoint": "/backup-configs/config-1",
+        "payload": {"backup_frequency_hours": 24, "retention_days": 30, "backup_path": "/root/data"},
+    }
+    assert config.backup_frequency_hours == 24
+
+
 def test_backup_create_skips_sdk_warning_for_cli_callers(monkeypatch):
     client = Lium(Config(api_key="test"), source="cli")
     pod = SimpleNamespace(id="pod-1", volume_path="/root")

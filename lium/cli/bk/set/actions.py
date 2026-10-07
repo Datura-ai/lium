@@ -13,18 +13,21 @@ class SetBackupAction:
         frequency_hours: int = ctx["frequency_hours"]
         retention_days: int = ctx["retention_days"]
 
-        # Check if backup already exists
         existing_config = lium.backup_config(pod)
-
         if existing_config:
-            lium.backup_delete(existing_config.id)
-
-        # Create new backup config
-        backup_config = lium.backup_create(
-            pod=pod,
-            path=path,
-            frequency_hours=frequency_hours,
-            retention_days=retention_days
-        )
+            # the server holds one config per pod; PUT keeps the old one if it refuses the new values
+            backup_config = lium.backup_update(
+                existing_config.id,
+                path=path,
+                frequency_hours=frequency_hours,
+                retention_days=retention_days,
+            )
+        else:
+            backup_config = lium.backup_create(
+                pod=pod,
+                path=path,
+                frequency_hours=frequency_hours,
+                retention_days=retention_days,
+            )
 
         return ActionResult(ok=True, data={"backup_config": backup_config})

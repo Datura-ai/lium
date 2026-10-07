@@ -21,6 +21,7 @@
       ~Lium.backup_list
       ~Lium.backup_logs
       ~Lium.backup_now
+      ~Lium.backup_update
       ~Lium.balance
       ~Lium.cancel_scheduled_termination
       ~Lium.create_template

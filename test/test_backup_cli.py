@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from click.testing import CliRunner
 
 from lium.cli.bk.now import command as now_command
@@ -75,6 +77,105 @@ def test_bk_set_prints_success(monkeypatch):
     assert result.exit_code == 0
     assert "Backup configured for backup-test" in result.output
     assert "path=/root/data, every=6h, keep=7d" in result.output
+
+
+def test_bk_set_updates_an_existing_config_in_place(monkeypatch):
+    calls = []
+
+    class FakeLium:
+        def __init__(self, source="sdk"):
+            pass
+
+        def ps(self):
+            return [_pod()]
+
+        def backup_config(self, pod):
+            return SimpleNamespace(id="config-123")
+
+        def backup_update(self, config_id, *, path, frequency_hours, retention_days):
+            calls.append(("update", config_id, path, frequency_hours, retention_days))
+            return SimpleNamespace(id=config_id)
+
+        def backup_delete(self, config_id):
+            calls.append(("delete", config_id))
+
+        def backup_create(self, **kwargs):
+            calls.append(("create",))
+
+    _patch_backup_command(monkeypatch, set_command, FakeLium)
+
+    result = CliRunner().invoke(
+        cli, ["bk", "set", "backup-test", "--path", "/root/data", "--every", "1d", "--keep", "30d"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [("update", "config-123", "/root/data", 24, 30)]
+
+
+def test_bk_set_refused_update_keeps_the_old_config(monkeypatch):
+    calls = []
+
+    class FakeLium:
+        def __init__(self, source="sdk"):
+            pass
+
+        def ps(self):
+            return [_pod()]
+
+        def backup_config(self, pod):
+            return SimpleNamespace(id="config-123")
+
+        def backup_update(self, config_id, **kwargs):
+            raise RuntimeError("API error 400: Configuration would result in 8760 backups")
+
+        def backup_delete(self, config_id):
+            calls.append(("delete", config_id))
+
+    _patch_backup_command(monkeypatch, set_command, FakeLium)
+
+    result = CliRunner().invoke(
+        cli, ["bk", "set", "backup-test", "--path", "/root/data", "--every", "1h", "--keep", "365d"]
+    )
+
+    assert result.exit_code != 0
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--every", "0h"],
+        ["--every", "8d"],
+        ["--every", "169h"],
+        ["--every", "1d2h"],
+        ["--keep", "0d"],
+        ["--keep", "400d"],
+        ["--keep", "7dx"],
+    ],
+)
+def test_bk_set_refuses_out_of_range_schedule_before_any_request(monkeypatch, flags):
+    class FakeLium:
+        def __init__(self, source="sdk"):
+            raise AssertionError("no request may go out for a refused schedule")
+
+    _patch_backup_command(monkeypatch, set_command, FakeLium)
+
+    result = CliRunner().invoke(cli, ["bk", "set", "backup-test", "--path", "/root/data", *flags])
+
+    assert result.exit_code == 2, result.output
+
+
+def test_bk_set_refuses_a_path_with_dot_dot(monkeypatch):
+    class FakeLium:
+        def __init__(self, source="sdk"):
+            raise AssertionError("no request may go out for a refused path")
+
+    _patch_backup_command(monkeypatch, set_command, FakeLium)
+
+    result = CliRunner().invoke(cli, ["bk", "set", "backup-test", "--path", "/root/../etc"])
+
+    assert result.exit_code == 2
+    assert ".." in result.output
 
 
 def test_bk_set_requires_explicit_backup_path():
