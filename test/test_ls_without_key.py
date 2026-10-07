@@ -1,6 +1,7 @@
 """`lium ls` with no API key: the public listing answers, so a visitor sees what is on offer and at what
 price before signing up, and is told how to rent."""
 
+import pytest
 from click.testing import CliRunner
 
 from lium.cli.cli import cli
@@ -16,13 +17,20 @@ NODE = ExecutorInfo(
 )
 
 
-def test_ls_without_key_lists_nodes_and_says_how_to_rent(monkeypatch):
+@pytest.mark.parametrize(
+    ("error", "env"),
+    [
+        ("No API key found. Set LIUM_API_KEY or ~/.lium/config.ini", {}),
+        ("No API key is saved for workspace 'research'; run `lium keys create`", {"LIUM_WORKSPACE": "research"}),
+    ],
+)
+def test_ls_without_key_lists_nodes_and_says_how_to_rent(monkeypatch, error, env):
     configs = []
 
     class KeylessLium:
         def __init__(self, config=None, **kwargs):
             if config is None:
-                raise ValueError("No API key found. Set LIUM_API_KEY or ~/.lium/config.ini")
+                raise ValueError(error)
             configs.append(config)
 
         def ls(self, **kwargs):
@@ -31,7 +39,7 @@ def test_ls_without_key_lists_nodes_and_says_how_to_rent(monkeypatch):
     monkeypatch.setattr(ls_module, "Lium", KeylessLium)
     monkeypatch.setattr(ls_module, "store_executor_selection", lambda executors: None)
 
-    result = CliRunner().invoke(cli, ["ls"], env={"COLUMNS": "400"})
+    result = CliRunner().invoke(cli, ["ls"], env={"COLUMNS": "400", **env})
 
     assert result.exit_code == 0, result.output
     assert "keyless-node" in result.output and SIGNUP_NUDGE in result.output

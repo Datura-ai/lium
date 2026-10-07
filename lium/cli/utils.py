@@ -65,7 +65,7 @@ def browsing_client(lium_cls: type[Lium] = Lium) -> tuple[Lium, bool]:
     try:
         return lium_cls(), False
     except ValueError as e:
-        if "No API key found" not in str(e):
+        if "No API key found" not in str(e) and "No API key is saved for workspace" not in str(e):
             raise
         return lium_cls(config=Config(api_key="", base_url=os.getenv("LIUM_BASE_URL", "https://lium.io/api"))), True
 
