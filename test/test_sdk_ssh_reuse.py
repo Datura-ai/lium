@@ -56,6 +56,12 @@ class _Channel:
     def get_pty(self):
         self.pty = True
 
+    def settimeout(self, seconds):
+        pass
+
+    def invoke_subsystem(self, name):
+        pass
+
     def exec_command(self, command):
         self.command = command
         self.transport.sent.append(command)
@@ -174,6 +180,12 @@ def _lium(monkeypatch, world):
             world.closes += 1
 
     monkeypatch.setattr(lium, "ssh_connection", connection)
+    # _ssh_reuse opens SFTP sessions itself (every wait bounded): the session object is the world's
+    def sftp_client(channel):
+        world.sftp_opens += 1
+        return _Sftp(world)
+
+    monkeypatch.setattr(sdk_client.paramiko, "SFTPClient", sftp_client)
     return lium
 
 
@@ -542,8 +554,28 @@ def test_a_dropped_client_is_collected_and_closes_its_connection(monkeypatch, wo
     import gc
     import weakref
 
-    lium = _lium(monkeypatch, world)
-    lium.exec(_pod(), command="a")
+    class FakeSshClient:                      # the real Lium.ssh_connection runs, over this paramiko stand-in
+        def __init__(self):
+            self.transport = _Transport(world)
+            world.clients.append(self)
+
+        def set_missing_host_key_policy(self, policy):
+            pass
+
+        def connect(self, **kwargs):
+            world.connects.append(kwargs["hostname"])
+
+        def get_transport(self):
+            return self.transport
+
+        def close(self):
+            self.transport.active = False
+            world.closes += 1
+
+    monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
+    monkeypatch.setattr(sdk_client.paramiko, "SSHClient", FakeSshClient)
+    lium = Lium(Config(api_key="test", ssh_key_path="/nonexistent/key"))
+    lium._pooled_connection(_pod()).release()
     ref = weakref.ref(lium)
     del lium
     gc.collect()
