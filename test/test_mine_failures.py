@@ -171,3 +171,13 @@ def test_sysbox_offer_does_nothing_without_a_terminal_or_a_yes(monkeypatch, tmp_
     mine._offer_sysbox_install(tmp_path)
     assert ran == []
 
+
+
+def test_sysbox_offer_comes_before_any_script_from_the_checkout_runs(monkeypatch, tmp_path: Path):
+    calls = []
+    monkeypatch.setattr(mine, "_clone_or_update_repo", lambda *a, **k: calls.append("clone"))
+    monkeypatch.setattr(mine, "_offer_sysbox_install", lambda *a, **k: calls.append("offer"))
+    monkeypatch.setattr(mine, "_install_executor_tools", lambda *a, **k: (calls.append("tools"), 1 / 0))
+    CliRunner().invoke(mine.mine_command, ["-k", "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", "--auto",
+                                           "--dir", str(tmp_path)])
+    assert calls == ["clone", "offer", "tools"]

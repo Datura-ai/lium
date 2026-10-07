@@ -194,8 +194,8 @@ def _has_sysbox() -> bool:
 
 
 def _offer_sysbox_install(compute_dir: Path) -> None:
-    """On a terminal, offer to run the sysbox installer now instead of failing step 3 with its command.
-    Outside the step spinner: the installer prints its own progress. Without a terminal, step 3 fails as before."""
+    """On a terminal with Docker already installed, offer to run the sysbox installer now instead of failing step 3 with
+    its command. Outside the step spinner: the installer prints its own progress. Otherwise step 3 fails as before."""
     import hashlib
     import subprocess
 
@@ -847,10 +847,11 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
         with timed_step_status(1, TOTAL_STEPS, "Ensuring repository"):
             _clone_or_update_repo(target_dir, branch)
 
+        # Before step 2: that step runs the checkout's own script, which must not get a sudo prompt to piggyback on.
+        _offer_sysbox_install(target_dir)
+
         with timed_step_status(2, TOTAL_STEPS, "Installing node tools"):
             _install_executor_tools(target_dir)
-
-        _offer_sysbox_install(target_dir)
 
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
             _check_prereqs(target_dir)
