@@ -2837,10 +2837,10 @@ class Lium:
             # remote command, which then never sends the exit status waited for below.
             total, over, lock = [0], threading.Event(), threading.Lock()
 
-            def drain(recv: Callable[[int], bytes]) -> bytes:
+            def drain(stream) -> bytes:
                 chunks = []
                 while True:
-                    chunk = recv(65536)
+                    chunk = stream.read(65536)
                     if not chunk:
                         return b"".join(chunks)
                     with lock:
@@ -2852,16 +2852,17 @@ class Lium:
                     chunks.append(chunk)
 
             readers = ThreadPoolExecutor(max_workers=2)
-            out, err = readers.submit(drain, channel.recv), readers.submit(drain, channel.recv_stderr)
+            out, err = readers.submit(drain, stdout), readers.submit(drain, stderr)
             readers.shutdown(wait=False)
-            deadline = time.monotonic() + timeout if timeout is not None else None
-            while not channel.exit_status_ready() and not over.is_set():
-                if deadline is not None and time.monotonic() >= deadline:
-                    channel.close()
-                    raise TimeoutError(
-                        f"Command did not finish within {timeout}s on pod {pod.name or pod.huid}: {command}"
-                    )
-                time.sleep(0.1)
+            if timeout is not None:
+                deadline = time.monotonic() + timeout
+                while not channel.exit_status_ready() and not over.is_set():
+                    if time.monotonic() >= deadline:
+                        channel.close()
+                        raise TimeoutError(
+                            f"Command did not finish within {timeout}s on pod {pod.name or pod.huid}: {command}"
+                        )
+                    time.sleep(0.1)
             out_bytes, err_bytes = out.result(), err.result()
             if over.is_set():
                 raise OutputLimitExceeded(
