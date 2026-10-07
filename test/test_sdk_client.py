@@ -522,7 +522,10 @@ def test_get_template_finds_a_template_by_huid_or_name(monkeypatch):
 
     uuid_named = Template(id="third", huid="h", name=template_id, docker_image="c", docker_image_tag="latest",
                           category="general", status="CREATED")
-    monkeypatch.setattr(client, "templates", lambda: [uuid_named])
+    foreign = Template(id="fourth", huid="g", name=template_id, docker_image="d", docker_image_tag="latest",
+                       category="general", status="CREATED")
+    listing = {False: [foreign, uuid_named], True: [uuid_named]}  # the public listing vs the caller's own templates
+    monkeypatch.setattr(client, "templates", lambda filter=None, only_my=False: listing[only_my])
     def no_such_id(*args, **kwargs):
         raise LiumNotFoundError("no such id")
 

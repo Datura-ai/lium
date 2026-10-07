@@ -2600,8 +2600,8 @@ class Lium:
             return self._template_by_huid_or_name(template_id)
         try:
             d = self._request("GET", f"/templates/{quote(str(template_id), safe='')}").json()
-        except LiumNotFoundError:  # a name may itself be a UUID
-            return self._template_by_huid_or_name(template_id)
+        except LiumNotFoundError:  # a name may itself be a UUID; only the caller's own templates, never a public one that borrows the ID
+            return self._template_by_huid_or_name(template_id, only_my=True)
         return Template(
             id=d.get("id", ""),
             huid=generate_huid(d.get("id", "")),
@@ -2612,9 +2612,9 @@ class Lium:
             status=d.get("status", "unknown"),
         )
 
-    def _template_by_huid_or_name(self, selector: str) -> Optional[Template]:
+    def _template_by_huid_or_name(self, selector: str, only_my: bool = False) -> Optional[Template]:
         # names are not unique and the listing includes public templates: never pick one of several
-        matches = [t for t in self.templates() if selector in (t.huid, t.name)]
+        matches = [t for t in (self.templates(only_my=True) if only_my else self.templates()) if selector in (t.huid, t.name)]
         if len(matches) > 1:
             raise LiumError(f"Template {selector!r} is ambiguous ({len(matches)} templates match); use its ID")
         return matches[0] if matches else None
