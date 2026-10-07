@@ -401,3 +401,35 @@ def test_rent_step_stops_after_max_tries_and_when_a_pod_was_left_behind(monkeypa
     with pytest.warns(UserWarning), pytest.raises(pytest.fail.Exception, match="not renting elsewhere"):
         conftest.up_first_accepting(session, _rental(conftest))
     assert session.ups == ["x0"]
+
+
+def test_unresolved_first_rent_is_not_retried_on_another_node_in_either_journey(monkeypatch):
+    from lium.sdk.exceptions import LiumRentOutcomeUnknownError
+
+    conftest = _load(monkeypatch)
+    journey = _load_sdk_journey(monkeypatch, conftest)
+
+    class _Sdk:
+        def __init__(self):
+            self.ups = []
+
+        def up(self, executor_id, name):
+            self.ups.append(executor_id)
+            raise LiumRentOutcomeUnknownError("first rent unresolved, repeat refused")
+
+        def ps(self):
+            raise AssertionError("no pod lookup, no second rent")
+
+    sdk, state = _Sdk(), {}
+    nodes = [SimpleNamespace(id=f"x{i}", huid=f"h{i}", price_per_hour=0.1 * i) for i in range(4)]
+    with pytest.raises(LiumRentOutcomeUnknownError):
+        journey.up_first_accepting(sdk, nodes, "e2e-1", state)
+    assert sdk.ups == ["x0"] and not state["refused"]
+
+    class _TimedOut(_Up):   # `lium up` timing out is exit 3 too, but it says "got no answer", not "refused"
+        def lium(self, *argv, check=False, timeout=0):
+            self.ups.append(argv[1])
+            return SimpleNamespace(rc=3, out="", err="api_timeout: got no answer", argv=list(argv))
+
+    cli = _TimedOut({})
+    assert conftest.up_first_accepting(cli, _rental(conftest)).rc == 3 and cli.ups == ["x0"]
