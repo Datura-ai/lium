@@ -332,7 +332,7 @@ def bench_cli(bench: Bench, python: str, runs: int, extra_env: Dict[str, str]) -
     times = []
     for _ in range(runs):
         started = time.perf_counter()
-        proc = subprocess.run([python, "-c", CLI_MAIN, "exec", POD_NAME, "true"], env=env, cwd=bench.workdir,
+        proc = subprocess.run([python, "-c", CLI_MAIN, "exec", POD_ID, "true"], env=env, cwd=bench.workdir,
                               capture_output=True, text=True, stdin=subprocess.DEVNULL)
         times.append(time.perf_counter() - started)
         if proc.returncode != 0:

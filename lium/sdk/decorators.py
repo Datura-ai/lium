@@ -439,12 +439,20 @@ def _future_time(iso: Optional[str]) -> Optional[str]:
     return iso if when > datetime.now(timezone.utc) else None
 
 
+def _account(sdk: Lium) -> tuple:
+    """Who a client acts as: API key, API server and workspace. A warm pod belongs to one such account."""
+    config = getattr(sdk, "config", None)
+    return tuple(getattr(config, field, None) for field in ("api_key", "base_url", "workspace_id", "workspace"))
+
+
 def _find_warm(sdk: Lium, key: str, say):
     """A pod this process (or an earlier one, by name) left warm for this machine spec.
 
     A pod this process still holds an open SSH connection to is up: it is used without
     listing the account's pods again."""
     warm = _WARM.get(key)
+    if warm and _account(warm.sdk) != _account(sdk):
+        warm = None   # another API key, server or workspace: the kept pod and connection are not this caller's
     has_open_connection = getattr(warm.sdk, "has_open_connection", None) if warm else None
     if callable(has_open_connection) and has_open_connection(warm.pod):
         return warm

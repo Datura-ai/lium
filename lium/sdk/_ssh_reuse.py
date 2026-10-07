@@ -3,7 +3,7 @@
 A new connection to a distant node is a TCP handshake, the SSH key exchange and the key
 authentication: seven or so round trips before a command can start, 1-4 s per call on the
 far nodes. A kept connection starts the next command after one channel open. paramiko is
-imported by the caller (``lium.sdk.client``); nothing here imports it.
+imported by the caller (``lium.sdk.client``); here it is imported only to open an SFTP session.
 """
 from __future__ import annotations
 
@@ -51,6 +51,13 @@ class PooledConnection:
         self._users_lock = threading.Lock()
         self.users = 0
         self.last_used = monotonic()
+        self._timer: Optional[threading.Timer] = None
+        self._pool: Optional[dict] = None          # the pool (not the client) this entry is listed in
+        self._pool_lock: Optional[threading.Lock] = None
+
+    def listed_in(self, pool: dict, lock: threading.Lock) -> None:
+        """Tell the entry which pool holds it, so an idle expiry can take it out of there."""
+        self._pool, self._pool_lock = pool, lock
 
     @classmethod
     def open(cls, connect: Callable[[], ContextManager[Any]]) -> "PooledConnection":
@@ -79,11 +86,39 @@ class PooledConnection:
     def acquire(self) -> None:
         with self._users_lock:
             self.users += 1
+            self._cancel_timer()
 
     def release(self) -> None:
         with self._users_lock:
             self.users = max(0, self.users - 1)
             self.last_used = monotonic()
+            if self.users == 0:
+                self._cancel_timer()
+                # Nothing else wakes an idle connection: without a request for the same pod it would
+                # stay open (and its pod's SSH session with it) until the process ends.
+                self._timer = threading.Timer(IDLE_SECONDS, self._expire)
+                self._timer.daemon = True
+                self._timer.start()
+
+    def _cancel_timer(self) -> None:  # call with _users_lock held
+        timer, self._timer = self._timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def _expire(self) -> None:
+        """Close the connection when it has had no user for ``IDLE_SECONDS``; checked under the locks
+        a taker holds, so a connection being taken at this moment is never closed."""
+        pool, pool_lock = self._pool, self._pool_lock
+        guard = pool_lock if pool_lock is not None else threading.Lock()
+        with guard:
+            with self._users_lock:
+                if self.users > 0 or monotonic() - self.last_used < IDLE_SECONDS:
+                    return
+                self._timer = None
+            if pool is not None:
+                for key in [k for k, kept in pool.items() if kept is self]:
+                    pool.pop(key, None)
+        self.close()
 
     def open_channel(self) -> Any:
         """A session channel on this connection, or None for a stand-in client without a transport.
@@ -105,14 +140,57 @@ class PooledConnection:
         neither waits for the other and no request of one lands in the other's.
         """
         if not self._sftp_lock.acquire(blocking=False):
-            return self.client.open_sftp(), False
+            return self._open_sftp(), False
         try:
-            if self._sftp is None or getattr(getattr(self._sftp, "sock", None), "closed", False):
-                self._sftp = self.client.open_sftp()
+            if self._sftp is not None and getattr(getattr(self._sftp, "sock", None), "closed", False):
+                self._sftp = None
+            if self._sftp is None:
+                self._sftp = self._open_sftp()
+            else:
+                self._ping(self._sftp)
             return self._sftp, True
         except BaseException:
+            sftp, self._sftp = self._sftp, None
             self._sftp_lock.release()
+            try:
+                if sftp is not None:
+                    sftp.close()
+            except Exception:  # noqa: BLE001 — a session on a connection that is being written off
+                pass
             raise
+
+    def _open_sftp(self) -> Any:
+        """A new SFTP session, every wait bounded by ``CHANNEL_OPEN_TIMEOUT`` (paramiko's own default is an hour)."""
+        transport = paramiko_transport(self.client)
+        if transport is None:
+            return self.client.open_sftp()
+        import paramiko
+
+        channel = transport.open_session(timeout=CHANNEL_OPEN_TIMEOUT)
+        try:
+            channel.settimeout(CHANNEL_OPEN_TIMEOUT)   # the version exchange below reads under it
+            channel.invoke_subsystem("sftp")
+            sftp = paramiko.SFTPClient(channel)
+        except BaseException:
+            channel.close()
+            raise
+        channel.settimeout(None)
+        return sftp
+
+    @staticmethod
+    def _ping(sftp: Any) -> None:
+        """One round trip on a kept session, bounded: a peer that went away silently (a laptop that slept,
+        a network switch) never answers, and a transfer would then block until TCP gave up (~15 min).
+        ``socket.timeout`` is an ``OSError``: the caller treats it as a dead connection and connects again."""
+        get_channel = getattr(sftp, "get_channel", None)
+        channel = get_channel() if callable(get_channel) else None
+        if channel is None or not hasattr(sftp, "normalize"):
+            return
+        channel.settimeout(CHANNEL_OPEN_TIMEOUT)
+        try:
+            sftp.normalize(".")
+        finally:
+            channel.settimeout(None)
 
     def give_back_sftp(self, sftp: Any, shared: bool) -> None:
         if shared:
@@ -124,6 +202,8 @@ class PooledConnection:
             pass
 
     def close(self) -> None:
+        with self._users_lock:
+            self._cancel_timer()
         sftp, self._sftp = self._sftp, None
         try:
             if sftp is not None:

@@ -2727,6 +2727,10 @@ class Lium:
                 f"and reconnect; {_SSH_INSECURE_ENV}=1 disables pinning."
             ) from e
 
+        # A kept connection suspends here for as long as it is kept, and the pool holds this generator:
+        # a frame that still named the client would keep it from ever being collected (and so from
+        # closing the pool in its finalizer). Nothing below needs it.
+        del self
         try:
             yield client
         finally:
@@ -2824,6 +2828,7 @@ class Lium:
             if entry is None:
                 entry = PooledConnection.open(lambda: self.ssh_connection(pod))
                 entry.acquire()
+                entry.listed_in(pool, lock)
                 with lock:
                     pool[key] = entry
         return entry
@@ -2910,16 +2915,26 @@ class Lium:
         """
         try:
             return entry, open_on(entry)
+        except paramiko.ChannelException:
+            # The server refused this one channel (its session limit): the connection is fine and other
+            # calls are running on it. Give back this call's use and report the refusal.
+            entry.release()
+            raise
         except (paramiko.SSHException, EOFError, OSError):
             entry.release()
             self._drop_pooled(pod, entry)
             entries = self.__dict__.get("_ssh_session_entries", {})
+            sessions = self.__dict__.get("_ssh_sessions", {})
             in_session = entries.get(pod.id) is entry
+            if in_session:
+                # ssh_connection() would hand back the closed client from these: clear them before connecting
+                entries.pop(pod.id, None)
+                sessions.pop(pod.id, None)
             entry = self._pooled_connection(pod)
             if in_session:  # inside ssh_session(): the block moves over too, with its own use
                 entry.acquire()
                 entries[pod.id] = entry
-                self._ssh_sessions[pod.id] = entry.client
+                sessions[pod.id] = entry.client
         except BaseException:
             entry.release()
             raise

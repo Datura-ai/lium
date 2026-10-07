@@ -365,6 +365,24 @@ def test_a_warm_pod_this_process_is_still_connected_to_is_used_without_listing_p
     f.close()
 
 
+@pytest.mark.parametrize("field, other", [("api_key", "key-b"), ("base_url", "https://other.example/api"), ("workspace_id", "ws-2")])
+def test_a_warm_pod_is_not_handed_to_another_account(monkeypatch, field, other):
+    from types import SimpleNamespace
+
+    def sdk(**changes):
+        config = dict(api_key="key-a", base_url="https://lium.io/api", workspace_id="ws-1", workspace=None, **changes)
+        pod = SimpleNamespace(id="pod-1", status="RUNNING", ssh_cmd="ssh root@h -p 1", name="x", executor=None)
+        return SimpleNamespace(config=SimpleNamespace(**config), ps=lambda: [pod], has_open_connection=lambda p: True)
+
+    old, new = sdk(), sdk()
+    setattr(new.config, field, other)
+    monkeypatch.setattr(D, "_WARM", {"k": D._Warm(old, old.ps()[0], None, 0, hourly=1.0)})
+
+    assert D._find_warm(old, "k", lambda m: None).sdk is old                     # same account: reused
+    monkeypatch.setitem(D._WARM, "k", D._Warm(old, old.ps()[0], None, 0, hourly=1.0))
+    assert D._find_warm(new, "k", lambda m: None) is None                        # changed: not the old account's pod
+
+
 def test_a_backend_with_rent_by_spec_gets_one_rent_call_and_no_listing(fake, capsys):
     FakeLium.rent_by_spec = True
     remote = D.machine(machine="A100", timeout=600)(double)

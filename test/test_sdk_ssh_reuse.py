@@ -463,3 +463,127 @@ def test_concurrent_uploads_and_downloads_to_one_pod_arrive_whole(real_pod, tmp_
     assert errors == []
     assert len(list(remote_dir.iterdir())) == 8
     assert bench.proxy.connections == 1
+
+
+def test_a_refused_channel_does_not_close_the_connection_other_calls_use(monkeypatch, world):
+    lium = _lium(monkeypatch, world)
+    pod = _pod()
+    lium.exec(pod, command="first")
+    transport = world.clients[0].transport
+    other = _kept(lium)
+    other.acquire()                                  # another call is running on the connection
+    real_open = transport.open_session
+
+    def refuse(timeout=None):
+        raise sdk_client.paramiko.ChannelException(1, "administratively prohibited")
+
+    transport.open_session = refuse
+    with pytest.raises(sdk_client.paramiko.ChannelException):
+        lium.exec(pod, command="second")
+    transport.open_session = real_open
+
+    assert transport.active and world.closes == 0 and len(world.connects) == 1
+    assert other.users == 1 and lium._ssh_pool and _kept(lium) is other
+
+
+def test_transport_loss_with_users_still_replaces_the_connection(monkeypatch, world):
+    lium = _lium(monkeypatch, world)
+    pod = _pod()
+    lium.exec(pod, command="first")
+    _kept(lium).acquire()
+    world.clients[0].transport.fail_open = 1
+
+    lium.exec(pod, command="second")
+
+    assert len(world.connects) == 2 and world.clients[0].transport.active is False
+
+
+def test_reconnect_inside_ssh_session_hands_out_the_new_client(monkeypatch, world, tmp_path):
+    lium = _lium(monkeypatch, world)
+    pod = _pod()
+    with lium.ssh_session(pod) as first:
+        world.clients[0].transport.fail_open = 1      # the held connection cannot open a channel any more
+        result = lium.exec(pod, command="inside")
+        assert result["stdout"] == "ran inside"
+        assert len(world.clients) == 2 and lium._ssh_sessions[pod.id] is world.clients[1]
+        with lium.ssh_connection(pod) as again:
+            assert again is world.clients[1] and again is not first
+        local = tmp_path / "f"
+        lium.download(pod, remote="/r", local=str(local))   # SFTP on the new client too
+    assert len(world.connects) == 2 and world.gets == ["/r"]
+
+
+def test_a_kept_connection_is_closed_after_the_idle_limit_without_another_call(monkeypatch, world):
+    monkeypatch.setattr(_ssh_reuse, "IDLE_SECONDS", 0.05)
+    lium = _lium(monkeypatch, world)
+    pod = _pod()
+    lium.exec(pod, command="a")
+    deadline = _ssh_reuse.monotonic() + 5
+    while world.closes == 0 and _ssh_reuse.monotonic() < deadline:
+        threading.Event().wait(0.02)
+
+    assert world.closes == 1 and not lium._ssh_pool and world.clients[0].transport.active is False
+
+
+def test_a_call_arriving_before_the_idle_deadline_keeps_the_connection(monkeypatch, world):
+    monkeypatch.setattr(_ssh_reuse, "IDLE_SECONDS", 0.2)
+    lium = _lium(monkeypatch, world)
+    pod = _pod()
+    lium.exec(pod, command="a")
+    entry = _kept(lium)
+    entry.acquire()                                   # in use when the timer of the first call fires
+    threading.Event().wait(0.4)
+    assert world.closes == 0 and lium._ssh_pool
+    entry.release()
+    lium.close()
+
+
+def test_a_dropped_client_is_collected_and_closes_its_connection(monkeypatch, world):
+    import gc
+    import weakref
+
+    lium = _lium(monkeypatch, world)
+    lium.exec(_pod(), command="a")
+    ref = weakref.ref(lium)
+    del lium
+    gc.collect()
+
+    assert ref() is None and world.closes == 1
+
+
+class _HalfDeadSftp(_Sftp):
+    """Accepts requests and never answers: its channel times out like a peer that went away."""
+
+    def __init__(self, world):
+        super().__init__(world)
+        self.timeouts = []
+        self.channel = type("Ch", (), {"settimeout": lambda c, t: self.timeouts.append(t)})()
+
+    def get_channel(self):
+        return self.channel
+
+    def normalize(self, path):
+        raise sdk_client.socket.timeout("timed out")
+
+
+@pytest.mark.parametrize("operation", ["upload", "download"])
+def test_a_transfer_on_a_silently_dead_kept_connection_reconnects(monkeypatch, world, tmp_path, operation):
+    lium = _lium(monkeypatch, world)
+    pod = _pod()
+    src = tmp_path / "f"
+    src.write_text("x")
+    lium.download(pod, remote="/first", local=str(src))
+    dead = _HalfDeadSftp(world)
+    _kept(lium)._sftp = dead                          # the kept SFTP session of a connection that died silently
+
+    if operation == "download":
+        lium.download(pod, remote="/second", local=str(src))
+        assert world.gets == ["/first", "/second"]
+    else:
+        monkeypatch.setattr(_Sftp, "put", lambda self, local, remote: self.world.gets.append(remote), raising=False)
+        monkeypatch.setattr(sdk_client, "_remote_file_path", lambda sftp, local, remote: remote)
+        lium.upload(pod, local=str(src), remote="/up")
+        assert world.gets == ["/first", "/up"]
+
+    assert dead.timeouts == [_ssh_reuse.CHANNEL_OPEN_TIMEOUT, None] and dead.closed
+    assert len(world.connects) == 2 and world.clients[0].transport.active is False

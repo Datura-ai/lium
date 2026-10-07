@@ -50,7 +50,7 @@ class _Ssh:
 
     def __call__(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
-        path = Path(next(a for a in argv if a.startswith("ControlPath=")).split("=", 1)[1])
+        path = Path(next(a for a in argv if a.startswith("ControlPath=")).split("=", 1)[1].strip('"'))
         if "check" in argv:
             return SimpleNamespace(returncode=0 if self.live else 255)
         if "exit" in argv:
@@ -271,11 +271,28 @@ def test_a_cached_pod_without_a_live_master_goes_to_the_pod_list(home, monkeypat
     assert pods_with_live_masters(lium, "warm-pod") is None
 
 
-def test_cached_pods_with_live_masters_are_used_by_name_huid_or_id(home, monkeypatch):
+def test_cached_pods_with_live_masters_are_used_by_huid_or_id(home, monkeypatch):
     lium = _lium(home)
     remember_pods(lium, [_pod(), _pod(pod_id="pod-2", name="other", huid="calm-owl-bb")])
     monkeypatch.setattr(ssh_mux, "has_live_master", lambda lium, pod: True)
-    assert [p.id for p in pods_with_live_masters(lium, "warm-pod, calm-owl-bb,pod-1")] == ["pod-1", "pod-2", "pod-1"]
+    assert [p.id for p in pods_with_live_masters(lium, "eager-wolf-aa, calm-owl-bb,pod-1")] == ["pod-1", "pod-2", "pod-1"]
+
+
+def test_a_pod_name_is_never_taken_from_the_cache(home, monkeypatch):
+    # a name can be moved to another pod after the cache was written: names go to the live list
+    lium = _lium(home)
+    remember_pods(lium, [_pod()])
+    monkeypatch.setattr(ssh_mux, "has_live_master", lambda lium, pod: True)
+    assert pods_with_live_masters(lium, "warm-pod") is None
+
+
+def test_the_control_path_with_a_space_in_the_home_directory_is_one_quoted_value(home, monkeypatch):
+    spaced = home / "my home"
+    spaced.mkdir()
+    monkeypatch.setenv("HOME", str(spaced))
+    master = ssh_mux.ControlMaster(_lium(home), _pod())
+    option = next(a for a in master.base if a.startswith("ControlPath="))
+    assert option == f'ControlPath="{master.path}"' and " " in str(master.path)
 
 
 class _CliLium:
@@ -316,9 +333,24 @@ def test_lium_exec_on_a_pod_with_a_live_master_lists_no_pods(home, monkeypatch):
     assert first.exit_code == 0 and _CliLium.ps_calls == 1 and sent == [("pod-1", "echo hi", {"K": "v"})]
 
     live.add("pod-1")
-    second, sent = _run_cli(monkeypatch, "warm-pod", "echo hi")
+    second, sent = _run_cli(monkeypatch, "eager-wolf-aa", "echo hi")
     assert second.exit_code == 0 and _CliLium.ps_calls == 0 and sent == [("pod-1", "echo hi", {})]
     assert "hi" in second.output
+
+
+def test_lium_exec_script_never_puts_its_text_in_ssh_argv(home, monkeypatch, tmp_path):
+    _CliLium.pods = [_pod()]
+    monkeypatch.setattr(ssh_mux, "has_live_master", lambda lium, pod: True)
+    calls = []
+    monkeypatch.setattr(_CliLium, "exec", lambda self, pod, **kw: calls.append(kw["command"]) or
+                        {"stdout": "", "stderr": "", "exit_code": 0, "success": True})
+    script = tmp_path / "s.sh"
+    script.write_text("echo SECRET-IN-SCRIPT\n")
+
+    for extra in ([], ["--detach"]):
+        result, sent = _run_cli(monkeypatch, "eager-wolf-aa", "--script", str(script), *extra)
+        assert result.exit_code == 0 and sent == []
+    assert len(calls) == 2 and all("SECRET-IN-SCRIPT" in c for c in calls)
 
 
 def test_lium_exec_with_persist_off_runs_over_the_sdk(home, monkeypatch):

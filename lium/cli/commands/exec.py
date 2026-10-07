@@ -28,7 +28,6 @@ from ..utils import (
     EXIT_POD_NOT_FOUND,
     CliFailure,
     console,
-    _exact_match,
     handle_errors,
     loading_status,
     parse_targets,
@@ -275,7 +274,8 @@ def pods_with_live_masters(lium: Lium, targets: str) -> Optional[list[PodInfo]]:
         return None
     pods = []
     for name in names:
-        pod = _exact_match(name, cached)
+        # id and huid only: a name can be renamed, or given to another pod, since the cache was written
+        pod = next((p for p in cached if name in (p.id, p.huid)), None)
         if pod is None or not ssh_mux.has_live_master(lium, pod):
             return None
         pods.append(pod)
@@ -369,7 +369,9 @@ def exec_command(
         )
 
     lium = Lium()
-    selected_pods = pods_with_live_masters(lium, targets) or resolve_pods_or_fail(
+    # A script's text would travel in ssh's argv (visible to every local user): it stays on the SDK path
+    use_master = uses_control_master(lium) and not script
+    selected_pods = (use_master and pods_with_live_masters(lium, targets)) or resolve_pods_or_fail(
         lium, targets, show_progress=not json_output
     )
 
@@ -400,7 +402,7 @@ def exec_command(
         else:
             command_to_run = build_detached_command(prelude + command_to_run, log_path)
 
-    if uses_control_master(lium):
+    if use_master:
         if len(selected_pods) == 1:
             results = [ssh_mux.exec_over_master(lium, selected_pods[0], command=command_to_run, env=env_dict)]
         else:
