@@ -157,6 +157,25 @@ def _check_prereqs():
     _run("docker info")
 
 
+# VerifyX refuses a node with under 100 GB free, measured after the node images are pulled (~40 GB: executor,
+# runner, validator preflight). On 7 Oct 2026 a 100 GB disk passed every earlier check and failed only at step 6.
+NODE_FREE_DISK_GB = 100
+NODE_IMAGES_GB = 40
+
+
+def _check_free_disk():
+    root = _run("docker info --format '{{.DockerRootDir}}'", check=False)[0].strip() or "/var/lib/docker"
+    free_gb = shutil.disk_usage(root if Path(root).exists() else "/").free / 1e9
+    images_pulled = bool(_run("docker image ls -q daturaai/compute-subnet-executor", check=False)[0].strip())
+    needed_gb = NODE_FREE_DISK_GB + (0 if images_pulled else NODE_IMAGES_GB)
+    if free_gb < needed_gb:
+        raise Exception(
+            f"Not enough free disk: {free_gb:.0f} GB free on {root}, {needed_gb} GB needed "
+            f"(validation requires {NODE_FREE_DISK_GB} GB free after about {NODE_IMAGES_GB} GB of node images). "
+            "Use a host with a disk of at least 150 GB, or free space and re-run."
+        )
+
+
 def _install_executor_tools(compute_dir: Path):
     script = compute_dir / "scripts" / "install_executor_on_ubuntu.sh"
     if not script.exists():
@@ -795,6 +814,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
 
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
             _check_prereqs()
+            _check_free_disk()
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.
         preflight_pull = _start_preflight_pull()
@@ -898,9 +918,10 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     add_url = f"https://provider.lium.io/nodes?{urlencode(params)}"
     
     console.print("\n[bold cyan]Register this node in the Provider Portal:[/bold cyan]")
-    console.print(f"[yellow]{add_url}[/yellow]\n")
+    # soft_wrap: a hard wrap split the IP across lines and the clicked link opened Add Node with a wrong address
+    console.print(f"[yellow]{add_url}[/yellow]\n", soft_wrap=True)
     console.print("[bold cyan]…or from this terminal:[/bold cyan]")
-    console.print(f"[yellow]{_provider_add_command(gpu_info, public_ip, external_port)}[/yellow]")
+    console.print(f"[yellow]{_provider_add_command(gpu_info, public_ip, external_port)}[/yellow]", soft_wrap=True)
     console.dim(_registration_note())
 
 
@@ -1005,9 +1026,9 @@ def _provider_add_command(gpu_info: dict, public_ip: str, external_port: str | i
 
 def _registration_note() -> str:
     return (
-        "Validators only reach nodes of providers with a running coordinator: opt in to the "
-        "Lium Central Provider Server (`lium provider config opt-in --yes`, or Profile Settings "
-        "in the portal) or run a self-hosted provider. Until then the node stays "
-        "VALIDATION_PENDING. The first validation takes roughly 15 minutes; add --price to "
-        "`node add` to override the default price."
+        "If your account is not opted in to the Lium Central Provider Server yet (Profile Settings "
+        "in the portal; on by default for new accounts), run `lium provider config opt-in --yes` "
+        "or a self-hosted provider, or the node stays VALIDATION_PENDING. The first validation "
+        "takes roughly 15 minutes. The node is listed at the model's default price; add --price "
+        "to `node add` to set your own within the range the portal shows for the model."
     )

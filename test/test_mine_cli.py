@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -362,3 +363,26 @@ def test_step_message_shows_the_live_detail() -> None:
     assert str(msg) == "Validating node"
     msg.detail = "GPU Matrix Multiplication"
     assert str(msg) == "Validating node (GPU Matrix Multiplication)"
+
+
+def _disk(monkeypatch, free_gb: float, images_pulled: bool) -> None:
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        if "DockerRootDir" in cmd:
+            return "/var/lib/docker\n", ""
+        return ("abc123\n" if images_pulled else ""), ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.shutil, "disk_usage", lambda path: SimpleNamespace(free=free_gb * 1e9))
+
+
+def test_free_disk_check_refuses_a_100_gb_disk_before_the_image_pulls(monkeypatch) -> None:
+    _disk(monkeypatch, free_gb=96, images_pulled=False)
+
+    with pytest.raises(Exception, match="140 GB needed"):
+        mine._check_free_disk()
+
+
+def test_free_disk_check_passes_a_rerun_with_the_images_already_pulled(monkeypatch) -> None:
+    _disk(monkeypatch, free_gb=110, images_pulled=True)
+
+    mine._check_free_disk()
