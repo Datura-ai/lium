@@ -170,6 +170,10 @@ def _lium(monkeypatch, world):
 
     @contextmanager
     def connection(pod, timeout=30):
+        held = lium._ssh_sessions.get(pod.id)   # as the real one: inside ssh_session() the held client is handed back
+        if held is not None:
+            yield held
+            return
         world.connects.append(pod.ssh_cmd)
         client = _Client(world)
         world.clients.append(client)

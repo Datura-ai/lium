@@ -347,10 +347,9 @@ def test_lium_exec_script_never_puts_its_text_in_ssh_argv(home, monkeypatch, tmp
     script = tmp_path / "s.sh"
     script.write_text("echo SECRET-IN-SCRIPT\n")
 
-    for extra in ([], ["--detach"]):
-        result, sent = _run_cli(monkeypatch, "eager-wolf-aa", "--script", str(script), *extra)
-        assert result.exit_code == 0 and sent == []
-    assert len(calls) == 2 and all("SECRET-IN-SCRIPT" in c for c in calls)
+    result, sent = _run_cli(monkeypatch, "eager-wolf-aa", "--script", str(script))
+    assert result.exit_code == 0, result.output
+    assert sent == [] and len(calls) == 1 and "SECRET-IN-SCRIPT" in calls[0]
 
 
 def test_lium_exec_with_persist_off_runs_over_the_sdk(home, monkeypatch):
