@@ -121,3 +121,27 @@ def test_create_ephemeral_template_action_uses_empty_environment_when_no_env():
 
     assert result.ok is True
     assert captured["environment"] == {}
+
+
+def test_create_ephemeral_template_action_sends_a_digest_reference_whole():
+    captured = {}
+
+    class FakeLium:
+        def create_template(self, **kwargs):
+            captured.update(kwargs)
+            return Template(
+                id="template-123",
+                huid="brave-fox-12",
+                name=kwargs["name"],
+                docker_image=kwargs["docker_image"],
+                docker_image_tag=kwargs["docker_image_tag"],
+                category="DOCKER",
+                status="VERIFY_SUCCESS",
+            )
+
+    image = "vllm/vllm-openai@sha256:" + "a" * 64
+
+    CreateEphemeralTemplateAction().execute({"lium": FakeLium(), "image": image})
+
+    assert captured["docker_image"] == image
+    assert captured["docker_image_tag"] == ""

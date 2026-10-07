@@ -189,7 +189,7 @@ def _post_rent_failure(exc: Exception, billing_pod: dict, doing: str, note: str 
 )
 @click.option("--restore-backup", "restore_backup_id", help="Backup ID to restore after the pod starts")
 @click.option("--restore-to", "restore_path", help="New or empty subdirectory for the startup restore")
-@click.option("--image", help="Docker image to run (e.g., pytorch/pytorch:2.0, nvidia/cuda:12.0)")
+@click.option("--image", help="Docker image to run (e.g., pytorch/pytorch:2.0, nvidia/cuda:12.0, or name@sha256:<digest> to pin one build)")
 @click.option("--internal-ports", help="Internal ports to expose (comma-separated, e.g., 22,8000,8080)")
 @click.option("--dockerfile", type=click.Path(exists=True, dir_okay=False, readable=True), help="Path to a Dockerfile to build the pod image from (custom build; mutually exclusive with --image/--template_id)")
 @click.option("-e", "--env", multiple=True, help="Environment variables (KEY=VALUE), can be repeated")
@@ -284,6 +284,7 @@ def up_command(
     Docker-run style (streams logs instead of SSH):
       lium up --gpu A4000 --image pytorch/pytorch:2.0
       lium up --gpu H100 --image vllm/vllm-openai:latest -e HF_TOKEN=xxx
+      lium up --gpu H100 --image vllm/vllm-openai@sha256:<digest>   # pin one build
       lium up --gpu A6000 --image python:3.11 --cmd "python -c 'print(1+1)'"
       lium up --gpu A4000 --image myimg --entrypoint /bin/sh --cmd "-c 'echo hi'"
       lium up --gpu A4000 --image myimg --internal-ports 22,8000,8080

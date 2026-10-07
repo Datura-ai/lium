@@ -173,8 +173,11 @@ class CreateEphemeralTemplateAction:
         cmd: Optional[str] = ctx.get("cmd", "")
         ports: List[int] = ctx.get("ports", [22])
 
-        # Parse image:tag
-        if ":" in image:
+        # A digest reference goes whole: the backend splits name, tag and digest, and an
+        # rsplit on ':' would cut "name@sha256:<hex>" inside the digest.
+        if "@" in image:
+            docker_image, docker_tag = image, ""
+        elif ":" in image:
             docker_image, docker_tag = image.rsplit(":", 1)
         else:
             docker_image = image
