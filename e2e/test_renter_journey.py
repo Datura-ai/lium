@@ -203,13 +203,17 @@ def test_billing_moves_while_the_pod_runs(session: Session, rental: Rental):
         pytest.skip("pod not running")
     if rental.balance_before is None:
         pytest.skip("balance before the rent unknown")
-    elapsed = time.monotonic() - rental.up_called_at
-    if elapsed < 330:
-        # the first accrual tick may not have landed yet; wait for it once
-        time.sleep(330 - elapsed)
+    # the tick is the wall-clock */5 beat and charges only pods already RUNNING, so the first charge lands at the
+    # first boundary after RUNNING (up to 5 min + provisioning after `up`, not a fixed 330 s), plus the queue
+    running_wall = time.time() - (time.monotonic() - rental.running_at)
+    first_tick = (int(running_wall) // 300 + 1) * 300
+    deadline = first_tick + 120
     bal = _balance(session)
-    elapsed = time.monotonic() - rental.up_called_at
-    assert bal < rental.balance_before, f"balance {rental.balance_before}→{bal} unchanged after {elapsed:.0f}s of rental"
+    while bal >= rental.balance_before and time.time() < deadline:
+        time.sleep(15)
+        bal = _balance(session)
+    elapsed = time.monotonic() - rental.running_at
+    assert bal < rental.balance_before, f"balance {rental.balance_before}→{bal} unchanged {elapsed:.0f}s after RUNNING, 2 min past the first billing tick"
 
 
 def test_rm_removes_the_pod_and_the_final_charge_matches_the_clock(session: Session, rental: Rental):
