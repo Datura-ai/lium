@@ -67,7 +67,7 @@ def ensure_socket_dir(directory: Path) -> None:
     try:
         directory.mkdir(mode=0o700)
     except FileExistsError:
-        pass
+        pass  # already there: the checks below decide whether it is usable
     # Open without following a symlink another user planted at the predictable fallback path, then check and chmod the
     # opened directory itself.
     try:
