@@ -2,7 +2,6 @@ from typing import List
 
 from lium.cli.actions import ActionResult
 from lium.sdk import Lium, PodInfo
-from lium.cli import ui
 
 
 class RebootPodsAction:
@@ -14,16 +13,15 @@ class RebootPodsAction:
         lium: Lium = ctx["lium"]
         volume_id: str | None = ctx.get("volume_id")
 
-        failed_huids = []
+        failures = []
 
         for pod in pods:
             try:
                 lium.reboot(pod, volume_id=volume_id)
             except Exception as e:
-                ui.debug(f"Failed to reboot {pod.huid}: {e}")
-                failed_huids.append(pod.huid)
+                failures.append(f"{pod.huid} ({e})")
 
         return ActionResult(
-            ok=(len(failed_huids) == 0),
-            data={"failed_huids": failed_huids}
+            ok=(len(failures) == 0),
+            data={"failures": failures}
         )

@@ -126,6 +126,7 @@ def ls_command(
     _, error = validation.validate(
         limit, lat, lon, max_distance, min_cuda_version,
         min_vram_gb=min_vram_gb, max_price=max_price, min_cpus=min_cpus, min_download_mbps=min_download_mbps,
+        gpu_count=gpu_count,
     )
     if error:
         raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
@@ -191,6 +192,14 @@ def ls_command(
             else:
                 tail = "Drop the filter or lower the floor"
             ui.info(f"{'; '.join(rules)}. {tail}")
+            return
+        server_filters = [flag for flag, on in (
+            ("--count", gpu_count), ("--min-cuda", min_cuda_version), ("--min-cpus", min_cpus),
+            ("--max-distance", max_distance),
+        ) if on]
+        if server_filters:
+            ui.error(f"No available node matches {', '.join(server_filters)}")
+            ui.info(f"Tip: loosen a filter, or {ui.styled('lium ls', 'success')} to see everything")
             return
         if gpu_type:
             ui.error(f"All {gpu_type} GPUs are currently rented out")

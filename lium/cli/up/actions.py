@@ -173,9 +173,10 @@ class CreateEphemeralTemplateAction:
         cmd: Optional[str] = ctx.get("cmd", "")
         ports: List[int] = ctx.get("ports", [22])
 
-        # Parse image:tag
-        if ":" in image:
-            docker_image, docker_tag = image.rsplit(":", 1)
+        # A ':' before the last '/' is a registry port (localhost:5000/img), not a tag
+        name, sep, tag = image.rpartition(":")
+        if sep and "/" not in tag:
+            docker_image, docker_tag = name, tag
         else:
             docker_image = image
             docker_tag = "latest"

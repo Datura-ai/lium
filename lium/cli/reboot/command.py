@@ -56,9 +56,10 @@ def reboot_command(targets: Optional[str], all: bool, volume_id: Optional[str]):
 
     # Only error if anything failed
     if not result.ok:
-        failed_huids = result.data.get("failed_huids", [])
+        failures = result.data.get("failures", [])
         raise CliFailure(
             "reboot_failed",
-            f"Failed to reboot pods: {', '.join(failed_huids)}",
+            f"Failed to reboot pods: {', '.join(failures)}",
             EXIT_GENERAL_ERROR,
         )
+    ui.success(f"Reboot requested for {', '.join(p.huid for p in selected_pods)}")
