@@ -532,6 +532,12 @@ def test_get_template_finds_a_template_by_huid_or_name(monkeypatch):
     monkeypatch.setattr(client, "_request", no_such_id)
     assert client.get_template(template_id) is uuid_named
 
+    def anonymous(*args, **kwargs):
+        raise LiumAuthError("no key")
+
+    monkeypatch.setattr(client, "templates", anonymous)
+    assert client.get_template(template_id) is None  # a missing ID looked up without a key is still "not found"
+
 
 def test_get_template_raises_errors_other_than_not_found(monkeypatch):
     client = Lium(Config(api_key="test"))

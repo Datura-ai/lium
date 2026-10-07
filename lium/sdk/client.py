@@ -2601,7 +2601,10 @@ class Lium:
         try:
             d = self._request("GET", f"/templates/{quote(str(template_id), safe='')}").json()
         except LiumNotFoundError:  # a name may itself be a UUID; only the caller's own templates, never a public one that borrows the ID
-            return self._template_by_huid_or_name(template_id, only_my=True)
+            try:
+                return self._template_by_huid_or_name(template_id, only_my=True)
+            except LiumAuthError:  # an anonymous lookup of a missing ID has no templates of its own
+                return None
         return Template(
             id=d.get("id", ""),
             huid=generate_huid(d.get("id", "")),
