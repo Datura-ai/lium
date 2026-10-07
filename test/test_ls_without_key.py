@@ -68,7 +68,7 @@ def test_templates_without_key_lists_and_says_how_to_rent(monkeypatch):
             if config is None:
                 raise ValueError("No API key found. Set LIUM_API_KEY")
 
-        def templates(self, **kwargs):
+        def templates(self, *args, **kwargs):
             return []
 
     monkeypatch.setattr(templates_module, "Lium", KeylessLium)
