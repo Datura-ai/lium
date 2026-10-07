@@ -130,7 +130,7 @@ finally:
             lium.down(p)
 ```
 
-`lium.exec` keeps at most `max_output_bytes` (default 256 MiB) of stdout and stderr together; past that it closes the channel and raises `OutputLimitExceeded`, so send large output to a file on the pod.
+`lium.exec` keeps at most `max_output_bytes` (default 64 MiB) of stdout and stderr together; past that it closes the channel and raises `OutputLimitExceeded`, so send large output to a file on the pod.
 
 ### Run work
 

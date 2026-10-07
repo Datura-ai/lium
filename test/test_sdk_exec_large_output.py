@@ -95,8 +95,8 @@ def test_exec_stops_reading_past_max_output_bytes(tmp_path, monkeypatch):
         lium.exec(pod, command="big-output", timeout=10, max_output_bytes=OUTPUT_BYTES // 2)
 
 
-def test_exec_limit_counts_decoded_text_not_wire_bytes(tmp_path, monkeypatch):
-    # Each invalid byte decodes to a 3-byte U+FFFD: 1 MiB on the wire is 3 MiB kept.
+def test_exec_limit_bounds_kept_text_not_wire_bytes(tmp_path, monkeypatch):
+    # Each invalid byte decodes to U+FFFD (2 bytes in a str): 1 MiB on the wire is 2 MiB kept.
     monkeypatch.setattr(_Server, "payload", b"\xff" * (1024 * 1024))
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
@@ -116,4 +116,4 @@ def test_exec_limit_counts_decoded_text_not_wire_bytes(tmp_path, monkeypatch):
     )
 
     with pytest.raises(OutputLimitExceeded):
-        lium.exec(pod, command="big-output", timeout=10, max_output_bytes=2 * 1024 * 1024)
+        lium.exec(pod, command="big-output", timeout=10, max_output_bytes=3 * 1024 * 1024 // 2)

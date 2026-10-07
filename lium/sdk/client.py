@@ -1,6 +1,5 @@
 """Lium SDK - Clean, Unix-style SDK for GPU pod management."""
 
-import codecs
 import getpass
 import hashlib
 import ipaddress
@@ -12,6 +11,7 @@ import shlex
 import socket
 import stat
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -2777,7 +2777,7 @@ class Lium:
         timeout: Optional[float] = None,
         detach: bool = False,
         log_path: Optional[str] = None,
-        max_output_bytes: int = 256 * 1024 * 1024,
+        max_output_bytes: int = 64 * 1024 * 1024,
     ) -> Dict[str, Any]:
         """Execute a shell command on a pod over SSH.
 
@@ -2838,25 +2838,22 @@ class Lium:
             # remote command, which then never sends the exit status waited for below.
             total, over, lock = [0], threading.Event(), threading.Lock()
 
-            def drain(read) -> str:
+            def drain(read) -> bytes:
                 # ``read`` returns as soon as any bytes arrive (paramiko's ``stream.read(n)`` waits for
                 # n of them), so the limit is checked per chunk and a slow trickle cannot outrun it.
-                # Decoding as we go counts what is kept: invalid bytes become 3-byte U+FFFD, so the
-                # text, not the wire bytes, is what the limit bounds.
-                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-                parts = []
+                # One bytearray per stream: no list of parts, no join copy.
+                buf = bytearray()
                 while True:
                     chunk = read(65536)
-                    text = decoder.decode(chunk, final=not chunk)
+                    if not chunk:
+                        return bytes(buf)
+                    buf += chunk
                     with lock:
-                        total[0] += len(text.encode("utf-8"))
+                        total[0] += len(chunk)
                         if total[0] > max_output_bytes:
                             over.set()
                             channel.close()
-                            return ""
-                    parts.append(text)
-                    if not chunk:
-                        return "".join(parts)
+                            return b""
 
             raw = hasattr(channel, "recv_stderr")
             read_out = channel.recv if raw else stdout.read
@@ -2873,7 +2870,15 @@ class Lium:
                             f"Command did not finish within {timeout}s on pod {pod.name or pod.huid}: {command}"
                         )
                     time.sleep(0.1)
-            out_text, err_text = out.result(), err.result()
+            out_bytes, err_bytes = out.result(), err.result()
+            out_text = out_bytes.decode("utf-8", errors="replace")
+            del out_bytes
+            err_text = err_bytes.decode("utf-8", errors="replace")
+            del err_bytes
+            # Python keeps a str at 1, 2 or 4 bytes per character, so ASCII with an emoji or two
+            # outgrows its UTF-8 size: bound what is actually kept.
+            if sys.getsizeof(out_text) + sys.getsizeof(err_text) > max_output_bytes:
+                over.set()
             if over.is_set():
                 raise OutputLimitExceeded(
                     f"Command wrote more than {max_output_bytes} bytes of output on pod {pod.name or pod.huid}"
