@@ -4267,7 +4267,7 @@ class Lium:
             "retention_days": retention_days,
             "backup_path": path,
         }
-        response = self._request("PUT", f"/backup-configs/{config_id}", json=payload).json()
+        response = self._request("PUT", f"/backup-configs/{quote(str(config_id), safe='')}", json=payload).json()
         return self._dict_to_backup_config(response)
 
     def backup_now(
