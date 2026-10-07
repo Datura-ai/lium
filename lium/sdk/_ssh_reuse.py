@@ -167,6 +167,10 @@ class PooledConnection:
         import paramiko
 
         channel = transport.open_session(timeout=CHANNEL_OPEN_TIMEOUT)
+        # invoke_subsystem waits for the peer's acknowledgement with no timeout; closing the channel releases it
+        deadline = threading.Timer(CHANNEL_OPEN_TIMEOUT, channel.close)
+        deadline.daemon = True
+        deadline.start()
         try:
             channel.settimeout(CHANNEL_OPEN_TIMEOUT)   # the version exchange below reads under it
             channel.invoke_subsystem("sftp")
@@ -174,6 +178,8 @@ class PooledConnection:
         except BaseException:
             channel.close()
             raise
+        finally:
+            deadline.cancel()
         channel.settimeout(None)
         return sftp
 

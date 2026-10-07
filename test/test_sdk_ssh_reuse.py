@@ -623,3 +623,31 @@ def test_a_transfer_on_a_silently_dead_kept_connection_reconnects(monkeypatch, w
 
     assert dead.timeouts == [_ssh_reuse.CHANNEL_OPEN_TIMEOUT, None] and dead.closed
     assert len(world.connects) == 2 and world.clients[0].transport.active is False
+
+
+def test_an_unacknowledged_sftp_subsystem_request_is_cut_off(monkeypatch, world):
+    from concurrent.futures import ThreadPoolExecutor, wait
+    from types import SimpleNamespace
+
+    lium = _lium(monkeypatch, world)
+    lium.download(_pod(), remote="/first", local=os.devnull)
+    entry = _kept(lium)
+    monkeypatch.setattr(_ssh_reuse, "CHANNEL_OPEN_TIMEOUT", 0.02)
+    channel = sdk_client.paramiko.Channel(0)
+    channel.active = True
+    transport = SimpleNamespace(
+        open_session=lambda **kw: channel,
+        is_active=lambda: True,
+        _send_user_message=lambda message: None,
+        get_exception=lambda: None,
+    )
+    channel.transport = transport
+    monkeypatch.setattr(entry.client, "get_transport", lambda: transport, raising=False)
+
+    with ThreadPoolExecutor(max_workers=1) as workers:
+        future = workers.submit(entry._open_sftp)
+        try:
+            wait([future], timeout=0.5)
+            assert future.done() and channel.closed
+        finally:
+            channel.close()
