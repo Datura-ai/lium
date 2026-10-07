@@ -44,3 +44,36 @@ def test_ls_without_key_lists_nodes_and_says_how_to_rent(monkeypatch, error, env
     assert result.exit_code == 0, result.output
     assert "keyless-node" in result.output and SIGNUP_NUDGE in result.output
     assert [c.api_key for c in configs] == [""]
+
+
+def test_real_sdk_without_a_key_raises_the_text_browsing_client_matches(monkeypatch, tmp_path):
+    from lium.cli.utils import browsing_client
+    from lium.sdk import Lium
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for var in ("LIUM_API_KEY", "LIUM_WORKSPACE", "LIUM_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+
+    client, anonymous = browsing_client(Lium)
+
+    assert anonymous is True
+    assert client.config.api_key == ""
+
+
+def test_templates_without_key_lists_and_says_how_to_rent(monkeypatch):
+    from lium.cli.templates import command as templates_module
+
+    class KeylessLium:
+        def __init__(self, config=None, **kwargs):
+            if config is None:
+                raise ValueError("No API key found. Set LIUM_API_KEY")
+
+        def templates(self, **kwargs):
+            return []
+
+    monkeypatch.setattr(templates_module, "Lium", KeylessLium)
+
+    result = CliRunner().invoke(cli, ["templates"], env={"COLUMNS": "400"})
+
+    assert result.exit_code == 0, result.output
+    assert SIGNUP_NUDGE in result.output
