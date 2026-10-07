@@ -818,8 +818,6 @@ def get_last_executor_selection() -> Optional[Dict[str, Any]]:
 
 def store_volume_selection(volumes: List) -> None:
     """Store the last volume selection for HUID-based lookup."""
-    from lium.cli.settings import config
-
     selection_data = {
         'timestamp': datetime.now(timezone.utc).isoformat(),  # aware: `volumes rm` checks its age
         'volumes': []
@@ -835,17 +833,16 @@ def store_volume_selection(volumes: List) -> None:
             'current_size_gb': volume.current_size_gb,
         })
 
-    # Store in config directory
-    config_file = config.config_dir / "last_volumes.json"
+    # per shell, like `lium ps`: another shell's `lium volumes` must not renumber this one's rows
+    config_file = volume_snapshot_path()
     with open(config_file, 'w') as f:
         json.dump(selection_data, f, indent=2)
+    _prune_pod_snapshots(config_file, datetime.now(timezone.utc), _VOLUMES_SNAPSHOT_PREFIX)
 
 
 def get_last_volume_selection() -> Optional[Dict[str, Any]]:
-    """Retrieve the last volume selection."""
-    from lium.cli.settings import config
-
-    config_file = config.config_dir / "last_volumes.json"
+    """This shell's last `lium volumes` list."""
+    config_file = volume_snapshot_path()
     if config_file.exists():
         try:
             with open(config_file, 'r') as f:
@@ -981,6 +978,7 @@ POD_INDEX_TTL_SECONDS = 600
 POD_INDEX_ENV = "LIUM_NO_POD_INDEX"
 _PS_SNAPSHOT_PREFIX = "last_ps."
 _PS_SNAPSHOT_SUFFIX = ".json"
+_VOLUMES_SNAPSHOT_PREFIX = "last_volumes."
 
 
 def pod_indexes_allowed() -> bool:
@@ -999,10 +997,16 @@ def pod_snapshot_path(session: Optional[str] = None) -> Path:
     return config.config_dir / f"{_PS_SNAPSHOT_PREFIX}{session or pod_index_session()}{_PS_SNAPSHOT_SUFFIX}"
 
 
-def _prune_pod_snapshots(keep: Path, now: datetime) -> None:
+def volume_snapshot_path() -> Path:
+    from lium.cli.settings import config
+
+    return config.config_dir / f"{_VOLUMES_SNAPSHOT_PREFIX}{pod_index_session()}{_PS_SNAPSHOT_SUFFIX}"
+
+
+def _prune_pod_snapshots(keep: Path, now: datetime, prefix: str = _PS_SNAPSHOT_PREFIX) -> None:
     """Drop other shells' snapshots once they are past the TTL; they can never be used again."""
     try:
-        for path in keep.parent.glob(f"{_PS_SNAPSHOT_PREFIX}*{_PS_SNAPSHOT_SUFFIX}"):
+        for path in keep.parent.glob(f"{prefix}*{_PS_SNAPSHOT_SUFFIX}"):
             if path == keep:
                 continue
             if now.timestamp() - path.stat().st_mtime > POD_INDEX_TTL_SECONDS:

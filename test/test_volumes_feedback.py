@@ -46,7 +46,7 @@ def _patch(monkeypatch, module: str, fake: _FakeLium, tmp_path) -> None:
 def _cache(tmp_path, volumes, age: timedelta = timedelta()) -> None:
     stamp = (datetime.now(timezone.utc) - age).isoformat()
     rows = [{"id": v.id, "huid": v.huid, "name": v.name} for v in volumes]
-    (tmp_path / "last_volumes.json").write_text(json.dumps({"timestamp": stamp, "volumes": rows}))
+    utils.volume_snapshot_path().write_text(json.dumps({"timestamp": stamp, "volumes": rows}))
 
 
 def test_volumes_new_prints_the_huid_to_attach(monkeypatch, tmp_path) -> None:
@@ -86,6 +86,17 @@ def test_volumes_rm_refuses_an_index_older_than_ten_minutes(monkeypatch, tmp_pat
     fake = _FakeLium()
     _patch(monkeypatch, "rm", fake, tmp_path)
     _cache(tmp_path, [_volume("calm-owl-2b")], age=timedelta(minutes=11))
+    result = CliRunner().invoke(volumes_rm_command, ["1", "-y"])
+    assert result.exit_code != 0
+    assert fake.deleted == []
+
+
+def test_volumes_rm_index_is_the_list_this_shell_saw(monkeypatch, tmp_path) -> None:
+    fake = _FakeLium()
+    _patch(monkeypatch, "rm", fake, tmp_path)
+    monkeypatch.setattr(utils, "pod_index_session", lambda: "shell-b")
+    _cache(tmp_path, [_volume("other-shell-4d", vid="id-B")])
+    monkeypatch.setattr(utils, "pod_index_session", lambda: "shell-a")
     result = CliRunner().invoke(volumes_rm_command, ["1", "-y"])
     assert result.exit_code != 0
     assert fake.deleted == []
