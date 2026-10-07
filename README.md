@@ -595,7 +595,7 @@ A pod that later presents a different key is rejected — the SDK raises `LiumHo
 reboot the platform did on its own, or an interception; delete that file if the pod was
 legitimately re-provisioned. Fingerprints are `SHA256:…`, as `ssh-keygen -lf` prints them.
 `LIUM_SSH_INSECURE=1` restores the old accept-anything behaviour (each accepted key is
-reported with its fingerprint). `lium ssh` runs OpenSSH with an argument list built from the
+reported on stderr). `lium ssh` runs OpenSSH with an argument list built from the
 pod's user, address and port; the API's connection string is never handed to a shell.
 
 ### Scripts and agents (non-interactive use)

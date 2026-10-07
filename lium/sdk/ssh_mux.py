@@ -21,6 +21,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -150,6 +151,9 @@ class ControlMaster:
             err.seek(0)
             message = err.read().decode("utf-8", errors="replace").strip()
         if started.returncode == 0:
+            for line in message.splitlines():
+                if "Permanently added" in line:
+                    warnings.warn(line, stacklevel=2)   # first-use pin, or the unverified accept under LIUM_SSH_INSECURE
             return
         name = self.pod.name or self.pod.huid
         if any(marker in message for marker in _HOST_KEY_CHANGED):
@@ -206,7 +210,8 @@ def exec_over_master(lium: Any, pod: PodInfo, *, command: str, env: Optional[Dic
     if result["exit_code"] == 255 and not master.alive():
         # 255 is also a command's own status; with the master gone it is ssh's: the connection dropped
         lines = result["stderr"].strip().splitlines()
-        raise LiumError(f"SSH connection to pod {pod.name or pod.huid} was lost" + (f": {lines[-1]}" if lines else ""))
+        # keep what the command printed before the drop; the caller prints it, then the error
+        result["error"] = f"SSH connection to pod {pod.name or pod.huid} was lost" + (f": {lines[-1]}" if lines else "")
     return result
 
 

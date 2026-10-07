@@ -97,11 +97,12 @@ def test_persist_zero_or_no_ssh_binary_turns_the_master_off(home, monkeypatch):
 
 
 def test_the_first_command_starts_a_background_master_with_the_pods_pinned_key(home, monkeypatch):
-    ssh = _Ssh(live=False)
+    ssh = _Ssh(live=False, start_stderr=b"Warning: Permanently added '[203.0.113.10]:20299' (ED25519) to the list of known hosts.\n")
     monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
     pod = _pod()
 
-    result = ssh_mux.exec_over_master(_lium(home), pod, command="nvidia-smi")
+    with pytest.warns(UserWarning, match="Permanently added"):
+        result = ssh_mux.exec_over_master(_lium(home), pod, command="nvidia-smi")
 
     start = next(argv for argv, _ in ssh.calls if "ControlMaster=yes" in argv)
     assert {"-N", "-f", "ControlPersist=600", "BatchMode=yes", "IdentitiesOnly=yes"} <= set(start)
@@ -150,8 +151,10 @@ def test_exit_255_with_the_master_gone_is_a_lost_connection(home, monkeypatch):
         return done
 
     monkeypatch.setattr(ssh_mux.subprocess, "run", dies_during_the_command)
-    with pytest.raises(LiumError, match="SSH connection to pod warm-pod was lost: Connection to"):
-        ssh_mux.exec_over_master(_lium(home), _pod(), command="train.py")
+    result = ssh_mux.exec_over_master(_lium(home), _pod(), command="train.py")
+    assert result["exit_code"] == 255 and not result["success"]
+    assert result["stdout"] == "out\n"   # what the command printed before the drop is kept
+    assert result["error"].startswith("SSH connection to pod warm-pod was lost: Connection to")
 
 
 def test_exit_255_from_the_command_itself_is_its_exit_code(home, monkeypatch):
