@@ -173,11 +173,28 @@ def test_sysbox_offer_does_nothing_without_a_terminal_or_a_yes(monkeypatch, tmp_
 
 
 
-def test_sysbox_offer_comes_before_any_script_from_the_checkout_runs(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize(
+    "docker_before_step2, official_install, expected",
+    [
+        (True, True, ["clone", "offer", "tools"]),
+        (False, True, ["clone", "offer", "tools", "offer"]),
+        (False, False, ["clone", "offer", "tools"]),
+    ],
+)
+def test_sysbox_offer_reaches_fresh_hosts_without_running_unverified_checkout_code_before_sudo(
+    monkeypatch, tmp_path: Path, docker_before_step2, official_install, expected
+):
     calls = []
+    monkeypatch.setattr(mine, "_exists", lambda cmd: docker_before_step2)
     monkeypatch.setattr(mine, "_clone_or_update_repo", lambda *a, **k: calls.append("clone"))
     monkeypatch.setattr(mine, "_offer_sysbox_install", lambda *a, **k: calls.append("offer"))
-    monkeypatch.setattr(mine, "_install_executor_tools", lambda *a, **k: (calls.append("tools"), 1 / 0))
+
+    def tools(*a, **k):
+        calls.append("tools")
+        return official_install
+
+    monkeypatch.setattr(mine, "_install_executor_tools", tools)
+    monkeypatch.setattr(mine, "_check_prereqs", lambda *a, **k: 1 / 0)
     CliRunner().invoke(mine.mine_command, ["-k", "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", "--auto",
                                            "--dir", str(tmp_path)])
-    assert calls == ["clone", "offer", "tools"]
+    assert calls == expected

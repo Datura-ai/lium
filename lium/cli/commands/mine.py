@@ -214,12 +214,32 @@ def _offer_sysbox_install(compute_dir: Path) -> None:
     subprocess.run(["sudo", "sh", "-c", _ROOT_EMPTY_DIR_BASH], input=script, check=False)
 
 
-def _install_executor_tools(compute_dir: Path):
+# Update with: sha256sum scripts/install_executor_on_ubuntu.sh
+_OFFICIAL_EXECUTOR_INSTALL_SHA256 = frozenset({"09b2a722766dc7c39aa525a4e49b880a1c121911e8b60b6c7852878f06b0cda9"})
+
+
+def _install_executor_tools(compute_dir: Path) -> bool:
+    """Install Docker and the node tools. True when the script that ran was the official one (its bytes are run, not
+    its mutable path), which is what allows the sysbox offer afterwards."""
+    import hashlib
+    import subprocess
+
     script = compute_dir / "scripts" / "install_executor_on_ubuntu.sh"
     if not script.exists():
         raise Exception(f"Install script not found at {script}")
 
-    _run(f"bash {script}")
+    content = script.read_bytes()
+    if hashlib.sha256(content).hexdigest() not in _OFFICIAL_EXECUTOR_INSTALL_SHA256:
+        _run(f"bash {script}")
+        return False
+    result = subprocess.run(["bash", "-s"], input=content, capture_output=True, env=_subprocess_env())
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Command failed ({result.returncode}): {script}\n"
+            f"--- stdout ---\n{result.stdout.decode(errors='replace')[-4000:]}\n"
+            f"--- stderr ---\n{result.stderr.decode(errors='replace')[-4000:]}"
+        )
+    return True
 
 
 def _setup_executor_env(
@@ -850,8 +870,14 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
         # Before step 2: that step runs the checkout's own script, which must not get a sudo prompt to piggyback on.
         _offer_sysbox_install(target_dir)
 
+        docker_before = _exists("docker")
         with timed_step_status(2, TOTAL_STEPS, "Installing node tools"):
-            _install_executor_tools(target_dir)
+            official_install = _install_executor_tools(target_dir)
+
+        # A fresh host got Docker in step 2; offer only if that script was the official one, so no checkout code
+        # ran before the sudo prompt.
+        if official_install and not docker_before:
+            _offer_sysbox_install(target_dir)
 
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
             _check_prereqs(target_dir)
