@@ -15,6 +15,8 @@ OUTPUT_BYTES = 3 * 1024 * 1024  # > paramiko DEFAULT_WINDOW_SIZE (2 MiB)
 
 
 class _Server(paramiko.ServerInterface):
+    payload = b"x" * OUTPUT_BYTES
+
     def __init__(self):
         self.command = threading.Event()
 
@@ -30,7 +32,7 @@ class _Server(paramiko.ServerInterface):
     def check_channel_exec_request(self, channel, command):
         def run():
             time.sleep(0.2)  # after the exec request has been answered
-            channel.sendall(b"x" * OUTPUT_BYTES)  # blocks until the client reads past the window
+            channel.sendall(_Server.payload)  # blocks until the client reads past the window
             channel.send_exit_status(0)
             channel.close()
 
@@ -91,3 +93,27 @@ def test_exec_stops_reading_past_max_output_bytes(tmp_path, monkeypatch):
 
     with pytest.raises(OutputLimitExceeded):
         lium.exec(pod, command="big-output", timeout=10, max_output_bytes=OUTPUT_BYTES // 2)
+
+
+def test_exec_limit_counts_decoded_text_not_wire_bytes(tmp_path, monkeypatch):
+    # Each invalid byte decodes to a 3-byte U+FFFD: 1 MiB on the wire is 3 MiB kept.
+    monkeypatch.setattr(_Server, "payload", b"\xff" * (1024 * 1024))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
+    key = paramiko.RSAKey.generate(2048)
+    key_file = tmp_path / "id_rsa"
+    key.write_private_key_file(str(key_file))
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    threading.Thread(target=_serve, args=(listener, paramiko.RSAKey.generate(2048)), daemon=True).start()
+    lium = Lium(config=Config(api_key="unused", ssh_key_path=key_file))
+    pod = PodInfo(
+        id="p1", name="p1", status="RUNNING", huid="p1", ssh_cmd=f"ssh root@127.0.0.1 -p {port}",
+        ports={}, created_at="", updated_at="", executor=None, template={},
+        removal_scheduled_at=None, jupyter_installation_status=None, jupyter_url=None,
+    )
+
+    with pytest.raises(OutputLimitExceeded):
+        lium.exec(pod, command="big-output", timeout=10, max_output_bytes=2 * 1024 * 1024)

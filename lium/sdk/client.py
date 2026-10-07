@@ -1,5 +1,6 @@
 """Lium SDK - Clean, Unix-style SDK for GPU pod management."""
 
+import codecs
 import getpass
 import hashlib
 import ipaddress
@@ -2837,22 +2838,31 @@ class Lium:
             # remote command, which then never sends the exit status waited for below.
             total, over, lock = [0], threading.Event(), threading.Lock()
 
-            def drain(stream) -> bytes:
-                chunks = []
+            def drain(read) -> str:
+                # ``read`` returns as soon as any bytes arrive (paramiko's ``stream.read(n)`` waits for
+                # n of them), so the limit is checked per chunk and a slow trickle cannot outrun it.
+                # Decoding as we go counts what is kept: invalid bytes become 3-byte U+FFFD, so the
+                # text, not the wire bytes, is what the limit bounds.
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                parts = []
                 while True:
-                    chunk = stream.read(65536)
-                    if not chunk:
-                        return b"".join(chunks)
+                    chunk = read(65536)
+                    text = decoder.decode(chunk, final=not chunk)
                     with lock:
-                        total[0] += len(chunk)
+                        total[0] += len(text.encode("utf-8"))
                         if total[0] > max_output_bytes:
                             over.set()
                             channel.close()
-                            return b""
-                    chunks.append(chunk)
+                            return ""
+                    parts.append(text)
+                    if not chunk:
+                        return "".join(parts)
 
+            raw = hasattr(channel, "recv_stderr")
+            read_out = channel.recv if raw else stdout.read
+            read_err = channel.recv_stderr if raw else stderr.read
             readers = ThreadPoolExecutor(max_workers=2)
-            out, err = readers.submit(drain, stdout), readers.submit(drain, stderr)
+            out, err = readers.submit(drain, read_out), readers.submit(drain, read_err)
             readers.shutdown(wait=False)
             if timeout is not None:
                 deadline = time.monotonic() + timeout
@@ -2863,15 +2873,15 @@ class Lium:
                             f"Command did not finish within {timeout}s on pod {pod.name or pod.huid}: {command}"
                         )
                     time.sleep(0.1)
-            out_bytes, err_bytes = out.result(), err.result()
+            out_text, err_text = out.result(), err.result()
             if over.is_set():
                 raise OutputLimitExceeded(
                     f"Command wrote more than {max_output_bytes} bytes of output on pod {pod.name or pod.huid}"
                 )
             exit_code = channel.recv_exit_status()
             return {
-                "stdout": out_bytes.decode("utf-8", errors="replace"),
-                "stderr": err_bytes.decode("utf-8", errors="replace"),
+                "stdout": out_text,
+                "stderr": err_text,
                 "exit_code": exit_code,
                 "success": exit_code == 0
             }
