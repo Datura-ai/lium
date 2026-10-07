@@ -2838,15 +2838,15 @@ class Lium:
             # remote command, which then never sends the exit status waited for below.
             total, over, lock = [0], threading.Event(), threading.Lock()
 
-            def drain(read) -> bytes:
+            def drain(read) -> bytearray:
                 # ``read`` returns as soon as any bytes arrive (paramiko's ``stream.read(n)`` waits for
                 # n of them), so the limit is checked per chunk and a slow trickle cannot outrun it.
-                # One bytearray per stream: no list of parts, no join copy.
+                # One bytearray per stream, returned as is: no list of parts, no join or bytes() copy.
                 buf = bytearray()
                 while True:
                     chunk = read(65536)
                     if not chunk:
-                        return bytes(buf)
+                        return buf
                     buf += chunk
                     with lock:
                         total[0] += len(chunk)
@@ -2871,18 +2871,15 @@ class Lium:
                         )
                     time.sleep(0.1)
             out_bytes, err_bytes = out.result(), err.result()
-            out_text = out_bytes.decode("utf-8", errors="replace")
-            del out_bytes
-            err_text = err_bytes.decode("utf-8", errors="replace")
-            del err_bytes
-            # Python keeps a str at 1, 2 or 4 bytes per character, so ASCII with an emoji or two
-            # outgrows its UTF-8 size: bound what is actually kept.
-            if sys.getsizeof(out_text) + sys.getsizeof(err_text) > max_output_bytes:
-                over.set()
-            if over.is_set():
+            # A str keeps 1 byte per character for ASCII and up to 4 otherwise (one emoji widens the
+            # whole string), so size the decoded text from the raw bytes before allocating it.
+            worst = sum(len(b) if b.isascii() else 4 * len(b) for b in (out_bytes, err_bytes))
+            if over.is_set() or worst > max_output_bytes:
                 raise OutputLimitExceeded(
                     f"Command wrote more than {max_output_bytes} bytes of output on pod {pod.name or pod.huid}"
                 )
+            out_text = out_bytes.decode("utf-8", errors="replace")
+            err_text = err_bytes.decode("utf-8", errors="replace")
             exit_code = channel.recv_exit_status()
             return {
                 "stdout": out_text,
