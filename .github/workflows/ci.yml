@@ -17,26 +17,23 @@ concurrency:
 
 jobs:
   test:
-    # the suite (39 files under test/) was never run by CI; only the binary-target
-    # matrix test was. Same install the macOS build already does, minus pyinstaller.
+    # the unit suite under test/, the binary-target matrix test included. Same install the macOS build
+    # already does, minus pyinstaller.
     name: pytest
     if: github.event_name != 'schedule'   # the daily cron is for e2e-live only
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.12"]
     steps:
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0   # hatch-vcs: the version is git describe against the tags
 
+    # the lowest supported Python only: the builds below cover 3.12
     - uses: astral-sh/setup-uv@v7
       with:
-        python-version: ${{ matrix.python-version }}
+        python-version: "3.10"
         enable-cache: true
 
     - name: Install
@@ -50,8 +47,8 @@ jobs:
   packaging:
     # Did this change touch anything that changes how the binaries are packaged? The two macOS jobs bill at
     # GitHub's 10x macOS rate and the arm64 Docker build repeats the amd64 one, so those three run only when a
-    # packaging input moved or on a manual dispatch. The amd64 Docker build, the wheel and the target-matrix
-    # test run on every push.
+    # packaging input moved or on a manual dispatch. The amd64 Docker build and the wheel run on every push
+    # (the target-matrix test runs in `pytest`).
     name: Packaging inputs changed?
     if: github.event_name != 'schedule'   # the daily cron is for e2e-live only
     runs-on: ubuntu-latest
@@ -113,27 +110,6 @@ jobs:
         name: python-dist
         path: dist/
         retention-days: 7
-
-  validate-binary-targets:
-    name: Validate binary target matrix
-    needs: packaging
-    if: github.event_name != 'schedule'   # the daily cron is for e2e-live only
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.12"
-
-    - name: Install pytest
-      run: python -m pip install --upgrade pip pytest pyyaml
-
-    - name: Verify installer and workflow target coverage
-      run: pytest test/test_release_binary_targets.py
 
   build-linux-binary:
     name: Build Linux binary (${{ matrix.asset_name }})
@@ -413,13 +389,13 @@ jobs:
     # the one context to require in the ruleset (lium requires none today). The binary
     # builds stay informational: a Debian mirror outage must not block every merge.
     # `packaging` is in the list because a skipped job counts as passing: if the inputs
-    # check fails, the wheel and the target test are skipped and only `packaging`'s own
+    # check fails, the wheel is skipped and only `packaging`'s own
     # failure makes this job red.
     # e2e-live is not in the list on purpose: it is a live suite against a marketplace, and a red run caused
     # by a platform defect (B-119: a node billing 2 GPUs and exposing 1) or an empty listing must not block
     # every merge; its result stands on its own as the sticky PR comment.
     name: ci-ok
-    needs: [packaging, test, build-python, validate-binary-targets]
+    needs: [packaging, test, build-python]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}   # aggregator only: reads job results, needs no token scopes (CodeQL actions/missing-workflow-permissions)

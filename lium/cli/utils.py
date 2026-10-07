@@ -300,7 +300,7 @@ def timed_step_status(step: int = 0, total_steps: int = 0, message: str = ""):
 
 # The exit-code taxonomy every command shares. Commands import these rather than
 # spelling the numbers, so this table is the one source of truth and
-# docs/exit-codes.md mirrors it (test_cli_errors.py checks that it does).
+# docs/exit-codes.md mirrors it.
 #
 # ``lium provider …`` is the one exception: it keeps its own map in
 # lium/cli/provider/_render.py, where the same numbers carry different meanings

@@ -490,7 +490,7 @@ lium fund --alpha -k <hotkey> -a 25 --netuid 64  # Any subnet Lium accepts
 
 ### `lium ls --format json` fields
 
-One object per node, sorted as the table is; the names are stable and pinned by `test/test_ls_speed.py`:
+One object per node, sorted as the table is; the names are stable:
 
 | field | meaning |
 |---|---|
