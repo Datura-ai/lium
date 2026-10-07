@@ -95,49 +95,43 @@ def test_exec_stops_reading_past_max_output_bytes(tmp_path, monkeypatch):
         lium.exec(pod, command="big-output", timeout=10, max_output_bytes=OUTPUT_BYTES // 2)
 
 
-def test_exec_limit_bounds_kept_text_not_wire_bytes(tmp_path, monkeypatch):
-    # Each invalid byte decodes to U+FFFD (2 bytes in a str): 1 MiB on the wire is 2 MiB kept.
-    monkeypatch.setattr(_Server, "payload", b"\xff" * (1024 * 1024))
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
-    key = paramiko.RSAKey.generate(2048)
-    key_file = tmp_path / "id_rsa"
-    key.write_private_key_file(str(key_file))
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(1)
-    port = listener.getsockname()[1]
-    threading.Thread(target=_serve, args=(listener, paramiko.RSAKey.generate(2048)), daemon=True).start()
-    lium = Lium(config=Config(api_key="unused", ssh_key_path=key_file))
-    pod = PodInfo(
-        id="p1", name="p1", status="RUNNING", huid="p1", ssh_cmd=f"ssh root@127.0.0.1 -p {port}",
-        ports={}, created_at="", updated_at="", executor=None, template={},
-        removal_scheduled_at=None, jupyter_installation_status=None, jupyter_url=None,
+@pytest.mark.parametrize(
+    ("wire_bytes", "tail"),
+    [(3 * 1024**2, b"x"), (1024**2, b"\xf0\x9f\x98\x80"), (1024**2, b"\xff")],
+)
+def test_exec_limit_bounds_kept_text_not_wire_bytes(wire_bytes, tail):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    import tracemalloc
+
+    remaining = wire_bytes
+
+    def recv(size):
+        nonlocal remaining
+        count = min(size, remaining)
+        remaining -= count
+        if not count:
+            return b""
+        if remaining == 0:
+            return b"x" * (count - len(tail)) + tail
+        return b"x" * count
+
+    channel = SimpleNamespace(
+        recv=recv, recv_stderr=lambda size: b"",
+        close=lambda: None, recv_exit_status=lambda: 0,
     )
-
-    with pytest.raises(OutputLimitExceeded):
-        lium.exec(pod, command="big-output", timeout=10, max_output_bytes=3 * 1024 * 1024 // 2)
-
-
-def test_exec_rejects_ascii_plus_emoji_before_decoding(tmp_path, monkeypatch):
-    # ASCII plus one emoji decodes to 4 bytes a character: refuse it from the raw size, before decoding.
-    monkeypatch.setattr(_Server, "payload", b"x" * (1024 * 1024) + "\U0001f600".encode())
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
-    key = paramiko.RSAKey.generate(2048)
-    key_file = tmp_path / "id_rsa"
-    key.write_private_key_file(str(key_file))
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(1)
-    port = listener.getsockname()[1]
-    threading.Thread(target=_serve, args=(listener, paramiko.RSAKey.generate(2048)), daemon=True).start()
-    lium = Lium(config=Config(api_key="unused", ssh_key_path=key_file))
-    pod = PodInfo(
-        id="p1", name="p1", status="RUNNING", huid="p1", ssh_cmd=f"ssh root@127.0.0.1 -p {port}",
-        ports={}, created_at="", updated_at="", executor=None, template={},
-        removal_scheduled_at=None, jupyter_installation_status=None, jupyter_url=None,
-    )
-
-    with pytest.raises(OutputLimitExceeded):
-        lium.exec(pod, command="big-output", timeout=10, max_output_bytes=2 * 1024 * 1024)
+    ssh = SimpleNamespace(exec_command=lambda command: (
+        SimpleNamespace(close=lambda: None),
+        SimpleNamespace(channel=channel), None,
+    ))
+    client = SimpleNamespace(ssh_connection=lambda pod: nullcontext(ssh))
+    limit = 4 * 1024**2
+    tracemalloc.start()
+    try:
+        try:
+            Lium.exec(client, SimpleNamespace(name="p", huid="p"), command="probe", max_output_bytes=limit)
+        except OutputLimitExceeded:
+            pass
+        assert tracemalloc.get_traced_memory()[1] <= limit + 256 * 1024
+    finally:
+        tracemalloc.stop()

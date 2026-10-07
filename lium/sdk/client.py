@@ -2802,7 +2802,8 @@ class Lium:
                 ``/workspace/logs/exec-<UTC timestamp>-<id>.log``, the ``<id>`` a
                 6-hex tail that keeps two launches in the same second apart).
 
-            max_output_bytes: Limit on stdout and stderr together. Past it the
+            max_output_bytes: Limit on the memory held for stdout and stderr together
+                (the raw bytes plus the text decoded from them). Past it the
                 channel is closed and :class:`OutputLimitExceeded` is raised, so
                 a pod cannot grow this process's memory without bound.
 
@@ -2871,9 +2872,11 @@ class Lium:
                         )
                     time.sleep(0.1)
             out_bytes, err_bytes = out.result(), err.result()
-            # A str keeps 1 byte per character for ASCII and up to 4 otherwise (one emoji widens the
-            # whole string), so size the decoded text from the raw bytes before allocating it.
-            worst = sum(len(b) if b.isascii() else 4 * len(b) for b in (out_bytes, err_bytes))
+            del out, err  # the futures keep their results alive
+            # The raw buffers stay alive while they are decoded, and a str keeps 1 byte per character
+            # for ASCII and up to 4 otherwise (one emoji widens the whole string): reserve both
+            # against the limit before allocating the text.
+            worst = sum(len(b) * (2 if b.isascii() else 5) for b in (out_bytes, err_bytes))
             if over.is_set() or worst > max_output_bytes:
                 raise OutputLimitExceeded(
                     f"Command wrote more than {max_output_bytes} bytes of output on pod {pod.name or pod.huid}"
