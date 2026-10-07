@@ -175,7 +175,10 @@ class CreateEphemeralTemplateAction:
 
         # A ':' before the last '/' is a registry port (localhost:5000/img), not a tag
         name, sep, tag = image.rpartition(":")
-        if sep and "/" not in tag:
+        if "@" in image:
+            # a digest reference goes whole: the backend splits name, tag and digest itself
+            docker_image, docker_tag = image, ""
+        elif sep and "/" not in tag:
             docker_image, docker_tag = name, tag
         else:
             docker_image = image

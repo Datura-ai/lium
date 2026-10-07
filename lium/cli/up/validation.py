@@ -23,6 +23,8 @@ def validate(
         return False, "--min-cpus must be a positive integer"
     if count is not None and count < 1:
         return False, "--count must be at least 1"
+    if ports is not None and ports < 1:
+        return False, "--ports must be at least 1"
 
     # With a node ID, -c/--count is not a filter: it is how many of that node's GPUs to rent (GPU splitting).
     if executor_id and (gpu or country or min_cpus is not None):
@@ -34,10 +36,6 @@ def validate(
 
     if ttl and until:
         return False, "Cannot specify both --ttl and --until"
-
-    if image and "@" in image:
-        # the template stores image and tag apart, so a digest reference cannot be passed through
-        return False, "--image takes NAME[:TAG]; a digest (NAME@sha256:...) is not supported"
 
     if image and template_id:
         return False, "Cannot specify both --image and --template_id"

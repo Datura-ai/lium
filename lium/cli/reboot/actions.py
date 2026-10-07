@@ -13,15 +13,17 @@ class RebootPodsAction:
         lium: Lium = ctx["lium"]
         volume_id: str | None = ctx.get("volume_id")
 
+        rebooted = []
         failures = []
 
         for pod in pods:
             try:
                 lium.reboot(pod, volume_id=volume_id)
+                rebooted.append(pod.huid)
             except Exception as e:
                 failures.append(f"{pod.huid} ({e})")
 
         return ActionResult(
             ok=(len(failures) == 0),
-            data={"failures": failures}
+            data={"rebooted": rebooted, "failures": failures}
         )

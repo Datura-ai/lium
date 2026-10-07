@@ -54,12 +54,13 @@ def reboot_command(targets: Optional[str], all: bool, volume_id: Optional[str]):
     action = RebootPodsAction()
     result = action.execute(ctx)
 
-    # Only error if anything failed
+    rebooted = result.data.get("rebooted", [])
     if not result.ok:
-        failures = result.data.get("failures", [])
+        # a batch that partly failed still names what was rebooted, so a retry targets only the failures
+        done = f"Reboot requested for {', '.join(rebooted)}. " if rebooted else ""
         raise CliFailure(
             "reboot_failed",
-            f"Failed to reboot pods: {', '.join(failures)}",
+            f"{done}Failed to reboot pods: {', '.join(result.data.get('failures', []))}",
             EXIT_GENERAL_ERROR,
         )
-    ui.success(f"Reboot requested for {', '.join(p.huid for p in selected_pods)}")
+    ui.success(f"Reboot requested for {', '.join(rebooted)}")
