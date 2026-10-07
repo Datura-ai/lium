@@ -168,15 +168,27 @@ class PooledConnection:
 
         channel = transport.open_session(timeout=CHANNEL_OPEN_TIMEOUT)
         # invoke_subsystem waits for the peer's acknowledgement with no timeout; closing the channel releases it
-        deadline = threading.Timer(CHANNEL_OPEN_TIMEOUT, channel.close)
+        timed_out = threading.Event()
+
+        def _give_up() -> None:
+            timed_out.set()
+            channel.close()
+
+        deadline = threading.Timer(CHANNEL_OPEN_TIMEOUT, _give_up)
         deadline.daemon = True
         deadline.start()
         try:
             channel.settimeout(CHANNEL_OPEN_TIMEOUT)   # the version exchange below reads under it
             channel.invoke_subsystem("sftp")
             sftp = paramiko.SFTPClient(channel)
-        except BaseException:
+        except BaseException as exc:
             channel.close()
+            if timed_out.is_set():
+                # Only this channel failed: a ChannelException keeps the kept connection (and the commands
+                # running on it); a bare SSHException from the closed channel would write the connection off.
+                raise paramiko.ChannelException(
+                    paramiko.common.OPEN_FAILED_CONNECT_FAILED, "the SFTP subsystem did not answer in time"
+                ) from exc
             raise
         finally:
             deadline.cancel()

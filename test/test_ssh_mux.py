@@ -403,3 +403,16 @@ def test_lium_exec_with_persist_off_connects_and_lists_pods_per_run(bench):
 def test_repeated_sdk_exec_opens_one_ssh_connection(bench):
     result = bench_warm_exec.bench_sdk(bench, sys.executable, 3, {})
     assert result["ssh_connections"] == 1
+
+
+def test_a_symlinked_socket_dir_is_refused_and_its_target_left_alone(tmp_path):
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    victim.chmod(0o755)
+    link = tmp_path / "lium-ssh-mux"
+    link.symlink_to(victim)
+
+    with pytest.raises(ssh_mux.LiumError):
+        ssh_mux.ensure_socket_dir(link)
+
+    assert (victim.stat().st_mode & 0o777) == 0o755

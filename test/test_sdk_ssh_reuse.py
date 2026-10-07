@@ -649,5 +649,7 @@ def test_an_unacknowledged_sftp_subsystem_request_is_cut_off(monkeypatch, world)
         try:
             wait([future], timeout=0.5)
             assert future.done() and channel.closed
+            # a ChannelException, not an SSHException: the kept connection and its running commands stay
+            assert isinstance(future.exception(), sdk_client.paramiko.ChannelException)
         finally:
             channel.close()

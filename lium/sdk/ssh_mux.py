@@ -62,10 +62,23 @@ def socket_dir() -> Path:
 
 def ensure_socket_dir(directory: Path) -> None:
     """Create ``directory`` ``0700``; refuse one another user owns (a shared temp dir)."""
-    directory.mkdir(parents=True, exist_ok=True)
-    if directory.stat().st_uid != os.getuid():
-        raise LiumError(f"{directory} belongs to another user; set {PERSIST_ENV}=0 or remove it")
-    os.chmod(directory, 0o700)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        directory.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    # Open without following a symlink another user planted at the predictable fallback path, then check and chmod the
+    # opened directory itself.
+    try:
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise LiumError(f"{directory} is not a plain directory; set {PERSIST_ENV}=0 or remove it") from exc
+    try:
+        if os.fstat(fd).st_uid != os.getuid():
+            raise LiumError(f"{directory} belongs to another user; set {PERSIST_ENV}=0 or remove it")
+        os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
 
 
 def socket_is_ours(path: Path) -> bool:
