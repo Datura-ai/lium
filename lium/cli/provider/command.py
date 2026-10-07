@@ -88,7 +88,7 @@ from lium.provider.errors import ProviderError
     "--dry-run",
     "dry_run",
     is_flag=True,
-    help="Skip irreversible subprocess calls (e.g. ssh) and report intent only.",
+    help="Send no portal write: print what the command would send and exit 0.",
 )
 @click.pass_context
 def provider_command(

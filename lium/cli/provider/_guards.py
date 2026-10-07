@@ -23,7 +23,7 @@ from __future__ import annotations
 import click
 
 from lium.cli.provider._persona import confirm_persona
-from lium.cli.provider._render import emit_error, fatal
+from lium.cli.provider._render import emit_error, fatal, render
 from lium.provider.errors import ARG_INVALID, ProviderError
 
 
@@ -46,13 +46,33 @@ def require_hotkey(ctx: click.Context, *, group: str | None = None) -> None:
     )
 
 
+def stop_if_dry_run(ctx: click.Context) -> None:
+    """Under ``--dry-run``, print the write this command would send and exit 0 before any request."""
+    opts = (ctx.obj or {}).get("provider_opts") or {}
+    if not opts.get("dry_run"):
+        return
+    params = {
+        k: v
+        for k, v in ctx.params.items()
+        if not k.startswith("_override") and "password" not in k
+    }
+    if opts.get("json"):
+        render(ctx, {"dry_run": True, "command": ctx.command_path, "params": params})
+    else:
+        shown = ", ".join(f"{k}={v!r}" for k, v in params.items())
+        click.echo(f"dry run: {ctx.command_path}{f' ({shown})' if shown else ''} not sent")
+    ctx.exit(0)
+
+
 def require_persona_ack(ctx: click.Context) -> None:
     """Run the persona gate before any spend-affecting subcommand.
 
     Mirrors :func:`lium.cli.provider.command.enforce_persona_gate` but lives
     here to avoid a circular import (the subgroup modules in turn import
-    ``command.py`` only via the umbrella).
+    ``command.py`` only via the umbrella). Every write passes here first, so
+    ``--dry-run`` stops here too.
     """
+    stop_if_dry_run(ctx)
     opts = (ctx.obj or {}).get("provider_opts") or {}
     ok = confirm_persona(
         ctx,
@@ -83,4 +103,5 @@ __all__ = [
     "handle_provider_error",
     "require_hotkey",
     "require_persona_ack",
+    "stop_if_dry_run",
 ]
