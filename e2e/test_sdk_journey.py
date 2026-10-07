@@ -150,9 +150,9 @@ def test_sdk_up_wait_exec_upload_download_rm(lium, sdk_pod, tmp_path):
     nodes = [n for n in lium.ls() if rentable(n.gpu_count, n.price_per_hour, _country(n), n.id, n.huid, scores.get(str(n.id)))]
     if not nodes:
         pytest.skip(f"no rentable node with ≥1 GPU at ≤ ${MAX_PRICE}/h and reliability ≥ {MIN_RELIABILITY:g} listed right now (E2E_EXCLUDE_* applied)")
-    t0 = time.monotonic()
     # the cheapest node that accepts: a refusal (400 "Can't rent node") moves to the next one, ≤ MAX_UP_TRIES (DAH-3488)
     created = up_first_accepting(lium, nodes, sdk_pod["name"], sdk_pod)
+    t0 = time.monotonic()   # readiness is timed from the accepted up: refusals do not eat its 600 s
     assert created.get("id") and created.get("status"), created  # {'executor_id','huid','id','name','ssh_cmd','status'}
     # Recorded before anything can fail, and capped: if wait_ready returns None or raises, an assertion trips, or
     # pytest-timeout kills the process (timeout_method = thread runs no finalizer), the pod still goes — by the
