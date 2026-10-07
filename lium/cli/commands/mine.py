@@ -142,7 +142,7 @@ def _clone_or_update_repo(target_dir: Path, branch: str):
         _run(f"git clone --branch {branch} https://github.com/Datura-ai/lium-io.git {target_dir}")
 
 
-def _check_prereqs():
+def _check_prereqs(compute_dir: Path):
     if not _exists("nvidia-smi"):
         raise Exception("NVIDIA GPU driver not found (nvidia-smi missing)")
 
@@ -155,6 +155,17 @@ def _check_prereqs():
         raise Exception("Docker not found")
 
     _run("docker info")
+
+    # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
+    # provider learns it from the preflight or a validator cycle later.
+    runtimes, _ = _run("docker info --format '{{json .Runtimes}}'")
+    if "sysbox-runc" not in runtimes:
+        setup = compute_dir / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh"
+        raise Exception(
+            "Sysbox runtime not found in Docker (required by validators).\n"
+            f"Install it with: sudo bash {setup}\n"
+            "then run `lium mine` again."
+        )
 
 
 # VerifyX refuses a node with under 100 GB free, measured after the node images are pulled (~40 GB: executor,
@@ -813,7 +824,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             _install_executor_tools(target_dir)
 
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
-            _check_prereqs()
+            _check_prereqs(target_dir)
             _check_free_disk()
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.

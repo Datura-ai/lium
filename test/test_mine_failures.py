@@ -100,3 +100,20 @@ def test_a_failed_step_prints_bracketed_tool_output_as_text(monkeypatch):
     assert result.exit_code == 1, result.output
     flat = " ".join(result.output.split())   # Rich wraps the panel at 80 columns
     assert "[type=int_parsing, input_value='', input_type=str]" in flat and "[/x]" in flat, result.output
+
+
+def _prereq_host(monkeypatch, runtimes: str):
+    monkeypatch.setattr(mine, "_exists", lambda cmd: True)
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: (runtimes if "Runtimes" in cmd else "", ""))
+
+
+def test_prereqs_fail_without_sysbox_and_name_the_setup_script(monkeypatch, tmp_path: Path):
+    _prereq_host(monkeypatch, '{"runc":{"path":"runc"}}')
+    with pytest.raises(Exception) as err:
+        mine._check_prereqs(tmp_path)
+    assert str(tmp_path / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh") in str(err.value)
+
+
+def test_prereqs_pass_with_sysbox(monkeypatch, tmp_path: Path):
+    _prereq_host(monkeypatch, '{"runc":{"path":"runc"},"sysbox-runc":{"path":"/usr/bin/sysbox-runc"}}')
+    mine._check_prereqs(tmp_path)
