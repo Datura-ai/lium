@@ -169,22 +169,36 @@ def _check_prereqs(compute_dir: Path):
         )
 
 
+# The installer runs as root, so only its official content may run: a fork or an edited checkout under --dir
+# must not turn the yes/no prompt into root access. Any other content (including a newer upstream script) falls
+# back to the printed install command. Update with: sha256sum neurons/executor/nvidia_docker_sysbox_setup.sh
+_OFFICIAL_SYSBOX_SETUP_SHA256 = frozenset({"972a6a29cfb517d22a4a69aee2830c35d0a27bab1ba3179d6dd7e90eb26ffe32"})
+
+
 def _sysbox_setup_script(compute_dir: Path) -> Path:
     return compute_dir / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh"
 
 
 def _has_sysbox() -> bool:
+    # validators run --runtime=sysbox-runc, so the runtime key must match exactly, not as a substring
     runtimes, _ = _run("docker info --format '{{json .Runtimes}}'", check=False)
-    return "sysbox-runc" in runtimes
+    try:
+        parsed = json.loads(runtimes)
+    except ValueError:
+        return False
+    return isinstance(parsed, dict) and "sysbox-runc" in parsed
 
 
 def _offer_sysbox_install(compute_dir: Path) -> None:
     """On a terminal, offer to run the sysbox installer now instead of failing step 3 with its command.
     Outside the step spinner: the installer prints its own progress. Without a terminal, step 3 fails as before."""
+    import hashlib
     import subprocess
 
     setup = _sysbox_setup_script(compute_dir)
     if not (sys.stdin.isatty() and _exists("docker") and setup.exists()) or _has_sysbox():
+        return
+    if hashlib.sha256(setup.read_bytes()).hexdigest() not in _OFFICIAL_SYSBOX_SETUP_SHA256:
         return
     console.warning("Docker has no sysbox runtime yet; validators need it.")
     if not click.confirm("Install sysbox and the NVIDIA container toolkit now (restarts Docker)?", default=True):
