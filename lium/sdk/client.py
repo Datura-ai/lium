@@ -2812,7 +2812,7 @@ class Lium:
             ``detach`` a dict with ``pid``, ``log_path`` and ``command``.
 
         Raises:
-            OutputLimitExceeded: the command wrote more than ``max_output_bytes``.
+            OutputLimitExceeded: holding the output would take more than ``max_output_bytes``.
             ValueError: an ``env`` name is not a shell identifier. Raised before
                 the connection is opened, so nothing reaches the pod.
         """
@@ -2888,7 +2888,7 @@ class Lium:
             worst = sum(sys.getsizeof(b) + len(b) * (1 if b.isascii() else 5) for b in (out_bytes, err_bytes))
             if over.is_set() or worst > max_output_bytes:
                 raise OutputLimitExceeded(
-                    f"Command wrote more than {max_output_bytes} bytes of output on pod {pod.name or pod.huid}"
+                    f"Output of the command on pod {pod.name or pod.huid} needs more than {max_output_bytes} bytes of memory"
                 )
             out_text = out_bytes.decode("utf-8", errors="replace")
             err_text = err_bytes.decode("utf-8", errors="replace")
