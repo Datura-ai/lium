@@ -299,7 +299,7 @@ def test_a_failed_node_read_sends_no_resume(stub, portal, status, exit_code, cod
 
 def test_an_unreachable_portal_on_the_node_read_sends_no_resume(stub, monkeypatch) -> None:
     resumes = []
-    monkeypatch.setattr("lium.provider.client.ProviderClient.resume_new_rentals", lambda *a, **k: resumes.append(a) or {})
+    monkeypatch.setattr("lium.provider.portal_http.PortalHTTP.delete", lambda *a, **k: resumes.append(a) or {})
     result = CliRunner().invoke(
         provider_command,
         ["--portal-url", closed_port_url(), "--json", "node", "resume", NODE, "--pause-id", str(uuid.uuid4()), "--yes"],
