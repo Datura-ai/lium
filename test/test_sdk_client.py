@@ -536,6 +536,10 @@ def test_get_template_finds_a_template_by_huid_or_name(monkeypatch):
         raise LiumAuthError("no key")
 
     monkeypatch.setattr(client, "templates", anonymous)
+    with pytest.raises(LiumAuthError):  # a configured key refused between the two calls is not "not found"
+        client.get_template(template_id)
+
+    client.config.api_key = ""
     assert client.get_template(template_id) is None  # a missing ID looked up without a key is still "not found"
 
 

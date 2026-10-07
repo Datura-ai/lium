@@ -2603,8 +2603,10 @@ class Lium:
         except LiumNotFoundError:  # a name may itself be a UUID; only the caller's own templates, never a public one that borrows the ID
             try:
                 return self._template_by_huid_or_name(template_id, only_my=True)
-            except LiumAuthError:  # an anonymous lookup of a missing ID has no templates of its own
-                return None
+            except LiumAuthError:
+                if self.config.api_key:  # a configured client's refused key (revoked meanwhile) is an error, not "not found"
+                    raise
+                return None  # an anonymous lookup of a missing ID has no templates of its own
         return Template(
             id=d.get("id", ""),
             huid=generate_huid(d.get("id", "")),
