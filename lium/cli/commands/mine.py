@@ -3,6 +3,7 @@
 import json
 import re
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -158,14 +159,37 @@ def _check_prereqs(compute_dir: Path):
 
     # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
     # provider learns it from the preflight or a validator cycle later.
-    runtimes, _ = _run("docker info --format '{{json .Runtimes}}'")
-    if "sysbox-runc" not in runtimes:
-        setup = compute_dir / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh"
+    if not _has_sysbox():
+        setup = _sysbox_setup_script(compute_dir)
         raise Exception(
             "Sysbox runtime not found in Docker (required by validators).\n"
             f"Install it with: sudo bash {setup}\n"
             "then run `lium mine` again."
         )
+
+
+def _sysbox_setup_script(compute_dir: Path) -> Path:
+    return compute_dir / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh"
+
+
+def _has_sysbox() -> bool:
+    runtimes, _ = _run("docker info --format '{{json .Runtimes}}'", check=False)
+    return "sysbox-runc" in runtimes
+
+
+def _offer_sysbox_install(compute_dir: Path) -> None:
+    """On a terminal, offer to run the sysbox installer now instead of failing step 3 with its command.
+    Outside the step spinner: the installer prints its own progress. Without a terminal, step 3 fails as before."""
+    import subprocess
+
+    setup = _sysbox_setup_script(compute_dir)
+    if not (sys.stdin.isatty() and _exists("docker") and setup.exists()) or _has_sysbox():
+        return
+    console.warning("Docker has no sysbox runtime yet; validators need it.")
+    if not click.confirm("Install sysbox and the NVIDIA container toolkit now (restarts Docker)?", default=True):
+        return
+    # stdin from /dev/null: the installer then skips its own "Continue?" prompt, the answer above is the consent
+    subprocess.run(["sudo", "bash", str(setup)], stdin=subprocess.DEVNULL, check=False)
 
 
 def _install_executor_tools(compute_dir: Path):
@@ -803,6 +827,8 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
 
         with timed_step_status(2, TOTAL_STEPS, "Installing node tools"):
             _install_executor_tools(target_dir)
+
+        _offer_sysbox_install(target_dir)
 
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
             _check_prereqs(target_dir)
