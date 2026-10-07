@@ -2874,10 +2874,11 @@ class Lium:
             out_bytes, err_bytes = out.result(), err.result()
             del out, err  # the futures keep their results alive
             # The raw buffers stay alive while they are decoded, and a str keeps 1 byte per character
-            # for ASCII and up to 4 otherwise (one emoji widens the whole string): reserve both
-            # against the limit before allocating the text.
+            # for ASCII and up to 4 otherwise (one emoji widens the whole string). Widening also holds
+            # the narrow decode buffer (1 byte per character) next to the wide result, so non-ASCII
+            # reserves 5 per byte: reserve it all against the limit before allocating the text.
             # getsizeof counts the bytearray's allocated capacity, which exceeds its length.
-            worst = sum(sys.getsizeof(b) + len(b) * (1 if b.isascii() else 4) for b in (out_bytes, err_bytes))
+            worst = sum(sys.getsizeof(b) + len(b) * (1 if b.isascii() else 5) for b in (out_bytes, err_bytes))
             if over.is_set() or worst > max_output_bytes:
                 raise OutputLimitExceeded(
                     f"Command wrote more than {max_output_bytes} bytes of output on pod {pod.name or pod.huid}"

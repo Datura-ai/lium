@@ -97,7 +97,10 @@ def test_exec_stops_reading_past_max_output_bytes(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     ("wire_bytes", "tail"),
-    [(3 * 1024**2, b"x"), (1024**2, b"\xf0\x9f\x98\x80"), (1024**2, b"\xff")],
+    [
+        (3 * 1024**2, b"x"), (1024**2, b"\xf0\x9f\x98\x80"), (1024**2, b"\xff"),
+        (800 * 1024, b"\xf0\x9f\x98\x80"),  # fits raw + 4x text, not the narrow decode buffer too
+    ],
 )
 def test_exec_limit_bounds_kept_text_not_wire_bytes(wire_bytes, tail):
     from contextlib import nullcontext
