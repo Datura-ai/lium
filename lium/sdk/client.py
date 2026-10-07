@@ -2825,6 +2825,11 @@ class Lium:
             # and this call has no stdin to give it.
             stdin.close()
             channel = stdout.channel
+            # Drain both streams while waiting: output past the SSH channel window (2 MiB) blocks the
+            # remote command, which then never sends the exit status waited for below.
+            readers = ThreadPoolExecutor(max_workers=2)
+            out, err = readers.submit(stdout.read), readers.submit(stderr.read)
+            readers.shutdown(wait=False)
             if timeout is not None:
                 deadline = time.monotonic() + timeout
                 while not channel.exit_status_ready():
@@ -2836,8 +2841,8 @@ class Lium:
                     time.sleep(0.1)
             exit_code = channel.recv_exit_status()
             return {
-                "stdout": stdout.read().decode("utf-8", errors="replace"),
-                "stderr": stderr.read().decode("utf-8", errors="replace"),
+                "stdout": out.result().decode("utf-8", errors="replace"),
+                "stderr": err.result().decode("utf-8", errors="replace"),
                 "exit_code": exit_code,
                 "success": exit_code == 0
             }
