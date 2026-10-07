@@ -7,7 +7,7 @@ from click.testing import CliRunner
 from lium.cli.cli import cli
 from lium.cli.ls import command as ls_module
 from lium.cli.utils import SIGNUP_NUDGE
-from lium.sdk import ExecutorInfo
+from lium.sdk import ExecutorInfo, Template
 
 NODE = ExecutorInfo(
     id="id-n1", huid="keyless-node", machine_name="m", gpu_type="H100", gpu_count=1, price_per_hour=2.0,
@@ -69,7 +69,8 @@ def test_templates_without_key_lists_and_says_how_to_rent(monkeypatch):
                 raise ValueError("No API key found. Set LIUM_API_KEY")
 
         def templates(self, *args, **kwargs):
-            return []
+            return [Template(id="t1", name="PyTorch", huid="brave-fox-3a", docker_image="daturaai/pytorch",
+                             docker_image_tag="2.6.0-cuda12.5.1", category="PYTORCH", status="VERIFY_SUCCESS")]
 
     monkeypatch.setattr(templates_module, "Lium", KeylessLium)
 
