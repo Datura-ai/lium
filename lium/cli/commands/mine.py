@@ -221,12 +221,24 @@ NODE_IMAGES_GIB = 40
 GIB = 1024**3
 
 
+# The tags the executor compose files pin; the executor itself is pinned by a digest only the runner resolves.
+_NODE_IMAGE_TAGS = ("daturaai/compute-subnet-executor-runner:latest", "daturaai/lium-watchtower:1.1.1")
+_EXECUTOR_IMAGE_REPO = "daturaai/compute-subnet-executor"
+
+
+def _node_images_present() -> bool:
+    """A rerun: the pinned images are local and so is an executor image. Its digest may be older than the one the
+    runner pulls, but a new digest shares most of its layers, so the pull is far below the full reserve."""
+    for image in (*_NODE_IMAGE_TAGS, PREFLIGHT_IMAGE):
+        if _run(f"docker image inspect {image}", check=False)[0].strip() in ("", "[]"):
+            return False
+    return bool(_run(f"docker images -q {_EXECUTOR_IMAGE_REPO}", check=False)[0].strip())
+
+
 def _check_free_disk():
     root = _run("docker info --format '{{.DockerRootDir}}'", check=False)[0].strip() or "/var/lib/docker"
     free = shutil.disk_usage(root if Path(root).exists() else "/").free
-    # The reserve stays even on a rerun: the executor image digest is resolved by the runner at start, so the CLI
-    # cannot tell whether the current images are already local.
-    needed_gib = NODE_FREE_DISK_GIB + NODE_IMAGES_GIB
+    needed_gib = NODE_FREE_DISK_GIB + (0 if _node_images_present() else NODE_IMAGES_GIB)
     if free < needed_gib * GIB:
         raise Exception(
             f"Not enough free disk: {free / GIB:.1f} GiB free on {root}, {needed_gib} GiB needed "

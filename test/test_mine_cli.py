@@ -365,22 +365,38 @@ def test_step_message_shows_the_live_detail() -> None:
     assert str(msg) == "Validating node (GPU Matrix Multiplication)"
 
 
-def _disk(monkeypatch, free_bytes: float) -> None:
-    monkeypatch.setattr(mine, "_run", lambda cmd, check=True, capture=True, cwd=None: ("/var/lib/docker\n", ""))
+ALL_NODE_IMAGES = {*mine._NODE_IMAGE_TAGS, mine.PREFLIGHT_IMAGE, mine._EXECUTOR_IMAGE_REPO}
+
+
+def _disk(monkeypatch, free_bytes: float, local_images: set) -> None:
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        if "DockerRootDir" in cmd:
+            return "/var/lib/docker\n", ""
+        found = cmd.split()[-1] in local_images  # docker image inspect <tag> / docker images -q <repo>
+        if "inspect" in cmd:
+            return ('[{"Id": "sha256:1"}]' if found else "[]"), ""
+        return ("1a2b\n" if found else ""), ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
     monkeypatch.setattr(mine.shutil, "disk_usage", lambda path: SimpleNamespace(free=free_bytes))
 
 
-# 140e9 bytes is 130.4 GiB: under the 140 GiB the validator's GiB floor plus the image reserve needs; 110 GiB is
-# a rerun whose images may already be local, which the CLI cannot confirm
-@pytest.mark.parametrize("free_bytes", [96e9, 140e9, 110 * mine.GIB])
-def test_free_disk_check_refuses_a_disk_without_room_for_the_image_reserve(monkeypatch, free_bytes) -> None:
-    _disk(monkeypatch, free_bytes=free_bytes)
+# 140e9 bytes is 130.4 GiB: under the 140 GiB the validator's GiB floor plus the image reserve needs
+@pytest.mark.parametrize(
+    ("free_bytes", "local_images"),
+    [(96e9, set()), (140e9, set()), (110 * mine.GIB, ALL_NODE_IMAGES - {mine._EXECUTOR_IMAGE_REPO})],
+)
+def test_free_disk_check_refuses_a_disk_without_room_for_the_image_pulls(monkeypatch, free_bytes, local_images) -> None:
+    _disk(monkeypatch, free_bytes=free_bytes, local_images=local_images)
 
     with pytest.raises(Exception, match="140 GiB needed"):
         mine._check_free_disk()
 
 
-def test_free_disk_check_passes_a_disk_with_room_for_the_images(monkeypatch) -> None:
-    _disk(monkeypatch, free_bytes=140 * mine.GIB)
+@pytest.mark.parametrize(("free_bytes", "local_images"), [(140 * mine.GIB, set()), (110 * mine.GIB, ALL_NODE_IMAGES)])
+def test_free_disk_check_passes_a_new_disk_and_a_rerun_with_the_images_pulled(
+    monkeypatch, free_bytes, local_images
+) -> None:
+    _disk(monkeypatch, free_bytes=free_bytes, local_images=local_images)
 
     mine._check_free_disk()
