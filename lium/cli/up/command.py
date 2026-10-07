@@ -632,7 +632,7 @@ def up_command(
             f"The rent request for {executor.huid} got no answer from the API ({exc.__class__.__name__}). "
             f"Run 'lium ps' before retrying: a pod named {name or executor.huid} may exist and be billing.{kept}",
             EXIT_API_ERROR,
-            data={**(_api_error_data(exc) if isinstance(exc, LiumError) else {}), **created_volume} or None,
+            data={**((_api_error_data(exc) if isinstance(exc, LiumError) else None) or {}), **created_volume} or None,
             hint="Do not run 'lium up' again until 'lium ps' shows whether the first request created a pod.",
         )
     except (LiumAuthError, LiumPermissionError, LiumServerError, LiumRateLimitError) as exc:
