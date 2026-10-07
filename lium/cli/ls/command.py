@@ -8,6 +8,8 @@ from rich.markup import escape
 from lium.sdk import Lium, ExecutorInfo
 from lium.cli import ui
 from lium.cli.utils import (
+    SIGNUP_NUDGE,
+    browsing_client,
     CliFailure,
     EXIT_CONFIGURATION_ERROR,
     console,
@@ -137,7 +139,7 @@ def ls_command(
     )
 
     # Load data
-    lium = Lium()
+    lium, anonymous = browsing_client(Lium)
     ctx = {
         "lium": lium,
         "gpu_type": gpu_type,
@@ -198,7 +200,10 @@ def ls_command(
         else:
             ui.error("All GPUs are currently rented out")
             ui.info("Check back later or contact support if this persists")
-        show_workspace(lium)
+        if anonymous:
+            ui.dim(SIGNUP_NUDGE)
+        else:
+            show_workspace(lium)
         return
 
 
@@ -230,7 +235,10 @@ def ls_command(
         ui.dim(display.format_hidden_columns(hidden))
     ui.print("")
     ui.info(tip)
-    show_workspace(lium)
+    if anonymous:
+        ui.dim(SIGNUP_NUDGE)
+    else:
+        show_workspace(lium)
 
     # Store selection for index-based access in up command
     store_executor_selection(sorted_executors)
