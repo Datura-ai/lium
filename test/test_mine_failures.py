@@ -7,6 +7,7 @@
 * a blank "Public SSH port" left the template's `SSH_PUBLIC_PORT=2200` beside `SSH_PORT=30311` (B-82) — the executor
   advertises `SSH_PUBLIC_PORT or SSH_PORT`, so validators were sent to a port nothing listens on.
 """
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -198,3 +199,24 @@ def test_sysbox_offer_reaches_fresh_hosts_without_running_unverified_checkout_co
     CliRunner().invoke(mine.mine_command, ["-k", "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", "--auto",
                                            "--dir", str(tmp_path)])
     assert calls == expected
+
+
+@pytest.mark.parametrize(
+    "script, expected",
+    [
+        (b"official", []),
+        (b"sudo -n id\n", ["sudo -K", "bash {script}"]),
+    ],
+)
+def test_unverified_install_script_runs_only_after_the_sudo_cache_is_cleared(
+    monkeypatch, tmp_path: Path, script, expected
+):
+    path = tmp_path / "scripts" / "install_executor_on_ubuntu.sh"
+    path.parent.mkdir()
+    path.write_bytes(script)
+    monkeypatch.setattr(mine, "_OFFICIAL_EXECUTOR_INSTALL_SHA256", frozenset({hashlib.sha256(b"official").hexdigest()}))
+    ran = []
+    monkeypatch.setattr(mine, "_run", lambda cmd, **k: ran.append(cmd) or ("", ""))
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: subprocess.CompletedProcess(a, 0, b"", b""))
+    mine._install_executor_tools(tmp_path)
+    assert ran == [c.format(script=path) for c in expected]

@@ -230,6 +230,8 @@ def _install_executor_tools(compute_dir: Path) -> bool:
 
     content = script.read_bytes()
     if hashlib.sha256(content).hexdigest() not in _OFFICIAL_EXECUTOR_INSTALL_SHA256:
+        # The sysbox offer just before may have cached a sudo password on this terminal; checkout code must not reuse it.
+        _run("sudo -K", check=False)
         _run(f"bash {script}")
         return False
     result = subprocess.run(["bash", "-s"], input=content, capture_output=True, env=_subprocess_env())
