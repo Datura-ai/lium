@@ -175,15 +175,17 @@ def test_sysbox_offer_does_nothing_without_a_terminal_or_a_yes(monkeypatch, tmp_
 
 
 @pytest.mark.parametrize(
-    "docker_before_step2, official_install, expected",
+    "fresh_clone, docker_before_step2, official_install, expected",
     [
-        (True, True, ["clone", "offer", "tools"]),
-        (False, True, ["clone", "offer", "tools", "offer"]),
-        (False, False, ["clone", "offer", "tools"]),
+        (True, True, True, ["clone", "offer", "tools"]),
+        (True, False, True, ["clone", "offer", "tools", "offer"]),
+        (True, False, False, ["clone", "offer", "tools"]),
+        (False, True, True, ["clone", "tools"]),
+        (False, False, True, ["clone", "tools"]),
     ],
 )
 def test_sysbox_offer_reaches_fresh_hosts_without_running_unverified_checkout_code_before_sudo(
-    monkeypatch, tmp_path: Path, docker_before_step2, official_install, expected
+    monkeypatch, tmp_path: Path, fresh_clone, docker_before_step2, official_install, expected
 ):
     calls = []
     monkeypatch.setattr(mine, "_exists", lambda cmd: docker_before_step2)
@@ -196,8 +198,9 @@ def test_sysbox_offer_reaches_fresh_hosts_without_running_unverified_checkout_co
 
     monkeypatch.setattr(mine, "_install_executor_tools", tools)
     monkeypatch.setattr(mine, "_check_prereqs", lambda *a, **k: 1 / 0)
+    target = tmp_path / "compute-subnet" if fresh_clone else tmp_path
     CliRunner().invoke(mine.mine_command, ["-k", "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", "--auto",
-                                           "--dir", str(tmp_path)])
+                                           "--dir", str(target)])
     assert calls == expected
 
 

@@ -865,12 +865,16 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
 
     TOTAL_STEPS = 8 if token else 6
 
+    # The sysbox offer asks for sudo, so only a checkout cloned by this run gets it: code from an existing --dir may
+    # already have run (an earlier step 2) and left a process waiting to reuse that sudo ticket.
+    fresh_clone = not target_dir.exists()
     try:
         with timed_step_status(1, TOTAL_STEPS, "Ensuring repository"):
             _clone_or_update_repo(target_dir, branch)
 
         # Before step 2: that step runs the checkout's own script, which must not get a sudo prompt to piggyback on.
-        _offer_sysbox_install(target_dir)
+        if fresh_clone:
+            _offer_sysbox_install(target_dir)
 
         docker_before = _exists("docker")
         with timed_step_status(2, TOTAL_STEPS, "Installing node tools"):
@@ -878,7 +882,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
 
         # A fresh host got Docker in step 2; offer only if that script was the official one, so no checkout code
         # ran before the sudo prompt.
-        if official_install and not docker_before:
+        if fresh_clone and official_install and not docker_before:
             _offer_sysbox_install(target_dir)
 
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
