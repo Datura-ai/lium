@@ -337,6 +337,8 @@ def test_up_json_failure_at_the_rent_names_the_volume_it_created(monkeypatch, re
                request_id="req-abc"), "insufficient_balance"),
     (LiumRentOutcomeUnknownError("first rent unresolved, repeat refused", code="idempotency_in_progress",
                                  hint="Retry with the same key", request_id="req-abc"), "api_timeout"),
+    # a proxy-made 502 carries no code, hint or request_id: the answer must still be the unknown-outcome one
+    (LiumRentOutcomeUnknownError("first rent unresolved, repeat got a 502"), "api_timeout"),
 ])
 def test_up_json_refusal_at_the_rent_keeps_the_servers_request_id_next_to_the_volume(
     monkeypatch, with_volume, rent_error, code,
@@ -350,11 +352,11 @@ def test_up_json_refusal_at_the_rent_keeps_the_servers_request_id_next_to_the_vo
     assert result.exit_code == EXIT_API_ERROR
     envelope = json.loads(result.stderr.strip().splitlines()[-1])
     assert envelope["error"]["code"] == code
-    expected = {"request_id": "req-abc"}
+    expected = {"request_id": rent_error.request_id} if rent_error.request_id else {}
     if with_volume:
         assert envelope["error"]["message"].endswith(" The volume my-data was created and is kept.")
         expected.update(volume_id="vol-1", volume_huid="calm-lake-01")
-    assert envelope["data"] == expected
+    assert (envelope.get("data") or {}) == expected
     if isinstance(rent_error, LiumRentOutcomeUnknownError):
         assert "Retry" not in envelope["error"]["hint"]
         assert "lium ps" in envelope["error"]["hint"]
