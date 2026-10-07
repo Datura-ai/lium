@@ -2,6 +2,7 @@
 
 import json
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -199,11 +200,24 @@ NODE_IMAGES_GIB = 40
 GIB = 1024**3
 
 
-def _check_free_disk():
+def _node_images_present(executor_dir: Path) -> bool:
+    """Every image this run pulls is already local at the reference compose names (a digest pin included):
+    an older executor image alone still leaves the current ones to pull."""
+    images = {PREFLIGHT_IMAGE}
+    try:
+        for file_flag, _service in _COMPOSE_SERVICES:
+            images.update(_run(f"docker compose {file_flag}config --images", cwd=str(executor_dir))[0].split())
+        for image in images:
+            _run(f"docker image inspect {shlex.quote(image)}")
+    except RuntimeError:
+        return False
+    return True
+
+
+def _check_free_disk(executor_dir: Path):
     root = _run("docker info --format '{{.DockerRootDir}}'", check=False)[0].strip() or "/var/lib/docker"
     free = shutil.disk_usage(root if Path(root).exists() else "/").free
-    images_pulled = bool(_run("docker image ls -q daturaai/compute-subnet-executor", check=False)[0].strip())
-    needed_gib = NODE_FREE_DISK_GIB + (0 if images_pulled else NODE_IMAGES_GIB)
+    needed_gib = NODE_FREE_DISK_GIB + (0 if _node_images_present(executor_dir) else NODE_IMAGES_GIB)
     if free < needed_gib * GIB:
         raise Exception(
             f"Not enough free disk: {free / GIB:.1f} GiB free on {root}, {needed_gib} GiB needed "
@@ -852,7 +866,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
 
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
             _check_prereqs(target_dir)
-            _check_free_disk()
+            _check_free_disk(target_dir / "neurons" / "executor")
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.
         preflight_pull = _start_preflight_pull()

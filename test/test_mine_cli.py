@@ -365,26 +365,40 @@ def test_step_message_shows_the_live_detail() -> None:
     assert str(msg) == "Validating node (GPU Matrix Multiplication)"
 
 
-def _disk(monkeypatch, free_bytes: float, images_pulled: bool) -> None:
+CURRENT_NODE_IMAGES = {"daturaai/compute-subnet-executor@sha256:aa", "daturaai/runner@sha256:bb", mine.PREFLIGHT_IMAGE}
+
+
+def _disk(monkeypatch, free_bytes: float, available_images: set) -> None:
     def fake_run(cmd, check=True, capture=True, cwd=None):
         if "DockerRootDir" in cmd:
             return "/var/lib/docker\n", ""
-        return ("abc123\n" if images_pulled else ""), ""
+        if "config --images" in cmd:
+            app = "app.yml" in cmd
+            return ("daturaai/compute-subnet-executor@sha256:aa" if app else "daturaai/runner@sha256:bb") + "\n", ""
+        if cmd.split()[-1].strip("'") not in available_images:  # docker image inspect <ref>
+            raise RuntimeError(f"Command failed (1): {cmd}")
+        return "[]", ""
 
     monkeypatch.setattr(mine, "_run", fake_run)
     monkeypatch.setattr(mine.shutil, "disk_usage", lambda path: SimpleNamespace(free=free_bytes))
 
 
-# 140e9 bytes is 130.4 GiB: under the 140 GiB the validator's GiB floor plus the image reserve needs
-@pytest.mark.parametrize("free_bytes", [96e9, 140e9])
-def test_free_disk_check_refuses_a_disk_too_small_before_the_image_pulls(monkeypatch, free_bytes) -> None:
-    _disk(monkeypatch, free_bytes=free_bytes, images_pulled=False)
+# 140e9 bytes is 130.4 GiB: under the 140 GiB the validator's GiB floor plus the image reserve needs; an executor
+# image older than the one compose pins still leaves the current images to pull
+@pytest.mark.parametrize(
+    ("free_bytes", "available_images"),
+    [(96e9, set()), (140e9, set()), (110 * mine.GIB, {"daturaai/compute-subnet-executor:old"})],
+)
+def test_free_disk_check_refuses_a_disk_too_small_before_the_image_pulls(
+    monkeypatch, tmp_path, free_bytes, available_images
+) -> None:
+    _disk(monkeypatch, free_bytes=free_bytes, available_images=available_images)
 
     with pytest.raises(Exception, match="140 GiB needed"):
-        mine._check_free_disk()
+        mine._check_free_disk(tmp_path)
 
 
-def test_free_disk_check_passes_a_rerun_with_the_images_already_pulled(monkeypatch) -> None:
-    _disk(monkeypatch, free_bytes=110 * 1024**3, images_pulled=True)
+def test_free_disk_check_passes_a_rerun_with_the_current_images_already_pulled(monkeypatch, tmp_path) -> None:
+    _disk(monkeypatch, free_bytes=110 * mine.GIB, available_images=CURRENT_NODE_IMAGES)
 
-    mine._check_free_disk()
+    mine._check_free_disk(tmp_path)
