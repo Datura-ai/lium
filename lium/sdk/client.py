@@ -2597,7 +2597,11 @@ class Lium:
         try:
             uuid.UUID(str(template_id))
         except ValueError:  # GET /templates/{id} takes only a UUID (422 otherwise)
-            return next((t for t in self.templates() if template_id in (t.huid, t.name)), None)
+            # names are not unique and the listing includes public templates: never pick one of several
+            matches = [t for t in self.templates() if template_id in (t.huid, t.name)]
+            if len(matches) > 1:
+                raise LiumError(f"Template {template_id!r} is ambiguous ({len(matches)} templates match); use its ID")
+            return matches[0] if matches else None
         try:
             d = self._request("GET", f"/templates/{quote(str(template_id), safe='')}").json()
             return Template(

@@ -111,7 +111,7 @@ def keys_list_command(workspace: Optional[str], json_output: bool):
 
     Columns: Name, Scopes, Budget (spent/budget for the day, the month and in total, when the key has one), Pods (active
     pods the key created), Created, Last used, ID. Budgets and the Pods count come from a server with per-key
-    budgets (not on lium.io yet); older servers show `—`.
+    budgets; older servers show `—`.
     """
     lium = workspace_client()
     require_session(lium)
@@ -148,22 +148,20 @@ def keys_list_command(workspace: Optional[str], json_output: bool):
 @click.option(
     "--daily-budget", type=BUDGET_RANGE, metavar="USD",
     help="Most USD the pods this key creates may be billed on one UTC day; at it the key's pods are deleted (data outside a volume is lost) and "
-         "new rentals through the key are refused. At least $1, whole cents (needs a server with per-key budgets; "
-         "not on lium.io yet)",
+         "new rentals through the key are refused. At least $1, whole cents (needs a server with per-key budgets)",
 )
 @click.option(
     "--monthly-budget", type=BUDGET_RANGE, metavar="USD",
-    help="The same over one UTC calendar month (needs a server with per-key budgets; not on lium.io yet)",
+    help="The same over one UTC calendar month (needs a server with per-key budgets)",
 )
 @click.option(
     "--max-budget", type=BUDGET_RANGE, metavar="USD",
-    help="The same over the key's lifetime (needs a server with per-key budgets; not on lium.io yet)",
+    help="The same over the key's lifetime (needs a server with per-key budgets)",
 )
 @click.option(
     "--pod-visibility", type=click.Choice(POD_VISIBILITIES), default=None,
     help="own = only the pods this key creates exist for it; account = every pod of the account, within the "
-         "key's scopes. Not passed: the server's own default decides (needs a server with pod visibility; "
-         "not on lium.io yet)",
+         "key's scopes. Not passed: the server's own default decides (needs a server with pod visibility)",
 )
 @click.option(
     "--allow-unbudgeted", is_flag=True,
@@ -376,7 +374,7 @@ def keys_show_command(key: str, workspace: Optional[str], json_output: bool):
 
     "What this key can do" is the server's list for the scopes the key holds (`GET /keys/scopes`); the
     refusals are the server's ledger (`GET /keys/{id}/refusals`: when, which window, what was asked).
-    Both need a newer Lium server (not on lium.io yet): an older server lists the scope names alone and has no
+    Both need a newer Lium server: an older server lists the scope names alone and has no
     refusal ledger.
 
     \b
@@ -466,7 +464,7 @@ def _refused_cell(refusals: Optional[List[ApiKeyRefusal]], today: Optional[int])
 def keys_scopes_command(json_output: bool):
     """Every API-key scope and pod-visibility value with what it allows, in the server's words (`GET /keys/scopes`).
 
-    Needs a server with the route (not on lium.io yet); older servers answer `not_found`. No
+    Needs a server with the route; older servers answer `not_found`. No
     session is needed: the table is static text, sent to any caller (the configured key goes along unchecked).
 
     \b
@@ -522,7 +520,7 @@ def keys_budget_command(
     json_output: bool,
 ):
     """Set or clear a key's budgets — day, month, lifetime (`PATCH /keys/{id}`; needs a server with per-key
-    budgets, not on lium.io yet — an older server has no such route and the CLI says so).
+    budgets — an older server has no such route and the CLI says so).
 
     A budget not named is left as it is; those named must keep daily ≤ monthly ≤ max; a budget the server did
     not record (a window it does not know) is refused, exit 2. Scopes and pod visibility cannot be changed after

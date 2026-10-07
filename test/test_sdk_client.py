@@ -513,6 +513,13 @@ def test_get_template_finds_a_template_by_huid_or_name(monkeypatch):
     assert client.get_template("Pytorch (Cuda + DinD)") is template
     assert client.get_template("no-such-template") is None
 
+    duplicates = [Template(id=i, huid="same-huid", name="training", docker_image=i, docker_image_tag="latest",
+                           category="general", status="CREATED") for i in ("first", "second")]
+    monkeypatch.setattr(client, "templates", lambda: duplicates)
+    for selector in ("training", "same-huid"):
+        with pytest.raises(LiumError, match="ambiguous"):
+            client.get_template(selector)
+
 
 def test_get_template_raises_errors_other_than_not_found(monkeypatch):
     client = Lium(Config(api_key="test"))
