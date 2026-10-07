@@ -111,6 +111,7 @@ def test_the_first_command_starts_a_background_master_with_the_pods_pinned_key(h
     assert start[-2:] == ["--", "root@203.0.113.10"] and start[start.index("-p") + 1] == "20299"
     assert result == {"stdout": "out\n", "stderr": "", "exit_code": 0, "success": True}
     assert oct((home / ".lium" / "ssh-mux").stat().st_mode & 0o777) == "0o700"
+    assert all({"ForwardAgent=no", "ClearAllForwardings=yes"} <= set(argv) for argv, _ in ssh.calls if argv[0] == "ssh")   # master and command
 
 
 def test_a_pin_notice_is_reported_when_the_login_then_fails(home, monkeypatch):
