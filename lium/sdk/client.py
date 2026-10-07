@@ -3149,6 +3149,11 @@ class Lium:
                 if got:
                     continue
                 if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                    # a command that ends mid-character still shows it, as U+FFFD
+                    for kind, decoder in (("stdout", out_text), ("stderr", err_text)):
+                        tail = decoder.decode(b"", final=True)
+                        if tail:
+                            yield {"type": kind, "data": tail}
                     return channel.recv_exit_status()
                 time.sleep(0.05)  # nothing pending: do not spin at 100% CPU until the command ends
 
