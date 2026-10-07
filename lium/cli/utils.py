@@ -821,7 +821,7 @@ def store_volume_selection(volumes: List) -> None:
     from lium.cli.settings import config
 
     selection_data = {
-        'timestamp': datetime.now().isoformat(),
+        'timestamp': datetime.now(timezone.utc).isoformat(),  # aware: `volumes rm` checks its age
         'volumes': []
     }
 
@@ -857,19 +857,16 @@ def get_last_volume_selection() -> Optional[Dict[str, Any]]:
 
 def resolve_volume_huid(huid: str) -> Optional[str]:
     """
-    Resolve volume HUID to database ID from cached selection.
+    Resolve volume HUID to database ID: the cached `lium volumes` list first, then the live list.
     Returns database ID or None if not found.
     """
-    last_selection = get_last_volume_selection()
-    if not last_selection:
-        return None
-
-    volumes = last_selection.get('volumes', [])
-    for volume in volumes:
+    last_selection = get_last_volume_selection() or {}
+    for volume in last_selection.get('volumes', []):
         if volume.get('huid') == huid:
             return volume.get('id')
 
-    return None
+    # a volume made in the web app, or since the last `lium volumes`, is not in the cache
+    return next((v.id for v in Lium().volumes() if v.huid == huid), None)
 
 
 def parse_volume_spec(volume_spec: str) -> Tuple[Optional[str], Optional[Dict[str, str]], Optional[str]]:
@@ -896,7 +893,7 @@ def parse_volume_spec(volume_spec: str) -> Tuple[Optional[str], Optional[Dict[st
 
         volume_id = resolve_volume_huid(huid)
         if not volume_id:
-            return None, None, f"Volume with HUID '{huid}' not found. Run 'lium volumes' first."
+            return None, None, f"Volume with HUID '{huid}' not found in your volumes (see 'lium volumes')."
 
         return volume_id, None, None
 

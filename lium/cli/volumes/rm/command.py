@@ -1,5 +1,7 @@
 """Volumes rm command."""
 
+from datetime import datetime, timezone
+
 import click
 
 from lium.sdk import Lium
@@ -11,6 +13,8 @@ from lium.cli.utils import (
     handle_errors,
     ensure_config,
     get_last_volume_selection,
+    POD_INDEX_TTL_SECONDS,
+    _snapshot_age_seconds,
 )
 from . import validation, parsing
 from .actions import RemoveVolumesAction
@@ -38,6 +42,16 @@ def volumes_rm_command(indices: str, yes: bool):
             EXIT_GENERAL_ERROR,
         )
 
+    age = _snapshot_age_seconds(last_selection, datetime.now(timezone.utc))
+    if age is None or age < 0 or age > POD_INDEX_TTL_SECONDS:
+        # same rule as pod indexes: never delete by a row number the caller saw too long ago
+        raise CliFailure(
+            "stale_volume_index",
+            f"The last 'lium volumes' list is older than {POD_INDEX_TTL_SECONDS // 60} minutes. "
+            "Run 'lium volumes' and retry.",
+            EXIT_CONFIGURATION_ERROR,
+        )
+
     volumes_data = last_selection.get('volumes', [])
 
     # Parse
@@ -50,7 +64,8 @@ def volumes_rm_command(indices: str, yes: bool):
     # Confirm
     if not yes:
         count = len(volumes_to_remove)
-        message = f"Remove {count} volume{'s' if count > 1 else ''}?"
+        names = ", ".join(f"{v['huid']} ({v.get('name') or '-'})" for _, v in volumes_to_remove)
+        message = f"Remove {count} volume{'s' if count > 1 else ''}: {names}?"
         if not ui.confirm(message):
             return
 
@@ -62,9 +77,10 @@ def volumes_rm_command(indices: str, yes: bool):
     result = action.execute(ctx)
 
     if not result.ok:
-        failed_huids = result.data.get("failed_huids", [])
+        failures = result.data.get("failures", [])
         raise CliFailure(
             "volume_removal_failed",
-            f"Failed to remove volumes: {', '.join(failed_huids)}",
+            f"Failed to remove volumes: {', '.join(failures)}",
             EXIT_GENERAL_ERROR,
         )
+    ui.success(f"Removed {', '.join(v['huid'] for _, v in volumes_to_remove)}")

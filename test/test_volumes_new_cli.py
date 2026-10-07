@@ -6,11 +6,13 @@ The README used to advertise ``--description`` while the CLI only knew ``--desc`
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from click.testing import CliRunner
 
+from lium.cli.actions import ActionResult
 from lium.cli.volumes.new.command import volumes_new_command
 
 
@@ -24,6 +26,7 @@ def test_volumes_new_accepts_every_description_spelling(monkeypatch, flag: str) 
     class _Action:
         def execute(self, ctx):
             seen.update(ctx)
+            return ActionResult(ok=True, data={"volume": SimpleNamespace(huid="vol-1")})
 
     monkeypatch.setattr("lium.cli.volumes.new.command.CreateVolumeAction", _Action)
     result = CliRunner().invoke(volumes_new_command, ["mydata", flag, "My dataset"])
