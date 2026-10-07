@@ -175,6 +175,7 @@ _SYSBOX_SETUP_COMMAND = (
     "curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-io/main/neurons/executor/"
     "nvidia_docker_sysbox_setup.sh | sudo bash"
 )
+_ROOT_EMPTY_DIR_BASH = 'd=$(mktemp -d) && cd "$d" && bash -s; rc=$?; cd / && rm -rf "$d"; exit $rc'
 _OFFICIAL_SYSBOX_SETUP_SHA256 = frozenset({"972a6a29cfb517d22a4a69aee2830c35d0a27bab1ba3179d6dd7e90eb26ffe32"})
 
 
@@ -197,7 +198,6 @@ def _offer_sysbox_install(compute_dir: Path) -> None:
     Outside the step spinner: the installer prints its own progress. Without a terminal, step 3 fails as before."""
     import hashlib
     import subprocess
-    import tempfile
 
     setup = _sysbox_setup_script(compute_dir)
     if not (sys.stdin.isatty() and _exists("docker") and setup.exists()) or _has_sysbox():
@@ -209,10 +209,9 @@ def _offer_sysbox_install(compute_dir: Path) -> None:
     if not click.confirm("Install sysbox and the NVIDIA container toolkit now (restarts Docker)?", default=True):
         return
     # The verified bytes go in on stdin, as in the official `curl | sudo bash` (no terminal, so the installer skips
-    # its own prompt), from an empty directory: the installer prefers a sysbox .deb in its working directory, and
-    # neither that nor a swapped script file may come from the checkout.
-    with tempfile.TemporaryDirectory() as empty:
-        subprocess.run(["sudo", "bash", "-s"], input=script, cwd=empty, check=False)
+    # its own prompt), from an empty directory root creates: the installer prefers a sysbox .deb in its working
+    # directory, so neither the checkout nor a process of this user may be able to place one there.
+    subprocess.run(["sudo", "sh", "-c", _ROOT_EMPTY_DIR_BASH], input=script, check=False)
 
 
 def _install_executor_tools(compute_dir: Path):

