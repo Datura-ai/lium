@@ -11,6 +11,7 @@ import shlex
 import socket
 import stat
 import subprocess
+import threading
 import time
 import uuid
 import warnings
@@ -42,6 +43,7 @@ from .exceptions import (
     LiumHostKeyError,
     LiumNotFoundError,
     LiumInsufficientBalanceError,
+    OutputLimitExceeded,
     LiumPermissionError,
     LiumRateLimitError,
     LiumScopeError,
@@ -2774,6 +2776,7 @@ class Lium:
         timeout: Optional[float] = None,
         detach: bool = False,
         log_path: Optional[str] = None,
+        max_output_bytes: int = 256 * 1024 * 1024,
     ) -> Dict[str, Any]:
         """Execute a shell command on a pod over SSH.
 
@@ -2798,11 +2801,16 @@ class Lium:
                 ``/workspace/logs/exec-<UTC timestamp>-<id>.log``, the ``<id>`` a
                 6-hex tail that keeps two launches in the same second apart).
 
+            max_output_bytes: Limit on stdout and stderr together. Past it the
+                channel is closed and :class:`OutputLimitExceeded` is raised, so
+                a pod cannot grow this process's memory without bound.
+
         Returns:
             Dict containing stdout, stderr, exit_code, and success flag; with
             ``detach`` a dict with ``pid``, ``log_path`` and ``command``.
 
         Raises:
+            OutputLimitExceeded: the command wrote more than ``max_output_bytes``.
             ValueError: an ``env`` name is not a shell identifier. Raised before
                 the connection is opened, so nothing reaches the pod.
         """
@@ -2827,22 +2835,42 @@ class Lium:
             channel = stdout.channel
             # Drain both streams while waiting: output past the SSH channel window (2 MiB) blocks the
             # remote command, which then never sends the exit status waited for below.
+            total, over, lock = [0], threading.Event(), threading.Lock()
+
+            def drain(recv: Callable[[int], bytes]) -> bytes:
+                chunks = []
+                while True:
+                    chunk = recv(65536)
+                    if not chunk:
+                        return b"".join(chunks)
+                    with lock:
+                        total[0] += len(chunk)
+                        if total[0] > max_output_bytes:
+                            over.set()
+                            channel.close()
+                            return b""
+                    chunks.append(chunk)
+
             readers = ThreadPoolExecutor(max_workers=2)
-            out, err = readers.submit(stdout.read), readers.submit(stderr.read)
+            out, err = readers.submit(drain, channel.recv), readers.submit(drain, channel.recv_stderr)
             readers.shutdown(wait=False)
-            if timeout is not None:
-                deadline = time.monotonic() + timeout
-                while not channel.exit_status_ready():
-                    if time.monotonic() >= deadline:
-                        channel.close()
-                        raise TimeoutError(
-                            f"Command did not finish within {timeout}s on pod {pod.name or pod.huid}: {command}"
-                        )
-                    time.sleep(0.1)
+            deadline = time.monotonic() + timeout if timeout is not None else None
+            while not channel.exit_status_ready() and not over.is_set():
+                if deadline is not None and time.monotonic() >= deadline:
+                    channel.close()
+                    raise TimeoutError(
+                        f"Command did not finish within {timeout}s on pod {pod.name or pod.huid}: {command}"
+                    )
+                time.sleep(0.1)
+            out_bytes, err_bytes = out.result(), err.result()
+            if over.is_set():
+                raise OutputLimitExceeded(
+                    f"Command wrote more than {max_output_bytes} bytes of output on pod {pod.name or pod.huid}"
+                )
             exit_code = channel.recv_exit_status()
             return {
-                "stdout": out.result().decode("utf-8", errors="replace"),
-                "stderr": err.result().decode("utf-8", errors="replace"),
+                "stdout": out_bytes.decode("utf-8", errors="replace"),
+                "stderr": err_bytes.decode("utf-8", errors="replace"),
                 "exit_code": exit_code,
                 "success": exit_code == 0
             }

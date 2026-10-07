@@ -7,7 +7,9 @@ import threading
 
 import paramiko
 
-from lium.sdk import Config, Lium, PodInfo
+import pytest
+
+from lium.sdk import Config, Lium, OutputLimitExceeded, PodInfo
 
 OUTPUT_BYTES = 3 * 1024 * 1024  # > paramiko DEFAULT_WINDOW_SIZE (2 MiB)
 
@@ -67,3 +69,25 @@ def test_exec_returns_output_larger_than_the_channel_window(tmp_path, monkeypatc
     result = lium.exec(pod, command="big-output", timeout=10)
 
     assert len(result["stdout"]) == OUTPUT_BYTES
+
+
+def test_exec_stops_reading_past_max_output_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
+    key = paramiko.RSAKey.generate(2048)
+    key_file = tmp_path / "id_rsa"
+    key.write_private_key_file(str(key_file))
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    threading.Thread(target=_serve, args=(listener, paramiko.RSAKey.generate(2048)), daemon=True).start()
+    lium = Lium(config=Config(api_key="unused", ssh_key_path=key_file))
+    pod = PodInfo(
+        id="p1", name="p1", status="RUNNING", huid="p1", ssh_cmd=f"ssh root@127.0.0.1 -p {port}",
+        ports={}, created_at="", updated_at="", executor=None, template={},
+        removal_scheduled_at=None, jupyter_installation_status=None, jupyter_url=None,
+    )
+
+    with pytest.raises(OutputLimitExceeded):
+        lium.exec(pod, command="big-output", timeout=10, max_output_bytes=OUTPUT_BYTES // 2)
