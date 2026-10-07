@@ -365,24 +365,26 @@ def test_step_message_shows_the_live_detail() -> None:
     assert str(msg) == "Validating node (GPU Matrix Multiplication)"
 
 
-def _disk(monkeypatch, free_gb: float, images_pulled: bool) -> None:
+def _disk(monkeypatch, free_bytes: float, images_pulled: bool) -> None:
     def fake_run(cmd, check=True, capture=True, cwd=None):
         if "DockerRootDir" in cmd:
             return "/var/lib/docker\n", ""
         return ("abc123\n" if images_pulled else ""), ""
 
     monkeypatch.setattr(mine, "_run", fake_run)
-    monkeypatch.setattr(mine.shutil, "disk_usage", lambda path: SimpleNamespace(free=free_gb * 1e9))
+    monkeypatch.setattr(mine.shutil, "disk_usage", lambda path: SimpleNamespace(free=free_bytes))
 
 
-def test_free_disk_check_refuses_a_100_gb_disk_before_the_image_pulls(monkeypatch) -> None:
-    _disk(monkeypatch, free_gb=96, images_pulled=False)
+# 140e9 bytes is 130.4 GiB: under the 140 GiB the validator's GiB floor plus the image reserve needs
+@pytest.mark.parametrize("free_bytes", [96e9, 140e9])
+def test_free_disk_check_refuses_a_disk_too_small_before_the_image_pulls(monkeypatch, free_bytes) -> None:
+    _disk(monkeypatch, free_bytes=free_bytes, images_pulled=False)
 
-    with pytest.raises(Exception, match="140 GB needed"):
+    with pytest.raises(Exception, match="140 GiB needed"):
         mine._check_free_disk()
 
 
 def test_free_disk_check_passes_a_rerun_with_the_images_already_pulled(monkeypatch) -> None:
-    _disk(monkeypatch, free_gb=110, images_pulled=True)
+    _disk(monkeypatch, free_bytes=110 * 1024**3, images_pulled=True)
 
     mine._check_free_disk()

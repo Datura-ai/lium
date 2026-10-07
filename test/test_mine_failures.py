@@ -117,3 +117,32 @@ def test_prereqs_fail_without_sysbox_and_name_the_setup_script(monkeypatch, tmp_
 def test_prereqs_pass_with_sysbox(monkeypatch, tmp_path: Path):
     _prereq_host(monkeypatch, '{"runc":{"path":"runc"},"sysbox-runc":{"path":"/usr/bin/sysbox-runc"}}')
     mine._check_prereqs(tmp_path)
+
+
+def _sysbox_offer_host(monkeypatch, tmp_path: Path, *, tty: bool, answer: bool):
+    _prereq_host(monkeypatch, '{"runc":{"path":"runc"}}')
+    setup = tmp_path / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh"
+    setup.parent.mkdir(parents=True)
+    setup.write_text("")
+    monkeypatch.setattr(mine.sys.stdin, "isatty", lambda: tty, raising=False)
+    monkeypatch.setattr(mine.click, "confirm", lambda *a, **kw: answer)
+    ran = []
+    monkeypatch.setattr("subprocess.run", lambda cmd, **kw: ran.append((cmd, kw.get("stdin"))))
+    return setup, ran
+
+
+def test_sysbox_offer_runs_the_installer_once_the_provider_agrees(monkeypatch, tmp_path: Path):
+    import subprocess
+
+    setup, ran = _sysbox_offer_host(monkeypatch, tmp_path, tty=True, answer=True)
+    mine._offer_sysbox_install(tmp_path)
+    assert ran == [(["sudo", "bash", str(setup)], subprocess.DEVNULL)]
+
+
+def test_sysbox_offer_does_nothing_without_a_terminal_or_a_yes(monkeypatch, tmp_path: Path):
+    _, ran = _sysbox_offer_host(monkeypatch, tmp_path, tty=False, answer=True)
+    mine._offer_sysbox_install(tmp_path)
+    monkeypatch.setattr(mine.click, "confirm", lambda *a, **kw: False)
+    monkeypatch.setattr(mine.sys.stdin, "isatty", lambda: True, raising=False)
+    mine._offer_sysbox_install(tmp_path)
+    assert ran == []
