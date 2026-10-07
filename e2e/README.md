@@ -22,7 +22,7 @@ a defective node — 8 Sep 2026, `brave-shark-ff` billed 2 GPUs and exposed 1 (B
 it is excluded or fixed. Nor is a node whose public-listing `reliability_score` is under `E2E_MIN_RELIABILITY`
 (default 90; a node with no score yet is kept; `E2E_MIN_RELIABILITY=0` lifts it, e.g. for a staging node with a low
 score): on 10 Sep 2026 a 2×3090 at $0.32/h scoring 72 had an unreachable SSH port map and was the cheapest pick for
-three PRs in a row (DAH-3383). The score is not in `ls --format json` or the SDK's `ExecutorInfo`, so
+three PRs in a row. The score is not in `ls --format json` or the SDK's `ExecutorInfo`, so
 `conftest.reliability_scores()` reads the public `GET /executors` once per journey (three attempts on a 429/5xx/network error, like the SDK's `ls()`). The
 platform's own rental check (`rental_check_verified_status`) would be the natural rule, but the field is not on
 `GET /executors` and 452 of 473 verified executors were still `PENDING` that day — it does not separate a dead node
@@ -31,14 +31,13 @@ for 30 s (`first_exec`; each attempt has the SDK's own 30 s connect timeout): `w
 sshd's port map can land a few seconds later; a port map that never comes still fails, with the same exception, once
 the budget is spent.
 
-A node that refuses the rent gives way to the next one (DAH-3488). Both journeys keep every rentable node, cheapest
+A node that refuses the rent gives way to the next one. Both journeys keep every rentable node, cheapest
 first, and rent the first that accepts. When `lium up` exits 3 with the CLI's "could not be rented" text (the API
 answered the rent with a 400 such as `Can't rent node. Try again later.`, or the node was taken meanwhile), or the
 SDK's `up()` raises the plain `LiumError` that wraps the same answer, the journey makes sure that no pod with its name
 exists, records the refusal and calls `up` on the next candidate with a different executor id. At most `MAX_UP_TRIES`
 (3) `up` calls per journey, all inside the step's one 540 s budget (a further node is tried only with at least 60 s
-left). The SDK's `up()` resolves the node from `ls()` first and raises a `ValueError` (`Node with ID … not found`,
-`No node found with id …`) when it left the listing meanwhile; that counts as a refusal too. A timeout, a pod that did not start, an auth, permission, server or
+left). A timeout, a pod that did not start, an auth, permission, server or
 rate-limit error and every other exit are not retried. Each refusal is a `rent refused: <huid> (<id>) at $<price>/h: <message>` pytest warning in the
 job log (and, in the CLI journey, a note in `commands.json`), so the fleet team can see which nodes refused; when every try
 refused, the failure message lists them. On 14 Sep 2026 the single candidate answered 400 on lium#152 and lium#164

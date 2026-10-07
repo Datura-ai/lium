@@ -12,6 +12,7 @@ from lium.sdk import (
     LiumError,
     LiumPermissionError,
     LiumRateLimitError,
+    LiumRentOutcomeUnknownError,
     LiumServerError,
     PodStartError,
 )
@@ -623,7 +624,7 @@ def up_command(
                 "gpu_count": requested_gpu_count,
             })
         )
-    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, LiumRentOutcomeUnknownError) as exc:
         # The API did not answer the rent request. Whether a pod was created is unknown, so the
         # caller must look before renting again — a blind retry is how one `up` made two pods.
         raise CliFailure(

@@ -20,6 +20,7 @@ from lium.sdk.exceptions import (
     LiumHostKeyError,
     LiumPermissionError,
     LiumRateLimitError,
+    LiumRentOutcomeUnknownError,
     LiumServerError,
 )
 
@@ -30,16 +31,13 @@ FIRST_SSH_PAUSE_S = 5.0
 
 # `Lium.up()` errors that moving to another node cannot fix: a bad key, no balance/permission (LiumInsufficientBalanceError
 # is a LiumPermissionError), the API down or throttling, a host-key mismatch. Every other LiumError is the API answering
-# the rent with a no (400 "Can't rent node") and is a refusal of that node. So are the two ValueErrors `up()` raises before
-# the POST when the node left the listing between `ls` and `up` (`Lium.get_executor`, `Lium.default_docker_template`).
-NOT_A_REFUSAL = (LiumAuthError, LiumPermissionError, LiumServerError, LiumRateLimitError, LiumHostKeyError)
-NODE_GONE = ("not found", "No node found")   # `Lium.up()`'s two ValueErrors for a node no longer listed (`get_executor`,
-                                              # `default_docker_template`); its other ValueErrors (no SSH key, template) are ours
+# the rent with a no (400 "Can't rent node") and is a refusal of that node. LiumRentOutcomeUnknownError is not: the first
+# POST may still create a pod.
+NOT_A_REFUSAL = (LiumAuthError, LiumPermissionError, LiumServerError, LiumRateLimitError, LiumHostKeyError, LiumRentOutcomeUnknownError)
 
 
 def up_first_accepting(lium, nodes: list, name: str, state: dict, max_tries: int = MAX_UP_TRIES) -> dict:
-    """`lium.up()` on the cheapest node; a node that refuses the rent (a `LiumError` outside NOT_A_REFUSAL, or the
-    `ValueError` for a node gone from the listing) gives way to the next one, a different executor id each time, at most
+    """`lium.up()` on the cheapest node; a node that refuses the rent (a `LiumError` outside NOT_A_REFUSAL) gives way to the next one, a different executor id each time, at most
     `max_tries` `up()` calls. Returns the dict `up()` returned for the node that took it. Every refusal is a
     `rent refused: …` warning and a line of `state["refused"]`. When a refusal left a pod named `name` behind, that pod
     is recorded in `state["pod"]` (the fixture removes it) and the step fails; when every try refused, the last refusal
@@ -60,9 +58,7 @@ def up_first_accepting(lium, nodes: list, name: str, state: dict, max_tries: int
             return lium.up(executor_id=node.id, name=name)
         except NOT_A_REFUSAL:
             raise
-        except (LiumError, ValueError) as exc:
-            if isinstance(exc, ValueError) and not any(t in str(exc) for t in NODE_GONE):
-                raise   # "No SSH keys found", a bad backup argument: ours, and no other node fixes it
+        except LiumError as exc:
             last = exc
             note = refusal_note(str(node.huid), str(node.id), node.price_per_hour, str(exc))
             state["refused"].append(note)

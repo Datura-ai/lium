@@ -257,6 +257,7 @@ def up_first_accepting(session: Session, rental: Rental, budget_s: float = 540, 
             break
         tried.add(node_id)
         rental.executor_id, rental.price_per_hour, rental.gpu_type = node_id, float(node.get("price_per_hour") or 0), str(node.get("gpu_type"))
+        rental.up_called_at = clock()   # billing runs from the attempt that is kept, not from earlier refusals
         r = session.lium("up", node_id, "--name", rental.name, "--ttl", "30m", "-y", "--no-ssh", timeout=max(1, int(left_s)))
         if not rent_refused(r):
             return r

@@ -647,25 +647,18 @@ def test_sdk_up_moves_to_the_next_node_on_a_refusal(monkeypatch):
     assert state["pod"] is None
 
 
-def test_sdk_up_treats_a_node_gone_from_the_listing_as_a_refusal_and_its_other_value_errors_as_ours(monkeypatch):
-    """`Lium.up()` resolves the node from `ls()` before the POST and raises ValueError("Node with ID … not found") when
-    it left the listing: that is the node refusing, so the next one is tried. "No SSH keys found" is our problem."""
+def test_sdk_up_stops_on_an_unknown_rent_outcome_and_on_our_own_value_errors(monkeypatch):
+    """A refused repeat of a rent whose first POST got no answer may still create a pod: no other node is tried."""
+    from lium.sdk.exceptions import LiumRentOutcomeUnknownError
     journey = _load_sdk_journey(monkeypatch, _load(monkeypatch))
-    sdk = _RefusingSdk({"exec-1": ValueError("Node with ID 'exec-1' not found")})
-    state = {"pod": None}
-    with pytest.warns(UserWarning, match=r"rent refused: huid-1 \(exec-1\) at \$0.30/h: Node with ID 'exec-1' not found"):
-        created = journey.up_first_accepting(sdk, [_sdk_node(1, 0.30), _sdk_node(2, 0.32)], "e2e-sdk-000004", state)
-    assert sdk.ups == ["exec-1", "exec-2"] and created["id"] == "pod-for-exec-2"
-    sdk = _RefusingSdk({"exec-1": ValueError("No node found with id exec-1")})   # `default_docker_template`'s wording
-    with pytest.warns(UserWarning, match=r"No node found with id exec-1"):
-        created = journey.up_first_accepting(sdk, [_sdk_node(1, 0.30), _sdk_node(2, 0.32)], "e2e-sdk-000006", {"pod": None})
-    assert sdk.ups == ["exec-1", "exec-2"] and created["id"] == "pod-for-exec-2"
-    sdk = _RefusingSdk({"exec-1": ValueError("No SSH keys found")})
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        with pytest.raises(ValueError, match="No SSH keys found"):
-            journey.up_first_accepting(sdk, [_sdk_node(1, 0.30), _sdk_node(2, 0.32)], "e2e-sdk-000005", {})
-    assert sdk.ups == ["exec-1"]
+    for err, exc_type in ((LiumRentOutcomeUnknownError("first POST unresolved"), LiumRentOutcomeUnknownError),
+                          (ValueError("No SSH keys found"), ValueError)):
+        sdk = _RefusingSdk({"exec-1": err})
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(exc_type):
+                journey.up_first_accepting(sdk, [_sdk_node(1, 0.30), _sdk_node(2, 0.32)], "e2e-sdk-000005", {})
+        assert sdk.ups == ["exec-1"]
 
 
 def test_sdk_up_gives_up_after_three_distinct_nodes(monkeypatch):
@@ -709,3 +702,18 @@ def test_sdk_a_refusal_that_left_a_pod_is_recorded_for_the_fixture(monkeypatch):
     with pytest.warns(UserWarning), pytest.raises(AssertionError, match="huid-1 refused the rent but a pod named e2e-sdk-000003 exists \\(id pod-77\\)"):
         journey.up_first_accepting(sdk, [_sdk_node(1, 0.30), _sdk_node(2, 0.32)], "e2e-sdk-000003", state)
     assert sdk.ups == ["exec-1"] and state["pod"] == {"id": "pod-77"}   # the sdk_pod fixture removes it by this id
+
+
+def test_billing_clock_starts_at_the_accepted_up(monkeypatch):
+    """Refused attempts are not rental time: `up_called_at` is set before every `up`, so it ends at the last one."""
+    conftest = _load(monkeypatch)
+    clock = {"t": 1000.0}
+    class _Session(_SlowSession):
+        def lium(self, *args, **kw):
+            if args[0] == "up" and args[1] == "exec-3":
+                return SimpleNamespace(rc=0, out="", err="", json=lambda: None)
+            return super().lium(*args, **kw)
+    rental = conftest.Rental(name="e2e-000000-008", candidates=[_node(i, 0.30 + i / 100) for i in (1, 2, 3)])
+    with pytest.warns(UserWarning):
+        conftest.up_first_accepting(_Session(clock, up_seconds=10), rental, clock=lambda: clock["t"])
+    assert rental.up_called_at == 1022.0   # two refusals of 10 s + a 1 s `ps` each
