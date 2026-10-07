@@ -39,7 +39,7 @@ def bk_set_command(pod_id: str, path: str, every: str, keep: str, yes: bool):
     ensure_config()
 
     # Validate
-    valid, error = validation.validate(pod_id, every, keep)
+    valid, error = validation.validate(pod_id, every, keep, path)
     if not valid:
         raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
 
