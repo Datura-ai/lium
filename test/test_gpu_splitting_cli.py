@@ -271,7 +271,7 @@ def test_mine_does_not_route_gpu_splitting_as_subcommand(monkeypatch):
     monkeypatch.setattr(
         legacy_mine,
         "_gather_inputs",
-        lambda hotkey, auto: {
+        lambda hotkey, auto, *ports: {
             "hotkey": "5F4hQyQ1wY2M6zS4mP7dN8kR2tV9xB3cL6jH1nT5uA7q",
             "internal_port": "8080",
             "external_port": "8080",
