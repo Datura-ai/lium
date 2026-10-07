@@ -73,7 +73,9 @@ def test_every_legacy_code_has_a_row_in_the_which_map_table():
     from lium.cli.provider._render import _EXIT_CODES, ERROR_CODES
 
     documented = set(re.findall(r"^\|\s*`([A-Z_]+)`\s*\|\s*\d+\s*\|", _section("### Which exit map applies"), re.M))
-    assert set(_EXIT_CODES) | set(ERROR_CODES) <= documented, sorted((set(_EXIT_CODES) | set(ERROR_CODES)) - documented)
+    # a code born namespaced (input.interrupted) has no old row; the unified table documents it
+    legacy = {c for c in set(_EXIT_CODES) | set(ERROR_CODES) if c.isupper()}
+    assert legacy <= documented, sorted(legacy - documented)
 
 
 def test_a_token_cache_race_is_retryable_under_json():

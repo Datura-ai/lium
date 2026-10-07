@@ -725,7 +725,7 @@ def test_a_provider_error_is_the_namespaced_envelope_on_stdout(portal_for):
 
     result = _run("--json", "node", "get", "e-1")
 
-    assert result.exit_code == 3
+    assert result.exit_code == 5
     assert result.stderr == ""
     assert json.loads(result.stdout) == {
         "ok": False,
@@ -734,7 +734,7 @@ def test_a_provider_error_is_the_namespaced_envelope_on_stdout(portal_for):
             "legacy_code": "PORTAL_NOT_FOUND",
             "message": "no such node",
             "hint": "The portal returned 404 for that resource (wrong UUID or already removed).",
-            "exit_code": 3,
+            "exit_code": 5,
             "context": {},
         },
     }
@@ -902,9 +902,9 @@ def test_until_clear_needs_watch_and_timeout_needs_until_clear(portal_for):
     portal_for(_Portal(node=_node()))
 
     result = _run("--json", "node", "status", "e-1", "--until-clear")
-    assert result.exit_code == 1 and json.loads(result.stdout)["error"]["code"] == "input.arg_invalid"
+    assert result.exit_code == 2 and json.loads(result.stdout)["error"]["code"] == "input.arg_invalid"
     result = _run("--json", "node", "status", "e-1", "--watch", "--timeout", "5")
-    assert result.exit_code == 1 and "--timeout needs --until-clear" in result.stdout
+    assert result.exit_code == 2 and "--timeout needs --until-clear" in result.stdout
 
 
 @pytest.fixture

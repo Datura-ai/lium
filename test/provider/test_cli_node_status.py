@@ -185,7 +185,11 @@ def test_node_status_watch_refreshes_until_interrupted(patched_client, monkeypat
 
 
 @pytest.mark.parametrize("switch", AGENT_SWITCHES)
-def test_node_status_watch_stops_on_ctrl_c_with_exit_0_in_agent_mode_too(patched_client, monkeypatch, switch):
+def test_node_status_watch_at_a_terminal_stops_on_ctrl_c_with_0_unless_noninteractive(patched_client, monkeypatch,
+                                                                                     switch):
+    from lium.cli import interactive
+
+    monkeypatch.setattr(interactive, "stdin_is_terminal", lambda: True)
     patched_client(VERIFYING)
 
     def _sleep(_seconds):
@@ -197,8 +201,9 @@ def test_node_status_watch_stops_on_ctrl_c_with_exit_0_in_agent_mode_too(patched
     result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", *flags, "node", "status", "e-1", "--watch"],
                                 env={**PLAIN_TEXT, **env})
 
-    assert result.exit_code == 0, result.output
-    assert "input.interrupted" not in result.output
+    interrupted = bool(env.get("LIUM_NONINTERACTIVE"))   # no one to read a 0: an agent gets 130
+    assert result.exit_code == (130 if interrupted else 0), result.output
+    assert ("input.interrupted" in result.output) is interrupted
 
 
 MODES = [pytest.param(((), {}), id="plain-text"), *AGENT_SWITCHES]
@@ -212,8 +217,11 @@ def _ctrl_c_on_fetch(portal) -> None:
 
 @pytest.mark.parametrize("switch", MODES)
 @pytest.mark.parametrize("via", ["node status", "mine status"])
-def test_a_one_shot_status_stopped_by_ctrl_c_exits_0_with_nothing_on_stdout_in_every_mode(patched_client, monkeypatch,
-                                                                                          via, switch):
+def test_a_one_shot_status_at_a_terminal_stopped_by_ctrl_c_exits_0_unless_noninteractive(patched_client, monkeypatch,
+                                                                                         via, switch):
+    from lium.cli import interactive
+
+    monkeypatch.setattr(interactive, "stdin_is_terminal", lambda: True)
     _ctrl_c_on_fetch(patched_client(VERIFYING))
     flags, env = switch
     if via == "node status":
@@ -222,7 +230,8 @@ def test_a_one_shot_status_stopped_by_ctrl_c_exits_0_with_nothing_on_stdout_in_e
     else:
         result = CliRunner().invoke(cli, ["mine", "status", "e-1", *flags],
                                     env={**PLAIN_TEXT, "LIUM_PROVIDER_HOTKEY": "hk1", **env})
-    assert result.exit_code == 0, result.output
+    interrupted = bool(env.get("LIUM_NONINTERACTIVE"))
+    assert result.exit_code == (130 if interrupted else 0), result.output
     assert result.stdout == ""
 
 

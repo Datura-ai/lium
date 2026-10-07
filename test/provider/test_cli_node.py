@@ -748,7 +748,7 @@ def test_node_notice_period_set_needs_exactly_one_kind(patched_build_client, ext
         ["-y", "--json", "--hotkey", "hk1", "node", "notice-period", "set", "e-1",
          "--start", "2026-10-01T09:00:00Z", *extra],
     )
-    assert result.exit_code == 1, result.output
+    assert result.exit_code == 2, result.output
     assert "exactly one of --minutes and --permanent" in result.output
     assert portal.posts == []
 
@@ -768,7 +768,7 @@ def test_node_notice_period_set_refuses_a_bad_start(patched_build_client, start,
         ["-y", "--json", "--hotkey", "hk1", "node", "notice-period", "set", "e-1",
          "--start", start, "--minutes", "30"],
     )
-    assert result.exit_code == 1, result.output
+    assert result.exit_code == 2, result.output
     assert message in result.output
     assert portal.posts == []
 
