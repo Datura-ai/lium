@@ -131,7 +131,7 @@ def test_exec_limit_bounds_kept_text_not_wire_bytes(wire_bytes, tail):
         try:
             Lium.exec(client, SimpleNamespace(name="p", huid="p"), command="probe", max_output_bytes=limit)
         except OutputLimitExceeded:
-            pass
+            pass  # expected for this probe; the assertion below is the point of the test
         assert tracemalloc.get_traced_memory()[1] <= limit + 256 * 1024
     finally:
         tracemalloc.stop()
