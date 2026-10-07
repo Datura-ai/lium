@@ -2597,24 +2597,27 @@ class Lium:
         try:
             uuid.UUID(str(template_id))
         except ValueError:  # GET /templates/{id} takes only a UUID (422 otherwise)
-            # names are not unique and the listing includes public templates: never pick one of several
-            matches = [t for t in self.templates() if template_id in (t.huid, t.name)]
-            if len(matches) > 1:
-                raise LiumError(f"Template {template_id!r} is ambiguous ({len(matches)} templates match); use its ID")
-            return matches[0] if matches else None
+            return self._template_by_huid_or_name(template_id)
         try:
             d = self._request("GET", f"/templates/{quote(str(template_id), safe='')}").json()
-            return Template(
-                id=d.get("id", ""),
-                huid=generate_huid(d.get("id", "")),
-                name=d.get("name", ""),
-                docker_image=d.get("docker_image", ""),
-                docker_image_tag=d.get("docker_image_tag", "latest"),
-                category=d.get("category", "general"),
-                status=d.get("status", "unknown"),
-            )
-        except LiumNotFoundError:
-            return None
+        except LiumNotFoundError:  # a name may itself be a UUID
+            return self._template_by_huid_or_name(template_id)
+        return Template(
+            id=d.get("id", ""),
+            huid=generate_huid(d.get("id", "")),
+            name=d.get("name", ""),
+            docker_image=d.get("docker_image", ""),
+            docker_image_tag=d.get("docker_image_tag", "latest"),
+            category=d.get("category", "general"),
+            status=d.get("status", "unknown"),
+        )
+
+    def _template_by_huid_or_name(self, selector: str) -> Optional[Template]:
+        # names are not unique and the listing includes public templates: never pick one of several
+        matches = [t for t in self.templates() if selector in (t.huid, t.name)]
+        if len(matches) > 1:
+            raise LiumError(f"Template {selector!r} is ambiguous ({len(matches)} templates match); use its ID")
+        return matches[0] if matches else None
 
     def get_template_by_image_name(self, image_name: Optional[str] = None, image_tag: Optional[str] = None) -> Optional[Template]:
         """Fetch a template by its Docker image + tag.

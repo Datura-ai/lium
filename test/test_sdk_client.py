@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lium.sdk import Config, Lium, LiumAuthError, LiumError, LiumPermissionError, Template
+from lium.sdk import Config, Lium, LiumAuthError, LiumError, LiumNotFoundError, LiumPermissionError, Template
 
 
 class _Forbidden:
@@ -519,6 +519,15 @@ def test_get_template_finds_a_template_by_huid_or_name(monkeypatch):
     for selector in ("training", "same-huid"):
         with pytest.raises(LiumError, match="ambiguous"):
             client.get_template(selector)
+
+    uuid_named = Template(id="third", huid="h", name=template_id, docker_image="c", docker_image_tag="latest",
+                          category="general", status="CREATED")
+    monkeypatch.setattr(client, "templates", lambda: [uuid_named])
+    def no_such_id(*args, **kwargs):
+        raise LiumNotFoundError("no such id")
+
+    monkeypatch.setattr(client, "_request", no_such_id)
+    assert client.get_template(template_id) is uuid_named
 
 
 def test_get_template_raises_errors_other_than_not_found(monkeypatch):
