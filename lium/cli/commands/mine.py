@@ -459,15 +459,18 @@ def _apply_env_overrides(
 def _gather_inputs(
     hotkey: Optional[str],
     auto: bool,
+    internal_port: int | None = None,
+    external_port: int | None = None,
 ) -> dict:
     """Ask everything up-front; return a dict of resolved inputs."""
     answers = {}
     if auto:
         # Auto mode - use all defaults
         answers["hotkey"] = hotkey or ""
+        internal = str(internal_port or 8080)
         answers.update(dict(
-            internal_port="8080",
-            external_port="8080",
+            internal_port=internal,
+            external_port=str(external_port) if external_port else internal,
             ssh_port="2200",
             ssh_public_port="",
             port_range=""
@@ -496,9 +499,9 @@ def _gather_inputs(
                 console.warning("Port must be an integer between 1 and 65535.")
         
         # Service ports
-        service_port = ask_port("Service port (where the node API will be reachable)", 8080)
+        service_port = ask_port("Service port (where the node API will be reachable)", internal_port or 8080)
         answers["internal_port"] = service_port
-        answers["external_port"] = service_port  # Set external same as internal
+        answers["external_port"] = str(external_port) if external_port else service_port
         answers["ssh_port"] = ask_port("Node SSH port (used by validator to SSH into the container)", 2200)
         
         # Optional ports
@@ -668,6 +671,17 @@ def _mine_status(args: list[str], hotkey: Optional[str] = None) -> int:
 # --------------------------
 # CLI
 # --------------------------
+def _ipv4(ctx, param, value: str | None) -> str | None:
+    if value is None:
+        return None
+    import ipaddress
+
+    try:
+        return str(ipaddress.IPv4Address(value))
+    except ValueError:
+        raise click.BadParameter(f"{value!r} is not an IPv4 address.")
+
+
 @click.command("mine", context_settings=dict(ignore_unknown_options=True, allow_extra_args=True), add_help_option=False)
 @click.option("--hotkey", "-k", help="Miner hotkey SS58 address (for `mine status`: the wallet hotkey name)")
 @click.option("--dir", "-d", "dir_", default="compute-subnet", help="Target directory")
@@ -711,9 +725,28 @@ def _mine_status(args: list[str], hotkey: Optional[str] = None) -> int:
     help="Minutes to wait for the node to be listed after registering; 0 returns right after the add. "
     "Only with --register.",
 )
+@click.option(
+    "--ip",
+    callback=_ipv4,
+    help="Public IPv4 the node is registered at, instead of the auto-detected one (a node behind CGNAT or a "
+    "port-forwarding VPS: the VPS address).",
+)
+@click.option(
+    "--internal-port",
+    type=click.IntRange(1, 65535),
+    default=None,
+    help="Port the node's service listens on (default 8080).",
+)
+@click.option(
+    "--external-port",
+    type=click.IntRange(1, 65535),
+    default=None,
+    help="Port the node is registered at and validators connect to (default: --internal-port).",
+)
 @click.pass_context
 @handle_errors
-def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token, portal_url, price, gpu_type, wait_minutes):
+def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token, portal_url, price, gpu_type,
+                 wait_minutes, ip, internal_port, external_port):
     """Set up this host as a Lium provider node: clone, configure, start and validate the executor.
 
     Before `docker compose up`, the service and SSH ports are checked on this host: a port
@@ -726,7 +759,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     node reports under come from the token (an account created with e-mail or Google has no key of its own;
     the portal's is written to the executor's .env) and two steps follow: the node
     is added to your account with the GPU model and count nvidia-smi reports, this host's public
-    IPv4 and the executor's port, at the model's base price from lium.io's public shared-config; then the node's
+    IPv4 (or --ip) and the executor's port, at the model's base price from lium.io's public shared-config; then the node's
     status is polled every 15 s until it is listed (exit 0), the portal names something to fix
     (OFFLINE or VALIDATION_FAILED, exit 1), or --wait minutes pass (exit 2). The node page URL is
     printed in every case.
@@ -781,7 +814,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 "If registration fails with an expired token, copy a fresh command from the portal."
             )
 
-    answers = _gather_inputs(hotkey, auto)
+    answers = _gather_inputs(hotkey, auto, internal_port, external_port)
     target_dir = Path(dir_).absolute()
 
     TOTAL_STEPS = 8 if token else 6
@@ -859,11 +892,12 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             gpu_type_override=gpu_type,
             wait_minutes=wait_minutes,
             total_steps=TOTAL_STEPS,
+            ip_override=ip,
         ))
 
     # Get executor details for summary
     gpu_info = _get_gpu_info()
-    public_ip = _get_public_ip()
+    public_ip = ip or _get_public_ip()
     
     # Get the external port from answers
     external_port = answers.get("external_port", "8080")
@@ -913,6 +947,7 @@ def _register_and_wait(
     gpu_type_override: Optional[str],
     wait_minutes: int,
     total_steps: int,
+    ip_override: str | None = None,
 ) -> int:
     """Steps 7–8 of `lium mine --register`: add the node to the account, then watch its status. Returns the exit code."""
     from rich.markup import escape
@@ -926,7 +961,7 @@ def _register_and_wait(
             inventory = reg.read_gpu_inventory(_run)
             gpu_type = gpu_type_override or inventory.gpu_type
             port = reg.executor_port(executor_dir)
-            ip = reg.public_ipv4_or_fail(_get_public_ip())
+            ip = ip_override or reg.public_ipv4_or_fail(_get_public_ip())
             price_per_gpu = reg.resolve_price(gpu_type, price)
             record = reg.register_node(
                 http,
