@@ -2848,13 +2848,15 @@ class Lium:
                     chunk = read(65536)
                     if not chunk:
                         return buf
-                    buf += chunk
+                    # Count before appending: the chunk that crosses the limit is never added, so the
+                    # buffers never grow past ``max_output_bytes``.
                     with lock:
                         total[0] += len(chunk)
                         if total[0] > max_output_bytes:
                             over.set()
                             channel.close()
                             return b""
+                    buf += chunk
 
             raw = hasattr(channel, "recv_stderr")
             read_out = channel.recv if raw else stdout.read
