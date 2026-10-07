@@ -2843,19 +2843,24 @@ class Lium:
                 # ``read`` returns as soon as any bytes arrive (paramiko's ``stream.read(n)`` waits for
                 # n of them), so the limit is checked per chunk and a slow trickle cannot outrun it.
                 # One bytearray per stream, returned as is: no list of parts, no join or bytes() copy.
-                buf = bytearray()
+                buf, held = bytearray(), 0
                 while True:
                     chunk = read(65536)
                     if not chunk:
                         return buf
-                    # Count before appending: the chunk that crosses the limit is never added, so the
-                    # buffers never grow past ``max_output_bytes``.
+                    # Count before appending, and count the capacity the append may allocate (a growing
+                    # bytearray over-allocates by up to 1/8, plus its header), not just the wire length:
+                    # the chunk that would cross the limit is never added, so the buffers never hold
+                    # more than ``max_output_bytes``.
+                    need = len(buf) + len(chunk)
+                    cap = need + (need >> 3) + 64
                     with lock:
-                        total[0] += len(chunk)
+                        total[0] += cap - held
                         if total[0] > max_output_bytes:
                             over.set()
                             channel.close()
                             return b""
+                    held = cap
                     buf += chunk
 
             raw = hasattr(channel, "recv_stderr")
