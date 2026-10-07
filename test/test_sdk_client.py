@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lium.sdk import Config, Lium, LiumError, LiumPermissionError
+from lium.sdk import Config, Lium, LiumAuthError, LiumError, LiumPermissionError, Template
 
 
 class _Forbidden:
@@ -467,3 +467,70 @@ def test_stream_exec_default_pty_is_unchanged(monkeypatch):
 
     assert calls["get_pty"] is True
     assert calls["command"] == "export A=1 && ls"
+
+
+def test_backup_and_restore_logs_follow_every_page(monkeypatch):
+    client = Lium(Config(api_key="test"))
+    sent = []
+
+    class Response:
+        def __init__(self, body):
+            self.body = body
+
+        def json(self):
+            return self.body
+
+    def fake_request(method, endpoint, **kwargs):
+        page = kwargs["params"]["page"]
+        sent.append((endpoint, page, kwargs["params"]["limit"]))
+        return Response({"items": [{"id": f"{endpoint}-{page}"}], "has_next": page < 2})
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    pod = SimpleNamespace(id="pod-1")
+
+    backups = client.backup_logs(pod)
+    restores = client.restore_logs(pod)
+
+    assert [log.id for log in backups] == ["/backup-logs/pod/pod-1-1", "/backup-logs/pod/pod-1-2"]
+    assert [log.id for log in restores] == ["/pods/pod-1/restore-logs-1", "/pods/pod-1/restore-logs-2"]
+    assert sent == [
+        ("/backup-logs/pod/pod-1", 1, 100),
+        ("/backup-logs/pod/pod-1", 2, 100),
+        ("/pods/pod-1/restore-logs", 1, 100),
+        ("/pods/pod-1/restore-logs", 2, 100),
+    ]
+
+
+def test_get_template_finds_a_template_by_huid_or_name(monkeypatch):
+    client = Lium(Config(api_key="test"))
+    template_id = "8fbb30f6-6026-4043-98c7-c4189dc09bef"
+    template = Template(id=template_id, huid="calm-lion-2c", name="Pytorch (Cuda + DinD)", docker_image="a",
+                        docker_image_tag="b", category="PYTORCH", status="VERIFY_SUCCESS")
+    monkeypatch.setattr(client, "templates", lambda: [template])
+    monkeypatch.setattr(client, "_request", lambda *a, **kw: pytest.fail("GET /templates/{id} takes only a UUID"))
+
+    assert client.get_template("calm-lion-2c") is template
+    assert client.get_template("Pytorch (Cuda + DinD)") is template
+    assert client.get_template("no-such-template") is None
+
+
+def test_get_template_raises_errors_other_than_not_found(monkeypatch):
+    client = Lium(Config(api_key="test"))
+
+    def refuse(*args, **kwargs):
+        raise LiumAuthError("bad key")
+
+    monkeypatch.setattr(client, "_request", refuse)
+
+    with pytest.raises(LiumAuthError):
+        client.get_template("8fbb30f6-6026-4043-98c7-c4189dc09bef")
+
+
+def test_wait_template_ready_returns_a_public_template_the_server_does_not_verify(monkeypatch):
+    client = Lium(Config(api_key="test"))
+    template = Template(id="t1", huid="h", name="mine", docker_image="a", docker_image_tag="b",
+                        category="general", status="CREATED")
+    monkeypatch.setattr(client, "templates", lambda only_my: [template])
+    monkeypatch.setattr("lium.sdk.client.time.sleep", lambda s: pytest.fail("waited"))
+
+    assert client.wait_template_ready("t1") is template

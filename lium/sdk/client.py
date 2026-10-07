@@ -1173,6 +1173,11 @@ class Lium:
         if not executor_info:
             raise ValueError(self.executor_not_found_message(executor_id))
 
+        # before the one-time template is created: a refusal here must leave nothing on the account
+        ssh_material = ssh_keys or self.config.ssh_public_keys
+        if not ssh_material:
+            raise ValueError("No SSH keys found")
+
         if image is not None:
             template_id = self.create_template(
                 name=f"ephemeral-{hashlib.md5(image.encode()).hexdigest()[:8]}",
@@ -1186,10 +1191,6 @@ class Lium:
         if template_id is None and dockerfile_content is None:
             selected_template = self.default_docker_template(executor_info.id)
             template_id = selected_template.id
-
-        ssh_material = ssh_keys or self.config.ssh_public_keys
-        if not ssh_material:
-            raise ValueError("No SSH keys found")
 
         self._ensure_ssh_keys_registered(ssh_material, name=ssh_name)
 
@@ -1821,7 +1822,7 @@ class Lium:
 
         Args:
             gpu_type: Optional GPU filter such as ``"A100"`` or ``"H200"``.
-            gpu_count: Exact GPU count to match (defaults to 8, pass ``None`` to disable).
+            gpu_count: Exact GPU count to match (default ``None``: any count).
             lat: Optional latitude for geospatial filtering. Must be used together with ``lon`` and ``max_distance_miles``.
             lon: Optional longitude for geospatial filtering. Must be used together with ``lat`` and ``max_distance_miles``.
             max_distance_miles: Optional radius (in miles) for geospatial filtering. Must be used together with ``lat`` and ``lon``.
@@ -1898,9 +1899,8 @@ class Lium:
         """List active pods.
 
         Args:
-            api_key_id: Only the pods rented through this API key (``GET /pods?api_key_id=…``,
-                server support pending). A server without the filter ignores the parameter and lists
-                every pod the caller can see.
+            api_key_id: Only the pods rented through this API key (``GET /pods?api_key_id=…``).
+                A server without the filter ignores the parameter and lists every pod the caller can see.
 
         Returns:
             List of :class:`PodInfo` objects representing the caller's running pods.
@@ -2595,7 +2595,11 @@ class Lium:
             Matching :class:`Template` or ``None`` if not found.
         """
         try:
-            d = self._request("GET", f"/templates/{template_id}").json()
+            uuid.UUID(str(template_id))
+        except ValueError:  # GET /templates/{id} takes only a UUID (422 otherwise)
+            return next((t for t in self.templates() if template_id in (t.huid, t.name)), None)
+        try:
+            d = self._request("GET", f"/templates/{quote(str(template_id), safe='')}").json()
             return Template(
                 id=d.get("id", ""),
                 huid=generate_huid(d.get("id", "")),
@@ -2605,7 +2609,7 @@ class Lium:
                 category=d.get("category", "general"),
                 status=d.get("status", "unknown"),
             )
-        except Exception:
+        except LiumNotFoundError:
             return None
 
     def get_template_by_image_name(self, image_name: Optional[str] = None, image_tag: Optional[str] = None) -> Optional[Template]:
@@ -3942,7 +3946,8 @@ class Lium:
             timeout: Maximum seconds to wait.
 
         Returns:
-            Template when verification succeeds, otherwise ``None`` if the timeout expires.
+            Template once it is verified (a public one at once: the server does not verify user
+            templates), otherwise ``None`` if the timeout expires.
 
         Raises:
             LiumError: If template verification fails.
@@ -3955,7 +3960,8 @@ class Lium:
 
             if current:
                 status = current.status.upper()
-                if status == "VERIFY_SUCCESS":
+                # A public template stays CREATED/UPDATED: the server verifies only its own templates.
+                if status in ("VERIFY_SUCCESS", "CREATED", "UPDATED"):
                     return current
                 elif status == "VERIFY_FAILED":
                     raise LiumError(f"Template verification failed: {current.name}")
@@ -4300,19 +4306,25 @@ class Lium:
             List of :class:`BackupLog` entries (possibly empty).
         """
         try:
-            response = self._request("GET", f"/backup-logs/pod/{pod.id}").json()
-            
-            # Handle paginated response - extract items from the response
-            if isinstance(response, dict) and 'items' in response:
-                logs = response['items']
-            else:
-                # Fallback for non-paginated response
-                logs = response if isinstance(response, list) else []
-            
-            return [self._dict_to_backup_log(log) for log in logs]
+            return [self._dict_to_backup_log(log) for log in self._all_pages(f"/backup-logs/pod/{pod.id}")]
         except LiumNotFoundError:
             # No backup logs exist for this pod, return empty list
             return []
+
+    def _all_pages(self, endpoint: str) -> List[Dict[str, Any]]:
+        """Every item of a paginated GET (the server's default page is 20 rows)."""
+        items: List[Dict[str, Any]] = []
+        page = 1
+        while True:
+            response = self._request("GET", endpoint, params={"page": page, "limit": 100}).json()
+            if isinstance(response, list):  # an unpaginated answer
+                return response
+            if not isinstance(response, dict):
+                return items
+            items.extend(response.get("items", []))
+            if not response.get("has_next"):
+                return items
+            page += 1
 
     def backup_logs_all(self) -> List[BackupLog]:
         """Get all backup logs available to the current user."""
@@ -4403,14 +4415,7 @@ class Lium:
             List of :class:`RestoreLog` entries (possibly empty).
         """
         try:
-            response = self._request("GET", f"/pods/{pod.id}/restore-logs").json()
-
-            if isinstance(response, dict) and "items" in response:
-                logs = response["items"]
-            else:
-                logs = response if isinstance(response, list) else []
-
-            return [self._dict_to_restore_log(log) for log in logs]
+            return [self._dict_to_restore_log(log) for log in self._all_pages(f"/pods/{pod.id}/restore-logs")]
         except LiumNotFoundError:
             return []
 

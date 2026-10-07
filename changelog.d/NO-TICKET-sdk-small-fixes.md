@@ -1,0 +1,7 @@
+### Fixed
+- `Lium.up(image=...)` checks for an SSH key before it creates the one-time template, so a call refused with "No SSH keys found" no longer leaves an `ephemeral-<hash>` template on the account.
+- `Lium.backup_logs` and `Lium.restore_logs` (and so `lium bk logs`, `lium bk show` and the short restore id lookup) return every log of the pod, not only the first 20.
+- `Lium.get_template` finds a template by HUID or name, as its docstring says, instead of returning `None`; it returns `None` only when the template is not found and raises other errors.
+- `Lium.wait_template_ready` returns a public template at once: the server does not verify user templates, so it used to wait out the whole timeout and return `None`.
+- `ApiKeysClient.refusals` works with an API key alone: the key asks about itself when there is no browser session.
+- The `ls(gpu_count=...)` docstring gives the real default (`None`, any count), and the API-key, `ps(api_key_id=...)` and budget docstrings no longer say "server support pending".
