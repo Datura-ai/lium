@@ -16,8 +16,8 @@ def _credit_line(credit_granted: bool | None) -> str:
     if credit_granted is True:
         return "A $5 signup credit was granted — check it with 'lium balance'."
     if credit_granted is False:
-        return ("No signup credit yet: the one-time $5 lands once the account has a confirmed e-mail (a --no-email "
-                "account adds one through PUT /api/users/me); one per person, and it can be paused. "
+        return ("No signup credit yet. A confirmed e-mail is required for it (a --no-email account adds one "
+                "through PUT /api/users/me), and the abuse checks, caps or a pause can still withhold it. "
                 "Fund the account before renting.")
     return "Check the balance with 'lium balance' and fund the account before renting."
 
