@@ -194,12 +194,7 @@ def _post_rent_failure(exc: Exception, billing_pod: dict, doing: str, note: str 
 @click.option("--dockerfile", type=click.Path(exists=True, dir_okay=False, readable=True), help="Path to a Dockerfile to build the pod image from (custom build; mutually exclusive with --image/--template_id)")
 @click.option("-e", "--env", multiple=True, help="Environment variables (KEY=VALUE), can be repeated")
 @click.option("--entrypoint", default="", help="Container entrypoint")
-@click.option(
-    "--cmd",
-    default="",
-    help="Command that keeps the container running. Base images (pytorch/pytorch, nvidia/cuda, ubuntu) need "
-    "'sleep infinity'. Not run by a shell: chain commands with \"bash -c 'a && sleep infinity'\"",
-)
+@click.option("--cmd", default="", help="Command that keeps the container running. Base images (pytorch/pytorch, nvidia/cuda, ubuntu) need 'sleep infinity'")
 @click.option("--ssh-name", default=None, help="Name to register a new SSH key under (default: cli-<user>@<hostname>)")
 @click.option(
     "--volume-encryption/--no-volume-encryption",
