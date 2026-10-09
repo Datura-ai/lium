@@ -156,6 +156,32 @@ def _check_prereqs():
 
     _run("docker info")
 
+    # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
+    # provider learns it from the preflight or a validator cycle later.
+    if not _has_sysbox():
+        raise Exception(
+            "Sysbox runtime not found in Docker (required by validators).\n"
+            f"Install it with: {_SYSBOX_SETUP_COMMAND}\n"
+            "then run `lium mine` again."
+        )
+
+
+# The printed command fetches the official installer, never the checkout's copy; the CLI does not run it (it needs sudo).
+_SYSBOX_SETUP_COMMAND = (
+    "curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-io/main/neurons/executor/"
+    "nvidia_docker_sysbox_setup.sh | sudo bash"
+)
+
+
+def _has_sysbox() -> bool:
+    # validators run --runtime=sysbox-runc, so the runtime key must match exactly, not as a substring
+    runtimes, _ = _run("docker info --format '{{json .Runtimes}}'", check=False)
+    try:
+        parsed = json.loads(runtimes)
+    except ValueError:
+        return False
+    return isinstance(parsed, dict) and "sysbox-runc" in parsed
+
 
 def _install_executor_tools(compute_dir: Path):
     script = compute_dir / "scripts" / "install_executor_on_ubuntu.sh"
