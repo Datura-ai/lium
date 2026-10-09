@@ -48,9 +48,9 @@ def schedules_rm_command(indices: str):
 
     # Only error if anything failed
     if not result.ok:
-        failed_huids = result.data.get("failed_huids", [])
+        failures = result.data.get("failures", [])
         raise CliFailure(
             "schedule_cancel_failed",
-            f"Failed to cancel schedules: {', '.join(failed_huids)}",
+            f"Failed to cancel schedules: {', '.join(failures)}",
             EXIT_GENERAL_ERROR,
         )

@@ -2,7 +2,6 @@ from typing import List
 
 from lium.cli.actions import ActionResult
 from lium.sdk import Lium, PodInfo
-from lium.cli import ui
 
 
 class CancelSchedulesAction:
@@ -13,16 +12,15 @@ class CancelSchedulesAction:
         pods: List[PodInfo] = ctx["pods"]
         lium: Lium = ctx["lium"]
 
-        failed_huids = []
+        failures = []
 
         for pod in pods:
             try:
                 lium.cancel_scheduled_termination(pod)
             except Exception as e:
-                ui.debug(f"Failed to cancel schedule for {pod.huid}: {e}")
-                failed_huids.append(pod.huid)
+                failures.append(f"{pod.huid} ({e})")
 
         return ActionResult(
-            ok=(len(failed_huids) == 0),
-            data={"failed_huids": failed_huids}
+            ok=(len(failures) == 0),
+            data={"failures": failures}
         )

@@ -836,10 +836,8 @@ def get_last_executor_selection() -> Optional[Dict[str, Any]]:
 
 def store_volume_selection(volumes: List) -> None:
     """Store the last volume selection for HUID-based lookup."""
-    from lium.cli.settings import config
-
     selection_data = {
-        'timestamp': datetime.now().isoformat(),
+        'timestamp': datetime.now(timezone.utc).isoformat(),  # aware: `volumes rm` checks its age
         'volumes': []
     }
 
@@ -853,17 +851,16 @@ def store_volume_selection(volumes: List) -> None:
             'current_size_gb': volume.current_size_gb,
         })
 
-    # Store in config directory
-    config_file = config.config_dir / "last_volumes.json"
+    # per shell, like `lium ps`: another shell's `lium volumes` must not renumber this one's rows
+    config_file = volume_snapshot_path()
     with open(config_file, 'w') as f:
         json.dump(selection_data, f, indent=2)
+    _prune_pod_snapshots(config_file, datetime.now(timezone.utc), _VOLUMES_SNAPSHOT_PREFIX)
 
 
 def get_last_volume_selection() -> Optional[Dict[str, Any]]:
-    """Retrieve the last volume selection."""
-    from lium.cli.settings import config
-
-    config_file = config.config_dir / "last_volumes.json"
+    """This shell's last `lium volumes` list."""
+    config_file = volume_snapshot_path()
     if config_file.exists():
         try:
             with open(config_file, 'r') as f:
@@ -875,19 +872,16 @@ def get_last_volume_selection() -> Optional[Dict[str, Any]]:
 
 def resolve_volume_huid(huid: str) -> Optional[str]:
     """
-    Resolve volume HUID to database ID from cached selection.
+    Resolve volume HUID to database ID: the cached `lium volumes` list first, then the live list.
     Returns database ID or None if not found.
     """
-    last_selection = get_last_volume_selection()
-    if not last_selection:
-        return None
-
-    volumes = last_selection.get('volumes', [])
-    for volume in volumes:
+    last_selection = get_last_volume_selection() or {}
+    for volume in last_selection.get('volumes', []):
         if volume.get('huid') == huid:
             return volume.get('id')
 
-    return None
+    # a volume made in the web app, or since the last `lium volumes`, is not in the cache
+    return next((v.id for v in Lium().volumes() if v.huid == huid), None)
 
 
 def parse_volume_spec(volume_spec: str) -> Tuple[Optional[str], Optional[Dict[str, str]], Optional[str]]:
@@ -914,7 +908,7 @@ def parse_volume_spec(volume_spec: str) -> Tuple[Optional[str], Optional[Dict[st
 
         volume_id = resolve_volume_huid(huid)
         if not volume_id:
-            return None, None, f"Volume with HUID '{huid}' not found. Run 'lium volumes' first."
+            return None, None, f"Volume with HUID '{huid}' not found in your volumes (see 'lium volumes')."
 
         return volume_id, None, None
 
@@ -1002,6 +996,7 @@ POD_INDEX_TTL_SECONDS = 600
 POD_INDEX_ENV = "LIUM_NO_POD_INDEX"
 _PS_SNAPSHOT_PREFIX = "last_ps."
 _PS_SNAPSHOT_SUFFIX = ".json"
+_VOLUMES_SNAPSHOT_PREFIX = "last_volumes."
 
 
 def pod_indexes_allowed() -> bool:
@@ -1020,10 +1015,16 @@ def pod_snapshot_path(session: Optional[str] = None) -> Path:
     return config.config_dir / f"{_PS_SNAPSHOT_PREFIX}{session or pod_index_session()}{_PS_SNAPSHOT_SUFFIX}"
 
 
-def _prune_pod_snapshots(keep: Path, now: datetime) -> None:
+def volume_snapshot_path() -> Path:
+    from lium.cli.settings import config
+
+    return config.config_dir / f"{_VOLUMES_SNAPSHOT_PREFIX}{pod_index_session()}{_PS_SNAPSHOT_SUFFIX}"
+
+
+def _prune_pod_snapshots(keep: Path, now: datetime, prefix: str = _PS_SNAPSHOT_PREFIX) -> None:
     """Drop other shells' snapshots once they are past the TTL; they can never be used again."""
     try:
-        for path in keep.parent.glob(f"{_PS_SNAPSHOT_PREFIX}*{_PS_SNAPSHOT_SUFFIX}"):
+        for path in keep.parent.glob(f"{prefix}*{_PS_SNAPSHOT_SUFFIX}"):
             if path == keep:
                 continue
             if now.timestamp() - path.stat().st_mtime > POD_INDEX_TTL_SECONDS:

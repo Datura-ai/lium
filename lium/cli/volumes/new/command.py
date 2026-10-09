@@ -21,4 +21,5 @@ def volumes_new_command(name: str, desc: Optional[str]):
     ctx = {"lium": lium, "name": name, "description": desc or ""}
 
     action = CreateVolumeAction()
-    ui.load(f"Creating volume '{name}'", lambda: action.execute(ctx))
+    volume = ui.load(f"Creating volume '{name}'", lambda: action.execute(ctx)).data["volume"]
+    ui.success(f"Created volume {volume.huid} ({name}). Attach it with: lium up <node> --volume id:{volume.huid}")
