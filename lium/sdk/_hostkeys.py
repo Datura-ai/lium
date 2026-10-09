@@ -1,8 +1,8 @@
-"""The paramiko side of host-key pinning (DAH-2904): the two ``MissingHostKeyPolicy`` subclasses
+"""The paramiko side of host-key pinning: the two ``MissingHostKeyPolicy`` subclasses
 ``ssh_connection`` installs and the fingerprint their messages print.
 
-They subclass paramiko at class-creation time, so they live here rather than in ``client.py``, which
-imports paramiko lazily (DAH-3053) and imports this module inside ``ssh_connection``. The path-side
+They subclass paramiko at class-creation time, so they live in this module; ``client.py`` imports
+paramiko lazily and imports this module inside ``ssh_connection``. The path-side
 helpers (``known_hosts_path``, ``forget_host_key``, ``ssh_insecure``) stay in ``client.py``: ``rsync``,
 ``reboot``, ``down`` and ``edit`` use them without paramiko.
 """
