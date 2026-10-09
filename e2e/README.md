@@ -18,11 +18,11 @@ PR. They rent the cheapest ≥1-GPU node under `E2E_MAX_PRICE` (default $0.50/h)
 lium.io (7 Sep 2026: an RTX 4090 at $0.32/h for 6 min plus one at $0.35/h for 30 s), about $0.02 on staging's A4000.
 Nodes in `E2E_EXCLUDE_COUNTRIES` (default `Russia,Belarus,RU,BY`; CI states the same) and executors in `E2E_EXCLUDE_EXECUTORS` (ids or huids; CI
 reads the repository variable `LIUM_E2E_EXCLUDE_EXECUTORS`) are never rented: the cheapest listing is deterministic, so
-a defective node — 8 Sep 2026, `brave-shark-ff` billed 2 GPUs and exposed 1 (B-119) — would fail every run until
+a defective node — 8 Sep 2026, `brave-shark-ff` billed 2 GPUs and exposed 1 — would fail every run until
 it is excluded or fixed. Nor is a node whose public-listing `reliability_score` is under `E2E_MIN_RELIABILITY`
 (default 90; a node with no score yet is kept; `E2E_MIN_RELIABILITY=0` lifts it, e.g. for a staging node with a low
 score): on 10 Sep 2026 a 2×3090 at $0.32/h scoring 72 had an unreachable SSH port map and was the cheapest pick for
-three PRs in a row (DAH-3383). The score is not in `ls --format json` or the SDK's `ExecutorInfo`, so
+three PRs in a row. The score is not in `ls --format json` or the SDK's `ExecutorInfo`, so
 `conftest.reliability_scores()` reads the public `GET /executors` once per journey (three attempts on a 429/5xx/network error, like the SDK's `ls()`). The
 platform's own rental check (`rental_check_verified_status`) would be the natural rule, but the field is not on
 `GET /executors` and 452 of 473 verified executors were still `PENDING` that day — it does not separate a dead node
@@ -58,7 +58,7 @@ Runs on every PR from this repo that touches `lium/**`, `e2e/**`, `pyproject.tom
 `e2e-inputs` job reads the PR's file list — the workflow itself has no `paths:` filter since #169, so that `ci-ok`
 always reports; a README- or `test/`-only PR does not rent anything), on `workflow_dispatch`, and once a day
 (`schedule`, e2e-live only — the suite and the build jobs skip on the cron) so API drift shows up without a push.
-`ci-ok` (the check meant to be required; lium requires none today) does not depend on `e2e-live`: a live suite red on a platform defect (B-119) or an empty
+`ci-ok` (the check meant to be required; lium requires none today) does not depend on `e2e-live`: a live suite red on a platform defect or an empty
 listing must not block every merge; the sticky comment is its verdict. Needs the repository secret **`LIUM_E2E_API_KEY`** (the key of a funded account on the target API) and the
 variable `LIUM_E2E_API_URL` (staging when unset). Today the variable is `https://lium.io/api` and the key belongs to
 a dedicated test account funded with $200, which covers about 6,000 runs at $0.03. Fork PRs have no secrets →
