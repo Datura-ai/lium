@@ -1793,11 +1793,12 @@ class Lium:
         pod = self.pod(pod_id=pod_id)
         template_id = pod["template"]["id"]
         # The pod row's template omits docker_credential_id, supports_docker, ...; the PUT writes every
-        # field it is given, so the base is the template row itself.
+        # field it is given, so the base is the template row itself. Its NULL columns (volumes, environment,
+        # entrypoint on most older templates) are dropped: the PUT accepts none of them as null.
         template = self._request("GET", f"/templates/{template_id}").json()
 
         payload = {
-            **template,
+            **{k: v for k, v in template.items() if v is not None},
             **kwargs,
         }
 

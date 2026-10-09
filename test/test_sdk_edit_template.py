@@ -14,7 +14,7 @@ TEMPLATE_ROW = {**POD_TEMPLATE, "docker_credential_id": "cred-1", "supports_dock
                 "supports_volume_encryption": True, "health_check_command": "true", "is_temporary": True}
 
 
-def test_edit_sends_back_the_fields_the_pod_listing_does_not_carry(monkeypatch, tmp_path):
+def _edit(monkeypatch, tmp_path, template_row, **kwargs):
     monkeypatch.setenv("HOME", str(tmp_path))
     lium = Lium(Config(api_key="k"))
     puts = []
@@ -30,7 +30,7 @@ def test_edit_sends_back_the_fields_the_pod_listing_does_not_carry(monkeypatch, 
         if method == "GET" and endpoint == "/pods/p1":
             return _Resp({"id": "p1", "template": POD_TEMPLATE})
         if method == "GET" and endpoint == "/templates/t1":
-            return _Resp(TEMPLATE_ROW)
+            return _Resp(template_row)
         if method == "PUT":
             puts.append(kw["json"])
             return _Resp(kw["json"])
@@ -38,10 +38,23 @@ def test_edit_sends_back_the_fields_the_pod_listing_does_not_carry(monkeypatch, 
 
     monkeypatch.setattr(lium, "_request", fake_request)
 
-    lium.edit("p1", startup_commands="python serve.py")
+    lium.edit("p1", **kwargs)
+    return puts[0]
 
-    body = puts[0]
+
+def test_edit_sends_back_the_fields_the_pod_listing_does_not_carry(monkeypatch, tmp_path):
+    body = _edit(monkeypatch, tmp_path, TEMPLATE_ROW, startup_commands="python serve.py")
+
     assert body["startup_commands"] == "python serve.py"
     assert body.get("docker_credential_id") == "cred-1"
     assert body.get("supports_docker") is True
     assert body.get("supports_volume_encryption") is True
+
+
+def test_edit_leaves_out_the_template_row_null_columns(monkeypatch, tmp_path):
+    row = {**TEMPLATE_ROW, "volumes": None, "environment": None, "entrypoint": None, "docker_image_digest": None}
+
+    body = _edit(monkeypatch, tmp_path, row, startup_commands="python serve.py")
+
+    assert not {"volumes", "environment", "entrypoint", "docker_image_digest", "description"} & body.keys()
+    assert body["startup_commands"] == "python serve.py"
