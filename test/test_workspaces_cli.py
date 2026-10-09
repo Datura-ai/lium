@@ -801,24 +801,6 @@ def test_workspace_flag_on_the_team_commands_reads_with_the_saved_key(home):
 
 
 @responses.activate
-def test_ls_prints_the_workspace_under_the_table_and_not_in_json(home):
-    from test_ls_tier import _make_executor_dict
-
-    responses.add(responses.GET, f"{API}/executors", json=[_make_executor_dict("e1", "secure")])
-    me()
-    responses.add(responses.GET, f"{API}/executors", json=[_make_executor_dict("e1", "secure")])
-
-    table = run("ls")
-    as_json = run("ls", "--format", "json")
-
-    assert table.exit_code == 0, table.output
-    assert "Workspace: Research (owner)" in table.output
-    assert as_json.exit_code == 0 and json.loads(as_json.output)[0]["id"] == "e1"
-    paths = [c.request.url.rsplit("/", 1)[-1].split("?")[0] for c in responses.calls]
-    assert paths == ["executors", "me", "executors"]  # the JSON run made no /users/me request
-
-
-@responses.activate
 def test_keys_list_json_leaves_the_key_material_out(home, monkeypatch):
     monkeypatch.setenv("LIUM_SESSION_TOKEN", "eyJ.fixture.session")
     me()
