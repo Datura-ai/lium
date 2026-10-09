@@ -13,6 +13,7 @@ from lium.cli.settings import config
 from datetime import datetime, timezone
 from rich.status import Status
 from lium.sdk import (
+    Config,
     ExecutorInfo,
     Lium,
     LiumAuthError,
@@ -54,6 +55,23 @@ def notice_console() -> ThemedConsole:
 
 
 # Text formatting helpers
+
+def browsing_client(lium_cls: type[Lium] = Lium) -> tuple[Lium, bool]:
+    """The client for the public listings (nodes, templates) and whether it runs without a key.
+
+    GET /executors and /templates answer without one, so someone deciding whether to sign up can see
+    what is on offer and at what price; every other command still stops at "No API key found".
+    """
+    try:
+        return lium_cls(), False
+    except ValueError as e:
+        if "No API key found" not in str(e) and "No API key is saved for workspace" not in str(e):
+            raise
+        return lium_cls(config=Config(api_key="", base_url=os.getenv("LIUM_BASE_URL", "https://lium.io/api"))), True
+
+
+SIGNUP_NUDGE = "Browsing without an account. To rent: lium signup --email you@example.com (or lium init with a key)"
+
 
 def mid_ellipsize(s: str, width: int = 28) -> str:
     """Truncate string with middle ellipsis if too long."""
