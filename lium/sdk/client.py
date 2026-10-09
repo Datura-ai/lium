@@ -1,5 +1,6 @@
 """Lium SDK - Clean, Unix-style SDK for GPU pod management."""
 
+import codecs
 import getpass
 import hashlib
 import ipaddress
@@ -3128,16 +3129,19 @@ class Lium:
             stdin.close()
 
             channel = stdout.channel
+            # one decoder per stream: a UTF-8 character split across two reads must not become U+FFFD
+            out_text = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            err_text = codecs.getincrementaldecoder("utf-8")(errors="replace")
             while True:
                 got = False
                 if channel.recv_ready():
-                    data = channel.recv(4096).decode("utf-8", errors="replace")
+                    data = out_text.decode(channel.recv(4096))
                     if data:
                         got = True
                         yield {"type": "stdout", "data": data}
 
                 if channel.recv_stderr_ready():
-                    data = channel.recv_stderr(4096).decode("utf-8", errors="replace")
+                    data = err_text.decode(channel.recv_stderr(4096))
                     if data:
                         got = True
                         yield {"type": "stderr", "data": data}
@@ -3145,6 +3149,11 @@ class Lium:
                 if got:
                     continue
                 if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                    # a command that ends mid-character still shows it, as U+FFFD
+                    for kind, decoder in (("stdout", out_text), ("stderr", err_text)):
+                        tail = decoder.decode(b"", final=True)
+                        if tail:
+                            yield {"type": kind, "data": tail}
                     return channel.recv_exit_status()
                 time.sleep(0.05)  # nothing pending: do not spin at 100% CPU until the command ends
 
