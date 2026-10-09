@@ -13,6 +13,7 @@ def validate(
     max_price: float | None = None,
     min_cpus: int | None = None,
     min_download_mbps: float | None = None,
+    gpu_count: int | None = None,
 ) -> tuple[bool, str | None]:
     """Validate ls command options, returns (is_valid, error_message)."""
 
@@ -44,5 +45,9 @@ def validate(
 
     if min_cpus is not None and min_cpus <= 0:
         return False, "--min-cpus must be a positive integer"
+
+    # 0 is falsy: the SDK would drop it and list every node
+    if gpu_count is not None and gpu_count < 1:
+        return False, "--count must be at least 1"
 
     return True, None
