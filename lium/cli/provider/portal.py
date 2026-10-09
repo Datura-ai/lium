@@ -12,7 +12,7 @@ from lium.cli.provider._render import (
     render,
 )
 from lium.provider.client import discord_connected_from_profile
-from lium.provider.errors import ARG_INVALID, ProviderError
+from lium.provider.errors import ARG_INVALID, PORTAL_AUTH_INVALID, ProviderError
 
 
 @click.group("portal")
@@ -128,6 +128,13 @@ def whoami(ctx: click.Context) -> None:
     try:
         body = client.whoami()
     except ProviderError as e:
+        if e.code == PORTAL_AUTH_INVALID and client._current_token() is None:
+            # nothing was sent to reject: say so instead of "token rejected"
+            e = ProviderError(
+                "no portal session for this hotkey",
+                code=PORTAL_AUTH_INVALID,
+                hint="Log in with `lium provider portal login`.",
+            )
         ctx.exit(emit_error(ctx, e))
         return
     summary = "portal session active"

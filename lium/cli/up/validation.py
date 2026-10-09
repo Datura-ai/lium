@@ -14,6 +14,7 @@ def validate(
     template_id: str | None = None,
     dockerfile: str | None = None,
     min_cpus: int | None = None,
+    ports: int | None = None,
 ) -> tuple[bool, str]:
     """Validate up command inputs."""
     # Checked first: 0 is falsy, so the filter checks below would otherwise read
@@ -22,14 +23,16 @@ def validate(
         return False, "--min-cpus must be a positive integer"
     if count is not None and count < 1:
         return False, "--count must be at least 1"
+    if ports is not None and ports < 1:
+        return False, "--ports must be at least 1"
 
     # With a node ID, -c/--count is not a filter: it is how many of that node's GPUs to rent (GPU splitting).
     if executor_id and (gpu or country or min_cpus is not None):
         return False, "Cannot use filters (--gpu, --country, --min-cpus) when specifying a node ID"
 
-    has_filters = bool(gpu or count or country) or min_cpus is not None
+    has_filters = bool(gpu or count or country or ports) or min_cpus is not None
     if not executor_id and not has_filters:
-        return False, "Must provide either NODE_ID or filters (--gpu, --count, --country, --min-cpus)"
+        return False, "Must provide either NODE_ID or filters (--gpu, --count, --country, --min-cpus, --ports)"
 
     if ttl and until:
         return False, "Cannot specify both --ttl and --until"

@@ -103,9 +103,8 @@ def provider_command(
 ) -> None:
     """Provider-side commands.
 
-    Use ``lium mine`` for renter workflows. ``lium provider ...`` is the
-    provider persona: portal session management, managing nodes,
-    installing GPU nodes, and reporting validator weights. Hotkey
+    ``lium mine`` sets up a node on this host; ``lium provider ...`` manages
+    the portal account: session, nodes, prices, sync and billing. Hotkey
     registration on SN51 itself is done directly with ``btcli subnet
     register``.
     """
