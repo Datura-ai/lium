@@ -33,6 +33,7 @@ from .config import config_command
 
 # from .commands.image import image_command  # Disabled for beta.1
 from .balance import balance_command
+from .request import request_command
 from .audit import audit_command
 from .fund import fund_command
 from .topup import topup_command
@@ -129,6 +130,7 @@ cli.add_command(theme_command)
 cli.add_command(config_command)
 # cli.add_command(image_command)  # Disabled for beta.1
 cli.add_command(balance_command)
+cli.add_command(request_command)
 cli.add_command(audit_command)
 cli.add_command(fund_command)
 cli.add_command(topup_command)
