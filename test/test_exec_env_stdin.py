@@ -32,8 +32,8 @@ class _ProcessFile:
     def close(self):
         self.stream.close()
 
-    def read(self):
-        return self.stream.read()
+    def read(self, size=-1):
+        return self.stream.read(size)
 
     def recv_exit_status(self):
         return self.proc.wait()

@@ -98,6 +98,11 @@ class LiumHostKeyError(LiumError):
     """A pod presented an SSH host key that differs from the pinned one."""
 
 
+class OutputLimitExceeded(LiumError):
+    """A command run with ``Lium.exec`` produced output that needs more than ``max_output_bytes`` of memory
+    (stdout and stderr together, raw bytes plus decoded text)."""
+
+
 class RemoteExecutionError(LiumError):
     """A function offloaded with ``@lium.machine`` did not return a result from the pod.
 

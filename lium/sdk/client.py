@@ -12,6 +12,8 @@ import shlex
 import socket
 import stat
 import subprocess
+import sys
+import threading
 import time
 import uuid
 import warnings
@@ -43,6 +45,7 @@ from .exceptions import (
     LiumHostKeyError,
     LiumNotFoundError,
     LiumInsufficientBalanceError,
+    OutputLimitExceeded,
     LiumPermissionError,
     LiumRateLimitError,
     LiumScopeError,
@@ -2775,6 +2778,7 @@ class Lium:
         timeout: Optional[float] = None,
         detach: bool = False,
         log_path: Optional[str] = None,
+        max_output_bytes: int = 64 * 1024 * 1024,
     ) -> Dict[str, Any]:
         """Execute a shell command on a pod over SSH.
 
@@ -2799,11 +2803,17 @@ class Lium:
                 ``/workspace/logs/exec-<UTC timestamp>-<id>.log``, the ``<id>`` a
                 6-hex tail that keeps two launches in the same second apart).
 
+            max_output_bytes: Limit on the memory held for stdout and stderr together
+                (the raw bytes plus the text decoded from them). Past it the
+                channel is closed and :class:`OutputLimitExceeded` is raised, so
+                a pod cannot grow this process's memory without bound.
+
         Returns:
             Dict containing stdout, stderr, exit_code, and success flag; with
             ``detach`` a dict with ``pid``, ``log_path`` and ``command``.
 
         Raises:
+            OutputLimitExceeded: holding the output would take more than ``max_output_bytes``.
             ValueError: an ``env`` name is not a shell identifier. Raised before
                 the connection is opened, so nothing reaches the pod.
         """
@@ -2826,19 +2836,67 @@ class Lium:
             # and this call has no stdin to give it.
             stdin.close()
             channel = stdout.channel
+            # Drain both streams while waiting: output past the SSH channel window (2 MiB) blocks the
+            # remote command, which then never sends the exit status waited for below.
+            total, over, lock = [0], threading.Event(), threading.Lock()
+
+            def drain(read) -> bytearray:
+                # ``read`` returns as soon as any bytes arrive (paramiko's ``stream.read(n)`` waits for
+                # n of them), so the limit is checked per chunk and a slow trickle cannot outrun it.
+                # One bytearray per stream, returned as is: no list of parts, no join or bytes() copy.
+                buf, held = bytearray(), 0
+                while True:
+                    chunk = read(65536)
+                    if not chunk:
+                        return buf
+                    # Count before appending, and count the capacity the append may allocate (a growing
+                    # bytearray over-allocates by up to 1/8, plus its header), not just the wire length:
+                    # the chunk that would cross the limit is never added, so the buffers never hold
+                    # more than ``max_output_bytes``.
+                    need = len(buf) + len(chunk)
+                    cap = need + (need >> 3) + 64
+                    with lock:
+                        total[0] += cap - held
+                        if total[0] > max_output_bytes:
+                            over.set()
+                            channel.close()
+                            return b""
+                    held = cap
+                    buf += chunk
+
+            raw = hasattr(channel, "recv_stderr")
+            read_out = channel.recv if raw else stdout.read
+            read_err = channel.recv_stderr if raw else stderr.read
+            readers = ThreadPoolExecutor(max_workers=2)
+            out, err = readers.submit(drain, read_out), readers.submit(drain, read_err)
+            readers.shutdown(wait=False)
             if timeout is not None:
                 deadline = time.monotonic() + timeout
-                while not channel.exit_status_ready():
+                while not channel.exit_status_ready() and not over.is_set():
                     if time.monotonic() >= deadline:
                         channel.close()
                         raise TimeoutError(
                             f"Command did not finish within {timeout}s on pod {pod.name or pod.huid}: {command}"
                         )
                     time.sleep(0.1)
+            out_bytes, err_bytes = out.result(), err.result()
+            del out, err  # the futures keep their results alive
+            # The raw buffers stay alive while they are decoded, and a str keeps 1 byte per character
+            # for ASCII and up to 4 otherwise (one emoji widens the whole string). Widening also holds
+            # the narrow decode buffer (1 byte per character) next to the wide result, so non-ASCII
+            # reserves 5 per byte: reserve it all against the limit before allocating the text.
+            # getsizeof counts the bytearray's allocated capacity, which exceeds its length.
+            worst = sum(sys.getsizeof(b) + len(b) * (1 if b.isascii() else 5) for b in (out_bytes, err_bytes))
+            if over.is_set() or worst > max_output_bytes:
+                raise OutputLimitExceeded(
+                    f"Output of the command on pod {pod.name or pod.huid} needs more than {max_output_bytes} bytes of memory"
+                )
+            out_text = out_bytes.decode("utf-8", errors="replace")
+            err_text = err_bytes.decode("utf-8", errors="replace")
             exit_code = channel.recv_exit_status()
             return {
-                "stdout": stdout.read().decode("utf-8", errors="replace"),
-                "stderr": stderr.read().decode("utf-8", errors="replace"),
+                "stdout": out_text,
+                "stderr": err_text,
                 "exit_code": exit_code,
                 "success": exit_code == 0
             }
