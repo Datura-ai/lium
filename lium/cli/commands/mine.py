@@ -143,7 +143,7 @@ def _clone_or_update_repo(target_dir: Path, branch: str):
         _run(f"git clone --branch {branch} https://github.com/Datura-ai/lium-io.git {target_dir}")
 
 
-def _check_prereqs(compute_dir: Path):
+def _check_prereqs():
     if not _exists("nvidia-smi"):
         raise Exception("NVIDIA GPU driver not found (nvidia-smi missing)")
 
@@ -167,20 +167,11 @@ def _check_prereqs(compute_dir: Path):
         )
 
 
-# The installer runs as root, so the printed command fetches the official script, never the checkout's copy (a fork
-# under --dir could have changed it), and the offer runs the checkout's copy only when its bytes are the official
-# ones. Any other content (including a newer upstream script) gets just the printed command.
-# Update with: sha256sum neurons/executor/nvidia_docker_sysbox_setup.sh
+# The printed command fetches the official installer, never the checkout's copy; the CLI does not run it (it needs sudo).
 _SYSBOX_SETUP_COMMAND = (
     "curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-io/main/neurons/executor/"
     "nvidia_docker_sysbox_setup.sh | sudo bash"
 )
-_ROOT_EMPTY_DIR_BASH = 'd=$(mktemp -d) && cd "$d" && bash -s; rc=$?; cd / && rm -rf "$d"; exit $rc'
-_OFFICIAL_SYSBOX_SETUP_SHA256 = frozenset({"972a6a29cfb517d22a4a69aee2830c35d0a27bab1ba3179d6dd7e90eb26ffe32"})
-
-
-def _sysbox_setup_script(compute_dir: Path) -> Path:
-    return compute_dir / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh"
 
 
 def _has_sysbox() -> bool:
@@ -193,55 +184,12 @@ def _has_sysbox() -> bool:
     return isinstance(parsed, dict) and "sysbox-runc" in parsed
 
 
-def _offer_sysbox_install(compute_dir: Path) -> None:
-    """On a terminal with Docker already installed, offer to run the sysbox installer now instead of failing step 3 with
-    its command. Outside the step spinner: the installer prints its own progress. Otherwise step 3 fails as before."""
-    import hashlib
-    import subprocess
-
-    setup = _sysbox_setup_script(compute_dir)
-    if not (sys.stdin.isatty() and _exists("docker") and setup.exists()) or _has_sysbox():
-        return
-    script = setup.read_bytes()
-    if hashlib.sha256(script).hexdigest() not in _OFFICIAL_SYSBOX_SETUP_SHA256:
-        return
-    console.warning("Docker has no sysbox runtime yet; validators need it.")
-    if not click.confirm("Install sysbox and the NVIDIA container toolkit now (restarts Docker)?", default=True):
-        return
-    # The verified bytes go in on stdin, as in the official `curl | sudo bash` (no terminal, so the installer skips
-    # its own prompt), from an empty directory root creates: the installer prefers a sysbox .deb in its working
-    # directory, so neither the checkout nor a process of this user may be able to place one there.
-    subprocess.run(["sudo", "sh", "-c", _ROOT_EMPTY_DIR_BASH], input=script, check=False)
-
-
-# Update with: sha256sum scripts/install_executor_on_ubuntu.sh
-_OFFICIAL_EXECUTOR_INSTALL_SHA256 = frozenset({"09b2a722766dc7c39aa525a4e49b880a1c121911e8b60b6c7852878f06b0cda9"})
-
-
-def _install_executor_tools(compute_dir: Path) -> bool:
-    """Install Docker and the node tools. True when the script that ran was the official one (its bytes are run, not
-    its mutable path), which is what allows the sysbox offer afterwards."""
-    import hashlib
-    import subprocess
-
+def _install_executor_tools(compute_dir: Path):
     script = compute_dir / "scripts" / "install_executor_on_ubuntu.sh"
     if not script.exists():
         raise Exception(f"Install script not found at {script}")
 
-    content = script.read_bytes()
-    if hashlib.sha256(content).hexdigest() not in _OFFICIAL_EXECUTOR_INSTALL_SHA256:
-        # The sysbox offer just before may have cached a sudo password on this terminal; checkout code must not reuse it.
-        _run("sudo -K", check=False)
-        _run(f"bash {script}")
-        return False
-    result = subprocess.run(["bash", "-s"], input=content, capture_output=True, env=_subprocess_env())
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Command failed ({result.returncode}): {script}\n"
-            f"--- stdout ---\n{result.stdout.decode(errors='replace')[-4000:]}\n"
-            f"--- stderr ---\n{result.stderr.decode(errors='replace')[-4000:]}"
-        )
-    return True
+    _run(f"bash {script}")
 
 
 def _setup_executor_env(
@@ -865,28 +813,15 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
 
     TOTAL_STEPS = 8 if token else 6
 
-    # The sysbox offer asks for sudo, so only a checkout cloned by this run gets it: code from an existing --dir may
-    # already have run (an earlier step 2) and left a process waiting to reuse that sudo ticket.
-    fresh_clone = not target_dir.exists()
     try:
         with timed_step_status(1, TOTAL_STEPS, "Ensuring repository"):
             _clone_or_update_repo(target_dir, branch)
 
-        # Before step 2: that step runs the checkout's own script, which must not get a sudo prompt to piggyback on.
-        if fresh_clone:
-            _offer_sysbox_install(target_dir)
-
-        docker_before = _exists("docker")
         with timed_step_status(2, TOTAL_STEPS, "Installing node tools"):
-            official_install = _install_executor_tools(target_dir)
-
-        # A fresh host got Docker in step 2; offer only if that script was the official one, so no checkout code
-        # ran before the sudo prompt.
-        if fresh_clone and official_install and not docker_before:
-            _offer_sysbox_install(target_dir)
+            _install_executor_tools(target_dir)
 
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
-            _check_prereqs(target_dir)
+            _check_prereqs()
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.
         preflight_pull = _start_preflight_pull()
