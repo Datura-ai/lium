@@ -228,6 +228,12 @@ class LiumCardTopUpError(LiumError):
         self.payment_intent_id = payment_intent_id
 
 
+class LiumRentOutcomeUnknownError(LiumError):
+    """A rent was posted, its answer was lost, no pod was found, and the repeat of the POST was refused
+    (a 409 "still processing" or a 400 from the executor lock): the first request may still create a pod.
+    Run :meth:`Lium.ps` before renting again."""
+
+
 class LiumChargeOutcomeUnknownError(LiumError):
     """A card top-up (:meth:`Lium.topup_card`) was posted and the answer was lost — a timeout, a
     dropped connection, or a 5xx after the platform had already asked Stripe to charge. Stripe
@@ -263,4 +269,5 @@ __all__ = [
     "RemoteExecutionError",
     "LiumCardTopUpError",
     "LiumChargeOutcomeUnknownError",
+    "LiumRentOutcomeUnknownError",
 ]

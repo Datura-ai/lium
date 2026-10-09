@@ -47,6 +47,7 @@ from .exceptions import (
     LiumRateLimitError,
     LiumScopeError,
     LiumServerError,
+    LiumRentOutcomeUnknownError,
     PodStartError,
 )
 from .jobs import (
@@ -1232,9 +1233,20 @@ class Lium:
             if existing:
                 return existing
             time.sleep(1)
-            response = self._request(
-                "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
-            ).json()
+            try:
+                response = self._request(
+                    "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
+                ).json()
+            except LiumError as exc:
+                # Any failure of the repeat (auth, permission, 429, 5xx, a plain refusal) does not undo
+                # the first POST, which may still be running.
+                raise LiumRentOutcomeUnknownError(
+                    f"The first rent request got no answer and its repeat was refused ({exc}); a pod may still appear. "
+                    "Run 'lium ps' before renting again.",
+                    code="rent_outcome_unknown",
+                    hint="Do not rent again until 'lium ps' shows whether the first request created a pod.",
+                    request_id=exc.request_id,
+                ) from exc
 
         # API should return pod info
         if response and "id" in response:
