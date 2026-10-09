@@ -1,0 +1,2 @@
+### Fixed
+- `lium provider --dry-run` (group or leaf position) now stops every portal write before a request is built: `node add/rm/update-price/update-gpu/min-gpu/notice-period/notify-added`, `config opt-in/opt-out/set-email/set-password/set-subscriptions/connect-discord` and `sync *` print `dry run: <command> (<arguments>) not sent` (under `--json`, `{"ok": true, "data": {"dry_run": true, "command", "params"}}`) and exit 0. The flag was stored and never read, so `node rm --dry-run` deleted the node. A password is never echoed.
