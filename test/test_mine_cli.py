@@ -362,3 +362,10 @@ def test_step_message_shows_the_live_detail() -> None:
     assert str(msg) == "Validating node"
     msg.detail = "GPU Matrix Multiplication"
     assert str(msg) == "Validating node (GPU Matrix Multiplication)"
+
+
+def test_gather_inputs_auto_uses_the_given_ports() -> None:
+    answers = mine._gather_inputs("hk", auto=True, internal_port=8081, external_port=40123)
+
+    assert answers["internal_port"] == "8081"
+    assert answers["external_port"] == "40123"

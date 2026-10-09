@@ -366,6 +366,9 @@ lium mine --auto --hotkey <HOTKEY>
 curl -fsSL https://lium.io/mine.sh | bash -s -- --register <TOKEN>
 lium mine --register <TOKEN> --wait 0          # add the node, do not wait for the validator
 
+# Node behind CGNAT or a port-forwarding VPS: register the VPS address and forwarded port
+lium mine --auto --hotkey <HOTKEY> --ip <VPS_IP> --external-port <FORWARDED_PORT> --internal-port 8080
+
 # Provider-portal automation (same surface as the portal frontend)
 lium config set provider.coldkey miner-prod        # one-time: persist wallet identity
 lium config set provider.hotkey  miner-1
