@@ -1071,6 +1071,7 @@ class Lium:
         gpu_count: Optional[int] = None,
         wait: bool = False,
         timeout: int = 600,
+        verify_gpus: bool = False,
     ) -> Union[Dict[str, Any], PodInfo]:
         """Start a new pod on a specific node.
 
@@ -1113,11 +1114,18 @@ class Lium:
                 takes every GPU that is free on the node right now (the whole node when
                 none of it is rented). The API rejects a count above the free GPUs, below
                 the provider's minimum, or on nodes that do not allow splitting.
+            verify_gpus: With ``wait=True``, compare the requested and billed GPU
+                counts, then count GPUs visible inside the pod with ``nvidia-smi -L``.
+                A mismatch or an unavailable check raises :class:`LiumError`.
+                The pod remains rented and billing; remove it if unwanted.
 
         Returns:
             Pod metadata as returned by the rent API (id, name, status, ssh command,
             etc.), or the ready :class:`PodInfo` when ``wait`` is ``True``.
         """
+        if verify_gpus and not wait:
+            raise ValueError("verify_gpus requires wait=True")
+
         created = self._rent(
             executor_id=executor_id,
             name=name,
@@ -1143,7 +1151,69 @@ class Lium:
                 f"did not become ready within {timeout}s; it is still billing — "
                 f"check 'lium ps' and remove it if unwanted"
             )
+        if verify_gpus:
+            self._verify_rented_gpu_count(ready, requested=gpu_count)
         return ready
+
+    def _verify_rented_gpu_count(self, pod: PodInfo, *, requested: Optional[int]) -> None:
+        """Check this rental's billed and visible GPU counts before returning it.
+
+        A RUNNING pod can precede sshd accepting connections, so retry connection
+        failures for the same 90 seconds as the CLI's GPU verification.
+        """
+        billing_note = f"pod {pod.id} is still billing; remove it if unwanted"
+        try:
+            billed = int(pod.gpu_count) if pod.gpu_count is not None else None
+        except (TypeError, ValueError):
+            billed = None
+        if requested is not None and billed is not None and billed != requested:
+            raise LiumError(
+                f"GPU count mismatch: requested {requested}, billed for {billed}; {billing_note}",
+                code="gpu_count_mismatch",
+            )
+
+        if billed is None:
+            raise LiumError(
+                f"could not verify GPUs: pod did not report a billed GPU count; {billing_note}",
+                code="gpu_verification_failed",
+            )
+
+        for attempt in range(19):
+            try:
+                result = self.exec(pod, command="nvidia-smi -L")
+                break
+            except (OSError, EOFError, paramiko.SSHException) as exc:
+                if attempt == 18:
+                    raise LiumError(
+                        f"could not verify GPUs over SSH: {exc}; {billing_note}",
+                        code="gpu_verification_failed",
+                    ) from exc
+                time.sleep(5)
+            except Exception as exc:
+                raise LiumError(
+                    f"could not verify GPUs over SSH: {exc}; {billing_note}",
+                    code="gpu_verification_failed",
+                ) from exc
+
+        if result.get("exit_code", 0) not in (0, None) or result.get("success") is False:
+            detail = (result.get("stderr") or result.get("stdout") or "").strip().splitlines()
+            why = f": {detail[0]}" if detail else ""
+            raise LiumError(
+                f"could not verify GPUs: nvidia-smi -L failed{why}; {billing_note}",
+                code="gpu_verification_failed",
+            )
+        visible = len(re.findall(r"^GPU [0-9]+:", str(result.get("stdout") or ""), re.MULTILINE))
+        if visible == 0:
+            raise LiumError(
+                f"could not verify GPUs: nvidia-smi -L listed no GPUs; {billing_note}",
+                code="gpu_verification_failed",
+            )
+        reference = billed
+        if reference is not None and visible != reference:
+            raise LiumError(
+                f"GPU count mismatch: billed for {reference}, nvidia-smi reports {visible}; {billing_note}",
+                code="gpu_count_mismatch",
+            )
 
     def _rent(
         self,
