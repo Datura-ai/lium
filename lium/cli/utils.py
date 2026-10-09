@@ -1188,7 +1188,7 @@ def wait_for_pod_ready(
     only when ``timeout`` is given and the pod is still starting when it runs out.
     ``on_poll`` is forwarded so the caller can show progress between polls.
     """
-    # poll_interval=None: 2 s for the first 90 s, then 10 s (DAH-3002, Lium.poll_delay).
+    # poll_interval=None: 1 s for the first 40 s, 2 s until 90 s, then 10 s (Lium.poll_delay).
     return lium_client.wait_ready(pod_id, timeout=timeout, poll_interval=None, on_poll=on_poll)
 
 
