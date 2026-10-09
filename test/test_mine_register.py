@@ -474,7 +474,7 @@ def _stub_host(monkeypatch, tmp_path: Path, *, nvidia_smi: str = "NVIDIA L4, 230
         (executor_dir / ".env.template").write_text(_TEMPLATE)
 
     monkeypatch.setattr(mine, "_clone_or_update_repo", fake_clone)
-    for name in ("_install_executor_tools", "_check_prereqs", "_start_executor", "_validate_executor", "_check_ports_free"):
+    for name in ("_install_executor_tools", "_check_prereqs", "_check_free_disk", "_start_executor", "_validate_executor", "_check_ports_free"):
         monkeypatch.setattr(mine, name, lambda *a, **k: None)
 
     class _Pull:

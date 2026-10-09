@@ -2,7 +2,9 @@
 
 import json
 import re
+import shlex
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -142,7 +144,7 @@ def _clone_or_update_repo(target_dir: Path, branch: str):
         _run(f"git clone --branch {branch} https://github.com/Datura-ai/lium-io.git {target_dir}")
 
 
-def _check_prereqs():
+def _check_prereqs(compute_dir: Path):
     if not _exists("nvidia-smi"):
         raise Exception("NVIDIA GPU driver not found (nvidia-smi missing)")
 
@@ -155,6 +157,97 @@ def _check_prereqs():
         raise Exception("Docker not found")
 
     _run("docker info")
+
+    # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
+    # provider learns it from the preflight or a validator cycle later.
+    if not _has_sysbox():
+        raise Exception(
+            "Sysbox runtime not found in Docker (required by validators).\n"
+            f"Install it with: {_SYSBOX_SETUP_COMMAND}\n"
+            "then run `lium mine` again."
+        )
+
+
+# The installer runs as root, so the printed command fetches the official script, never the checkout's copy (a fork
+# under --dir could have changed it), and the offer runs the checkout's copy only when its bytes are the official
+# ones. Any other content (including a newer upstream script) gets just the printed command.
+# Update with: sha256sum neurons/executor/nvidia_docker_sysbox_setup.sh
+_SYSBOX_SETUP_COMMAND = (
+    "curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-io/main/neurons/executor/"
+    "nvidia_docker_sysbox_setup.sh | sudo bash"
+)
+_ROOT_EMPTY_DIR_BASH = 'd=$(mktemp -d) && cd "$d" && bash -s; rc=$?; cd / && rm -rf "$d"; exit $rc'
+_OFFICIAL_SYSBOX_SETUP_SHA256 = frozenset({"972a6a29cfb517d22a4a69aee2830c35d0a27bab1ba3179d6dd7e90eb26ffe32"})
+
+
+def _sysbox_setup_script(compute_dir: Path) -> Path:
+    return compute_dir / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh"
+
+
+def _has_sysbox() -> bool:
+    # validators run --runtime=sysbox-runc, so the runtime key must match exactly, not as a substring
+    runtimes, _ = _run("docker info --format '{{json .Runtimes}}'", check=False)
+    try:
+        parsed = json.loads(runtimes)
+    except ValueError:
+        return False
+    return isinstance(parsed, dict) and "sysbox-runc" in parsed
+
+
+def _offer_sysbox_install(compute_dir: Path) -> None:
+    """On a terminal, offer to run the sysbox installer now instead of failing step 3 with its command.
+    Outside the step spinner: the installer prints its own progress. Without a terminal, step 3 fails as before."""
+    import hashlib
+    import subprocess
+
+    setup = _sysbox_setup_script(compute_dir)
+    if not (sys.stdin.isatty() and _exists("docker") and setup.exists()) or _has_sysbox():
+        return
+    script = setup.read_bytes()
+    if hashlib.sha256(script).hexdigest() not in _OFFICIAL_SYSBOX_SETUP_SHA256:
+        return
+    console.warning("Docker has no sysbox runtime yet; validators need it.")
+    if not click.confirm("Install sysbox and the NVIDIA container toolkit now (restarts Docker)?", default=True):
+        return
+    # The verified bytes go in on stdin, as in the official `curl | sudo bash` (no terminal, so the installer skips
+    # its own prompt), from an empty directory root creates: the installer prefers a sysbox .deb in its working
+    # directory, so neither the checkout nor a process of this user may be able to place one there.
+    subprocess.run(["sudo", "sh", "-c", _ROOT_EMPTY_DIR_BASH], input=script, check=False)
+
+
+# VerifyX refuses a node with under 100 GiB free, measured after the node images are pulled (~40 GiB: executor,
+# runner, validator preflight). On 7 Oct 2026 a 100 GB disk passed every earlier check and failed only at step 6.
+NODE_FREE_DISK_GIB = 100
+NODE_IMAGES_GIB = 40
+GIB = 1024**3
+
+
+def _node_images_present(executor_dir: Path) -> bool:
+    """Every image this run would pull is already local. The runner image carries the compose file with the executor
+    digest the runner injects at build, so that file, not the unrendered docker-compose.app.yml, names the images."""
+    try:
+        images = set(_run("docker compose config --images", cwd=str(executor_dir))[0].split())
+        runner = next(i for i in images if "executor-runner" in i)
+        baked = _run(f"docker run --rm --entrypoint cat {shlex.quote(runner)} /root/executor/docker-compose.yml")[0]
+        images.update(re.findall(r"^\s*image:\s*(\S+)", baked, re.MULTILINE))
+        images.add(PREFLIGHT_IMAGE)
+        for image in images:
+            _run(f"docker image inspect {shlex.quote(image)}")
+    except (RuntimeError, StopIteration):
+        return False
+    return True
+
+
+def _check_free_disk(executor_dir: Path):
+    root = _run("docker info --format '{{.DockerRootDir}}'", check=False)[0].strip() or "/var/lib/docker"
+    free = shutil.disk_usage(root if Path(root).exists() else "/").free
+    needed_gib = NODE_FREE_DISK_GIB + (0 if _node_images_present(executor_dir) else NODE_IMAGES_GIB)
+    if free < needed_gib * GIB:
+        raise Exception(
+            f"Not enough free disk: {free / GIB:.1f} GiB free on {root}, {needed_gib} GiB needed "
+            f"(validation requires {NODE_FREE_DISK_GIB} GiB free after about {NODE_IMAGES_GIB} GiB of node images). "
+            "Use a host with a disk of at least 160 GB, or free space and re-run."
+        )
 
 
 def _install_executor_tools(compute_dir: Path):
@@ -793,8 +886,11 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
         with timed_step_status(2, TOTAL_STEPS, "Installing node tools"):
             _install_executor_tools(target_dir)
 
+        _offer_sysbox_install(target_dir)
+
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
-            _check_prereqs()
+            _check_prereqs(target_dir)
+            _check_free_disk(target_dir / "neurons" / "executor")
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.
         preflight_pull = _start_preflight_pull()
@@ -898,9 +994,10 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     add_url = f"https://provider.lium.io/nodes?{urlencode(params)}"
     
     console.print("\n[bold cyan]Register this node in the Provider Portal:[/bold cyan]")
-    console.print(f"[yellow]{add_url}[/yellow]\n")
+    # soft_wrap: a hard wrap split the IP across lines and the clicked link opened Add Node with a wrong address
+    console.print(f"[yellow]{add_url}[/yellow]\n", soft_wrap=True)
     console.print("[bold cyan]…or from this terminal:[/bold cyan]")
-    console.print(f"[yellow]{_provider_add_command(gpu_info, public_ip, external_port)}[/yellow]")
+    console.print(f"[yellow]{_provider_add_command(gpu_info, public_ip, external_port)}[/yellow]", soft_wrap=True)
     console.dim(_registration_note())
 
 
@@ -1005,9 +1102,9 @@ def _provider_add_command(gpu_info: dict, public_ip: str, external_port: str | i
 
 def _registration_note() -> str:
     return (
-        "Validators only reach nodes of providers with a running coordinator: opt in to the "
-        "Lium Central Provider Server (`lium provider config opt-in --yes`, or Profile Settings "
-        "in the portal) or run a self-hosted provider. Until then the node stays "
-        "VALIDATION_PENDING. The first validation takes roughly 15 minutes; add --price to "
-        "`node add` to override the default price."
+        "If your account is not opted in to the Lium Central Provider Server yet (Profile Settings "
+        "in the portal; on by default for new accounts), run `lium provider config opt-in --yes` "
+        "or a self-hosted provider, or the node stays VALIDATION_PENDING. The first validation "
+        "takes roughly 15 minutes. The node is listed at the model's default price; add --price "
+        "to `node add` to set your own within the range the portal shows for the model."
     )
