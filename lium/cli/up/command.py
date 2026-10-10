@@ -762,9 +762,9 @@ def up_command(
     pod_label = f"Pod {ui.styled(pod.huid, 'pod_id')} (name: {escape(pod_name)}, id: {escape(str(pod_id))})"
 
     if budget_usd is not None:
-        # The cap counts from the pod's created_at, the one timestamp the API gives (the platform
-        # bills from RUNNING but does not say when that began; lium spend and lium rm count from
-        # the same point), at the pod's own price. With --ttl/--until too, the earlier wins.
+        # The cap counts from the pod's created_at, where the platform's billing starts once the pod
+        # is running (lium spend and lium rm count from the same point), at the pod's own price.
+        # With --ttl/--until too, the earlier wins.
         deadline = budget_deadline(pod, budget_usd, fallback_price=price_per_hour)
         if deadline is None:
             ui.warning(f"{pod_label} is running but the --budget cap could not be computed (no price or created_at)")

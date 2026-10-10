@@ -3952,14 +3952,17 @@ class Lium:
         )
 
     def wait_template_ready(self, template_id: str, timeout: int = 300) -> Optional[Template]:
-        """Wait for template verification to complete.
+        """Wait until a template can be used to rent a pod.
+
+        The platform no longer verifies new templates: a public one stays ``CREATED`` (``UPDATED`` after an edit)
+        and can be rented right away, a private one starts as ``VERIFY_SUCCESS``. Only ``VERIFY_PENDING`` waits.
 
         Args:
             template_id: Template identifier.
             timeout: Maximum seconds to wait.
 
         Returns:
-            Template when verification succeeds, otherwise ``None`` if the timeout expires.
+            Template once it is usable, otherwise ``None`` if the timeout expires.
 
         Raises:
             LiumError: If template verification fails.
@@ -3972,7 +3975,7 @@ class Lium:
 
             if current:
                 status = current.status.upper()
-                if status == "VERIFY_SUCCESS":
+                if status in ("CREATED", "UPDATED", "VERIFY_SUCCESS"):
                     return current
                 elif status == "VERIFY_FAILED":
                     raise LiumError(f"Template verification failed: {current.name}")
