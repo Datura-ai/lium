@@ -11,19 +11,24 @@ class RemovePodsAction:
     def execute(self, ctx: dict) -> ActionResult:
         pods: List[PodInfo] = ctx["pods"]
         lium: Lium = ctx["lium"]
+        # only passed when given, so `rm` stays a plain delete otherwise
+        feedback = {k: ctx[k] for k in ("feedback", "rating") if ctx.get(k) is not None}
 
         failed_huids = []
+        feedback_errors = {}
 
         for pod in pods:
             try:
-                lium.rm(pod)
+                result = lium.rm(pod, **feedback)
+                if isinstance(result, dict) and result.get("feedback_error"):
+                    feedback_errors[pod.huid] = result["feedback_error"]
             except Exception as e:
                 ui.debug(f"Failed to remove {pod.huid}: {e}")
                 failed_huids.append(pod.huid)
 
         return ActionResult(
             ok=(len(failed_huids) == 0),
-            data={"failed_huids": failed_huids}
+            data={"failed_huids": failed_huids, "feedback_errors": feedback_errors}
         )
 
 

@@ -136,6 +136,8 @@ def rerun_with_yes(
     name_only: bool,
     workspace: Optional[str] = None,
     output_format: str = "table",
+    feedback: Optional[str] = None,
+    rating: Optional[int] = None,
 ) -> str:
     """The command line that was given, with ``--yes`` added — what a refused caller re-runs.
 
@@ -157,6 +159,10 @@ def rerun_with_yes(
         words.append("--name-only")
     if output_format != "table":
         words.extend(["--format", output_format])
+    if rating is not None:
+        words.extend(["--rating", str(rating)])
+    if feedback is not None:
+        words.extend(["--feedback", shlex.quote(feedback)])
     words.append("--yes")
     return " ".join(words)
 
@@ -205,6 +211,11 @@ def refuse_without_a_terminal(plan: RemovalPlan, rerun: str) -> NoReturn:
     help="Output format. 'json' emits the removed pods with uptime and estimated spend.",
 )
 @click.option("--json", "json_output", is_flag=True, hidden=True, help="Alias for --format json")
+@click.option(
+    "--feedback", "feedback",
+    help="Tell Lium how the pod's node went (sent before the pod is removed; never blocks the removal).",
+)
+@click.option("--rating", type=click.IntRange(1, 5), help="Rate the pod's node 1-5 (with or without --feedback).")
 @handle_errors
 def rm_command(
     targets: Optional[str],
@@ -215,6 +226,8 @@ def rm_command(
     name_only: bool,
     output_format: str,
     json_output: bool,
+    feedback: Optional[str],
+    rating: Optional[int],
 ):
     """Remove (terminate) GPU pods.
 
@@ -233,9 +246,16 @@ def rm_command(
     \b
     Each removed pod is reported with its uptime and estimated spend
     (uptime × $/h, marked ≈ because the API returns no billed figure).
+    \b
+    --feedback "..." and --rating 1-5 tell Lium how the node went, in the
+    same call: rm eager-wolf-aa -y --rating 2 --feedback "slow disk".
     """
     # `--json` is the hidden alias `ps`, `ls`, `spend` and `templates` accept; `--format json` is the documented spelling
     output_format = resolve_output_format(output_format, json_output)
+    if (feedback is not None or rating is not None) and (in_duration or at_time):
+        raise CliFailure(
+            "invalid_arguments", "--feedback/--rating go with an immediate rm, not --in/--at", EXIT_CONFIGURATION_ERROR
+        )
     lium = Lium()
     # --format json: stdout is one JSON document, so the workspace context line goes to stderr
     show_workspace(lium, acting=True, on_stderr=output_format == "json")
@@ -253,7 +273,7 @@ def rm_command(
             plan, rerun_with_yes(
                 targets, remove_all, in_duration, at_time, name_only,
                 workspace=lium.config.workspace if lium.config.workspace_explicit else None,
-                output_format=output_format,
+                output_format=output_format, feedback=feedback, rating=rating,
             )
         )
 
@@ -265,7 +285,7 @@ def rm_command(
     ):
         return
 
-    context = {"pods": plan.pods, "lium": lium}
+    context = {"pods": plan.pods, "lium": lium, "feedback": feedback, "rating": rating}
     if plan.termination_time:
         context["termination_time"] = plan.termination_time.isoformat()
         action = ScheduleRemovalAction()
@@ -278,6 +298,7 @@ def rm_command(
     failed_huids = list(result.data.get("failed_huids") or [])
     budget_errors = list(result.data.get("budget_errors") or [])
     budget_huids = list(result.data.get("budget_huids") or [])
+    feedback_errors = dict(result.data.get("feedback_errors") or {})
     not_done = set(failed_huids) | set(budget_huids)
     done_pods = [pod for pod in plan.pods if pod.huid not in not_done]
     removed_huids = [pod.huid for pod in done_pods]
@@ -295,6 +316,8 @@ def rm_command(
             ],
             "failed": failed_huids,
         }
+        if feedback is not None or rating is not None:
+            payload["feedback_failed"] = feedback_errors
         if plan.termination_time:
             payload["termination_time"] = context["termination_time"]
             payload["budget_refused"] = budget_huids
@@ -305,6 +328,8 @@ def rm_command(
         if not plan.termination_time:
             for pod in done_pods:
                 ui.info(display.format_removed_line(pod, spends[pod.huid]))
+        for huid, error in feedback_errors.items():
+            ui.warning(f"Feedback for {huid} was not recorded: {error}")
 
     if budget_errors:
         # A 402 is the key's budget, not a generic failed huid. Print scheduled/failed
