@@ -448,6 +448,65 @@ def test_up_command_reports_non_utf8_dockerfile(monkeypatch, tmp_path):
     assert "Could not read Dockerfile" in result.output
 
 
+def test_up_command_refuses_copy_of_local_files_before_renting(monkeypatch, tmp_path):
+    # Arrange: the node's build context holds only the Dockerfile, so COPY of a
+    # file next to it would fail there after the rent.
+    (tmp_path / "app.py").write_text("print('hi')\n")
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM python:3.12-slim\nCOPY app.py /app/app.py\nCMD [\"python\", \"/app/app.py\"]\n")
+    monkeypatch.setattr(up_command, "ensure_config", lambda: None)
+    monkeypatch.setattr(up_command, "Lium", lambda **kwargs: pytest.fail("rent path reached"))
+
+    # Act
+    result = CliRunner().invoke(up_command.up_command, ["brave-fox-3a", "--dockerfile", str(dockerfile)])
+
+    # Assert
+    assert result.exit_code == 2
+    assert "COPY app.py /app/app.py" in result.output
+    assert "--image" in result.output
+
+
+def test_build_context_lines_lists_local_copy_and_add():
+    # Arrange
+    content = (
+        "FROM alpine\n"
+        "COPY --chown=1000:1000 src/ /src/\n"
+        "ADD [\"data.tar.gz\", \"/data/\"]\n"
+        "copy \\\n  requirements.txt /r.txt\n"
+    )
+
+    # Act
+    lines = up_validation.build_context_lines(content)
+
+    # Assert
+    assert lines == [
+        "COPY --chown=1000:1000 src/ /src/",
+        'ADD ["data.tar.gz", "/data/"]',
+        "copy    requirements.txt /r.txt",
+    ]
+
+
+def test_build_context_lines_ignores_lines_that_need_no_local_files():
+    # Arrange
+    content = (
+        "FROM golang:1.22 AS build\n"
+        "RUN go build -o /out/app ./...\n"
+        "FROM alpine\n"
+        "# COPY app.py /app.py\n"
+        "COPY --from=build /out/app /usr/local/bin/app\n"
+        "COPY <<EOF /etc/motd\n"
+        "COPY not-a-real-line /x\n"
+        "EOF\n"
+        "ADD https://example.com/x.tar.gz /x/\n"
+    )
+
+    # Act
+    lines = up_validation.build_context_lines(content)
+
+    # Assert
+    assert lines == []
+
+
 # --------------------------------------------------------------------------- #
 # SDK: Lium.up(image=...) — docker image only, defaults for the rest (DAH-2103)
 # --------------------------------------------------------------------------- #

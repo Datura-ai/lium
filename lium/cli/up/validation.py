@@ -1,6 +1,11 @@
 """Up command validation."""
 
+import json
+import re
 from typing import Optional, Tuple
+
+_HEREDOC_RE = re.compile(r"<<-?[\"']?(\w+)[\"']?")
+_REMOTE_SOURCE_RE = re.compile(r"^(https?://|git://|git@)", re.IGNORECASE)
 
 
 def validate(
@@ -67,3 +72,55 @@ def parse_env_vars(env_list: Tuple[str, ...]) -> Tuple[dict, Optional[str]]:
             return {}, f"Empty key in environment variable: '{env_str}'"
         env_dict[key] = value
     return env_dict, None
+
+
+def build_context_lines(dockerfile_content: str) -> list[str]:
+    """The COPY/ADD lines that read local files, which a `--dockerfile` build cannot see.
+
+    The node builds with the Dockerfile as the only file in its build context, so
+    these fail there with "not found". `COPY --from=<stage>`, heredoc sources and
+    remote ADD sources need no local files and are not listed.
+    """
+    logical: list[str] = []
+    buf: list[str] = []
+    heredoc_end: str | None = None
+    for line in dockerfile_content.splitlines():
+        if heredoc_end is not None:
+            if line.strip() == heredoc_end:
+                heredoc_end = None
+            continue
+        if not buf and line.lstrip().startswith("#"):
+            continue
+        if line.rstrip().endswith("\\"):
+            buf.append(line.rstrip()[:-1])
+            continue
+        buf.append(line)
+        joined = " ".join(buf).strip()
+        buf = []
+        if joined:
+            logical.append(joined)
+        heredoc = _HEREDOC_RE.search(joined)
+        if heredoc:
+            heredoc_end = heredoc.group(1)
+
+    found: list[str] = []
+    for line in logical:
+        parts = line.split(maxsplit=1)
+        if len(parts) < 2 or parts[0].upper() not in ("COPY", "ADD"):
+            continue
+        tokens = parts[1].split()
+        flags = []
+        while tokens and tokens[0].startswith("--"):
+            flags.append(tokens.pop(0))
+        if any(flag.startswith("--from=") for flag in flags):
+            continue
+        rest = " ".join(tokens)
+        if rest.startswith("["):
+            try:
+                tokens = [str(t) for t in json.loads(rest)]
+            except ValueError:
+                pass
+        sources = tokens[:-1]
+        if any(not src.startswith("<<") and not _REMOTE_SOURCE_RE.match(src) for src in sources):
+            found.append(line)
+    return found

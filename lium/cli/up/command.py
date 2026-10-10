@@ -335,7 +335,8 @@ def up_command(
     volume_create_params = parsed.get("volume_create_params")
 
     # Custom-Dockerfile build: read the Dockerfile text the CLI will send to the
-    # backend (the image is built remotely; no build context is uploaded).
+    # backend (the image is built remotely; no build context is uploaded, so a
+    # COPY/ADD of local files is refused here instead of failing after the rent).
     dockerfile_content = None
     if dockerfile_mode:
         from pathlib import Path
@@ -380,6 +381,18 @@ def up_command(
                 "dockerfile_too_large",
                 f"Dockerfile is too large ({size_bytes} bytes); max is {max_bytes} bytes (64 KiB)",
                 EXIT_CONFIGURATION_ERROR,
+            )
+        local_lines = validation.build_context_lines(dockerfile_content)
+        if local_lines:
+            raise CliFailure(
+                "dockerfile_needs_build_context",
+                "--dockerfile builds on the node with the Dockerfile as its only file; local files "
+                "next to it are not uploaded, so these lines would fail with 'not found':\n  "
+                + "\n  ".join(local_lines),
+                EXIT_CONFIGURATION_ERROR,
+                data={"lines": local_lines},
+                hint="Fetch those files in a RUN step (git clone, curl, pip install), "
+                "or build and push the image yourself and run it with --image.",
             )
 
     lium = Lium(source="cli")
