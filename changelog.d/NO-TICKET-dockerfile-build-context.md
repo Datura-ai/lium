@@ -1,0 +1,2 @@
+### Added
+- `lium up --dockerfile` uploads the Dockerfile's directory as the build context when the Dockerfile `COPY`s or `ADD`s local files and the API advertises `build_context`, so those files reach the build on the node. `.dockerignore` is honoured, symlinks that leave the directory are refused, and nothing is uploaded for a Dockerfile that reads no local files. Against an API without it, the refusal before renting stays. SDK: `Lium.upload_build_context()`, `lium.sdk.build_context.pack()` and `build_context_sha256` on `up()` and `rent()`.

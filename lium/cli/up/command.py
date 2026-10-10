@@ -15,6 +15,8 @@ from lium.sdk import (
     LiumServerError,
     PodStartError,
 )
+from lium.sdk import build_context
+from lium.sdk.client import BUILD_CONTEXT
 from lium.cli import ui
 from lium.cli.workspaces.context import show_workspace
 from lium.cli.utils import (
@@ -51,6 +53,8 @@ from .actions import (
 # few minutes; a wait that has passed fifteen minutes is a rent that is not going to come up on its
 # own, and the caller is billed for every one of those minutes.
 DEFAULT_TIMEOUT_SECONDS = 900
+# what `lium up --dockerfile` packs at most; the API holds its own limit
+BUILD_CONTEXT_MAX_BYTES = 100 * 1024 * 1024
 
 
 def _wait_budget(deadline: float, ready_timeout: Optional[int]) -> int:
@@ -335,9 +339,10 @@ def up_command(
     volume_create_params = parsed.get("volume_create_params")
 
     # Custom-Dockerfile build: read the Dockerfile text the CLI will send to the
-    # backend (the image is built remotely; no build context is uploaded, so a
-    # COPY/ADD of local files is refused here instead of failing after the rent).
+    # backend (the image is built remotely). The lines that COPY/ADD local files
+    # decide below whether the Dockerfile's directory goes up as the build context.
     dockerfile_content = None
+    local_lines: list[str] = []
     if dockerfile_mode:
         from pathlib import Path
 
@@ -383,7 +388,13 @@ def up_command(
                 EXIT_CONFIGURATION_ERROR,
             )
         local_lines = validation.build_context_lines(dockerfile_content)
-        if local_lines:
+
+    lium = Lium(source="cli")
+    # COPY/ADD of local files: upload the Dockerfile's directory as the build context when the
+    # backend takes one, else refuse before renting (the node would fail them with 'not found').
+    build_context_sha256 = None
+    if dockerfile_mode and local_lines:
+        if not lium.supports(BUILD_CONTEXT):
             raise CliFailure(
                 "dockerfile_needs_build_context",
                 "--dockerfile builds on the node with the Dockerfile as its only file; local files "
@@ -394,8 +405,17 @@ def up_command(
                 hint="Fetch those files in a RUN step (git clone, curl, pip install), "
                 "or build and push the image yourself and run it with --image.",
             )
-
-    lium = Lium(source="cli")
+        context_dir = Path(dockerfile).resolve().parent
+        try:
+            archive = ui.load(
+                f"Packing build context {context_dir}",
+                lambda: build_context.pack(context_dir, max_bytes=BUILD_CONTEXT_MAX_BYTES),
+            )
+        except (OSError, ValueError) as exc:
+            raise CliFailure("build_context_invalid", f"Could not pack the build context: {exc}", EXIT_CONFIGURATION_ERROR)
+        build_context_sha256 = ui.load(
+            f"Uploading build context ({len(archive) // 1024} KiB)", lambda: lium.upload_build_context(archive)
+        )
     # the billing owner of this workspace pays for the pod (lium-platform DAH-2986)
     show_workspace(lium, acting=True)
     if restore_backup_id:
@@ -633,6 +653,7 @@ def up_command(
                 "spec": spec,
                 "template": template,
                 "dockerfile_content": dockerfile_content,
+                "build_context_sha256": build_context_sha256,
                 "name": name,
                 "volume_id": volume_id,
                 "ports": ports,
