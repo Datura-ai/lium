@@ -963,6 +963,7 @@ class Lium:
             gpu_power_limited=gpu_power_limited,
             gpu_power_limit_w=_int_or_none(executor_dict, "gpu_power_limit_w"),
             gpu_power_limit_default_w=_int_or_none(executor_dict, "gpu_power_limit_default_w"),
+            last_verified_at=executor_dict.get("last_verified_at"),
         )
 
     def list_ssh_keys(self) -> List[SSHKey]:
