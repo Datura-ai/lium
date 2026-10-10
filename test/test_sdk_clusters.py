@@ -690,3 +690,21 @@ def test_up_cluster_resends_once_with_the_same_key_when_the_backend_honours_it(m
     assert len(posts) == 2 and posts[0][2] == posts[1][2]
     post_keys = [k for k in sent_keys if k is not None]
     assert len(post_keys) == 2 and post_keys[0] == post_keys[1]
+
+
+@pytest.mark.parametrize("code", ["idempotency_in_progress", "idempotency_outcome_unknown"])
+def test_up_cluster_looks_up_by_name_when_the_resend_cannot_replay(code):
+    answers = iter([LiumServerError("Server error: 504"), LiumError("conflict", code=code)])
+
+    def order():
+        raise next(answers)
+
+    client = _Client(
+        routes={("GET", "/version"): {"features": ["rent_idempotency"]}, ("POST", "/executors/cluster/rent"): order},
+        ps_sequence=[[], _pods([_pod_payload(0), _pod_payload(1)])],
+    )
+
+    cluster = client.up_cluster(["exec-0", "exec-1"], name="job", template_id="tpl-x")
+
+    assert cluster.id == "c-1"
+    assert len([c for c in client.calls if c[0] == "POST"]) == 2

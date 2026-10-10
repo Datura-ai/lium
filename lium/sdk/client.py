@@ -2166,8 +2166,9 @@ class Lium:
                 except (requests.RequestException, LiumServerError, LiumRateLimitError):
                     pass  # the resend was lost too: the lookup by name below finds what was rented
                 except LiumError as exc:
-                    # the first order is still running server-side: its outcome is found by name below
-                    if exc.code != "idempotency_in_progress":
+                    # the first order is still running, or its answer was not recorded: either way it
+                    # may have rented, so its outcome is found by name below
+                    if exc.code not in ("idempotency_in_progress", "idempotency_outcome_unknown"):
                         raise
         if response is not None and not response.get("success", True):
             # a definite refusal: nothing was rented, so there is nothing to look for
