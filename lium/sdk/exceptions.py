@@ -99,7 +99,8 @@ class LiumHostKeyError(LiumError):
 
 
 class RemoteExecutionError(LiumError):
-    """A function offloaded with ``@lium.machine`` did not return a result from the pod.
+    """A function offloaded with ``@lium.machine`` did not return a result from the pod,
+    or a command streamed with ``Lium.stream_exec(check=True)`` exited non-zero.
 
     When the function raised, the caller sees the original exception type and this
     error is its ``__cause__``; ``remote_traceback`` is the traceback from the pod.
