@@ -198,8 +198,8 @@ def _post_rent_failure(exc: Exception, billing_pod: dict, doing: str, note: str 
 @click.option("--ssh-name", default=None, help="Name to register a new SSH key under (default: cli-<user>@<hostname>)")
 @click.option(
     "--volume-encryption/--no-volume-encryption",
-    default=True,
-    help="Encrypt the local volume when supported (enabled by default)",
+    default=None,
+    help="Encrypt the local volume. Default: on when the template supports it, off otherwise",
 )
 @click.option(
     "--json", "json_output", is_flag=True,
@@ -237,7 +237,7 @@ def up_command(
     entrypoint: Optional[str],
     cmd: Optional[str],
     ssh_name: Optional[str],
-    volume_encryption: bool,
+    volume_encryption: bool | None,
     json_output: bool,
 ):
     """\b

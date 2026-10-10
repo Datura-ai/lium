@@ -33,7 +33,9 @@ def _stub_up(monkeypatch, client, captured):
     """Stub out network + ssh helpers on a real Lium so up() reaches payload build."""
     monkeypatch.setattr(client, "get_executor", lambda executor_id: SimpleNamespace(id="exec-1"))
     monkeypatch.setattr(
-        client, "default_docker_template", lambda executor_id: SimpleNamespace(id="tmpl-default")
+        client,
+        "default_docker_template",
+        lambda executor_id: SimpleNamespace(id="tmpl-default", supports_volume_encryption=True),
     )
     monkeypatch.setattr(client, "_ensure_ssh_keys_registered", lambda *a, **k: None)
 
@@ -107,7 +109,6 @@ def test_up_without_template_or_dockerfile_falls_back_to_default_template(monkey
 @pytest.mark.parametrize(
     ("enabled", "expected"),
     [
-        (None, None),
         (False, False),
         (True, True),
     ],
@@ -124,6 +125,63 @@ def test_up_sends_volume_encryption_preference(monkeypatch, enabled, expected):
     )
 
     assert captured["payload"]["enable_volume_encryption"] is expected
+
+
+@pytest.mark.parametrize(("supported", "expected"), [(True, True), (False, False)])
+def test_up_requests_encryption_only_when_the_template_supports_it(monkeypatch, supported, expected):
+    client = Lium(Config(api_key="test"))
+    captured: dict = {}
+    _stub_up(monkeypatch, client, captured)
+    monkeypatch.setattr(
+        client, "get_template", lambda template_id: SimpleNamespace(supports_volume_encryption=supported)
+    )
+
+    client.up(executor_id="exec-1", template_id="tmpl-xyz", ssh_keys=["ssh-ed25519 AAA"])
+
+    assert captured["payload"]["enable_volume_encryption"] is expected
+
+
+def test_up_with_dockerfile_does_not_request_encryption(monkeypatch):
+    client = Lium(Config(api_key="test"))
+    captured: dict = {}
+    _stub_up(monkeypatch, client, captured)
+
+    client.up(executor_id="exec-1", dockerfile_content="FROM busybox", ssh_keys=["ssh-ed25519 AAA"])
+
+    assert captured["payload"]["enable_volume_encryption"] is False
+
+
+def test_up_requests_encryption_when_asked_on_a_template_without_support(monkeypatch):
+    client = Lium(Config(api_key="test"))
+    captured: dict = {}
+    _stub_up(monkeypatch, client, captured)
+    monkeypatch.setattr(
+        client, "get_template", lambda template_id: SimpleNamespace(supports_volume_encryption=False)
+    )
+
+    client.up(
+        executor_id="exec-1", template_id="tmpl-xyz", ssh_keys=["ssh-ed25519 AAA"], enable_volume_encryption=True
+    )
+
+    assert captured["payload"]["enable_volume_encryption"] is True
+
+
+def test_get_template_reads_volume_encryption_support(monkeypatch):
+    client = Lium(Config(api_key="test"))
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda method, endpoint, **kwargs: _Resp({"id": "tmpl-1", "supports_volume_encryption": True}),
+    )
+
+    template = client.get_template("tmpl-1")
+
+    assert template.supports_volume_encryption is True
+
+
+def test_up_command_leaves_volume_encryption_to_the_template_by_default():
+    (option,) = [p for p in up_command.up_command.params if p.name == "volume_encryption"]
+    assert option.default is None
 
 
 def test_up_sends_startup_restore(monkeypatch):

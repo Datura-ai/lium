@@ -362,3 +362,14 @@ def test_older_backend_reads_the_nvlink_verdict_off_a_summary_row(client):
 
     assert result.executor.id == "linked" and result.candidates == 1
     assert "interconnect" not in linked["specs"]
+
+
+@responses.activate
+def test_rent_by_spec_with_a_dockerfile_does_not_request_encryption(client):
+    _version(["rent_by_spec"])
+    responses.add(responses.GET, f"{BASE}/pods", json=[])
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", json=RENTED)
+
+    client.rent(gpu_type="H100", name="train-1", dockerfile_content="FROM busybox", ssh_keys=[KEY])
+
+    assert json.loads(responses.calls[-1].request.body)["enable_volume_encryption"] is False

@@ -1065,7 +1065,7 @@ class Lium:
         ports: Optional[int] = None,
         ssh_keys: Optional[List[str]] = None,
         ssh_name: Optional[str] = None,
-        enable_volume_encryption: bool | None = True,
+        enable_volume_encryption: bool | None = None,
         backup_id: Optional[str] = None,
         restore_path: Optional[str] = None,
         gpu_count: Optional[int] = None,
@@ -1099,8 +1099,10 @@ class Lium:
                 backend. Defaults to ``cli-<user>@<hostname>``. Only applied to keys
                 that are not already registered server-side.
             enable_volume_encryption: Whether to request encryption for the local
-                pod volume. Enabled by default. The image must support Lium volume
-                encryption.
+                pod volume. ``None`` (the default) requests it only when the template
+                advertises support (``Template.supports_volume_encryption``); a
+                Dockerfile build or a plain ``image`` does not. ``True`` requests it
+                for any image; an image without support then gets a plain volume.
             backup_id: Optional backup ID to restore after the pod starts.
             restore_path: New or empty subdirectory where the backup is restored.
                 Required when ``backup_id`` is provided.
@@ -1184,9 +1186,13 @@ class Lium:
                 one_time_template=True,
             ).id
 
+        selected_template: Optional[Template] = None
         if template_id is None and dockerfile_content is None:
             selected_template = self.default_docker_template(executor_info.id)
             template_id = selected_template.id
+
+        if enable_volume_encryption is None:
+            enable_volume_encryption = self._template_offers_volume_encryption(template_id, selected_template)
 
         ssh_material = ssh_keys or self.config.ssh_public_keys
         if not ssh_material:
@@ -1407,7 +1413,7 @@ class Lium:
         """
         rent_args = dict(
             name="Your Pod", template_id=None, image=None, dockerfile_content=None, volume_id=None,
-            ports=None, ssh_keys=None, ssh_name=None, enable_volume_encryption=True,
+            ports=None, ssh_keys=None, ssh_name=None, enable_volume_encryption=None,
             backup_id=None, restore_path=None, gpu_count=None,
         )
         unknown = set(up_kwargs) - set(rent_args)
@@ -1494,7 +1500,7 @@ class Lium:
         ports: Optional[int] = None,
         ssh_keys: Optional[List[str]] = None,
         ssh_name: Optional[str] = None,
-        enable_volume_encryption: bool | None = True,
+        enable_volume_encryption: bool | None = None,
         backup_id: Optional[str] = None,
         restore_path: Optional[str] = None,
         dry_run: bool = False,
@@ -1567,6 +1573,11 @@ class Lium:
             "interconnect": interconnect,
         }
         spec = {key: value for key, value in spec.items() if value is not None}
+        if enable_volume_encryption is None and (template_id is not None or dockerfile_content is not None):
+            enable_volume_encryption = self._template_offers_volume_encryption(template_id)
+        elif enable_volume_encryption is None:
+            # the server picks Lium's recommended template for the node, which supports it
+            enable_volume_encryption = True
         rental = {
             "name": name,
             "template_id": template_id,
@@ -2394,6 +2405,15 @@ class Lium:
 
         return templates[0]
 
+    def _template_offers_volume_encryption(
+        self, template_id: Optional[str], template: Optional[Template] = None
+    ) -> bool:
+        """Request an encrypted volume only where the template says its image supports one, so a
+        rent never asks for something it cannot get. A Dockerfile build has no template."""
+        if template is None and template_id is not None:
+            template = self.get_template(template_id)
+        return bool(template and template.supports_volume_encryption)
+
     def default_docker_template(self, executor_id: str) -> Template:
         """Resolve the best default template for a node ID.
 
@@ -2455,6 +2475,7 @@ class Lium:
                 docker_image_tag=d.get("docker_image_tag", "latest"),
                 category=d.get("category", "general"),
                 status=d.get("status", "unknown"),
+                supports_volume_encryption=bool(d.get("supports_volume_encryption")),
             )
             for d in data
         ]
@@ -2605,6 +2626,7 @@ class Lium:
                 docker_image_tag=d.get("docker_image_tag", "latest"),
                 category=d.get("category", "general"),
                 status=d.get("status", "unknown"),
+                supports_volume_encryption=bool(d.get("supports_volume_encryption")),
             )
         except Exception:
             return None
