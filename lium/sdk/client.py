@@ -1982,29 +1982,61 @@ class Lium:
         pods = data.get("pods")
         return {**data, "pods": pods if isinstance(pods, list) else []}
 
-    def down(self, pod: PodInfo) -> Dict[str, Any]:
+    def pod_feedback(
+        self, pod: PodInfo, text: str = "", rating: Optional[int] = None, reason: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Leave feedback on a pod's node (``POST /pods/{id}/feedback``): ``rating`` 1-5, ``text``, ``reason``.
+
+        The feedback reaches Lium support and the node's provider rating. The pod must still exist, so
+        give it before (or with) :meth:`down`.
+        """
+        if rating is not None and not 1 <= rating <= 5:
+            raise ValueError("rating must be 1-5")
+        payload = {"feedback_text": text, "rating": rating, "reason": reason}
+        return self._request("POST", f"/pods/{pod.id}/feedback", json=payload).json()
+
+    def down(
+        self, pod: PodInfo, feedback: Optional[str] = None, rating: Optional[int] = None
+    ) -> Dict[str, Any]:
         """Stop a pod.
 
         Args:
             pod: Pod to terminate.
+            feedback: Optional note about the pod's node, sent with :meth:`pod_feedback` first.
+            rating: Optional 1-5 rating of the node, sent the same way.
 
         Returns:
-            API response payload from the delete call.
+            API response payload from the delete call. With feedback, it also carries
+            ``feedback_error`` when the feedback could not be recorded; the pod is removed either way.
         """
+        if rating is not None and not 1 <= rating <= 5:
+            raise ValueError("rating must be 1-5")
+        feedback_error = None
+        if feedback is not None or rating is not None:
+            try:
+                self.pod_feedback(pod, feedback or "", rating=rating, reason="unrent")
+            except Exception as e:  # feedback must never keep a pod billing
+                feedback_error = str(e)
         result = self._request("DELETE", f"/pods/{pod.id}").json()
         forget_host_key(pod)
+        if feedback_error and isinstance(result, dict):
+            result["feedback_error"] = feedback_error
         return result
 
-    def rm(self, pod: PodInfo) -> Dict[str, Any]:
+    def rm(
+        self, pod: PodInfo, feedback: Optional[str] = None, rating: Optional[int] = None
+    ) -> Dict[str, Any]:
         """Remove pod (alias for :meth:`down`).
 
         Args:
             pod: Pod to terminate.
+            feedback: Optional note about the pod's node.
+            rating: Optional 1-5 rating of the node.
 
         Returns:
             API response payload from the delete call.
         """
-        return self.down(pod)
+        return self.down(pod, feedback=feedback, rating=rating)
 
     def reboot(self, pod: PodInfo, volume_id: Optional[str] = None) -> Dict[str, Any]:
         """Reboot a pod.

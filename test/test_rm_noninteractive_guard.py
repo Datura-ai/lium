@@ -301,14 +301,19 @@ def test_rerun_line_carries_every_rm_option():
     `--format` was one) is dropped from the printed command, so a refused caller re-runs a different
     command. Every option is parsed from a real argv with a non-default value and must come back out
     of the rerun line; a new option fails here until both the argv and the rerun line carry it."""
-    argv = ["train", "--all", "--in", "45m", "--at", "2030-01-01T00:00", "--name-only", "--format", "json"]
+    argv = ["train", "--all", "--in", "45m", "--at", "2030-01-01T00:00", "--name-only", "--format", "json",
+            "--rating", "2", "--feedback", "slow disk"]
     ctx = rm_module.rm_command.make_context("rm", argv)
     line = rm_module.rerun_with_yes(
         ctx.params["targets"], ctx.params["remove_all"], ctx.params["in_duration"], ctx.params["at_time"],
         ctx.params["name_only"], output_format=ctx.params["output_format"],
+        feedback=ctx.params["feedback"], rating=ctx.params["rating"],
     )
 
-    assert line == "lium rm train --all --in 45m --at 2030-01-01T00:00 --name-only --format json --yes"
+    assert line == (
+        "lium rm train --all --in 45m --at 2030-01-01T00:00 --name-only --format json"
+        " --rating 2 --feedback 'slow disk' --yes"
+    )
     for param in rm_module.rm_command.params:
         if param.name in ("targets", "yes") or param.hidden:
             continue  # `--json` is the hidden alias of `--format json` (lium#252): the line carries the documented spelling
