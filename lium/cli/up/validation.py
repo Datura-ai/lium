@@ -119,7 +119,7 @@ def build_context_lines(dockerfile_content: str) -> list[str]:
             try:
                 tokens = [str(t) for t in json.loads(rest)]
             except ValueError:
-                pass
+                pass  # not valid JSON: Docker reads it as shell form, so keep the whitespace tokens
         sources = tokens[:-1]
         if any(not src.startswith("<<") and not _REMOTE_SOURCE_RE.match(src) for src in sources):
             found.append(line)
