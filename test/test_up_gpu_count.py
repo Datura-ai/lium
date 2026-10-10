@@ -615,3 +615,18 @@ def test_rent_pod_action_threads_gpu_count():
 
     assert result.ok
     assert captured["gpu_count"] == 1
+
+
+def test_up_warns_before_renting_a_spot_node_with_a_reduced_power_limit(monkeypatch):
+    spot = _executor(8)
+    spot.tier = "spot"
+    spot.gpu_power_limited = True
+    spot.gpu_power_limit_w = 410
+    spot.gpu_power_limit_default_w = 450
+    monkeypatch.setattr(_FakeLium, "ls", lambda self, *a, **k: [spot])
+
+    result = _run_up(monkeypatch, "-c", "8", node_gpus=8, billed=8)
+
+    assert result.exit_code == 0, result.output
+    assert "Spot node" in result.output
+    assert "410 W of 450 W" in result.output

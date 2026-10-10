@@ -558,6 +558,16 @@ def up_command(
             )
         rent_price = executor.price_per_gpu * rent_count if rent_count != executor.gpu_count else price_per_hour
 
+    # renters wrote "I didn't even know it was a spot" and "throttled to 410 W, not shown before rental":
+    # say both before renting, with or without --yes (on stderr, so --json stdout stays one document)
+    if getattr(executor, "tier", None) == "spot":
+        ui.notice_warning(f"{executor.huid} is a Spot node: the provider can reclaim it at any time, with no refund.")
+    if getattr(executor, "gpu_power_limited", None) and executor.gpu_power_limit_w:
+        ui.notice_warning(
+            f"{executor.huid} runs its GPUs at a reduced power limit "
+            f"({executor.gpu_power_limit_w} W of {executor.gpu_power_limit_default_w or '?'} W)."
+        )
+
     if not yes:
         confirm_msg = (
             f"Acquire pod on {executor.huid} "
