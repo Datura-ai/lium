@@ -20,6 +20,7 @@ class GetExecutorsAction:
         min_cpus = ctx.get("min_cpus")
         nvlink = ctx.get("nvlink") or None
         min_download_mbps = ctx.get("min_download_mbps")
+        reliable = ctx.get("reliable") or None
 
         executors = lium.ls(
             gpu_type=gpu_type,
@@ -31,6 +32,7 @@ class GetExecutorsAction:
             min_cpus=min_cpus,
             nvlink=nvlink,
             min_download_mbps=min_download_mbps,
+            reliable=reliable,
         )
         return ActionResult(
             ok=True,

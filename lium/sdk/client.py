@@ -963,6 +963,9 @@ class Lium:
             gpu_power_limited=gpu_power_limited,
             gpu_power_limit_w=_int_or_none(executor_dict, "gpu_power_limit_w"),
             gpu_power_limit_default_w=_int_or_none(executor_dict, "gpu_power_limit_default_w"),
+            reliability_proven=(
+                executor_dict["reliability_proven"] if isinstance(executor_dict.get("reliability_proven"), bool) else None
+            ),
         )
 
     def list_ssh_keys(self) -> List[SSHKey]:
@@ -1816,6 +1819,7 @@ class Lium:
         min_cpus: Optional[int] = None,
         nvlink: Optional[bool] = None,
         min_download_mbps: Optional[float] = None,
+        reliable: Optional[bool] = None,
         view: str = "summary",
     ) -> List[ExecutorInfo]:
         """List available nodes.
@@ -1837,6 +1841,9 @@ class Lium:
             min_download_mbps: Minimum Download in Mbps, judged on
                 :attr:`ExecutorInfo.effective_download_speed_mbps` (the figure ``lium ls`` shows as
                 Download). Nodes with no figure are excluded.
+            reliable: ``True`` keeps only nodes whose provider's reliability score rests on enough rentals
+                (:attr:`ExecutorInfo.reliability_proven`). Unrated and thinly observed providers are excluded,
+                as is every node when the API does not report the verdict. ``False``/``None`` do not filter.
             view: ``"summary"`` (default) asks the API for the fields a listing reads — price, GPU/CPU/RAM/disk
                 headline specs, location, tier, network; an API that does not know the parameter returns the
                 full row. ``"full"`` asks for the whole node-check scrape in :attr:`ExecutorInfo.specs` (docker
@@ -1854,6 +1861,8 @@ class Lium:
             params["nvlink"] = "true"
         if min_download_mbps is not None:
             params["min_download_mbps"] = min_download_mbps
+        if reliable:
+            params["reliable_only"] = "true"
         if gpu_type:
             # Try to map short GPU name to full machine name
             machine_name = self._resolve_machine_name(gpu_type)
@@ -1884,6 +1893,8 @@ class Lium:
             ]
         if nvlink:
             executors = [e for e in executors if e.nvlink is True]
+        if reliable:
+            executors = [e for e in executors if e.reliability_proven is True]
         if min_download_mbps is not None:
             executors = [
                 e for e in executors
