@@ -48,6 +48,7 @@ from .exceptions import (
     LiumScopeError,
     LiumServerError,
     PodStartError,
+    RemoteExecutionError,
 )
 from .jobs import (
     DEFAULT_JOB_DIR,
@@ -3105,6 +3106,7 @@ class Lium:
         command: str,
         env: Optional[Dict[str, str]] = None,
         pty: bool = True,
+        check: bool = False,
     ) -> Generator[Dict[str, str], None, int]:
         """Execute a shell command and stream incremental output.
 
@@ -3115,17 +3117,24 @@ class Lium:
             pty: Request a pseudo-terminal (default). A pty merges stderr into stdout
                 and turns ``\n`` into ``\r\n``; pass ``False`` to keep the two
                 streams apart, as :func:`lium.machine` does to relay a function's output.
+            check: Raise :class:`RemoteExecutionError` when the command exits
+                non-zero, after its last chunk, so a plain ``for`` loop fails
+                with the command instead of finishing silently.
 
         Yields:
             Streaming output chunks as ``{"type": "stdout"|"stderr", "data": str}``.
 
         Returns:
             The command's exit status (the generator's ``StopIteration.value``).
+
+        Raises:
+            RemoteExecutionError: with ``check=True``, the command exited non-zero;
+                ``exit_code`` holds the status.
         """
-        command = self._prep_command(command, env)
+        remote_command = self._prep_command(command, env)  # ``command`` alone goes in errors: no env values
 
         with self.ssh_connection(pod) as client:
-            stdin, stdout, stderr = client.exec_command(command, get_pty=pty)
+            stdin, stdout, stderr = client.exec_command(remote_command, get_pty=pty)
             stdin.close()
 
             channel = stdout.channel
@@ -3154,7 +3163,13 @@ class Lium:
                         tail = decoder.decode(b"", final=True)
                         if tail:
                             yield {"type": kind, "data": tail}
-                    return channel.recv_exit_status()
+                    exit_code = channel.recv_exit_status()
+                    if check and exit_code != 0:
+                        raise RemoteExecutionError(
+                            f"Command exited with status {exit_code} on pod {pod.name or pod.huid}: {command}",
+                            exit_code=exit_code,
+                        )
+                    return exit_code
                 time.sleep(0.05)  # nothing pending: do not spin at 100% CPU until the command ends
 
     def exec_all(

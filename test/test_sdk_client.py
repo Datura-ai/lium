@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lium.sdk import Config, Lium, LiumError, LiumPermissionError
+from lium.sdk import Config, Lium, LiumError, LiumPermissionError, RemoteExecutionError
 
 
 class _Forbidden:
@@ -467,6 +467,30 @@ def test_stream_exec_default_pty_is_unchanged(monkeypatch):
 
     assert calls["get_pty"] is True
     assert calls["command"] == "export A=1 && ls"
+
+
+def test_stream_exec_check_raises_with_exit_code_after_the_last_chunk(monkeypatch):
+    client, _ = _stream_client(monkeypatch, _FakeChannel())
+    pod = SimpleNamespace(id="pod-1", name="p", ssh_cmd="ssh root@10.0.0.1 -p 22")
+    chunks = []
+
+    with pytest.raises(RemoteExecutionError) as err:
+        for chunk in client.stream_exec(pod, command="python -u run.py", env={"TOKEN": "s3cret"}, check=True):
+            chunks.append(chunk)
+
+    assert [c["data"] for c in chunks] == ["one\n", "warn\n", "two\n"]
+    assert err.value.exit_code == 3
+    assert "python -u run.py" in str(err.value)
+    assert "s3cret" not in str(err.value)
+
+
+def test_stream_exec_check_passes_quietly_on_exit_zero(monkeypatch):
+    client, _ = _stream_client(monkeypatch, _SplitCharChannel([b"done\n"]))
+    pod = SimpleNamespace(id="pod-1", name="p", ssh_cmd="ssh root@10.0.0.1 -p 22")
+
+    chunks = list(client.stream_exec(pod, command="train", check=True))
+
+    assert chunks == [{"type": "stdout", "data": "done\n"}]
 
 
 class _SplitCharChannel:
