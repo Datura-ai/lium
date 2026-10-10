@@ -54,6 +54,8 @@ def client(monkeypatch):
     lium = Lium(Config(api_key="test"))
     monkeypatch.setattr(lium, "get_executor", lambda executor_id: SimpleNamespace(id=EXECUTOR_ID))
     monkeypatch.setattr(lium, "_ensure_ssh_keys_registered", lambda *a, **k: None)
+    # the template lookup for the encryption default is not one of the scripted rent calls
+    monkeypatch.setattr(lium, "get_template", lambda template_id: None)
     return lium
 
 

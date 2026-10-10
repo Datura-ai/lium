@@ -485,7 +485,11 @@ class _Resp:
 
 def _stub_up(monkeypatch, client, captured):
     monkeypatch.setattr(client, "get_executor", lambda executor_id: SimpleNamespace(id="exec-1"))
-    monkeypatch.setattr(client, "default_docker_template", lambda executor_id: SimpleNamespace(id="tmpl-default"))
+    monkeypatch.setattr(
+        client,
+        "default_docker_template",
+        lambda executor_id: SimpleNamespace(id="tmpl-default", supports_volume_encryption=True),
+    )
     monkeypatch.setattr(client, "_ensure_ssh_keys_registered", lambda *a, **k: None)
 
     def fake_request(method, endpoint, json=None, **kwargs):
