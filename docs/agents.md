@@ -227,6 +227,24 @@ lium exec "$POD" --json "tar czf /root/out.tgz -C /root/project out" >/dev/null
 lium scp "$POD" /root/out.tgz ./out.tgz -d
 ```
 
+The same run in one SDK call, bounded by a budget and a deadline. `run_job` schedules the pod's removal server-side
+for the earlier of the two right after the rent, deletes the pod before it returns whatever happened, and never
+raises for the job's outcome:
+
+```python
+from lium.sdk import Lium
+
+r = Lium().run_job(
+    command="cd /root && python train.py --epochs 1",
+    gpu_type="H100", max_cost_usd=5, deadline_s=1800,
+    inputs={"train.py": "/root/train.py"}, outputs={"/root/out.tgz": "out.tgz"},
+)
+print(r.to_dict())  # status, exit_code, outputs, missing_outputs, cleanup, cost_usd, estimated_cost_usd
+```
+
+`status` is `succeeded`, `failed`, `timed_out`, `budget_exhausted`, `rent_failed`, `boot_failed` or `error`;
+`cleanup` is `removed`, or `scheduled` when the delete failed and the server-side removal stands.
+
 ## 7. Provider nodes (`lium provider`)
 
 `lium provider … --json`, or `LIUM_OUTPUT=json` in the environment, prints one envelope per command on stdout: `{"ok": true, "data": …}`, or on failure `{"ok": false, "error": {"code", "legacy_code", "message", "hint", "exit_code", "context", "data"?}}`. `code` is namespaced snake_case (`auth.expired`, `input.arg_invalid`, `portal.not_found`, `ssh.unreachable`, …) and never holds a space; `legacy_code` is the UPPER_CASE code older scripts matched (`PORTAL_NOT_FOUND`), and `null` on a code that never had one (`node.blocked.*`, `input.interrupted`). `data` carries the error's details when there are any. `legacy_code` and `context` are on every provider error, `node.blocked.*` included: `context` holds the same details as `data`, is `{}` when there are none, and is kept for older readers, so read `data`. The provider commands keep their own exit statuses: 1 input, 2 auth, 3 portal, 5 ssh, 6 config, 7 token-cache contention, 10 for a blocked node, and 130 (`input.interrupted`) for Ctrl-C on `node status` under `--until-clear` or when no person is at the terminal (`LIUM_NONINTERACTIVE=1`, or stdin is not a terminal); Ctrl-C on plain `--watch` in a terminal exits 0. These numbers are today's: a shared exit table for every command is coming in [docs/exit-codes.md](exit-codes.md) and may move them, so until it lands match on `code` and on the `exit_code` the envelope reports.

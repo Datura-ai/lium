@@ -1,0 +1,2 @@
+### Added
+- SDK: `Lium.run_job(command=, gpu_type=, max_cost_usd=, deadline_s=, inputs=, outputs=)` runs one bounded job: rents by spec, schedules the pod's removal for the earlier of the deadline and the moment the budget is spent, runs the command within the time left, copies the outputs back (after a failure too), always deletes the pod, and returns a `JobResult` with a terminal status, the exit code, the cleanup outcome and the billed and estimated cost.
