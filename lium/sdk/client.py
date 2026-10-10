@@ -2164,7 +2164,7 @@ class Lium:
                         "POST", "/executors/cluster/rent", json=payload, headers=rent_headers, retry=False
                     ).json()
                 except (requests.RequestException, LiumServerError, LiumRateLimitError):
-                    pass
+                    pass  # the resend was lost too: the lookup by name below finds what was rented
                 except LiumError as exc:
                     # the first order is still running server-side: its outcome is found by name below
                     if exc.code != "idempotency_in_progress":
