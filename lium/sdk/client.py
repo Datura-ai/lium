@@ -89,6 +89,8 @@ from .workspaces import WorkspacesClient
 
 # The backend feature `Lium.rent` looks for on GET /version before using POST /executors/rent-by-spec.
 RENT_BY_SPEC = "rent_by_spec"
+# The backend feature that takes a build-context upload (POST /build-contexts) for a custom-Dockerfile rent.
+BUILD_CONTEXT = "build_context"
 # Node specs report RAM and disk in KiB and GPU memory in MiB.
 _KIB_PER_GB = 1024 * 1024
 _MIB_PER_GB = 1024
@@ -1053,6 +1055,22 @@ class Lium:
             except OSError as exc:
                 warnings.warn(f"lium: could not write ssh-keys cache ({exc})", stacklevel=2)
 
+    def upload_build_context(self, archive: bytes) -> str:
+        """Upload a gzipped tar of a custom build's context (see :func:`lium.sdk.build_context.pack`).
+
+        Returns the archive's sha256, which :meth:`up` and :meth:`rent` take as
+        ``build_context_sha256``. Needs a backend that advertises ``build_context``
+        (:meth:`supports`); the archive is kept for a limited time, so upload it right
+        before the rent. Uploading the same archive again is harmless.
+        """
+        data = self._request(
+            "POST",
+            "/build-contexts",
+            data=archive,
+            headers={**self.headers, "Content-Type": "application/gzip"},
+        ).json()
+        return data["sha256"]
+
     def up(
         self,
         *,
@@ -1061,6 +1079,7 @@ class Lium:
         template_id: Optional[str] = None,
         image: Optional[str] = None,
         dockerfile_content: Optional[str] = None,
+        build_context_sha256: Optional[str] = None,
         volume_id: Optional[str] = None,
         ports: Optional[int] = None,
         ssh_keys: Optional[List[str]] = None,
@@ -1092,6 +1111,9 @@ class Lium:
                 pass exactly one. The image is built remotely with no network
                 access, so the Dockerfile must be self-contained (no ``ADD <url>``
                 or ``ADD ${var}`` directives).
+            build_context_sha256: What :meth:`upload_build_context` returned: the files
+                the Dockerfile's ``COPY``/``ADD`` read, unpacked next to it on the node.
+                Needs ``dockerfile_content`` and a backend that advertises ``build_context``.
             volume_id: Optional volume ID to attach on spawn.
             ports: Number of exposed ports to request.
             ssh_keys: SSH public keys to authorize. Defaults to the keys discovered by the Config.
@@ -1124,6 +1146,7 @@ class Lium:
             template_id=template_id,
             image=image,
             dockerfile_content=dockerfile_content,
+            build_context_sha256=build_context_sha256,
             volume_id=volume_id,
             ports=ports,
             ssh_keys=ssh_keys,
@@ -1161,6 +1184,7 @@ class Lium:
         backup_id: Optional[str],
         restore_path: Optional[str],
         gpu_count: Optional[int] = None,
+        build_context_sha256: Optional[str] = None,
     ) -> Dict[str, Any]:
         """The rent call itself; :meth:`up` adds the optional wait on top."""
         if sum(x is not None for x in (template_id, image, dockerfile_content)) > 1:
@@ -1207,6 +1231,8 @@ class Lium:
         }
         if gpu_count is not None:
             payload["gpu_count"] = gpu_count
+        if build_context_sha256 is not None:
+            payload["build_context_sha256"] = build_context_sha256
 
         # The rent call is not idempotent, so it is never retried blindly. A
         # timeout or a 5xx may have created the pod anyway; look for it before
@@ -1480,6 +1506,7 @@ class Lium:
         name: str = "Your Pod",
         template_id: Optional[str] = None,
         dockerfile_content: Optional[str] = None,
+        build_context_sha256: Optional[str] = None,
         min_vram_gb: Optional[float] = None,
         min_cpus: Optional[int] = None,
         min_ram_gb: Optional[float] = None,
@@ -1516,6 +1543,7 @@ class Lium:
             template_id: Template to run. Omitted: the node's recommended image.
                 Mutually exclusive with ``dockerfile_content``.
             dockerfile_content: Build the image from this Dockerfile instead (see :meth:`up`).
+            build_context_sha256: The build context of ``dockerfile_content`` (see :meth:`up`).
             min_vram_gb, min_cpus, min_ram_gb, min_disk_gb, min_download_mbps, min_ports:
                 Floors on the host; a host that does not report the figure does not qualify.
             max_price_per_gpu_hour: Ceiling on ``price_per_gpu``.
@@ -1571,6 +1599,7 @@ class Lium:
             "name": name,
             "template_id": template_id,
             "dockerfile_content": dockerfile_content,
+            "build_context_sha256": build_context_sha256,
             "volume_id": volume_id,
             "ports": ports,
             "ssh_keys": ssh_keys,
@@ -1612,6 +1641,7 @@ class Lium:
             "backup_log_id": rental["backup_id"],
             "restore_path": rental["restore_path"],
             "dry_run": dry_run,
+            **({"build_context_sha256": rental["build_context_sha256"]} if rental["build_context_sha256"] else {}),
         }
         gpu_count = int(spec.get("gpu_count") or 1)
         # A rent is billable and a lost response may have succeeded server-side, so it is sent
@@ -1692,6 +1722,7 @@ class Lium:
                 name=rental["name"],
                 template_id=rental["template_id"],
                 dockerfile_content=rental["dockerfile_content"],
+                build_context_sha256=rental["build_context_sha256"],
                 volume_id=rental["volume_id"],
                 ports=rental["ports"],
                 ssh_keys=rental["ssh_keys"],

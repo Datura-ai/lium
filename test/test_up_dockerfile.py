@@ -449,13 +449,18 @@ def test_up_command_reports_non_utf8_dockerfile(monkeypatch, tmp_path):
 
 
 def test_up_command_refuses_copy_of_local_files_before_renting(monkeypatch, tmp_path):
-    # Arrange: the node's build context holds only the Dockerfile, so COPY of a
-    # file next to it would fail there after the rent.
+    # Arrange: a backend without build-context uploads builds with the Dockerfile as the
+    # only file, so COPY of a file next to it would fail there after the rent.
     (tmp_path / "app.py").write_text("print('hi')\n")
     dockerfile = tmp_path / "Dockerfile"
     dockerfile.write_text("FROM python:3.12-slim\nCOPY app.py /app/app.py\nCMD [\"python\", \"/app/app.py\"]\n")
     monkeypatch.setattr(up_command, "ensure_config", lambda: None)
-    monkeypatch.setattr(up_command, "Lium", lambda **kwargs: pytest.fail("rent path reached"))
+    lium = SimpleNamespace(
+        supports=lambda feature: False,
+        upload_build_context=lambda archive: pytest.fail("uploaded"),
+    )
+    monkeypatch.setattr(up_command, "Lium", lambda **kwargs: lium)
+    monkeypatch.setattr(up_command, "ResolveExecutorAction", lambda: pytest.fail("rent path reached"))
 
     # Act
     result = CliRunner().invoke(up_command.up_command, ["brave-fox-3a", "--dockerfile", str(dockerfile)])
