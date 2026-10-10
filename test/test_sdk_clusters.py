@@ -7,6 +7,7 @@ pod); the SDK could not reach any of it, so a multi-node job could only be start
 
 import itertools
 import time
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -639,3 +640,22 @@ def test_rm_cluster_403_is_a_permission_error(monkeypatch, tmp_path):
         client.rm_cluster(Cluster(id="c-1", pods=pods))
 
     assert len(client.calls) == 1
+
+
+def test_up_cluster_sends_an_idempotency_key(monkeypatch):
+    client = _Client(
+        routes={("POST", "/executors/cluster/rent"): {"success": True, "pod_ids": ["pod-0", "pod-1"]}},
+        ps_sequence=[_pods([_pod_payload(0), _pod_payload(1)])],
+    )
+    monkeypatch.setattr(client, "cluster_template", lambda: _template("0.0.7"))
+    sent_headers = []
+    record = client._request
+    monkeypatch.setattr(
+        client, "_request", lambda method, endpoint, **kw: sent_headers.append(kw.get("headers")) or record(method, endpoint, **kw)
+    )
+
+    client.up_cluster(["exec-0", "exec-1"], name="job")
+
+    [headers] = [h for h in sent_headers if h is not None]
+    uuid.UUID(headers["Idempotency-Key"])
+    assert headers["X-API-KEY"] == "test"

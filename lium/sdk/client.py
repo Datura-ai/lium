@@ -1615,11 +1615,16 @@ class Lium:
         }
         gpu_count = int(spec.get("gpu_count") or 1)
         # A rent is billable and a lost response may have succeeded server-side, so it is sent
-        # once, as in `up`; a dry run rents nothing and keeps the retries. Pods that exist before
-        # the rent can never be the one it created (see `up`).
+        # once; a dry run rents nothing and keeps the retries. The Idempotency-Key lets a server
+        # that honours it on this route replay the first answer; it is not resent yet because no
+        # server advertises that support, and one that ignores the key would rent again. Pods
+        # that exist before the rent can never be the one it created (see `up`).
         known_pod_ids = frozenset() if dry_run else self._pod_ids_before_rent()
+        rent_headers = {**self.headers, "Idempotency-Key": str(uuid.uuid4())}
         try:
-            data = self._request("POST", "/executors/rent-by-spec", json=payload, retry=dry_run).json()
+            data = self._request(
+                "POST", "/executors/rent-by-spec", json=payload, headers=rent_headers, retry=dry_run
+            ).json()
         except (requests.RequestException, LiumServerError, LiumRateLimitError):
             if dry_run:
                 raise
@@ -2130,8 +2135,9 @@ class Lium:
             "initial_port_count": ports,
             "enable_volume_encryption": enable_volume_encryption,
         }
-        # Not idempotent and not retried: a timeout may have rented the group anyway, so look
-        # for it by name before reporting failure rather than sending the order twice. The
+        # Not retried: a timeout may have rented the group anyway, so look for it by name before
+        # reporting failure rather than sending the order twice (the Idempotency-Key only helps a
+        # server that honours it; one that ignores it would rent a second group). The
         # by-name lookup only accepts a cluster that did not exist before this call: an older
         # cluster reusing the pod name must not be handed back (and then, say, --ttl'd). That is
         # why the snapshot is taken before the order and a failure to take it aborts the order:
@@ -2139,7 +2145,12 @@ class Lium:
         # the lookup hand back the older cluster.
         known_clusters = self._cluster_ids_now()
         try:
-            response = self._request("POST", "/executors/cluster/rent", json=payload).json()
+            response = self._request(
+                "POST",
+                "/executors/cluster/rent",
+                json=payload,
+                headers={**self.headers, "Idempotency-Key": str(uuid.uuid4())},
+            ).json()
         except (requests.RequestException, LiumServerError, LiumRateLimitError):
             response = None
         if response is not None and not response.get("success", True):

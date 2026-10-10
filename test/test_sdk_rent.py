@@ -6,6 +6,7 @@ rent-by-spec 200/409 bodies, and the `GET /executors` rows the client-side path 
 """
 
 import json
+import uuid
 
 import pytest
 import responses
@@ -362,3 +363,23 @@ def test_older_backend_reads_the_nvlink_verdict_off_a_summary_row(client):
 
     assert result.executor.id == "linked" and result.candidates == 1
     assert "interconnect" not in linked["specs"]
+
+
+@responses.activate
+def test_rent_sends_a_fresh_idempotency_key_and_still_posts_once(client, monkeypatch):
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(sdk_utils.time, "sleep", lambda seconds: None)
+    _version(["rent_by_spec"])
+    responses.add(responses.GET, f"{BASE}/pods", json=[])
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", status=502)
+
+    with pytest.raises(LiumServerError):
+        client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY])
+    responses.replace(responses.POST, f"{BASE}/executors/rent-by-spec", json=RENTED)
+    client.rent(gpu_type="H100", name="train-2", ssh_keys=[KEY])
+
+    posts = [c.request for c in responses.calls if c.request.method == "POST"]
+    assert len(posts) == 2  # the 502 was not resent: a server that ignores the key would rent again
+    keys = [uuid.UUID(p.headers["Idempotency-Key"]) for p in posts]
+    assert keys[0] != keys[1]
+    assert posts[0].headers["X-API-KEY"] == "test"
