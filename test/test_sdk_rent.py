@@ -383,3 +383,21 @@ def test_rent_sends_a_fresh_idempotency_key_and_still_posts_once(client, monkeyp
     keys = [uuid.UUID(p.headers["Idempotency-Key"]) for p in posts]
     assert keys[0] != keys[1]
     assert posts[0].headers["X-API-KEY"] == "test"
+
+
+@responses.activate
+def test_a_lost_rent_response_is_resent_once_with_the_same_key_when_the_backend_honours_it(client, monkeypatch):
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
+    _version(["rent_by_spec", "rent_idempotency"])
+    responses.add(responses.GET, f"{BASE}/pods", json=[])
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", status=502)
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", json=RENTED)
+
+    result = client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY])
+
+    posts = [c.request for c in responses.calls if c.request.method == "POST"]
+    assert len(posts) == 2
+    assert posts[0].headers["Idempotency-Key"] == posts[1].headers["Idempotency-Key"]
+    assert posts[0].body == posts[1].body
+    assert result.pod["id"] == "pod-uuid-1"
+    assert [c.request.url for c in responses.calls].count(f"{BASE}/pods") == 1 + 3  # looked before resending
