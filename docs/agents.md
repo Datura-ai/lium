@@ -245,6 +245,14 @@ print(r.to_dict())  # status, exit_code, outputs, missing_outputs, cleanup, cost
 `status` is `succeeded`, `failed`, `timed_out`, `budget_exhausted`, `rent_failed`, `boot_failed` or `error`;
 `cleanup` is `removed`, or `scheduled` when the delete failed and the server-side removal stands.
 
+From the shell, `lium job run` makes the same call. Its exit code follows the job: 0 on success, the command's own
+code when it failed, 124 when the budget or deadline stopped it, and 1 otherwise:
+
+```bash
+lium job run "cd /root && python train.py --epochs 1" --gpu H100 --budget 5 --deadline 30m \
+  --input train.py:/root/train.py --output /root/out.tgz:out.tgz --format json
+```
+
 ## 7. Provider nodes (`lium provider`)
 
 `lium provider … --json`, or `LIUM_OUTPUT=json` in the environment, prints one envelope per command on stdout: `{"ok": true, "data": …}`, or on failure `{"ok": false, "error": {"code", "legacy_code", "message", "hint", "exit_code", "context", "data"?}}`. `code` is namespaced snake_case (`auth.expired`, `input.arg_invalid`, `portal.not_found`, `ssh.unreachable`, …) and never holds a space; `legacy_code` is the UPPER_CASE code older scripts matched (`PORTAL_NOT_FOUND`), and `null` on a code that never had one (`node.blocked.*`, `input.interrupted`). `data` carries the error's details when there are any. `legacy_code` and `context` are on every provider error, `node.blocked.*` included: `context` holds the same details as `data`, is `{}` when there are none, and is kept for older readers, so read `data`. The provider commands keep their own exit statuses: 1 input, 2 auth, 3 portal, 5 ssh, 6 config, 7 token-cache contention, 10 for a blocked node, and 130 (`input.interrupted`) for Ctrl-C on `node status` under `--until-clear` or when no person is at the terminal (`LIUM_NONINTERACTIVE=1`, or stdin is not a terminal); Ctrl-C on plain `--watch` in a terminal exits 0. These numbers are today's: a shared exit table for every command is coming in [docs/exit-codes.md](exit-codes.md) and may move them, so until it lands match on `code` and on the `exit_code` the envelope reports.
