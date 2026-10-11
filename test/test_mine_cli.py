@@ -384,7 +384,8 @@ def _disk(monkeypatch, free_bytes: float, available_images: set = frozenset()) -
             return f"{RUNNER}\ndaturaai/lium-watchtower:1.1.1\n", ""
         if cmd.startswith("docker run"):
             # a real docker run would pull a missing image; the check must never get here without the runner local
-            assert "--pull=never" in cmd and RUNNER in available_images
+            assert RUNNER in available_images
+            assert "--pull" not in cmd  # Docker before 20.10 has no --pull on docker run
             return BAKED_COMPOSE, ""
         if cmd.split()[-1].strip("'") not in available_images:  # docker image inspect <ref>
             raise RuntimeError(f"Command failed (1): {cmd}")
