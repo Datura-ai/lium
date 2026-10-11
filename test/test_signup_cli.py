@@ -251,7 +251,7 @@ def test_signup_says_no_credit_was_granted_when_the_flag_is_false(monkeypatch, s
     result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com", "--password", "s3cret-pw"])
 
     assert result.exit_code == 0
-    assert "No signup credit was granted" in result.output
+    assert "No signup credit yet" in result.output
     assert "$5 signup credit was granted" not in result.output
 
 
@@ -271,7 +271,7 @@ def test_a_generated_password_containing_dollar_five_is_not_mistaken_for_the_cre
 
     assert result.exit_code == 0
     assert "EyH@j&dQO5$5cayT#Y" in result.output  # the generated password is shown to the user
-    assert "No signup credit was granted" in result.output
+    assert "No signup credit yet" in result.output
     assert "$5 signup credit was granted" not in result.output
 
 
