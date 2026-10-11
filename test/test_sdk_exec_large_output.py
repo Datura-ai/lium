@@ -103,6 +103,8 @@ def test_exec_stops_reading_past_max_output_bytes(tmp_path, monkeypatch):
         (800 * 1024, b"\xf0\x9f\x98\x80", 4 * 1024**2),  # fits raw + 4x text, not the narrow decode buffer too
         (450, b"x", 1024),  # fits the raw buffers, not the str headers too
         (5 * 1024**2, b"x", 4 * 1024**2),  # a reader crosses the limit while draining
+        # a 2-byte character before an emoji widens twice: a 2-byte and a 4-byte buffer at once
+        (10 * 1024**2, b"\xc4\x80\xf0\x9f\x98\x80", 64 * 1024**2),
     ],
 )
 def test_exec_limit_bounds_kept_text_not_wire_bytes(wire_bytes, tail, limit):

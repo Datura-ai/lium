@@ -2882,13 +2882,15 @@ class Lium:
             del out, err  # the futures keep their results alive
             # The raw buffers stay alive while they are decoded, and a str keeps 1 byte per character
             # for ASCII and up to 4 otherwise (one emoji widens the whole string). Widening also holds
-            # the narrow decode buffer (1 byte per character) next to the wide result, so non-ASCII
-            # reserves 5 per byte: reserve it all against the limit before allocating the text.
+            # the previous buffer next to the wide result: 1 byte per character, or 2 when a character
+            # from U+0100..U+FFFF (an invalid byte replaced by U+FFFD included) comes before an emoji,
+            # so non-ASCII reserves 2 + 4 = 6 per byte: reserve it all against the limit before
+            # allocating the text.
             # getsizeof counts the bytearray's allocated capacity, which exceeds its length, and each
             # str also carries its object header (largest for a non-ASCII str), so both count too.
             str_header = sys.getsizeof("\U0001F600") - 4
             worst = sum(
-                sys.getsizeof(b) + str_header + len(b) * (1 if b.isascii() else 5) for b in (out_bytes, err_bytes)
+                sys.getsizeof(b) + str_header + len(b) * (1 if b.isascii() else 6) for b in (out_bytes, err_bytes)
             )
             if over.is_set() or worst > max_output_bytes:
                 # a held session (ssh_session) outlives this call: close the channel, or a command that sent EOF
