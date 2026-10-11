@@ -176,6 +176,46 @@ def test_run_job_ssh_error_reports_error_and_removes_the_pod(lium, monkeypatch):
     assert result.cleanup == "removed"
 
 
+class _OutputLimitExceeded(LiumError):
+    """Stands in for lium#314's OutputLimitExceeded, which `Lium.exec` raises past `max_output_bytes`."""
+
+
+def _exec_exits(code):
+    return lambda pod, command, env=None, timeout=None: {"exit_code": code, "stdout": "", "stderr": ""}
+
+
+def _exec_raises(exc):
+    def exec_(pod, command, env=None, timeout=None):
+        raise exc
+
+    return exec_
+
+
+@pytest.mark.parametrize(
+    "exec_, status",
+    [
+        (_exec_exits(0), "succeeded"),
+        (_exec_exits(2), "failed"),
+        (_exec_exits(124), "timed_out"),
+        (_exec_raises(TimeoutError("exec timed out")), "timed_out"),
+        (_exec_raises(_OutputLimitExceeded("output over 64 MiB")), "error"),
+    ],
+    ids=["success", "non-zero-exit", "timeout-exit", "exec-timeout", "output-limit"],
+)
+def test_run_job_copies_the_outputs_before_it_removes_the_pod(lium, monkeypatch, exec_, status):
+    events = []
+    monkeypatch.setattr(lium, "exec", exec_)
+    monkeypatch.setattr(lium, "download", lambda pod, remote, local: events.append(("download", remote)))
+    monkeypatch.setattr(lium, "_request", lambda method, path, **kw: events.append((method, path)))
+
+    result = lium.run_job(command="python train.py", gpu_type="H100", max_cost_usd=5, deadline_s=600,
+                          outputs={"/root/train.log": "train.log"})
+
+    assert result.status == status
+    assert events == [("download", "/root/train.log"), ("DELETE", "/pods/pod-1")]
+    assert result.outputs == {"/root/train.log": "train.log"} and result.cleanup == "removed"
+
+
 def test_run_job_does_not_run_without_the_server_side_removal(lium, monkeypatch):
     def schedule(pod, termination_time):
         raise LiumError("503")

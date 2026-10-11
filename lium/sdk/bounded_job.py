@@ -152,6 +152,8 @@ def run_job(
             run = lium.exec(pod, command=remote, env=env, timeout=run_s + 30)
         except TimeoutError as exc:
             result.status, result.error = stopped_by, str(exc)
+        except Exception as exc:  # noqa: BLE001 - e.g. OutputLimitExceeded (lium#314): the outputs below still matter
+            result.status, result.error = ERROR, str(exc)
         else:
             result.exit_code = run.get("exit_code")
             result.stdout, result.stderr = run.get("stdout", ""), run.get("stderr", "")
@@ -162,7 +164,7 @@ def run_job(
             else:
                 result.status = FAILED
 
-        # copied after a failure or a timeout too: a partial log or checkpoint is often what the caller needs
+        # copied after a failure, an exec error or a timeout too: a partial log or checkpoint is what the caller needs
         for remote_path, local in (outputs or {}).items():
             try:
                 lium.download(pod, remote=remote_path, local=local)
