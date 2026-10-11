@@ -506,16 +506,22 @@ def test_get_template_finds_a_template_by_huid_or_name(monkeypatch):
     template_id = "8fbb30f6-6026-4043-98c7-c4189dc09bef"
     template = Template(id=template_id, huid="calm-lion-2c", name="Pytorch (Cuda + DinD)", docker_image="a",
                         docker_image_tag="b", category="PYTORCH", status="VERIFY_SUCCESS")
-    monkeypatch.setattr(client, "templates", lambda: [template])
+    mine = Template(id="mine", huid="quiet-fox-11", name="training", docker_image="m", docker_image_tag="latest",
+                    category="general", status="CREATED")
+    listing = {False: [template, mine], True: [mine]}  # the public listing vs the caller's own templates
+    monkeypatch.setattr(client, "templates", lambda filter=None, only_my=False: listing[only_my])
     monkeypatch.setattr(client, "_request", lambda *a, **kw: pytest.fail("GET /templates/{id} takes only a UUID"))
 
-    assert client.get_template("calm-lion-2c") is template
-    assert client.get_template("Pytorch (Cuda + DinD)") is template
+    assert client.get_template("calm-lion-2c") is template  # a HUID comes from the server's ID: any listed template
+    assert client.get_template("training") is mine
+    assert client.get_template("quiet-fox-11") is mine
+    # whoever publishes a template picks its name: someone else's is never picked, it may be a look-alike
+    assert client.get_template("Pytorch (Cuda + DinD)") is None
     assert client.get_template("no-such-template") is None
 
     duplicates = [Template(id=i, huid="same-huid", name="training", docker_image=i, docker_image_tag="latest",
                            category="general", status="CREATED") for i in ("first", "second")]
-    monkeypatch.setattr(client, "templates", lambda: duplicates)
+    monkeypatch.setattr(client, "templates", lambda filter=None, only_my=False: duplicates)
     for selector in ("training", "same-huid"):
         with pytest.raises(LiumError, match="ambiguous"):
             client.get_template(selector)
@@ -541,6 +547,15 @@ def test_get_template_finds_a_template_by_huid_or_name(monkeypatch):
 
     client.config.api_key = ""
     assert client.get_template(template_id) is None  # a missing ID looked up without a key is still "not found"
+
+    def public_only(filter=None, only_my=False):
+        if only_my:
+            raise LiumAuthError("no key")
+        return [template]
+
+    monkeypatch.setattr(client, "templates", public_only)
+    assert client.get_template("calm-lion-2c") is template  # browsing without a key still finds a HUID
+    assert client.get_template("Pytorch (Cuda + DinD)") is None
 
 
 def test_get_template_raises_errors_other_than_not_found(monkeypatch):

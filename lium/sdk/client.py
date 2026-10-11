@@ -2590,7 +2590,8 @@ class Lium:
         """Fetch a template by ID/HUID/name.
 
         Args:
-            template_id: Template ID, HUID, or name to match.
+            template_id: Template ID, HUID, or name to match. A name matches only the
+                caller's own templates; an ID or HUID matches any template the caller can see.
 
         Returns:
             Matching :class:`Template` or ``None`` if not found.
@@ -2602,12 +2603,7 @@ class Lium:
         try:
             d = self._request("GET", f"/templates/{quote(str(template_id), safe='')}").json()
         except LiumNotFoundError:  # a name may itself be a UUID; only the caller's own templates, never a public one that borrows the ID
-            try:
-                return self._template_by_huid_or_name(template_id, only_my=True)
-            except LiumAuthError:
-                if self.config.api_key:  # a configured client's refused key (revoked meanwhile) is an error, not "not found"
-                    raise
-                return None  # an anonymous lookup of a missing ID has no templates of its own
+            return self._template_by_huid_or_name(template_id, only_my=True)
         return Template(
             id=d.get("id", ""),
             huid=generate_huid(d.get("id", "")),
@@ -2618,9 +2614,23 @@ class Lium:
             status=d.get("status", "unknown"),
         )
 
+    def _own_templates(self) -> List[Template]:
+        try:
+            return self.templates(only_my=True)
+        except LiumAuthError:
+            if self.config.api_key:  # a configured client's refused key (revoked meanwhile) is an error, not "not found"
+                raise
+            return []  # an anonymous caller has no templates of its own
+
     def _template_by_huid_or_name(self, selector: str, only_my: bool = False) -> Optional[Template]:
-        # names are not unique and the listing includes public templates: never pick one of several
-        matches = [t for t in (self.templates(only_my=True) if only_my else self.templates()) if selector in (t.huid, t.name)]
+        # Whoever publishes a template picks its name, so a name only matches the caller's own templates: a public
+        # template named like the one meant (or like a typo of it) is never picked. A HUID comes from the
+        # server-assigned ID, so it may match any listed template. Names are not unique either: never pick one of several.
+        own = self._own_templates()
+        matches = {t.id: t for t in own if selector in (t.huid, t.name)}
+        if not only_my:
+            matches.update({t.id: t for t in self.templates() if t.huid == selector})
+        matches = list(matches.values())
         if len(matches) > 1:
             raise LiumError(f"Template {selector!r} is ambiguous ({len(matches)} templates match); use its ID")
         return matches[0] if matches else None
