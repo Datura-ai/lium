@@ -512,11 +512,11 @@ def test_get_template_finds_a_template_by_huid_or_name(monkeypatch):
     monkeypatch.setattr(client, "templates", lambda filter=None, only_my=False: listing[only_my])
     monkeypatch.setattr(client, "_request", lambda *a, **kw: pytest.fail("GET /templates/{id} takes only a UUID"))
 
-    assert client.get_template("calm-lion-2c") is template  # a HUID comes from the server's ID: any listed template
     assert client.get_template("training") is mine
     assert client.get_template("quiet-fox-11") is mine
-    # whoever publishes a template picks its name: someone else's is never picked, it may be a look-alike
+    # someone else's template is chosen by its ID: its name is the publisher's pick and a HUID can be ground
     assert client.get_template("Pytorch (Cuda + DinD)") is None
+    assert client.get_template("calm-lion-2c") is None
     assert client.get_template("no-such-template") is None
 
     duplicates = [Template(id=i, huid="same-huid", name="training", docker_image=i, docker_image_tag="latest",
@@ -554,7 +554,7 @@ def test_get_template_finds_a_template_by_huid_or_name(monkeypatch):
         return [template]
 
     monkeypatch.setattr(client, "templates", public_only)
-    assert client.get_template("calm-lion-2c") is template  # browsing without a key still finds a HUID
+    assert client.get_template("calm-lion-2c") is None  # without a key there are no own templates to match
     assert client.get_template("Pytorch (Cuda + DinD)") is None
 
 

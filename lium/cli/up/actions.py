@@ -152,7 +152,10 @@ class ResolveTemplateAction:
         if template_id:
             template = lium.get_template(template_id)
             if not template:
-                return ActionResult(ok=False, data={}, error=f"Template '{template_id}' not found")
+                return ActionResult(ok=False, data={}, error=(
+                    f"Template '{template_id}' not found among your templates; "
+                    "a public template is chosen by its ID ('lium templates' lists them)"
+                ))
         else:
             template = lium.default_docker_template(executor.id) if executor else None
             if not template:
