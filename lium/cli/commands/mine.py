@@ -228,7 +228,11 @@ def _node_images_present(executor_dir: Path) -> bool:
     try:
         images = set(_run("docker compose config --images", cwd=str(executor_dir))[0].split())
         runner = next(i for i in images if "executor-runner" in i)
-        baked = _run(f"docker run --rm --entrypoint cat {shlex.quote(runner)} /root/executor/docker-compose.yml")[0]
+        # inspect first: docker run pulls a missing image, which is the download this check exists to precede
+        _run(f"docker image inspect {shlex.quote(runner)}")
+        baked = _run(
+            f"docker run --rm --pull=never --entrypoint cat {shlex.quote(runner)} /root/executor/docker-compose.yml"
+        )[0]
         images.update(re.findall(r"^\s*image:\s*(\S+)", baked, re.MULTILINE))
         images.add(PREFLIGHT_IMAGE)
         for image in images:

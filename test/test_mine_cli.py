@@ -371,8 +371,11 @@ BAKED_COMPOSE = f"services:\n  executor:\n    image: {EXECUTOR}\n  autoheal:\n  
 CURRENT_NODE_IMAGES = {RUNNER, "daturaai/lium-watchtower:1.1.1", EXECUTOR, "willfarrell/autoheal", mine.PREFLIGHT_IMAGE}
 
 
-def _disk(monkeypatch, free_bytes: float, available_images: set = frozenset()) -> None:
+def _disk(monkeypatch, free_bytes: float, available_images: set = frozenset()) -> list:
+    calls = []
+
     def fake_run(cmd, check=True, capture=True, cwd=None):
+        calls.append(cmd)
         if "DockerRootDir" in cmd:
             return "/var/lib/docker\n", ""
         if "config --images" in cmd:
@@ -380,13 +383,16 @@ def _disk(monkeypatch, free_bytes: float, available_images: set = frozenset()) -
             assert "app.yml" not in cmd
             return f"{RUNNER}\ndaturaai/lium-watchtower:1.1.1\n", ""
         if cmd.startswith("docker run"):
-            return (BAKED_COMPOSE, "") if RUNNER in available_images else ("", "")
+            # a real docker run would pull a missing image; the check must never get here without the runner local
+            assert "--pull=never" in cmd and RUNNER in available_images
+            return BAKED_COMPOSE, ""
         if cmd.split()[-1].strip("'") not in available_images:  # docker image inspect <ref>
             raise RuntimeError(f"Command failed (1): {cmd}")
         return "[]", ""
 
     monkeypatch.setattr(mine, "_run", fake_run)
     monkeypatch.setattr(mine.shutil, "disk_usage", lambda path: SimpleNamespace(free=free_bytes))
+    return calls
 
 
 # 140e9 bytes is 130.4 GiB: under the 140 GiB the validator's GiB floor plus the image reserve needs; a stale
@@ -408,6 +414,14 @@ def test_free_disk_check_refuses_a_disk_too_small_before_the_image_pulls(
 
     with pytest.raises(Exception, match="140 GiB needed"):
         mine._check_free_disk(tmp_path)
+
+
+def test_free_disk_check_never_runs_a_runner_image_that_is_not_local(monkeypatch, tmp_path) -> None:
+    calls = _disk(monkeypatch, free_bytes=110 * mine.GIB, available_images=CURRENT_NODE_IMAGES - {RUNNER})
+
+    with pytest.raises(Exception, match="140 GiB needed"):
+        mine._check_free_disk(tmp_path)
+    assert not [c for c in calls if c.startswith(("docker run", "docker pull"))]
 
 
 def test_free_disk_check_passes_a_rerun_whose_runner_resolved_images_are_all_local(monkeypatch, tmp_path) -> None:
