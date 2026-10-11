@@ -96,13 +96,15 @@ def test_exec_stops_reading_past_max_output_bytes(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("wire_bytes", "tail"),
+    ("wire_bytes", "tail", "limit"),
     [
-        (3 * 1024**2, b"x"), (1024**2, b"\xf0\x9f\x98\x80"), (1024**2, b"\xff"),
-        (800 * 1024, b"\xf0\x9f\x98\x80"),  # fits raw + 4x text, not the narrow decode buffer too
+        (3 * 1024**2, b"x", 4 * 1024**2), (1024**2, b"\xf0\x9f\x98\x80", 4 * 1024**2),
+        (1024**2, b"\xff", 4 * 1024**2),
+        (800 * 1024, b"\xf0\x9f\x98\x80", 4 * 1024**2),  # fits raw + 4x text, not the narrow decode buffer too
+        (450, b"x", 1024),  # fits the raw buffers, not the str headers too
     ],
 )
-def test_exec_limit_bounds_kept_text_not_wire_bytes(wire_bytes, tail):
+def test_exec_limit_bounds_kept_text_not_wire_bytes(wire_bytes, tail, limit):
     from contextlib import nullcontext
     from types import SimpleNamespace
     import tracemalloc
@@ -128,13 +130,10 @@ def test_exec_limit_bounds_kept_text_not_wire_bytes(wire_bytes, tail):
         SimpleNamespace(channel=channel), None,
     ))
     client = SimpleNamespace(ssh_connection=lambda pod: nullcontext(ssh))
-    limit = 4 * 1024**2
     tracemalloc.start()
     try:
-        try:
+        with pytest.raises(OutputLimitExceeded):
             Lium.exec(client, SimpleNamespace(name="p", huid="p"), command="probe", max_output_bytes=limit)
-        except OutputLimitExceeded:
-            pass  # expected for this probe; the assertion below is the point of the test
         assert tracemalloc.get_traced_memory()[1] <= limit + 256 * 1024
     finally:
         tracemalloc.stop()

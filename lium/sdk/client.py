@@ -2884,8 +2884,12 @@ class Lium:
             # for ASCII and up to 4 otherwise (one emoji widens the whole string). Widening also holds
             # the narrow decode buffer (1 byte per character) next to the wide result, so non-ASCII
             # reserves 5 per byte: reserve it all against the limit before allocating the text.
-            # getsizeof counts the bytearray's allocated capacity, which exceeds its length.
-            worst = sum(sys.getsizeof(b) + len(b) * (1 if b.isascii() else 5) for b in (out_bytes, err_bytes))
+            # getsizeof counts the bytearray's allocated capacity, which exceeds its length, and each
+            # str also carries its object header (largest for a non-ASCII str), so both count too.
+            str_header = sys.getsizeof("\U0001F600") - 4
+            worst = sum(
+                sys.getsizeof(b) + str_header + len(b) * (1 if b.isascii() else 5) for b in (out_bytes, err_bytes)
+            )
             if over.is_set() or worst > max_output_bytes:
                 raise OutputLimitExceeded(
                     f"Output of the command on pod {pod.name or pod.huid} needs more than {max_output_bytes} bytes of memory"
