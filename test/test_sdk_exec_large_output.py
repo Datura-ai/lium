@@ -102,6 +102,7 @@ def test_exec_stops_reading_past_max_output_bytes(tmp_path, monkeypatch):
         (1024**2, b"\xff", 4 * 1024**2),
         (800 * 1024, b"\xf0\x9f\x98\x80", 4 * 1024**2),  # fits raw + 4x text, not the narrow decode buffer too
         (450, b"x", 1024),  # fits the raw buffers, not the str headers too
+        (5 * 1024**2, b"x", 4 * 1024**2),  # a reader crosses the limit while draining
     ],
 )
 def test_exec_limit_bounds_kept_text_not_wire_bytes(wire_bytes, tail, limit):
@@ -121,19 +122,22 @@ def test_exec_limit_bounds_kept_text_not_wire_bytes(wire_bytes, tail, limit):
             return b"x" * (count - len(tail)) + tail
         return b"x" * count
 
+    closed = []
     channel = SimpleNamespace(
         recv=recv, recv_stderr=lambda size: b"",
-        close=lambda: None, recv_exit_status=lambda: 0,
+        close=lambda: closed.append("channel"), recv_exit_status=lambda: 0,
     )
-    ssh = SimpleNamespace(exec_command=lambda command: (
-        SimpleNamespace(close=lambda: None),
-        SimpleNamespace(channel=channel), None,
-    ))
-    client = SimpleNamespace(ssh_connection=lambda pod: nullcontext(ssh))
+    ssh = SimpleNamespace(
+        exec_command=lambda command: (SimpleNamespace(close=lambda: None), SimpleNamespace(channel=channel), None),
+        close=lambda: closed.append("connection"),
+    )
+    client = SimpleNamespace(ssh_connection=lambda pod: nullcontext(ssh))  # a held session: exec must not close it
     tracemalloc.start()
     try:
         with pytest.raises(OutputLimitExceeded):
             Lium.exec(client, SimpleNamespace(name="p", huid="p"), command="probe", max_output_bytes=limit)
         assert tracemalloc.get_traced_memory()[1] <= limit + 256 * 1024
+        # both rejections (a reader crossing the limit, the reservation before decoding) close the channel
+        assert "channel" in closed and "connection" not in closed
     finally:
         tracemalloc.stop()

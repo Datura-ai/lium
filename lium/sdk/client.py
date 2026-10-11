@@ -2891,6 +2891,9 @@ class Lium:
                 sys.getsizeof(b) + str_header + len(b) * (1 if b.isascii() else 5) for b in (out_bytes, err_bytes)
             )
             if over.is_set() or worst > max_output_bytes:
+                # a held session (ssh_session) outlives this call: close the channel, or a command that sent EOF
+                # without closing it keeps a remote session slot; the shared SSH connection stays open
+                channel.close()
                 raise OutputLimitExceeded(
                     f"Output of the command on pod {pod.name or pod.huid} needs more than {max_output_bytes} bytes of memory"
                 )
