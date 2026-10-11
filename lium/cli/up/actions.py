@@ -93,7 +93,8 @@ class ResolveExecutorAction:
             executors = lium.ls(gpu_type=gpu, min_cpus=min_cpus)
 
             if count:
-                executors = [e for e in executors if e.gpu_count == count]
+                # a rent with no count takes the node's free GPUs, not the host total
+                executors = [e for e in executors if rented_gpu_count(e) == count]
             if country:
                 executors = [
                     e for e in executors
@@ -125,9 +126,7 @@ class ResolveExecutorAction:
                 filter_desc = ', '.join(filters) if filters else "specified filters"
                 return ActionResult(ok=False, data={}, error=f"No nodes available with {filter_desc}")
 
-            from lium.cli.ls.command import ls_store_executor
             from lium.cli.ls.display import sort_executors
-            ls_store_executor(gpu_type=gpu)
 
             # One rule for `ls` and `up`: the pick is row 1 of `lium ls` with the same
             # filters, in the order `ls` prints (cheapest $/GPU·h first, unpriced last;
@@ -173,9 +172,13 @@ class CreateEphemeralTemplateAction:
         cmd: Optional[str] = ctx.get("cmd", "")
         ports: List[int] = ctx.get("ports", [22])
 
-        # Parse image:tag
-        if ":" in image:
-            docker_image, docker_tag = image.rsplit(":", 1)
+        # A ':' before the last '/' is a registry port (localhost:5000/img), not a tag
+        name, sep, tag = image.rpartition(":")
+        if "@" in image:
+            # a digest reference goes whole: the backend splits name, tag and digest itself
+            docker_image, docker_tag = image, ""
+        elif sep and "/" not in tag:
+            docker_image, docker_tag = name, tag
         else:
             docker_image = image
             docker_tag = "latest"

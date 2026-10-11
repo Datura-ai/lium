@@ -273,3 +273,43 @@ def test_portal_generic_provider_error_returns_exit_3(patched_build_client) -> N
         ["--hotkey", "hk1", "portal", "login"],
     )
     assert result.exit_code == 3, result.output
+
+
+def test_portal_whoami_without_a_saved_session_says_so(patched_build_client) -> None:
+    portal = _Portal(get_raises=ProviderAuthError("portal rejected credentials", code="PORTAL_AUTH_INVALID"))
+    patched_build_client(portal)
+
+    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", "portal", "whoami"])
+
+    assert result.exit_code == 2, result.output
+    assert "no portal session for this hotkey" in result.output
+    assert "Token rejected" not in result.output
+
+
+def test_portal_whoami_with_a_rejected_token_keeps_the_rejection(
+    patched_build_client, fake_signer, tmp_token_store: TokenStore
+) -> None:
+    tmp_token_store.save(fake_signer.ss58_address, _make_jwt(int(time.time()) + 3600), provider_id="m-1")
+    portal = _Portal(get_raises=ProviderAuthError("portal rejected credentials", code="PORTAL_AUTH_INVALID"))
+    patched_build_client(portal)
+
+    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", "portal", "whoami"])
+
+    assert "portal rejected credentials" in result.output
+
+
+def test_status_without_a_session_reads_not_signed_in_not_down(patched_build_client) -> None:
+    portal = _Portal(get_raises=ProviderAuthError("portal rejected credentials", code="PORTAL_AUTH_INVALID"))
+    patched_build_client(portal)
+
+    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", "status"])
+
+    assert "portal=not-signed-in" in result.output
+    assert "portal=down" not in result.output
+
+
+def test_provider_help_does_not_call_mine_a_renter_workflow() -> None:
+    result = CliRunner().invoke(provider_command, ["--help"])
+
+    assert "renter workflows" not in result.output
+    assert "validator weights" not in result.output

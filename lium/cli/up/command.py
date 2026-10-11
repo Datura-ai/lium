@@ -300,7 +300,7 @@ def up_command(
     dockerfile_mode = dockerfile is not None
 
     valid, error = validation.validate(
-        executor_id, gpu, count, country, ttl, until, image, template_id, dockerfile, min_cpus
+        executor_id, gpu, count, country, ttl, until, image, template_id, dockerfile, min_cpus, ports
     )
     if not valid:
         raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
@@ -321,6 +321,13 @@ def up_command(
     parsed, error = parsing.parse(ttl, until, volume)
     if error:
         raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
+    if not docker_run_mode and not dockerfile_mode and (env or entrypoint or cmd or internal_ports):
+        # only the --image path builds a template from them; a template rent would drop them silently
+        raise CliFailure(
+            "invalid_arguments",
+            "-e/--env, --entrypoint, --cmd and --internal-ports apply only with --image",
+            EXIT_CONFIGURATION_ERROR,
+        )
 
     termination_time = parsed.get("termination_time")  # --until; --ttl becomes a time at the rent
     ttl_duration = parsed.get("ttl")

@@ -26,6 +26,7 @@ from lium.cli.provider._guards import (
     handle_provider_error,
     require_hotkey,
     require_persona_ack,
+    stop_if_dry_run,
 )
 from lium.cli.provider._overrides import with_provider_overrides
 from lium.cli.provider._render import discord_incentive_warnings, render
@@ -132,6 +133,7 @@ def set_email(ctx: click.Context, email: str) -> None:
 @click.pass_context
 def set_password(ctx: click.Context, new_password: str | None) -> None:
     require_hotkey(ctx, group="config")
+    stop_if_dry_run(ctx)
     if not new_password:
         if _json_mode(ctx):
             ctx.exit(
@@ -191,6 +193,7 @@ def connect_discord(
     poll_interval: float,
 ) -> None:
     require_hotkey(ctx, group="config")
+    stop_if_dry_run(ctx)
     client = build_client(ctx)
     try:
         authorization_url = client.create_discord_oauth_authorization_url()

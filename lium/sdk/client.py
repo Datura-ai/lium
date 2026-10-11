@@ -1,5 +1,6 @@
 """Lium SDK - Clean, Unix-style SDK for GPU pod management."""
 
+import codecs
 import getpass
 import hashlib
 import ipaddress
@@ -315,7 +316,7 @@ _AVAILABLE_RE = re.compile(r"balance is " + _USD, re.I)
 def _response_error_code(response: requests.Response) -> Optional[str]:
     """The stable ``error.code`` of the platform's error body, when it sends one.
 
-    lium-platform#210 (DAH-3056) answers every 4xx/5xx with
+    The platform answers every 4xx/5xx with
     ``{"error": {"code", "message", "hint", "request_id"}, ...}``; older servers
     send ``error`` as a string or not at all, and then this is ``None``.
     """
@@ -383,7 +384,7 @@ def permission_error(
 
     ``code`` is the platform's structured ``error.code`` when the response carried
     one (:func:`_response_error_code`); it decides. Without it the message text
-    decides, which is what every server before lium-platform#210 sends. ``key``
+    decides, as it does for a server whose error body carries no code. ``key``
     (the API key's fingerprint and source) is appended so the message says which
     key the server refused. ``code`` and ``context`` (:func:`_error_context`'s
     hint/request_id) are carried on the exception.
@@ -2714,9 +2715,9 @@ class Lium:
         """``export NAME=value`` statements for ``env``, shell-quoted so each value
         reaches the pod byte-for-byte (spaces, quotes, ``$``, newlines).
 
-        Names must be valid shell identifiers (DAH-2894); anything else raises
-        :class:`ValueError` here rather than failing with an opaque
-        ``export: not a valid identifier`` on the pod.
+        Names must be valid shell identifiers; anything else raises
+        :class:`ValueError` here, before anything runs on the pod, and the
+        message names the variable.
         """
         exports = []
         for name, value in env.items():
@@ -3128,16 +3129,19 @@ class Lium:
             stdin.close()
 
             channel = stdout.channel
+            # one decoder per stream: a UTF-8 character split across two reads must not become U+FFFD
+            out_text = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            err_text = codecs.getincrementaldecoder("utf-8")(errors="replace")
             while True:
                 got = False
                 if channel.recv_ready():
-                    data = channel.recv(4096).decode("utf-8", errors="replace")
+                    data = out_text.decode(channel.recv(4096))
                     if data:
                         got = True
                         yield {"type": "stdout", "data": data}
 
                 if channel.recv_stderr_ready():
-                    data = channel.recv_stderr(4096).decode("utf-8", errors="replace")
+                    data = err_text.decode(channel.recv_stderr(4096))
                     if data:
                         got = True
                         yield {"type": "stderr", "data": data}
@@ -3145,6 +3149,11 @@ class Lium:
                 if got:
                     continue
                 if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                    # a command that ends mid-character still shows it, as U+FFFD
+                    for kind, decoder in (("stdout", out_text), ("stderr", err_text)):
+                        tail = decoder.decode(b"", final=True)
+                        if tail:
+                            yield {"type": kind, "data": tail}
                     return channel.recv_exit_status()
                 time.sleep(0.05)  # nothing pending: do not spin at 100% CPU until the command ends
 
@@ -3219,6 +3228,10 @@ class Lium:
     # DAH-3002: the backend marks a cached-template pod RUNNING at p50 22.5 s after the rent
     # (7 d to 6 Sep 2026); polled every 10 s the caller learnt it 0–10 s late. Poll every
     # 2 s while a normal start is still plausible, then fall back to the old 10 s.
+    # A 2 s poll still reports RUNNING 1 s late on average; cached pods are RUNNING at p50 16 s /
+    # p90 31 s (6 Oct 2026), so the first 40 s poll every second.
+    FIRST_POLL_SECONDS = 1
+    FIRST_POLL_WINDOW_SECONDS = 40
     FAST_POLL_SECONDS = 2
     FAST_POLL_WINDOW_SECONDS = 90
     SLOW_POLL_SECONDS = 10
@@ -3228,11 +3241,14 @@ class Lium:
         """Seconds to sleep between two ``wait_ready`` polls.
 
         A caller-given ``poll_interval`` is used as-is; ``None`` selects the adaptive
-        schedule (:attr:`FAST_POLL_SECONDS` for the first :attr:`FAST_POLL_WINDOW_SECONDS`
-        seconds, :attr:`SLOW_POLL_SECONDS` after that).
+        schedule (:attr:`FIRST_POLL_SECONDS` for the first :attr:`FIRST_POLL_WINDOW_SECONDS`
+        seconds, :attr:`FAST_POLL_SECONDS` until :attr:`FAST_POLL_WINDOW_SECONDS`,
+        :attr:`SLOW_POLL_SECONDS` after that).
         """
         if poll_interval is not None:
             return poll_interval
+        if elapsed < cls.FIRST_POLL_WINDOW_SECONDS:
+            return cls.FIRST_POLL_SECONDS
         return cls.FAST_POLL_SECONDS if elapsed < cls.FAST_POLL_WINDOW_SECONDS else cls.SLOW_POLL_SECONDS
 
     def pod_events(self, pod_id: str) -> List[Dict[str, Any]]:
@@ -3295,8 +3311,9 @@ class Lium:
             timeout: Maximum number of seconds to wait; ``None`` waits until the
                 pod is ready or fails.
             poll_interval: Fixed interval between successive ``ps`` calls; ``None``
-                (default) polls every :attr:`FAST_POLL_SECONDS` for the first
-                :attr:`FAST_POLL_WINDOW_SECONDS` seconds, then every
+                (default) polls every :attr:`FIRST_POLL_SECONDS` for the first
+                :attr:`FIRST_POLL_WINDOW_SECONDS` seconds, every :attr:`FAST_POLL_SECONDS`
+                until :attr:`FAST_POLL_WINDOW_SECONDS`, then every
                 :attr:`SLOW_POLL_SECONDS` — see :meth:`poll_delay`.
             on_poll: Called after every poll with the pod as last listed (or
                 ``None``), its status (``"missing"`` when not listed) and the

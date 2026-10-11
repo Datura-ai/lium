@@ -8,6 +8,8 @@ from rich.markup import escape
 from lium.sdk import Lium, ExecutorInfo
 from lium.cli import ui
 from lium.cli.utils import (
+    SIGNUP_NUDGE,
+    browsing_client,
     CliFailure,
     EXIT_CONFIGURATION_ERROR,
     console,
@@ -126,6 +128,7 @@ def ls_command(
     _, error = validation.validate(
         limit, lat, lon, max_distance, min_cuda_version,
         min_vram_gb=min_vram_gb, max_price=max_price, min_cpus=min_cpus, min_download_mbps=min_download_mbps,
+        gpu_count=gpu_count,
     )
     if error:
         raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
@@ -137,7 +140,7 @@ def ls_command(
     )
 
     # Load data
-    lium = Lium()
+    lium, anonymous = browsing_client(Lium)
     ctx = {
         "lium": lium,
         "gpu_type": gpu_type,
@@ -192,13 +195,24 @@ def ls_command(
                 tail = "Drop the filter or lower the floor"
             ui.info(f"{'; '.join(rules)}. {tail}")
             return
+        server_filters = [flag for flag, on in (
+            ("--count", gpu_count), ("--min-cuda", min_cuda_version), ("--min-cpus", min_cpus),
+            ("--max-distance", max_distance),
+        ) if on]
+        if server_filters:
+            ui.error(f"No available node matches {', '.join(server_filters)}")
+            ui.info(f"Tip: loosen a filter, or {ui.styled('lium ls', 'success')} to see everything")
+            return
         if gpu_type:
             ui.error(f"All {gpu_type} GPUs are currently rented out")
             ui.info(f"Tip: {ui.styled('lium ls', 'success')}")
         else:
             ui.error("All GPUs are currently rented out")
             ui.info("Check back later or contact support if this persists")
-        show_workspace(lium)
+        if anonymous:
+            ui.dim(SIGNUP_NUDGE)
+        else:
+            show_workspace(lium)
         return
 
 
@@ -230,7 +244,10 @@ def ls_command(
         ui.dim(display.format_hidden_columns(hidden))
     ui.print("")
     ui.info(tip)
-    show_workspace(lium)
+    if anonymous:
+        ui.dim(SIGNUP_NUDGE)
+    else:
+        show_workspace(lium)
 
     # Store selection for index-based access in up command
     store_executor_selection(sorted_executors)

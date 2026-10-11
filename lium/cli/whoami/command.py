@@ -19,6 +19,9 @@ def _yes_no(value):
 
 def _api_row(identity: Identity) -> str:
     base = identity.api_base_url or ""
+    if not identity.has_api_key:
+        # no key, no call: "unreachable: None" read as an outage
+        return f"{base}  not checked (no API key)".strip()
     if identity.api_reachable and identity.api_error:
         return f"{base}  answered with an error: {identity.api_error}".strip()
     if identity.api_reachable:
