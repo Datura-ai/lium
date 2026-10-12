@@ -336,6 +336,9 @@ def _response_error_code(response: requests.Response) -> Optional[str]:
 CARD_TOPUP_ERROR_CODES = frozenset(
     {
         "CARD_AUTHENTICATION_REQUIRED",
+        "CARD_AUTHENTICATION_NOT_COMPLETED",
+        "CARD_AUTHENTICATION_UNAVAILABLE",
+        "CARD_AUTHENTICATION_EXPIRED",
         "CARD_DECLINED",
         "NO_SAVED_CARD",
         "NO_DEFAULT_CARD",
@@ -354,7 +357,9 @@ CREDIT_EPSILON_USD = 0.005
 
 def card_topup_error(response: requests.Response, **context: Optional[str]) -> LiumCardTopUpError:
     """The exception for a card top-up 402: the server's sentence as the message, and the fields
-    of its structured body (``status``, ``decline_code``, ``dashboard_url``, ``payment_intent_id``)."""
+    of its structured body (``status``, ``decline_code``, ``dashboard_url``, ``payment_intent_id``,
+    and on a 3-D Secure step-up ``transaction_id`` and ``next_action_url``). The body does not carry
+    the idempotency key; :meth:`Lium.topup_card` sets the one it sent."""
     try:
         payload = response.json()
     except ValueError:
@@ -371,6 +376,8 @@ def card_topup_error(response: requests.Response, **context: Optional[str]) -> L
         decline_code=text(detail.get("decline_code")),
         dashboard_url=text(detail.get("dashboard_url")),
         payment_intent_id=text(detail.get("payment_intent_id")),
+        transaction_id=text(detail.get("transaction_id")),
+        next_action_url=text(detail.get("next_action_url")),
         **context,
     )
 
@@ -4707,9 +4714,12 @@ class Lium:
             never a second charge. Do not repeat the call without the key.
 
         Raises:
-            LiumCardTopUpError: the bank wants a confirmation (``CARD_AUTHENTICATION_REQUIRED``,
-                see ``dashboard_url``), declined the card (``CARD_DECLINED``), or no card is
-                saved / none is the default. Nothing was charged.
+            LiumCardTopUpError: the bank wants a confirmation (``CARD_AUTHENTICATION_REQUIRED``),
+                declined the card (``CARD_DECLINED``), or no card is saved / none is the default.
+                Nothing was charged. ``idempotency_key`` on the error is the key sent. With
+                ``next_action_url`` (``is_step_up``) the payment is still open: the cardholder
+                confirms there and the balance is credited; repeat only with that same key
+                (``transaction_id`` names the row), never a new one, which opens a second payment.
             LiumChargeOutcomeUnknownError: the answer was lost (timeout, dropped connection,
                 5xx) after the charge was posted — it may have gone through. Check the balance
                 before trying again; ``idempotency_key`` on the error repeats it safely.
@@ -4724,6 +4734,10 @@ class Lium:
             payload["payment_method_id"] = payment_method_id
         try:
             body = self._request("POST", "/payments/topup", json=payload).json()
+        except LiumCardTopUpError as exc:
+            # the 402 body does not echo the key; a step-up must be followed with this one, not a new one
+            exc.idempotency_key = exc.idempotency_key or key
+            raise
         except LiumServerError as exc:
             # retrieve/list 502s, or a Stripe refusal before processing: the card was not touched
             if exc.code in CARD_TOPUP_NOT_CHARGED_CODES:
