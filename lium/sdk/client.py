@@ -2586,6 +2586,31 @@ class Lium:
             return None
         return sorted({t for t in (extract_gpu_type(n) for n in names) if re.fullmatch(r"[A-Z]*\d{2,4}[A-Z]*", t)})
 
+    def request_machine(self, gpu: str, count: Optional[int] = None) -> Dict[str, Any]:
+        """Ask providers for a GPU type that is sold out (``POST /machine-requests``).
+
+        ``gpu`` is a short type (``B300``, ``4090``) or a full catalog name. The providers who
+        list that type are told, and the request shows in ``lium.io/machine-requests``. A short
+        type that covers several catalog names must be given by one of them.
+
+        Returns:
+            The API's answer: ``provider_notified_count`` and, when present, ``confirmation``.
+        """
+        names = sorted(name for name in self.gpu_types() if name)
+        if gpu in names:
+            machine_name = gpu
+        else:
+            matches = [name for name in names if gpu_short_matches(gpu, extract_gpu_type(name))]
+            if not matches:
+                raise ValueError(f"No GPU type matches '{gpu}'")
+            if len(matches) > 1:
+                raise ValueError(f"'{gpu}' covers several GPU types; name one: {', '.join(matches)}")
+            machine_name = matches[0]
+        payload: Dict[str, Any] = {"machine_name": machine_name}
+        if count:
+            payload["gpu_count"] = count
+        return self._request("POST", "/machine-requests", json=payload).json()
+
     def get_template(self, template_id: str) -> Optional[Template]:
         """Fetch a template by ID/HUID/name.
 

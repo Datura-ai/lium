@@ -75,7 +75,10 @@ class ResolveExecutorAction:
                 # server's hint and request_id ride along in data (DAH-3057); the command lifts
                 # the hint out into the failure's own.
                 data = {**(_api_error_data(exc) or {}), **({"hint": exc.hint} if exc.hint else {})}
-                return ActionResult(ok=False, data=data, error=str(exc))
+                error = str(exc)
+                if gpu:
+                    error += f". Ask providers for it: lium request {gpu}" + (f" -n {count}" if count else "")
+                return ActionResult(ok=False, data=data, error=error)
             return ActionResult(
                 ok=True,
                 data={
@@ -124,7 +127,10 @@ class ResolveExecutorAction:
                 if ports:
                     filters.append(f"min ports={ports}")
                 filter_desc = ', '.join(filters) if filters else "specified filters"
-                return ActionResult(ok=False, data={}, error=f"No nodes available with {filter_desc}")
+                error = f"No nodes available with {filter_desc}"
+                if gpu:
+                    error += f". Ask providers for it: lium request {gpu}" + (f" -n {count}" if count else "")
+                return ActionResult(ok=False, data={}, error=error)
 
             from lium.cli.ls.display import sort_executors
 
