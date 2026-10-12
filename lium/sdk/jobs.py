@@ -42,7 +42,7 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 def _ssh_exception() -> type:
     """``paramiko.SSHException``, imported when an exec fails rather than with the CLI.
 
-    Importing the CLI must not load paramiko (DAH-3053); ``client.py`` keeps it lazy
+    Importing the CLI must not load paramiko; ``client.py`` keeps it lazy
     and so does this module — by the time an exec raises, ``ssh_connection`` has
     imported it anyway.
     """

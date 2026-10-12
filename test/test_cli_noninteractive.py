@@ -8,6 +8,7 @@ now goes through one gate: with no terminal on stdin, or with
 once with a hint naming the flag to pass.
 """
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -203,7 +204,10 @@ def test_volumes_rm_without_yes_fails_fast_when_piped(monkeypatch):
     monkeypatch.setattr(volumes_rm_module, "ensure_config", lambda: None)
     monkeypatch.setattr(
         volumes_rm_module, "get_last_volume_selection",
-        lambda: {"volumes": [{"id": "vol-1", "huid": "calm-lake-01", "name": "data"}]},
+        lambda: {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "volumes": [{"id": "vol-1", "huid": "calm-lake-01", "name": "data"}],
+        },
     )
     monkeypatch.setattr(volumes_rm_module, "Lium", lambda *a, **k: pytest.fail("removal started"))
 

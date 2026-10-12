@@ -467,3 +467,40 @@ def test_stream_exec_default_pty_is_unchanged(monkeypatch):
 
     assert calls["get_pty"] is True
     assert calls["command"] == "export A=1 && ls"
+
+
+class _SplitCharChannel:
+    def __init__(self, out):
+        self.out = list(out)
+
+    def recv_ready(self):
+        return bool(self.out)
+
+    def recv(self, n):
+        return self.out.pop(0)
+
+    def recv_stderr_ready(self):
+        return False
+
+    def exit_status_ready(self):
+        return not self.out
+
+    def recv_exit_status(self):
+        return 0
+
+
+@pytest.mark.parametrize(
+    ("out", "expected"),
+    [
+        (["██".encode()[:4], "██".encode()[4:]], "██"),  # split inside the second "█"
+        ([b"good\xe2\x96"], "good\ufffd"),  # the command ends mid-character
+    ],
+    ids=["split-across-reads", "ends-mid-character"],
+)
+def test_stream_exec_decodes_utf8_across_reads_and_at_exit(monkeypatch, out, expected):
+    client, _ = _stream_client(monkeypatch, _SplitCharChannel(out))
+    pod = SimpleNamespace(id="pod-1", name="p", ssh_cmd="ssh root@10.0.0.1 -p 22")
+
+    text = "".join(chunk["data"] for chunk in client.stream_exec(pod, command="train"))
+
+    assert text == expected

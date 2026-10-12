@@ -13,7 +13,7 @@ from lium.cli.provider import _blocking
 from lium.cli.provider._client import build_client
 from lium.cli.provider._overrides import with_provider_overrides
 from lium.cli.provider._render import emit_error, render
-from lium.provider.errors import ARG_INVALID, ProviderError
+from lium.provider.errors import ARG_INVALID, PORTAL_AUTH_INVALID, ProviderError
 from lium.provider.models import ExecutorInfo
 
 
@@ -64,7 +64,13 @@ def status_command(ctx: click.Context, netuid: int) -> None:
         if snapshot.registered_on_subnet is not None
         else "registered=unknown"
     )
-    summary_parts.append(f"portal={'active' if snapshot.portal_session_active else 'down'}")
+    if snapshot.portal_session_active:
+        portal_state = "active"
+    elif f"whoami: {PORTAL_AUTH_INVALID}" in (snapshot.warnings or []):
+        portal_state = "not-signed-in"  # the portal answered; this hotkey has no valid session
+    else:
+        portal_state = "down"
+    summary_parts.append(f"portal={portal_state}")
     if snapshot.discord_connected is not None:
         summary_parts.append(f"discord_connected={snapshot.discord_connected}")
     if snapshot.extra_incentive_eligible is not None:

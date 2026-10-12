@@ -194,7 +194,7 @@ def _post_rent_failure(exc: Exception, billing_pod: dict, doing: str, note: str 
 @click.option("--dockerfile", type=click.Path(exists=True, dir_okay=False, readable=True), help="Path to a Dockerfile to build the pod image from (custom build; mutually exclusive with --image/--template_id)")
 @click.option("-e", "--env", multiple=True, help="Environment variables (KEY=VALUE), can be repeated")
 @click.option("--entrypoint", default="", help="Container entrypoint")
-@click.option("--cmd", default="", help="Command to run in the container")
+@click.option("--cmd", default="", help="Command that keeps the container running. Base images (pytorch/pytorch, nvidia/cuda, ubuntu) need 'sleep infinity'")
 @click.option("--ssh-name", default=None, help="Name to register a new SSH key under (default: cli-<user>@<hostname>)")
 @click.option(
     "--volume-encryption/--no-volume-encryption",
@@ -300,7 +300,7 @@ def up_command(
     dockerfile_mode = dockerfile is not None
 
     valid, error = validation.validate(
-        executor_id, gpu, count, country, ttl, until, image, template_id, dockerfile, min_cpus
+        executor_id, gpu, count, country, ttl, until, image, template_id, dockerfile, min_cpus, ports
     )
     if not valid:
         raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
@@ -321,6 +321,13 @@ def up_command(
     parsed, error = parsing.parse(ttl, until, volume)
     if error:
         raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
+    if not docker_run_mode and not dockerfile_mode and (env or entrypoint or cmd or internal_ports):
+        # only the --image path builds a template from them; a template rent would drop them silently
+        raise CliFailure(
+            "invalid_arguments",
+            "-e/--env, --entrypoint, --cmd and --internal-ports apply only with --image",
+            EXIT_CONFIGURATION_ERROR,
+        )
 
     termination_time = parsed.get("termination_time")  # --until; --ttl becomes a time at the rent
     ttl_duration = parsed.get("ttl")

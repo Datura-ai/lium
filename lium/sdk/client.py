@@ -1,5 +1,6 @@
 """Lium SDK - Clean, Unix-style SDK for GPU pod management."""
 
+import codecs
 import getpass
 import hashlib
 import ipaddress
@@ -315,7 +316,7 @@ _AVAILABLE_RE = re.compile(r"balance is " + _USD, re.I)
 def _response_error_code(response: requests.Response) -> Optional[str]:
     """The stable ``error.code`` of the platform's error body, when it sends one.
 
-    lium-platform#210 (DAH-3056) answers every 4xx/5xx with
+    The platform answers every 4xx/5xx with
     ``{"error": {"code", "message", "hint", "request_id"}, ...}``; older servers
     send ``error`` as a string or not at all, and then this is ``None``.
     """
@@ -383,7 +384,7 @@ def permission_error(
 
     ``code`` is the platform's structured ``error.code`` when the response carried
     one (:func:`_response_error_code`); it decides. Without it the message text
-    decides, which is what every server before lium-platform#210 sends. ``key``
+    decides, as it does for a server whose error body carries no code. ``key``
     (the API key's fingerprint and source) is appended so the message says which
     key the server refused. ``code`` and ``context`` (:func:`_error_context`'s
     hint/request_id) are carried on the exception.
@@ -1791,13 +1792,18 @@ class Lium:
             >>> lium.edit(pod_id, startup_commands="python main.py", environment={"DEBUG": "1"})
         """
         pod = self.pod(pod_id=pod_id)
+        template_id = pod["template"]["id"]
+        # The pod row's template omits docker_credential_id, supports_docker, ...; the PUT writes every
+        # field it is given, so the base is the template row itself. Its NULL columns (volumes, environment,
+        # entrypoint on most older templates) are dropped: the PUT accepts none of them as null.
+        template = self._request("GET", f"/templates/{template_id}").json()
 
         payload = {
-            **pod["template"],
+            **{k: v for k, v in template.items() if v is not None},
             **kwargs,
         }
 
-        result = self._request("PUT", f"/templates/{pod['template']['id']}", json=payload).json()
+        result = self._request("PUT", f"/templates/{template_id}", json=payload).json()
         # The backend routes this PUT into a container reboot (pod_service.edit_pod ->
         # reboot_rental_container), so the pod's SSH host key changes with it.
         forget_host_key(pod_id)
@@ -2585,6 +2591,31 @@ class Lium:
             return None
         return sorted({t for t in (extract_gpu_type(n) for n in names) if re.fullmatch(r"[A-Z]*\d{2,4}[A-Z]*", t)})
 
+    def request_machine(self, gpu: str, count: Optional[int] = None) -> Dict[str, Any]:
+        """Ask providers for a GPU type that is sold out (``POST /machine-requests``).
+
+        ``gpu`` is a short type (``B300``, ``4090``) or a full catalog name. The providers who
+        list that type are told, and the request shows in ``lium.io/machine-requests``. A short
+        type that covers several catalog names must be given by one of them.
+
+        Returns:
+            The API's answer: ``provider_notified_count`` and, when present, ``confirmation``.
+        """
+        names = sorted(name for name in self.gpu_types() if name)
+        if gpu in names:
+            machine_name = gpu
+        else:
+            matches = [name for name in names if gpu_short_matches(gpu, extract_gpu_type(name))]
+            if not matches:
+                raise ValueError(f"No GPU type matches '{gpu}'")
+            if len(matches) > 1:
+                raise ValueError(f"'{gpu}' covers several GPU types; name one: {', '.join(matches)}")
+            machine_name = matches[0]
+        payload: Dict[str, Any] = {"machine_name": machine_name}
+        if count:
+            payload["gpu_count"] = count
+        return self._request("POST", "/machine-requests", json=payload).json()
+
     def get_template(self, template_id: str) -> Optional[Template]:
         """Fetch a template by ID/HUID/name.
 
@@ -2714,9 +2745,9 @@ class Lium:
         """``export NAME=value`` statements for ``env``, shell-quoted so each value
         reaches the pod byte-for-byte (spaces, quotes, ``$``, newlines).
 
-        Names must be valid shell identifiers (DAH-2894); anything else raises
-        :class:`ValueError` here rather than failing with an opaque
-        ``export: not a valid identifier`` on the pod.
+        Names must be valid shell identifiers; anything else raises
+        :class:`ValueError` here, before anything runs on the pod, and the
+        message names the variable.
         """
         exports = []
         for name, value in env.items():
@@ -3128,16 +3159,19 @@ class Lium:
             stdin.close()
 
             channel = stdout.channel
+            # one decoder per stream: a UTF-8 character split across two reads must not become U+FFFD
+            out_text = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            err_text = codecs.getincrementaldecoder("utf-8")(errors="replace")
             while True:
                 got = False
                 if channel.recv_ready():
-                    data = channel.recv(4096).decode("utf-8", errors="replace")
+                    data = out_text.decode(channel.recv(4096))
                     if data:
                         got = True
                         yield {"type": "stdout", "data": data}
 
                 if channel.recv_stderr_ready():
-                    data = channel.recv_stderr(4096).decode("utf-8", errors="replace")
+                    data = err_text.decode(channel.recv_stderr(4096))
                     if data:
                         got = True
                         yield {"type": "stderr", "data": data}
@@ -3145,6 +3179,11 @@ class Lium:
                 if got:
                     continue
                 if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                    # a command that ends mid-character still shows it, as U+FFFD
+                    for kind, decoder in (("stdout", out_text), ("stderr", err_text)):
+                        tail = decoder.decode(b"", final=True)
+                        if tail:
+                            yield {"type": kind, "data": tail}
                     return channel.recv_exit_status()
                 time.sleep(0.05)  # nothing pending: do not spin at 100% CPU until the command ends
 
@@ -3219,6 +3258,10 @@ class Lium:
     # DAH-3002: the backend marks a cached-template pod RUNNING at p50 22.5 s after the rent
     # (7 d to 6 Sep 2026); polled every 10 s the caller learnt it 0–10 s late. Poll every
     # 2 s while a normal start is still plausible, then fall back to the old 10 s.
+    # A 2 s poll still reports RUNNING 1 s late on average; cached pods are RUNNING at p50 16 s /
+    # p90 31 s (6 Oct 2026), so the first 40 s poll every second.
+    FIRST_POLL_SECONDS = 1
+    FIRST_POLL_WINDOW_SECONDS = 40
     FAST_POLL_SECONDS = 2
     FAST_POLL_WINDOW_SECONDS = 90
     SLOW_POLL_SECONDS = 10
@@ -3228,11 +3271,14 @@ class Lium:
         """Seconds to sleep between two ``wait_ready`` polls.
 
         A caller-given ``poll_interval`` is used as-is; ``None`` selects the adaptive
-        schedule (:attr:`FAST_POLL_SECONDS` for the first :attr:`FAST_POLL_WINDOW_SECONDS`
-        seconds, :attr:`SLOW_POLL_SECONDS` after that).
+        schedule (:attr:`FIRST_POLL_SECONDS` for the first :attr:`FIRST_POLL_WINDOW_SECONDS`
+        seconds, :attr:`FAST_POLL_SECONDS` until :attr:`FAST_POLL_WINDOW_SECONDS`,
+        :attr:`SLOW_POLL_SECONDS` after that).
         """
         if poll_interval is not None:
             return poll_interval
+        if elapsed < cls.FIRST_POLL_WINDOW_SECONDS:
+            return cls.FIRST_POLL_SECONDS
         return cls.FAST_POLL_SECONDS if elapsed < cls.FAST_POLL_WINDOW_SECONDS else cls.SLOW_POLL_SECONDS
 
     def pod_events(self, pod_id: str) -> List[Dict[str, Any]]:
@@ -3295,8 +3341,9 @@ class Lium:
             timeout: Maximum number of seconds to wait; ``None`` waits until the
                 pod is ready or fails.
             poll_interval: Fixed interval between successive ``ps`` calls; ``None``
-                (default) polls every :attr:`FAST_POLL_SECONDS` for the first
-                :attr:`FAST_POLL_WINDOW_SECONDS` seconds, then every
+                (default) polls every :attr:`FIRST_POLL_SECONDS` for the first
+                :attr:`FIRST_POLL_WINDOW_SECONDS` seconds, every :attr:`FAST_POLL_SECONDS`
+                until :attr:`FAST_POLL_WINDOW_SECONDS`, then every
                 :attr:`SLOW_POLL_SECONDS` — see :meth:`poll_delay`.
             on_poll: Called after every poll with the pod as last listed (or
                 ``None``), its status (``"missing"`` when not listed) and the
@@ -4239,6 +4286,35 @@ class Lium:
         
         response = self._request("POST", "/backup-configs", json=payload).json()
         
+        return self._dict_to_backup_config(response)
+
+    def backup_update(
+        self,
+        config_id: str,
+        *,
+        path: str,
+        frequency_hours: int,
+        retention_days: int,
+    ) -> BackupConfig:
+        """Replace the schedule of an existing backup configuration in place.
+
+        A refused update leaves the old configuration as it was.
+
+        Args:
+            config_id: Backup configuration identifier.
+            path: Explicit filesystem path inside the pod volume to back up.
+            frequency_hours: Backup interval in hours.
+            retention_days: Retention period in days.
+
+        Returns:
+            Updated :class:`BackupConfig`.
+        """
+        payload = {
+            "backup_frequency_hours": frequency_hours,
+            "retention_days": retention_days,
+            "backup_path": path,
+        }
+        response = self._request("PUT", f"/backup-configs/{quote(str(config_id), safe='')}", json=payload).json()
         return self._dict_to_backup_config(response)
 
     def backup_now(

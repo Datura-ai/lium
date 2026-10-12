@@ -22,7 +22,9 @@ def sleeps(monkeypatch):
 
 
 def test_poll_delay_is_fast_first_then_slow():
-    assert Lium.poll_delay(0) == Lium.FAST_POLL_SECONDS == 2
+    assert Lium.poll_delay(0) == Lium.FIRST_POLL_SECONDS == 1
+    assert Lium.poll_delay(39.9) == 1
+    assert Lium.poll_delay(40) == Lium.FAST_POLL_SECONDS == 2
     assert Lium.poll_delay(89.9) == 2
     assert Lium.poll_delay(90) == Lium.SLOW_POLL_SECONDS == 10
     assert Lium.poll_delay(600) == 10
@@ -33,35 +35,35 @@ def test_poll_delay_honours_a_fixed_interval():
     assert Lium.poll_delay(600, poll_interval=1) == 1
 
 
-def test_wait_ready_sleeps_two_seconds_between_early_polls(sleeps, monkeypatch):
-    clock = iter([0, 0, 2, 4])
+def test_wait_ready_sleeps_one_second_between_early_polls(sleeps, monkeypatch):
+    clock = iter([0, 0, 1, 2])
     monkeypatch.setattr("lium.sdk.client.time.time", lambda: next(clock))
     client = _Client([[_pod("PENDING", None)], [_pod("PENDING", None)], [_pod("RUNNING")]])
 
     ready = client.wait_ready("pod-1", timeout=300)
 
     assert ready.status == "RUNNING"
-    assert sleeps == [2, 2]
+    assert sleeps == [1, 1]
 
 
 def test_wait_ready_backs_off_to_ten_seconds_after_the_fast_window(sleeps, monkeypatch):
-    clock = iter([0, 0, 30, 95, 200])
+    clock = iter([0, 0, 30, 60, 95, 200])
     monkeypatch.setattr("lium.sdk.client.time.time", lambda: next(clock))
-    client = _Client([[_pod("PENDING", None)]] * 3 + [[_pod("RUNNING")]])
+    client = _Client([[_pod("PENDING", None)]] * 4 + [[_pod("RUNNING")]])
 
     client.wait_ready("pod-1", timeout=1000)
 
-    assert sleeps == [2, 2, 10]
+    assert sleeps == [1, 1, 2, 10]
 
 
 def test_wait_ready_uses_the_fast_schedule_for_a_pod_not_yet_listed(sleeps, monkeypatch):
-    clock = iter([0, 0, 2])
+    clock = iter([0, 0, 1])
     monkeypatch.setattr("lium.sdk.client.time.time", lambda: next(clock))
     client = _Client([[], [_pod("RUNNING")]])
 
     client.wait_ready("pod-1", timeout=300)
 
-    assert sleeps == [2]
+    assert sleeps == [1]
 
 
 def test_explicit_poll_interval_is_still_a_fixed_interval(sleeps):

@@ -131,7 +131,7 @@ def parse_volume_spec(volume: str) -> tuple[str | None, dict | None, str]:
 
         volume_id = resolve_volume_huid(huid)
         if not volume_id:
-            return None, None, f"Volume with HUID '{huid}' not found. Run 'lium volumes' first."
+            return None, None, f"Volume with HUID '{huid}' not found in your volumes (see 'lium volumes')."
 
         return volume_id, None, ""
 
