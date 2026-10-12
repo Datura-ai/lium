@@ -371,7 +371,7 @@ BAKED_COMPOSE = f"services:\n  executor:\n    image: {EXECUTOR}\n  autoheal:\n  
 CURRENT_NODE_IMAGES = {RUNNER, "daturaai/lium-watchtower:1.1.1", EXECUTOR, "willfarrell/autoheal", mine.PREFLIGHT_IMAGE}
 
 
-def _disk(monkeypatch, free_bytes: float, available_images: set = frozenset(), sizes: dict | None = None) -> list:
+def _disk(monkeypatch, free_bytes: float, available_images: set = frozenset()) -> list:
     calls = []
 
     def fake_run(cmd, check=True, capture=True, cwd=None):
@@ -387,10 +387,9 @@ def _disk(monkeypatch, free_bytes: float, available_images: set = frozenset(), s
             assert RUNNER in available_images
             assert "--pull" not in cmd  # Docker before 20.10 has no --pull on docker run
             return BAKED_COMPOSE, ""
-        ref = cmd.split()[-1].strip("'")
-        if ref not in available_images:  # docker image inspect <ref>
+        if cmd.split()[-1].strip("'") not in available_images:  # docker image inspect <ref>
             raise RuntimeError(f"Command failed (1): {cmd}")
-        return (f"{(sizes or {}).get(ref, 0)}\n" if "{{.Size}}" in cmd else "[]"), ""
+        return "[]", ""
 
     monkeypatch.setattr(mine, "_run", fake_run)
     monkeypatch.setattr(mine.shutil, "disk_usage", lambda path: SimpleNamespace(free=free_bytes))
@@ -437,19 +436,6 @@ def test_free_disk_check_refuses_below_the_validator_floor_even_when_the_images_
 
     with pytest.raises(Exception, match="100 GiB needed"):
         mine._check_free_disk(tmp_path)
-
-
-# `compose up --pull always` re-pulls an image behind a tag (autoheal has none) when the tag moved; the digest-pinned
-# executor never changes, so only the tagged images' sizes are reserved
-def test_free_disk_check_reserves_a_rerun_s_tagged_images_for_compose_up_pull_always(monkeypatch, tmp_path) -> None:
-    sizes = {EXECUTOR: 30 * mine.GIB, "willfarrell/autoheal": mine.GIB // 2, RUNNER: mine.GIB // 5}
-    _disk(monkeypatch, free_bytes=100 * mine.GIB, available_images=CURRENT_NODE_IMAGES, sizes=sizes)
-
-    with pytest.raises(Exception, match="101 GiB needed"):
-        mine._check_free_disk(tmp_path)
-
-    _disk(monkeypatch, free_bytes=101 * mine.GIB, available_images=CURRENT_NODE_IMAGES, sizes=sizes)
-    mine._check_free_disk(tmp_path)
 
 
 def test_gather_inputs_auto_uses_the_given_ports() -> None:

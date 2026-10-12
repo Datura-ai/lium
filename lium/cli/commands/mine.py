@@ -1,7 +1,6 @@
 """Mine command for setting up a compute subnet executor/miner."""
 
 import json
-import math
 import re
 import shlex
 import shutil
@@ -192,12 +191,9 @@ NODE_IMAGES_GIB = 40
 GIB = 1024**3
 
 
-def _node_images_reserve_gib(executor_dir: Path) -> int:
-    """GiB the node images may still download. The runner image carries the compose file with the executor digest
-    the runner injects at build, so that file, not the unrendered docker-compose.app.yml, names the images. With any
-    of them missing, reserve the full NODE_IMAGES_GIB; with all local, the runner's `compose up --pull always` (and
-    the preflight `docker pull`) can still fetch a newer image behind any tag, so reserve the size of every image not
-    pinned by digest."""
+def _node_images_present(executor_dir: Path) -> bool:
+    """Every image this run would pull is already local. The runner image carries the compose file with the executor
+    digest the runner injects at build, so that file, not the unrendered docker-compose.app.yml, names the images."""
     try:
         images = set(_run("docker compose config --images", cwd=str(executor_dir))[0].split())
         runner = next(i for i in images if "executor-runner" in i)
@@ -207,21 +203,21 @@ def _node_images_reserve_gib(executor_dir: Path) -> int:
         baked = _run(f"docker run --rm --entrypoint cat {shlex.quote(runner)} /root/executor/docker-compose.yml")[0]
         images.update(re.findall(r"^\s*image:\s*(\S+)", baked, re.MULTILINE))
         images.add(PREFLIGHT_IMAGE)
-        sizes = {i: int(_run(f"docker image inspect --format '{{{{.Size}}}}' {shlex.quote(i)}")[0]) for i in images}
-    except (RuntimeError, StopIteration, ValueError):
-        return NODE_IMAGES_GIB
-    return math.ceil(sum(size for image, size in sizes.items() if "@sha256:" not in image) / GIB)
+        for image in images:
+            _run(f"docker image inspect {shlex.quote(image)}")
+    except (RuntimeError, StopIteration):
+        return False
+    return True
 
 
 def _check_free_disk(executor_dir: Path):
     root = _run("docker info --format '{{.DockerRootDir}}'", check=False)[0].strip() or "/var/lib/docker"
     free = shutil.disk_usage(root if Path(root).exists() else "/").free
-    reserve_gib = _node_images_reserve_gib(executor_dir)
-    needed_gib = NODE_FREE_DISK_GIB + reserve_gib
+    needed_gib = NODE_FREE_DISK_GIB + (0 if _node_images_present(executor_dir) else NODE_IMAGES_GIB)
     if free < needed_gib * GIB:
         raise Exception(
             f"Not enough free disk: {free / GIB:.1f} GiB free on {root}, {needed_gib} GiB needed "
-            f"(validation requires {NODE_FREE_DISK_GIB} GiB free after up to {reserve_gib} GiB of node image pulls). "
+            f"(validation requires {NODE_FREE_DISK_GIB} GiB free after about {NODE_IMAGES_GIB} GiB of node images). "
             "Use a host with a disk of at least 160 GB, or free space and re-run."
         )
 
