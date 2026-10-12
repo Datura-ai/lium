@@ -99,8 +99,8 @@ class LiumHostKeyError(LiumError):
 
 
 class OutputLimitExceeded(LiumError):
-    """A command run with ``Lium.exec`` produced output that needs more than ``max_output_bytes`` of memory
-    (stdout and stderr together, raw bytes plus decoded text)."""
+    """A command run with ``Lium.exec`` produced more than ``max_output_bytes`` of output
+    (stdout and stderr together, raw bytes; the decoded text comes on top)."""
 
 
 class RemoteExecutionError(LiumError):

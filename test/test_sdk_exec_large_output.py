@@ -95,22 +95,10 @@ def test_exec_stops_reading_past_max_output_bytes(tmp_path, monkeypatch):
         lium.exec(pod, command="big-output", timeout=10, max_output_bytes=OUTPUT_BYTES // 2)
 
 
-@pytest.mark.parametrize(
-    ("wire_bytes", "tail", "limit"),
-    [
-        (3 * 1024**2, b"x", 4 * 1024**2), (1024**2, b"\xf0\x9f\x98\x80", 4 * 1024**2),
-        (1024**2, b"\xff", 4 * 1024**2),
-        (800 * 1024, b"\xf0\x9f\x98\x80", 4 * 1024**2),  # fits raw + 4x text, not the narrow decode buffer too
-        (450, b"x", 1024),  # fits the raw buffers, not the str headers too
-        (5 * 1024**2, b"x", 4 * 1024**2),  # a reader crosses the limit while draining
-        # a 2-byte character before an emoji widens twice: a 2-byte and a 4-byte buffer at once
-        (10 * 1024**2, b"\xc4\x80\xf0\x9f\x98\x80", 64 * 1024**2),
-    ],
-)
-def test_exec_limit_bounds_kept_text_not_wire_bytes(wire_bytes, tail, limit):
+def _probe(wire_bytes, tail, limit):
+    """Run exec over a fake held session whose stdout is ``wire_bytes`` long and ends in ``tail``."""
     from contextlib import nullcontext
     from types import SimpleNamespace
-    import tracemalloc
 
     remaining = wire_bytes
 
@@ -134,12 +122,21 @@ def test_exec_limit_bounds_kept_text_not_wire_bytes(wire_bytes, tail, limit):
         close=lambda: closed.append("connection"),
     )
     client = SimpleNamespace(ssh_connection=lambda pod: nullcontext(ssh))  # a held session: exec must not close it
-    tracemalloc.start()
-    try:
-        with pytest.raises(OutputLimitExceeded):
-            Lium.exec(client, SimpleNamespace(name="p", huid="p"), command="probe", max_output_bytes=limit)
-        assert tracemalloc.get_traced_memory()[1] <= limit + 256 * 1024
-        # both rejections (a reader crossing the limit, the reservation before decoding) close the channel
-        assert "channel" in closed and "connection" not in closed
-    finally:
-        tracemalloc.stop()
+    run = lambda: Lium.exec(client, SimpleNamespace(name="p", huid="p"), command="probe", max_output_bytes=limit)
+    return run, closed
+
+
+@pytest.mark.parametrize(("wire_bytes", "limit"), [(5 * 1024**2, 4 * 1024**2), (1025, 1024)])
+def test_exec_output_past_the_limit_closes_the_channel_only(wire_bytes, limit):
+    run, closed = _probe(wire_bytes, b"x", limit)
+    with pytest.raises(OutputLimitExceeded):
+        run()
+    assert "channel" in closed and "connection" not in closed
+
+
+def test_exec_limit_counts_raw_bytes_not_decoded_text():
+    # mostly ASCII with one non-ASCII character: 10 MiB on the wire is well under the 64 MiB default
+    run, closed = _probe(10 * 1024**2, "\u00e9".encode(), 64 * 1024**2)
+    result = run()
+    assert len(result["stdout"]) == 10 * 1024**2 - 1 and result["stdout"].endswith("\u00e9")
+    assert "connection" not in closed

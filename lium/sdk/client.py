@@ -12,7 +12,6 @@ import shlex
 import socket
 import stat
 import subprocess
-import sys
 import threading
 import time
 import uuid
@@ -2869,17 +2868,17 @@ class Lium:
                 ``/workspace/logs/exec-<UTC timestamp>-<id>.log``, the ``<id>`` a
                 6-hex tail that keeps two launches in the same second apart).
 
-            max_output_bytes: Limit on the memory held for stdout and stderr together
-                (the raw bytes plus the text decoded from them). Past it the
-                channel is closed and :class:`OutputLimitExceeded` is raised, so
-                a pod cannot grow this process's memory without bound.
+            max_output_bytes: Limit on the raw bytes of stdout and stderr held
+                together (the decoded text comes on top). Past it the channel is
+                closed and :class:`OutputLimitExceeded` is raised, so a pod
+                cannot grow this process's memory without bound.
 
         Returns:
             Dict containing stdout, stderr, exit_code, and success flag; with
             ``detach`` a dict with ``pid``, ``log_path`` and ``command``.
 
         Raises:
-            OutputLimitExceeded: holding the output would take more than ``max_output_bytes``.
+            OutputLimitExceeded: stdout and stderr together are more than ``max_output_bytes``.
             ValueError: an ``env`` name is not a shell identifier. Raised before
                 the connection is opened, so nothing reaches the pod.
         """
@@ -2910,24 +2909,18 @@ class Lium:
                 # ``read`` returns as soon as any bytes arrive (paramiko's ``stream.read(n)`` waits for
                 # n of them), so the limit is checked per chunk and a slow trickle cannot outrun it.
                 # One bytearray per stream, returned as is: no list of parts, no join or bytes() copy.
-                buf, held = bytearray(), 0
+                buf = bytearray()
                 while True:
                     chunk = read(65536)
                     if not chunk:
                         return buf
-                    # Count before appending, and count the capacity the append may allocate (a growing
-                    # bytearray over-allocates by up to 1/8, plus its header), not just the wire length:
-                    # the chunk that would cross the limit is never added, so the buffers never hold
-                    # more than ``max_output_bytes``.
-                    need = len(buf) + len(chunk)
-                    cap = need + (need >> 3) + 64
+                    # count before appending: the chunk that would cross the limit is never added
                     with lock:
-                        total[0] += cap - held
+                        total[0] += len(chunk)
                         if total[0] > max_output_bytes:
                             over.set()
                             channel.close()
                             return b""
-                    held = cap
                     buf += chunk
 
             raw = hasattr(channel, "recv_stderr")
@@ -2947,24 +2940,12 @@ class Lium:
                     time.sleep(0.1)
             out_bytes, err_bytes = out.result(), err.result()
             del out, err  # the futures keep their results alive
-            # The raw buffers stay alive while they are decoded, and a str keeps 1 byte per character
-            # for ASCII and up to 4 otherwise (one emoji widens the whole string). Widening also holds
-            # the previous buffer next to the wide result: 1 byte per character, or 2 when a character
-            # from U+0100..U+FFFF (an invalid byte replaced by U+FFFD included) comes before an emoji,
-            # so non-ASCII reserves 2 + 4 = 6 per byte: reserve it all against the limit before
-            # allocating the text.
-            # getsizeof counts the bytearray's allocated capacity, which exceeds its length, and each
-            # str also carries its object header (largest for a non-ASCII str), so both count too.
-            str_header = sys.getsizeof("\U0001F600") - 4
-            worst = sum(
-                sys.getsizeof(b) + str_header + len(b) * (1 if b.isascii() else 6) for b in (out_bytes, err_bytes)
-            )
-            if over.is_set() or worst > max_output_bytes:
+            if over.is_set():
                 # a held session (ssh_session) outlives this call: close the channel, or a command that sent EOF
                 # without closing it keeps a remote session slot; the shared SSH connection stays open
                 channel.close()
                 raise OutputLimitExceeded(
-                    f"Output of the command on pod {pod.name or pod.huid} needs more than {max_output_bytes} bytes of memory"
+                    f"Output of the command on pod {pod.name or pod.huid} is more than {max_output_bytes} bytes"
                 )
             out_text = out_bytes.decode("utf-8", errors="replace")
             err_text = err_bytes.decode("utf-8", errors="replace")
