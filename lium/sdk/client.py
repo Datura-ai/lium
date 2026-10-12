@@ -2590,16 +2590,20 @@ class Lium:
         """Fetch a template by ID/HUID/name.
 
         Args:
-            template_id: Template ID, HUID, or name to match. A HUID or name matches only the
+            template_id: Template ID, HUID, or name to match. A HUID or name picks only the
                 caller's own templates; someone else's public template is chosen by its ID.
 
         Returns:
             Matching :class:`Template` or ``None`` if not found.
+
+        Raises:
+            LiumError: the HUID or name matches several of the caller's templates, or matches only
+                public templates of other users (the message names their IDs and images).
         """
         try:
             uuid.UUID(str(template_id))
         except ValueError:  # GET /templates/{id} takes only a UUID (422 otherwise)
-            return self._template_by_huid_or_name(template_id)
+            return self._template_by_huid_or_name(template_id, name_public=True)
         try:
             d = self._request("GET", f"/templates/{quote(str(template_id), safe='')}").json()
         except LiumNotFoundError:  # a name may itself be a UUID; only the caller's own templates, never a public one that borrows the ID
@@ -2622,14 +2626,24 @@ class Lium:
                 raise
             return []  # an anonymous caller has no templates of its own
 
-    def _template_by_huid_or_name(self, selector: str) -> Optional[Template]:
-        # Only the caller's own templates match by HUID or name. Whoever publishes a template picks its name, and a
-        # HUID has only 25,600 values, so a publisher could pick or grind a public look-alike of either: someone
-        # else's template is chosen by its full ID. Names are not unique either: never pick one of several.
+    def _template_by_huid_or_name(self, selector: str, name_public: bool = False) -> Optional[Template]:
+        # Only the caller's own templates are picked by HUID or name. Whoever publishes a template picks its name, and
+        # a HUID has only 25,600 values, so a publisher could pick or grind a public look-alike of either: someone
+        # else's template is never chosen silently. Names are not unique either: never pick one of several.
         matches = [t for t in self._own_templates() if selector in (t.huid, t.name)]
         if len(matches) > 1:
             raise LiumError(f"Template {selector!r} is ambiguous ({len(matches)} templates match); use its ID")
-        return matches[0] if matches else None
+        if matches:
+            return matches[0]
+        public = [t for t in self.templates() if selector in (t.huid, t.name)] if name_public else []
+        if public:
+            # listed but someone else's: name each match's ID and image, so the caller chooses one knowingly
+            found = "; ".join(f"{t.id} ({t.docker_image}:{t.docker_image_tag})" for t in public[:5])
+            raise LiumError(
+                f"Template {selector!r} is not one of yours; a public template is chosen by its ID. "
+                f"Matching public template{'s' if len(public) > 1 else ''}: {found}"
+            )
+        return None
 
     def get_template_by_image_name(self, image_name: Optional[str] = None, image_tag: Optional[str] = None) -> Optional[Template]:
         """Fetch a template by its Docker image + tag.

@@ -514,9 +514,11 @@ def test_get_template_finds_a_template_by_huid_or_name(monkeypatch):
 
     assert client.get_template("training") is mine
     assert client.get_template("quiet-fox-11") is mine
-    # someone else's template is chosen by its ID: its name is the publisher's pick and a HUID can be ground
-    assert client.get_template("Pytorch (Cuda + DinD)") is None
-    assert client.get_template("calm-lion-2c") is None
+    # someone else's template is never picked by its name (the publisher's pick) or HUID (it can be ground):
+    # the error names its ID, so the caller chooses it knowingly
+    for selector in ("Pytorch (Cuda + DinD)", "calm-lion-2c"):
+        with pytest.raises(LiumError, match=f"not one of yours.*{template_id}"):
+            client.get_template(selector)
     assert client.get_template("no-such-template") is None
 
     duplicates = [Template(id=i, huid="same-huid", name="training", docker_image=i, docker_image_tag="latest",
@@ -554,8 +556,9 @@ def test_get_template_finds_a_template_by_huid_or_name(monkeypatch):
         return [template]
 
     monkeypatch.setattr(client, "templates", public_only)
-    assert client.get_template("calm-lion-2c") is None  # without a key there are no own templates to match
-    assert client.get_template("Pytorch (Cuda + DinD)") is None
+    for selector in ("calm-lion-2c", "Pytorch (Cuda + DinD)"):  # without a key, no own templates: the ID is named
+        with pytest.raises(LiumError, match=template_id):
+            client.get_template(selector)
 
 
 def test_get_template_raises_errors_other_than_not_found(monkeypatch):
