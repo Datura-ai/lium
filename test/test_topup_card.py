@@ -319,18 +319,22 @@ def test_a_server_error_is_sent_once_and_is_an_unknown_outcome_carrying_the_key(
 
 
 @responses.activate
-def test_a_502_before_the_card_is_touched_is_a_server_error_not_an_unknown_outcome(client):
-    """`STRIPE_UNAVAILABLE` is a retrieve/list failure: nothing was charged, so this is not exit 6."""
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(502, "STRIPE_UNAVAILABLE"), (503, "TOP_UP_BUSY")],
+)
+def test_a_5xx_before_the_card_is_touched_is_a_server_error_not_an_unknown_outcome(client, status, code):
+    """Retrieve/list failures and a full submission pool charge nothing, so neither is exit 6."""
     responses.post(
         TOPUP,
-        status=502,
-        json=_error_body(502, {"code": "STRIPE_UNAVAILABLE", "message": "Stripe is unavailable; nothing was charged."}),
+        status=status,
+        json=_error_body(status, {"code": code, "message": "Nothing was charged."}),
     )
 
     with pytest.raises(LiumServerError) as raised:
         client.topup_card(50, idempotency_key="nightly-1")
 
-    assert raised.value.code == "STRIPE_UNAVAILABLE"
+    assert raised.value.code == code
     assert len(responses.calls) == 1
 
 
