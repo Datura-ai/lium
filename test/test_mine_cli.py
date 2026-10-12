@@ -436,3 +436,10 @@ def test_free_disk_check_refuses_below_the_validator_floor_even_when_the_images_
 
     with pytest.raises(Exception, match="100 GiB needed"):
         mine._check_free_disk(tmp_path)
+
+
+def test_gather_inputs_auto_uses_the_given_ports() -> None:
+    answers = mine._gather_inputs("hk", auto=True, internal_port=8081, external_port=40123)
+
+    assert answers["internal_port"] == "8081"
+    assert answers["external_port"] == "40123"
