@@ -2492,6 +2492,16 @@ class Lium:
             raise ValueError(self.ambiguous_executor_message(executor, matches))
         return matches[0] if matches else None
 
+    def pod_record(self, pod_id: str) -> Dict[str, Any]:
+        """What one run ran on and what it cost, readable after the pod is removed.
+
+        ``GET /pods/{id}/record``: GPU model and count, the image (with its digest when the template pins
+        one), the node's driver/CUDA/interconnect when the container came up (``environment``, null for
+        older runs), start and end, ``close_reason``, ``billed_seconds``, ``total`` (what the ledger
+        charged) and ``price_segments``. A server without the route answers 404 (``LiumNotFoundError``).
+        """
+        return self._request("GET", f"/pods/{uuid.UUID(str(pod_id))}/record").json()
+
     @staticmethod
     def ambiguous_executor_message(executor: str, matches: List[ExecutorInfo]) -> str:
         """The sentence for a HUID that is shared by several listed nodes."""
