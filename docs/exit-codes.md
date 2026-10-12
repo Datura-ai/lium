@@ -133,10 +133,16 @@ Commands add their own codes for the failures only they can have — for example
 `removal_failed`; `fund` raises `transfer_failed`, `netuid_not_accepted` (2: `--netuid` names a subnet whose alpha
 Lium does not accept right now; `data` carries `netuid` and the `accepted` list) and `netuid_needs_alpha` (2: `--netuid`
 without `--alpha`); `topup link`, `topup create`, `topup card` and `topup wait` with `--wait` raise `balance_unreadable` (3: the balance could not be read before the payment, so nothing was created or charged) and `credit_not_seen` (the balance did not rise in time; `data.charged` says whether money already left: 3 with `charged: null` (not known: a payment may be made and its credit on the way) after a payment page, an invoice or `topup wait` — keep waiting with `lium topup wait --above <data.balance_before>`; 6 with `charged: true` after `topup card` — the card was charged, do not run the charge again except with `data.idempotency_key` and the same amount within 24 h); `topup card` (not released yet) passes on the platform's own
-`CARD_AUTHENTICATION_REQUIRED`, `CARD_DECLINED`, `NO_SAVED_CARD`,
+`CARD_AUTHENTICATION_REQUIRED`, `CARD_AUTHENTICATION_NOT_COMPLETED`, `CARD_AUTHENTICATION_UNAVAILABLE`,
+`CARD_AUTHENTICATION_EXPIRED`, `CARD_DECLINED`, `NO_SAVED_CARD`,
 `NO_DEFAULT_CARD` and `WALLET_NOT_SUPPORTED` (a saved Link, Apple Pay or Google Pay wallet) (3: the
 API refused the charge and the balance did not move; `data` carries `dashboard_url`, the bank's
-`decline_code` and the `payment_intent_id`) and raises `charge_outcome_unknown` (6: a timeout or
+`decline_code` and the `payment_intent_id`; a repeat needs a new key) — except a
+`CARD_AUTHENTICATION_REQUIRED` that carries `data.next_action_url` (6: a 3-D Secure step-up, the
+payment is still open; the cardholder confirms at `data.next_action_url` and the balance is credited
+with no further call; `data` also carries `transaction_id`, `idempotency_key` and `amount_usd`, and
+the hint is the exact `lium topup card … --idempotency-key <data.idempotency_key>` to repeat. Repeat
+only with that key, never a new one: a new key opens a second payment on the card) — and raises `charge_outcome_unknown` (6: a timeout or
 5xx after the charge was posted — it may have gone through; the message says to check `lium
 balance` before trying again, `data.idempotency_key` is the key a repeat must carry with the
 same amount within 24 h to get the

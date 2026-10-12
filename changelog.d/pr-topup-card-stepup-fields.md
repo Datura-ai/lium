@@ -1,0 +1,4 @@
+### Changed
+- `lium topup card` (not released): a 3-D Secure step-up (402 `CARD_AUTHENTICATION_REQUIRED` with `next_action_url`, lium-platform#912) exits 6 instead of 3 and prints the URL to confirm at, the transaction id, the idempotency key and the exact re-run with that same `--idempotency-key`, and says not to retry with a new key (that opens a second payment). `--json` puts `next_action_url`, `transaction_id`, `idempotency_key` and `amount_usd` in `data`. A `CARD_AUTHENTICATION_REQUIRED` without a URL stays final (exit 3).
+### Added
+- SDK: `LiumCardTopUpError` carries `next_action_url`, `transaction_id`, `idempotency_key` (the key the call was sent with, the one `Lium.topup_card` made included) and `is_step_up`; `CARD_AUTHENTICATION_NOT_COMPLETED`, `CARD_AUTHENTICATION_UNAVAILABLE` and `CARD_AUTHENTICATION_EXPIRED` are card top-up errors (exit 3, retry with a new key) instead of plain `LiumError`.
