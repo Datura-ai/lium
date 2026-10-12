@@ -104,10 +104,6 @@ IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _MAX_REDIRECTS = MAX_REDIRECTS
 
 
-# Public API key for the pay API (pay-tao-api-v2). Single source of truth so the
-# literal is not re-typed across every pay-API call site.
-_PAY_API_KEY = "6RhXQ788J9BdnqeLua8z7ZSkXBDahclxhwjMB17qW1M"
-
 # Set LIUM_SSH_INSECURE=1 to restore the old behaviour (accept any host key, never pin).
 _SSH_INSECURE_ENV = "LIUM_SSH_INSECURE"
 _POD_ID_SAFE = re.compile(r"[^A-Za-z0-9._-]")
@@ -4096,12 +4092,9 @@ class Lium:
             Raw wallet records returned by the pay API.
         """
         user = self._request("GET", "/users/me").json()
-        pay_headers = {"X-API-KEY": _PAY_API_KEY}
         resp = self._request(
             "GET",
-            f"/wallet/available-wallets/{user['stripe_customer_id']}",
-            base_url=self.config.base_pay_url,
-            headers=pay_headers,
+            f"/tao/pay/wallet/available-wallets/{user['stripe_customer_id']}",
         )
         return resp.json()
 
@@ -4112,10 +4105,9 @@ class Lium:
         share, so the alpha flow never issues more than one ``/tao/create-transfer``
         round-trip.
 
-        Note the deliberate HTTP shape: this call uses the DEFAULT ``base_url`` (the
-        main Lium API) and NO pay ``X-API-KEY`` header — unlike the pay-API calls
-        (:meth:`wallets`, :meth:`convert_alpha`, :meth:`company_wallet`). Do not
-        "harmonize" it onto ``base_pay_url`` / the pay key; that returns 401/404.
+        Like every pay call here it goes to the main Lium API with the caller's own
+        key; the pay API's calls go through the backend's ``/tao/pay`` proxy, which
+        holds the pay API's key (sec-audit-1012-4).
         """
         create_transfer_response = self._request(
             "POST", "/tao/create-transfer", json={"amount": 10}
@@ -4148,18 +4140,13 @@ class Lium:
         Raises:
             LiumError: If verification or wallet polling fails.
         """
-        pay_headers = {"X-API-KEY": _PAY_API_KEY}
-        access_key = self._request(
-            "GET", "/token/generate", base_url=self.config.base_pay_url, headers=pay_headers
-        ).json()["access_key"]
+        access_key = self._request("GET", "/tao/pay/token/generate").json()["access_key"]
         sig = bt_wallet.coldkey.sign(access_key.encode()).hex()
         app_id, stripe_customer_id = self._create_transfer_app_credentials()
 
         verify_response = self._request(
             "POST",
-            "/token/verify",
-            base_url=self.config.base_pay_url,
-            headers=pay_headers,
+            "/tao/pay/token/verify",
             json={
                 "coldkey_address": bt_wallet.coldkeypub.ss58_address,
                 "access_key": access_key,
@@ -4186,9 +4173,7 @@ class Lium:
         """
         resp = self._request(
             "GET",
-            "/balance/alpha/subnets",
-            base_url=self.config.base_pay_url,
-            headers={"X-API-KEY": _PAY_API_KEY},
+            "/tao/pay/balance/alpha/subnets",
         ).json()
         return AlphaSubnets(
             subnets=tuple(
@@ -4212,15 +4197,12 @@ class Lium:
         and a subnet that is not accepted (400) to a ``LiumError``, so the funding
         stops before any transfer is sent.
         """
-        pay_headers = {"X-API-KEY": _PAY_API_KEY}
         params = {"amount": str(usd)}
         if netuid is not None:
             params["netuid"] = str(netuid)
         resp = self._request(
             "GET",
-            "/balance/convert/alpha",
-            base_url=self.config.base_pay_url,
-            headers=pay_headers,
+            "/tao/pay/balance/convert/alpha",
             params=params,
         ).json()
         return AlphaQuote(
@@ -4239,9 +4221,7 @@ class Lium:
         """
         resp = self._request(
             "GET",
-            "/wallet/company/",
-            base_url=self.config.base_pay_url,
-            headers={"X-API-KEY": _PAY_API_KEY},
+            "/tao/pay/wallet/company/",
             params={"app_id": app_id},
         ).json()
         return resp["wallet_hash"]
