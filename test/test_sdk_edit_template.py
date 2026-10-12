@@ -2,6 +2,8 @@
 supports_volume_encryption or health_check_command, and PUT /templates/{id} writes every field it is given,
 so edit() builds its body from the template row itself."""
 
+import pytest
+
 from lium.sdk import Config, Lium
 
 POD_TEMPLATE = {  # what GET /pods/{id} carries: TemplateBaseResponse
@@ -49,6 +51,7 @@ def test_edit_sends_back_the_fields_the_pod_listing_does_not_carry(monkeypatch, 
     assert body.get("docker_credential_id") == "cred-1"
     assert body.get("supports_docker") is True
     assert body.get("supports_volume_encryption") is True
+    assert body.get("health_check_command") == "true"
 
 
 def test_edit_leaves_out_the_template_row_null_columns(monkeypatch, tmp_path):
@@ -58,3 +61,23 @@ def test_edit_leaves_out_the_template_row_null_columns(monkeypatch, tmp_path):
 
     assert not {"volumes", "environment", "entrypoint", "docker_image_digest", "description"} & body.keys()
     assert body["startup_commands"] == "python serve.py"
+
+
+@pytest.mark.parametrize("is_temporary", [True, False, None])
+@pytest.mark.parametrize("one_time_template", [None, False])
+@pytest.mark.parametrize("kwargs", [{}, {"is_temporary": True, "one_time_template": False}])
+def test_edit_omits_temporary_flags_for_public_templates(monkeypatch, tmp_path, is_temporary, one_time_template, kwargs):
+    row = {**TEMPLATE_ROW, "is_temporary": is_temporary, "is_private": False, "one_time_template": one_time_template}
+
+    body = _edit(monkeypatch, tmp_path, row, environment={"DEBUG": "1"}, **kwargs)
+
+    assert not {"is_temporary", "one_time_template"} & body.keys()
+    assert body["environment"] == {"DEBUG": "1"}
+
+
+def test_edit_preserves_one_time_template_cleanup(monkeypatch, tmp_path):
+    row = {**TEMPLATE_ROW, "one_time_template": True, "is_private": True}
+
+    body = _edit(monkeypatch, tmp_path, row)
+
+    assert body["one_time_template"] is True
