@@ -130,7 +130,7 @@ finally:
             lium.down(p)
 ```
 
-`lium.exec` holds at most `max_output_bytes` (default 64 MiB) of raw stdout and stderr together, with the decoded text on top (1 to 4 bytes per character); past that it closes the channel and raises `OutputLimitExceeded`, so send large output to a file on the pod.
+`lium.exec` keeps at most `max_output_bytes` (default 64 MiB) bytes of output, stdout and stderr together; past that it closes the channel and raises `OutputLimitExceeded` (`lium exec --max-output-bytes N` sets it from the CLI). It bounds output bytes, not memory: peak memory is about twice the limit for ASCII output, raw bytes plus decoded text, and more when emoji or similar characters widen the text. Send large output to a file on the pod.
 
 ### Run work
 

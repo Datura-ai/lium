@@ -100,6 +100,9 @@ load_dotenv()
 # A POSIX shell identifier: what ``export`` accepts on the pod.
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # checked with fullmatch: `$` would let a trailing newline through
 # HTTP methods that are safe to repeat after a lost response; see ``Lium._request``.
+# Default limit on the output bytes (stdout and stderr together) exec keeps; see Lium.exec.
+DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+
 IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # `request_same_origin` in `.utils` follows redirects for the credential-bearing HTTP paths of this package — renter SDK,
 # provider portal, signup (DAH-3543); `_MAX_REDIRECTS` stays as the name the tests read.
@@ -2843,7 +2846,7 @@ class Lium:
         timeout: Optional[float] = None,
         detach: bool = False,
         log_path: Optional[str] = None,
-        max_output_bytes: int = 64 * 1024 * 1024,
+        max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
     ) -> Dict[str, Any]:
         """Execute a shell command on a pod over SSH.
 
@@ -2868,10 +2871,13 @@ class Lium:
                 ``/workspace/logs/exec-<UTC timestamp>-<id>.log``, the ``<id>`` a
                 6-hex tail that keeps two launches in the same second apart).
 
-            max_output_bytes: Limit on the raw bytes of stdout and stderr held
-                together (the decoded text comes on top). Past it the channel is
-                closed and :class:`OutputLimitExceeded` is raised, so a pod
-                cannot grow this process's memory without bound.
+            max_output_bytes: Limit on the output bytes, stdout and stderr
+                together (default 64 MiB). It bounds output bytes, not memory:
+                the raw bytes and the text decoded from them are both held, so
+                peak memory is about twice the limit for ASCII or Latin-1 output,
+                and more when a wider character such as an emoji makes the text
+                take up to 4 bytes per character. Past the limit the channel is
+                closed and :class:`OutputLimitExceeded` is raised.
 
         Returns:
             Dict containing stdout, stderr, exit_code, and success flag; with
@@ -3278,6 +3284,7 @@ class Lium:
         command: str,
         env: Optional[Dict[str, str]] = None,
         max_workers: int = 10,
+        max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
     ) -> List[Dict]:
         """Execute a shell command on multiple pods in parallel.
 
@@ -3286,6 +3293,7 @@ class Lium:
             command: Shell command to run on each pod.
             env: Optional environment variables exported before each command.
             max_workers: Maximum number of SSH workers to spawn.
+            max_output_bytes: Output byte limit for each pod, as in :meth:`exec`.
 
         Returns:
             List of result dictionaries mirroring :meth:`exec`, each with the pod
@@ -3304,7 +3312,7 @@ class Lium:
 
         def exec_single(pod: PodInfo):
             try:
-                result = self.exec(pod, command=command, env=env)
+                result = self.exec(pod, command=command, env=env, max_output_bytes=max_output_bytes)
                 result["pod"] = pod.id
                 return result
             except Exception as e:

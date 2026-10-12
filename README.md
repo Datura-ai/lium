@@ -223,7 +223,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium spend [--format json]` - Hourly burn, estimated spend per pod, balance and runway
 - `lium describe <POD>` - Full manifest of one pod: ports, GPU, template, billing, last lifecycle event (why it is REBOOT_FAILED/BROKEN) and the node's disk health (add `--json` for machine-readable output). A deleted pod can still be described by its id: you get the events the backend kept for it and the reason it went away.
 - `lium ssh <POD>` - SSH into a pod
-- `lium exec <POD> <COMMAND>` - Execute command on pod (`--json` for stdout/stderr/exit_code; `-d/--detach` starts it in the background and returns immediately)
+- `lium exec <POD> <COMMAND>` - Execute command on pod (`--json` for stdout/stderr/exit_code; `-d/--detach` starts it in the background and returns immediately; `--max-output-bytes N` sets the output limit, default 64 MiB)
 - `lium logs <POD>` - Stream a pod's container logs
 - `lium port-forward <POD> <PORT>` - Forward a local port to a pod port
 - `lium scp <POD> <LOCAL_FILE> [REMOTE_PATH]` - Copy files to pods (add `-d` to download from pods)
