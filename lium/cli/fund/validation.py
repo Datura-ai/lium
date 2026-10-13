@@ -93,6 +93,17 @@ def is_ss58_address(bt, value: str) -> bool:
     return bool(check(value))
 
 
+def alpha_balance(bt, rao: int, netuid: int):
+    """A ``Balance`` of ``rao`` in subnet ``netuid``'s alpha, across library versions.
+
+    bittensor 11 takes the subnet in ``Balance.from_rao(rao, netuid)`` and has no ``set_unit``;
+    older releases tag the unit with ``set_unit``.
+    """
+    balance = bt.Balance.from_rao(rao)
+    set_unit = getattr(balance, "set_unit", None)
+    return set_unit(netuid) if set_unit else bt.Balance.from_rao(rao, netuid)
+
+
 def wallet_class(bt):
     """Return the bittensor Wallet class across library versions.
 

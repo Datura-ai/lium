@@ -297,12 +297,12 @@ def _alpha_fund(
     subnet_label = subnet_label or f"netuid {netuid}"
 
     # Decimal -> Balance: floor the quoted alpha at integer rao with ROUND_DOWN BEFORE
-    # set_unit, so we never transfer more than quoted (keeps the free+fee gate exact).
+    # tagging it with the subnet, so we never transfer more than quoted (keeps the free+fee gate exact).
     # Never via from_tao(float), which would inject binary-float error on a money path.
     floored_rao = int(
         (quote.alpha_amount * _RAO_PER_ALPHA).quantize(Decimal(1), rounding=ROUND_DOWN)
     )
-    amount_bal = bt.Balance.from_rao(floored_rao).set_unit(netuid)
+    amount_bal = validation.alpha_balance(bt, floored_rao, netuid)
     alpha_amount = floored_rao / float(_RAO_PER_ALPHA)
 
     # Phase A: display free alpha + fee before the confirm prompt.

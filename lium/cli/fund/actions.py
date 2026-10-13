@@ -41,6 +41,28 @@ def _select_free_alpha(stake_infos, hotkey_ss58, netuid):
     return rows[0].stake - rows[0].locked, ""
 
 
+def _free_alpha(subtensor, coldkey_ss58, hotkey_ss58, netuid):
+    """Free alpha for ``hotkey_ss58`` on ``netuid``: ``(free_balance, "")`` or ``(None, error)``.
+
+    bittensor <= 10 lists ``StakeInfo`` rows with a per-row ``locked``. bittensor 11 dropped
+    ``get_stake_info_for_coldkey``: its ``stake_for_coldkey`` read lists positions (``hotkey``,
+    no lock), and a conviction lock is a floor on the whole coldkey on a subnet, so what this
+    hotkey can hand over without moving lock mass is its stake capped by the coldkey's
+    ``available`` on that subnet (``stake_availability``).
+    """
+    if hasattr(subtensor, "get_stake_info_for_coldkey"):
+        return _select_free_alpha(subtensor.get_stake_info_for_coldkey(coldkey_ss58), hotkey_ss58, netuid)
+    positions = subtensor.read("stake_for_coldkey", coldkey_ss58=coldkey_ss58)
+    rows = [p for p in positions or [] if p.hotkey == hotkey_ss58 and p.netuid == netuid]
+    if not rows:
+        return None, f"No free alpha: no stake found for hotkey {hotkey_ss58} on netuid {netuid}"
+    if len(rows) > 1:
+        return None, f"Unexpected multiple stake entries for hotkey {hotkey_ss58} on netuid {netuid}; aborting"
+    available = subtensor.read("stake_availability", coldkey_ss58=coldkey_ss58, netuid=netuid)["available"]
+    stake = rows[0].stake
+    return (available if available < stake else stake), ""
+
+
 def _movement_fee(subtensor, amount_bal, netuid):
     """Best-effort on-chain stake-movement fee for the alpha transfer.
 
@@ -50,7 +72,8 @@ def _movement_fee(subtensor, amount_bal, netuid):
     rather than blocking.
 
     Returns:
-        ``(fee_balance, True)`` when obtained, else ``(None, False)``.
+        ``(fee_balance, True)`` when obtained, else ``(None, False)`` (always on bittensor 11,
+        which has no ``get_stake_movement_fee``).
     """
     try:
         fee = subtensor.get_stake_movement_fee(
@@ -174,12 +197,20 @@ class ExecuteTransferAction:
 
         try:
             subtensor = subtensor_class(bt)()
+            amount = bt.Balance.from_tao(tao_amount)
 
-            resp = subtensor.transfer(
-                wallet=bt_wallet,
-                destination_ss58=self.LIUM_FUNDING_ADDRESS,
-                amount=bt.Balance.from_tao(tao_amount),
-            )
+            if hasattr(subtensor, "transfer"):
+                resp = subtensor.transfer(
+                    wallet=bt_wallet,
+                    destination_ss58=self.LIUM_FUNDING_ADDRESS,
+                    amount=amount,
+                )
+            else:
+                # bittensor 11: extrinsics are intents run by ``execute`` (keep_alive, as transfer did by default)
+                resp = subtensor.execute(
+                    bt.intents.Transfer(dest_ss58=self.LIUM_FUNDING_ADDRESS, amount_tao=amount),
+                    bt_wallet,
+                )
 
             # bittensor >=8 returns an ExtrinsicResponse (.success/.message); older
             # versions returned a bare bool. Accept either.
@@ -264,8 +295,7 @@ class CheckFreeAlphaAction:
 
         try:
             subtensor = subtensor_class(bt)()
-            stake_infos = subtensor.get_stake_info_for_coldkey(coldkey)
-            free, err = _select_free_alpha(stake_infos, hotkey, netuid)
+            free, err = _free_alpha(subtensor, coldkey, hotkey, netuid)
             if err:
                 return ActionResult(ok=False, data={}, error=err)
 
@@ -310,8 +340,7 @@ class ExecuteAlphaTransferAction:
 
         try:
             subtensor = subtensor_class(bt)()
-            stake_infos = subtensor.get_stake_info_for_coldkey(coldkey)
-            free, err = _select_free_alpha(stake_infos, hotkey, netuid)
+            free, err = _free_alpha(subtensor, coldkey, hotkey, netuid)
             if err:
                 return ActionResult(ok=False, data={}, error=err)
 
@@ -327,14 +356,27 @@ class ExecuteAlphaTransferAction:
                     error=f"Insufficient free alpha: need {amount}, free {free}",
                 )
 
-            resp = subtensor.transfer_stake(
-                wallet=bt_wallet,
-                destination_coldkey_ss58=dest_coldkey,
-                hotkey_ss58=hotkey,
-                origin_netuid=netuid,
-                destination_netuid=netuid,
-                amount=amount,
-            )
+            if hasattr(subtensor, "transfer_stake"):
+                resp = subtensor.transfer_stake(
+                    wallet=bt_wallet,
+                    destination_coldkey_ss58=dest_coldkey,
+                    hotkey_ss58=hotkey,
+                    origin_netuid=netuid,
+                    destination_netuid=netuid,
+                    amount=amount,
+                )
+            else:
+                # bittensor 11: the same extrinsic as an intent; the stake stays on ``hotkey`` and subnet
+                resp = subtensor.execute(
+                    bt.intents.TransferStake(
+                        dest_coldkey_ss58=dest_coldkey,
+                        hotkey_ss58=hotkey,
+                        origin_netuid=netuid,
+                        dest_netuid=netuid,
+                        amount_alpha=amount,
+                    ),
+                    bt_wallet,
+                )
             # bittensor >=8 returns an ExtrinsicResponse (.success/.message); older
             # versions returned a bare bool. Accept either.
             ok = getattr(resp, "success", resp)
