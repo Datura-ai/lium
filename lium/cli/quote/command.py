@@ -7,7 +7,14 @@ from rich.table import Table
 
 from lium.sdk import Lium
 from lium.cli import ui
-from lium.cli.utils import CliFailure, handle_errors, resolve_executor_indices, resolve_output_format
+from lium.cli.utils import (
+    SIGNUP_NUDGE,
+    CliFailure,
+    browsing_client,
+    handle_errors,
+    resolve_executor_indices,
+    resolve_output_format,
+)
 
 
 def _node_id(node: str) -> str:
@@ -40,7 +47,8 @@ def quote_command(node, hours, gpu_count, volume_gb, backup_gb, output_format, j
     """Quote a job on NODE: compute, volume and backup at the rates billing charges.
 
     NODE is a row number from the last `lium ls`, a node HUID or a UUID. Egress is
-    billed at what AWS charges and has no amount. Nothing is reserved.
+    billed at what AWS charges and has no amount. Nothing is reserved, and no API
+    key is needed.
 
     \b
     Examples:
@@ -50,7 +58,8 @@ def quote_command(node, hours, gpu_count, volume_gb, backup_gb, output_format, j
     if hours <= 0:
         raise click.BadParameter("must be above 0", param_hint="--hours")
     json_output = resolve_output_format(output_format, json_output) == "json"
-    lium = Lium()
+    # the quote route and the listing a HUID resolves through are public: no key is needed to price a job
+    lium, anonymous = browsing_client(Lium)
     fetch = lambda: lium.quote(  # noqa: E731
         _node_id(node), hours=hours, gpu_count=gpu_count, volume_gb=volume_gb, backup_gb=backup_gb
     )
@@ -68,3 +77,5 @@ def quote_command(node, hours, gpu_count, volume_gb, backup_gb, output_format, j
     ui.print(table)
     ui.info(f"Total {_money(quote['total_usd'])} (egress not included)")
     ui.dim(f"Balance needed to start the rent: {_money(quote['min_balance_to_rent_usd'])}")
+    if anonymous:
+        ui.dim(SIGNUP_NUDGE)

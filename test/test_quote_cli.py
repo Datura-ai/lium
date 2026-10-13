@@ -7,6 +7,7 @@ from click.testing import CliRunner
 
 from lium.cli.cli import cli
 from lium.cli.quote import command as quote_module
+from lium.cli.utils import SIGNUP_NUDGE
 from lium.sdk import Config, Lium, LiumNotFoundError
 
 NODE = "3f2b9c1e-8a4d-4b6e-9f10-2c3d4e5f6a7b"
@@ -100,3 +101,26 @@ def test_quote_refuses_non_positive_hours_before_asking(requests_seen):
     out = CliRunner().invoke(cli, ["quote", NODE, "--hours", "0"])
 
     assert out.exit_code == 2 and requests_seen == []
+
+
+def test_quote_without_an_api_key_prices_the_node_and_says_how_to_rent(monkeypatch):
+    # millerserhii on #337 (dc7153c): the quote route is public, so a visitor with no key can price a job
+    seen = []
+
+    class KeylessLium(Lium):
+        def __init__(self, config=None, **kwargs):
+            if config is None:
+                raise ValueError("No API key found. Set LIUM_API_KEY")
+            super().__init__(config=config, **kwargs)
+
+        def _request(self, method, path, **kwargs):
+            seen.append((method, path, self.config.api_key))
+            return _Response(QUOTE)
+
+    monkeypatch.setattr(quote_module, "Lium", KeylessLium)
+
+    out = CliRunner().invoke(cli, ["quote", NODE, "--hours", "2"], env={"COLUMNS": "400"})
+
+    assert out.exit_code == 0, out.output
+    assert seen == [("GET", f"/executors/{NODE}/quote", "")]
+    assert "Total $32.0500" in out.output and SIGNUP_NUDGE in out.output
