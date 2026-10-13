@@ -72,7 +72,6 @@ def billing_client() -> Lium:
     return Lium(config=Config(
         api_key=key,
         base_url=os.getenv("LIUM_BASE_URL", "https://lium.io/api"),
-        base_pay_url=os.getenv("LIUM_PAY_URL", "https://pay-api.lium.io"),
         api_key_source=source,
     ))
 

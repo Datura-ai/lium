@@ -1426,3 +1426,19 @@ def test_fund_no_alpha_uses_tao_path(monkeypatch):
 
     assert result.exit_code == 0
     assert calls["tao"] and not calls["alpha"]
+
+
+def test_sdk_wallets_without_stripe_customer_is_empty(monkeypatch):
+    lium = _sdk_lium()
+    calls = []
+
+    def fake_request(method, endpoint, **kwargs):
+        calls.append(endpoint)
+        if endpoint == "/users/me":
+            return _Resp({"stripe_customer_id": None})
+        raise AssertionError(f"unexpected endpoint {endpoint}")
+
+    monkeypatch.setattr(lium, "_request", fake_request)
+
+    assert lium.wallets() == []
+    assert calls == ["/users/me"]

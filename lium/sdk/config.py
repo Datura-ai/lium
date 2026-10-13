@@ -114,7 +114,6 @@ def workspace_section(name: str) -> str:
 class Config:
     api_key: str
     base_url: str = "https://lium.io/api"
-    base_pay_url: str = "https://pay-api.lium.io"
     ssh_key_path: Optional[Path] = None
     # The workspace this client was asked to act in (``--workspace`` / LIUM_WORKSPACE /
     # ``lium workspaces use``), by the name it was saved under; None when nothing was asked.
@@ -196,7 +195,6 @@ class Config:
         return cls(
             api_key=api_key,
             base_url=os.getenv("LIUM_BASE_URL", "https://lium.io/api"),
-            base_pay_url=os.getenv("LIUM_PAY_URL", "https://pay-api.lium.io"),
             ssh_key_path=ssh_key,
             workspace=named,
             workspace_id=file_config.get(section, "id", fallback=None) if runs_with_saved_key else None,

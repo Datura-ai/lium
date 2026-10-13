@@ -4091,11 +4091,11 @@ class Lium:
         Returns:
             Raw wallet records returned by the pay API.
         """
-        user = self._request("GET", "/users/me").json()
-        resp = self._request(
-            "GET",
-            f"/tao/pay/wallet/available-wallets/{user['stripe_customer_id']}",
-        )
+        customer_id = self._request("GET", "/users/me").json()["stripe_customer_id"]
+        # No Stripe customer yet means no wallets; the backend refuses an empty id with a 400.
+        if not customer_id:
+            return []
+        resp = self._request("GET", f"/tao/pay/wallet/available-wallets/{customer_id}")
         return resp.json()
 
     def _create_transfer_app_credentials(self) -> tuple[str, str]:
