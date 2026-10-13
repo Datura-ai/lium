@@ -48,16 +48,37 @@ def requests_seen(monkeypatch):
     return seen
 
 
-def test_quote_by_uuid_asks_the_api_once_with_the_job(requests_seen):
-    out = CliRunner().invoke(cli, ["quote", NODE, "--hours", "2", "--volume-gb", "200", "--format", "json"])
+def _node(gpu_count=8, available_gpu_count=None):
+    return type("N", (), {"id": NODE, "gpu_count": gpu_count, "available_gpu_count": available_gpu_count})()
+
+
+def test_quote_by_uuid_with_gpus_asks_the_api_once_with_the_job(requests_seen, monkeypatch):
+    monkeypatch.setattr(requests_seen.client, "get_executor", lambda ref: pytest.fail("no lookup expected"))
+
+    out = CliRunner().invoke(
+        cli, ["quote", NODE, "--hours", "2", "--gpus", "8", "--volume-gb", "200", "--format", "json"]
+    )
 
     assert out.exit_code == 0, out.output
-    assert requests_seen == [("GET", f"/executors/{NODE}/quote", {"hours": 2.0, "volume_gb": 200.0, "backup_gb": 0.0})]
+    assert requests_seen == [
+        ("GET", f"/executors/{NODE}/quote", {"hours": 2.0, "volume_gb": 200.0, "backup_gb": 0.0, "gpu_count": 8})
+    ]
     assert json.loads(out.output)["total_usd"] == 32.05
 
 
+@pytest.mark.parametrize("available, quoted", [(2, 2), (8, 8), (None, 8)])
+def test_quote_without_gpus_prices_the_free_gpus_lium_up_would_rent(requests_seen, monkeypatch, available, quoted):
+    # millerserhii on #337 (f7c98f0): on an 8-GPU node with 2 free, `lium up NODE` rents 2, so the quote is for 2
+    monkeypatch.setattr(requests_seen.client, "get_executor", lambda ref: _node(available_gpu_count=available))
+
+    out = CliRunner().invoke(cli, ["quote", NODE, "--hours", "2", "--format", "json"])
+
+    assert out.exit_code == 0, out.output
+    assert requests_seen[0][2]["gpu_count"] == quoted
+
+
 def test_quote_by_huid_resolves_the_listed_node_and_passes_gpus(requests_seen, monkeypatch):
-    monkeypatch.setattr(requests_seen.client, "get_executor", lambda ref: type("N", (), {"id": NODE})())
+    monkeypatch.setattr(requests_seen.client, "get_executor", lambda ref: _node())
 
     out = CliRunner().invoke(cli, ["quote", "cosmic-hawk-f2", "--hours", "1", "--gpus", "1"])
 

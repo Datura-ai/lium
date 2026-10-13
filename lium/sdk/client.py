@@ -2503,8 +2503,8 @@ class Lium:
     ) -> Dict[str, Any]:
         """What renting a node for ``hours`` costs, line by line, at the rates billing charges.
 
-        ``GET /executors/{uuid}/quote``: compute (price per GPU × ``gpu_count``, every GPU of the node
-        by default), volume and backup storage per GB-hour, and an egress line with no amount (billed
+        ``GET /executors/{uuid}/quote``: compute (price per GPU × ``gpu_count``; by default the node's
+        free GPUs, which is what ``lium up <node>`` rents without ``-c``), volume and backup storage per GB-hour, and an egress line with no amount (billed
         at what AWS charges). Returns the API's answer: ``price_per_hour``, ``lines`` (``item``,
         ``unit``, ``rate_usd``, ``quantity``, ``amount_usd``, ``note``), ``total_usd`` (egress not
         included) and ``min_balance_to_rent_usd``. Nothing is reserved.
@@ -2519,10 +2519,16 @@ class Lium:
         try:
             node_id = str(uuid.UUID(executor))
         except ValueError:
+            node_id = None
+        if node_id is None or gpu_count is None:
             node = self.get_executor(executor)
             if node is None:
                 raise LiumNotFoundError(f"No listed node '{executor}'. Try: lium ls")
             node_id = node.id
+            if gpu_count is None:
+                # a rent with no count takes the node's free GPUs, so a split node is quoted as that split
+                free = getattr(node, "available_gpu_count", None)
+                gpu_count = node.gpu_count if free is None else free
         params: Dict[str, Any] = {"hours": hours, "volume_gb": volume_gb, "backup_gb": backup_gb}
         if gpu_count is not None:
             params["gpu_count"] = gpu_count

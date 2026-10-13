@@ -27,7 +27,7 @@ def _money(value) -> str:
 @click.command("quote", epilog="Use --format json for machine-readable output.")
 @click.argument("node")
 @click.option("--hours", type=float, required=True, help="How long the job runs.")
-@click.option("--gpus", "gpu_count", type=int, default=None, help="GPUs to rent (default: every GPU of the node).")
+@click.option("--gpus", "gpu_count", type=int, default=None, help="GPUs to rent (default: the node's free GPUs, as `lium up` rents).")
 @click.option("--volume-gb", type=float, default=0.0, show_default=True, help="Volume kept for the job, in GB.")
 @click.option("--backup-gb", type=float, default=0.0, show_default=True, help="Backups kept for the job, in GB.")
 @click.option(
