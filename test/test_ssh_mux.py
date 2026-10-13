@@ -111,7 +111,24 @@ def test_the_first_command_starts_a_background_master_with_the_pods_pinned_key(h
     assert start[-2:] == ["--", "root@203.0.113.10"] and start[start.index("-p") + 1] == "20299"
     assert result == {"stdout": "out\n", "stderr": "", "exit_code": 0, "success": True}
     assert oct((home / ".lium" / "ssh-mux").stat().st_mode & 0o777) == "0o700"
-    assert all({"ForwardAgent=no", "ClearAllForwardings=yes"} <= set(argv) for argv, _ in ssh.calls if argv[0] == "ssh")   # master and command
+    assert all({"ForwardAgent=no", "ForwardX11=no", "ClearAllForwardings=yes"} <= set(argv) for argv, _ in ssh.calls if argv[0] == "ssh")   # master and command
+
+
+@pytest.mark.skipif(shutil.which("ssh") is None, reason="needs the OpenSSH client")
+@pytest.mark.parametrize("option, expected", [
+    ("forwardagent", "no"),
+    ("forwardx11", "no"),
+    ("clearallforwardings", "yes"),
+])
+def test_the_renters_ssh_config_cannot_forward_anything_to_the_pod(home, option, expected):
+    config = home / "ssh_config"
+    config.write_text("Host *\n  ForwardAgent yes\n  ForwardX11 yes\n  ForwardX11Trusted yes\n  LocalForward 8888 localhost:8888\n")
+    master = ssh_mux.ControlMaster(_lium(home), _pod())
+
+    evaluated = subprocess.run(["ssh", "-F", str(config), "-G", *master.base[1:], "--", master.destination],
+                               capture_output=True, text=True, check=True).stdout
+
+    assert f"{option} {expected}" in evaluated.splitlines()
 
 
 def test_a_pin_notice_is_reported_when_the_login_then_fails(home, monkeypatch):

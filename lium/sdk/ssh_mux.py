@@ -115,7 +115,7 @@ class ControlMaster:
         self.path = control_path(pod)
         self.destination = f"{user}@{host}"
         self.base = ["ssh", "-p", str(port), "-o", f'ControlPath="{self.path}"', "-o", "BatchMode=yes",
-                     "-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes"]
+                     "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ClearAllForwardings=yes"]
         key_path = getattr(lium.config, "ssh_key_path", None)
         if key_path:
             self.base += ["-i", str(Path(key_path).expanduser()), "-o", "IdentitiesOnly=yes"]
