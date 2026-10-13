@@ -5,6 +5,8 @@ hint}}`` instead, so the model can read what went wrong and what to do next.
 """
 
 import asyncio
+import threading
+import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from lium.sdk import Lium
@@ -58,6 +60,29 @@ def _pod(pod: PodInfo) -> Dict[str, Any]:
     }
 
 
+def _redact(text: Optional[str], command: str) -> Optional[str]:
+    """`text` with the command cut out: commands often carry secrets (HF_TOKEN=... python train.py)."""
+    return text.replace(command, "<command>") if text and command else text
+
+
+class _RentalCancelled(Exception):
+    pass
+
+
+class _Rental:
+    """One rent_pod call, shared by the worker thread and the async tool that may be cancelled while it runs."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.cancelled = False
+        self.finished = False
+
+
+def _rented_pod_id(result: Optional[Dict[str, Any]]) -> Optional[str]:
+    result = result or {}
+    return result.get("pod_id") or (result.get("pod") or {}).get("pod_id")
+
+
 def _tail(text: Optional[str]) -> str:
     text = text or ""
     return text if len(text) <= OUTPUT_TAIL_CHARS else f"…[cut to the last {OUTPUT_TAIL_CHARS} characters]\n" + text[-OUTPUT_TAIL_CHARS:]
@@ -69,6 +94,9 @@ class LiumTools:
     def __init__(self, client_factory: Callable[[], Lium] = lambda: Lium(source="mcp")):
         self._factory = client_factory
         self._client: Optional[Lium] = None
+        # rentals the host cancelled whose pod is still being removed; a new rental waits for them
+        self._cleanup = threading.Condition()
+        self._cleanups_pending = 0
 
     @property
     def client(self) -> Lium:
@@ -100,8 +128,29 @@ class LiumTools:
 
         return _guarded(call)
 
-    def rent_pod(self, executor_id: str, name: str, template_id: Optional[str] = None, timeout_seconds: int = 600) -> Dict[str, Any]:
+    CLEANUP_WAIT_SECONDS = 180
+    CLEANUP_LIST_ATTEMPTS = 30
+    CLEANUP_LIST_DELAY_SECONDS = 2.0
+
+    def rent_pod(
+        self,
+        executor_id: str,
+        name: str,
+        template_id: Optional[str] = None,
+        timeout_seconds: int = 600,
+        rental: Optional[_Rental] = None,
+    ) -> Dict[str, Any]:
+        rental = rental or _Rental()
+
         def call():
+            with self._cleanup:
+                if not self._cleanup.wait_for(lambda: self._cleanups_pending == 0, self.CLEANUP_WAIT_SECONDS):
+                    return _error(
+                        "cleanup_pending",
+                        "A cancelled rental is still being removed.",
+                        "Call list_pods, remove_pod any pod you did not mean to keep, then rent again.",
+                    )
+
             # rent and wait separately: once the rent call returns the pod bills, so a slow start must hand back its id
             # rather than an error the model would answer by renting a second pod
             created = self.client.up(executor_id=executor_id, name=name, template_id=template_id, wait=False)
@@ -114,8 +163,16 @@ class LiumTools:
                 "next": "The pod is rented and billing. Do NOT call rent_pod again: call list_pods until its status is "
                 "RUNNING, then run_command; or remove_pod with this pod_id to stop billing.",
             }
+
+            def stop_if_cancelled(*_):
+                if rental.cancelled:
+                    raise _RentalCancelled()
+
             try:
-                ready = self.client.wait_ready(created, timeout=timeout_seconds)
+                stop_if_cancelled()
+                ready = self.client.wait_ready(created, timeout=timeout_seconds, on_poll=stop_if_cancelled)
+            except _RentalCancelled:
+                return {"ok": False, "pod_id": pod_id}
             except PodStartError as e:
                 failed = _error(
                     "pod_start_failed",
@@ -130,14 +187,60 @@ class LiumTools:
                 return {**pending, "warning": f"Not running after {timeout_seconds}s; some nodes take longer to start."}
             return {"ok": True, "pod": _pod(ready), "next": "run_command on this pod; remove_pod when done (billing stops)"}
 
-        return _guarded(call)
+        result = _guarded(call)
+        with rental.lock:
+            rental.finished = True
+            if not rental.cancelled:
+                return result
+        # the host cancelled the call and will never see this pod id: remove the pod so a retry is not a second bill
+        self._discard(_rented_pod_id(result))
+        return _error("cancelled", "The rental was cancelled; its pod was removed.")
+
+    def cancel_rental(self, rental: _Rental, result: Optional[Dict[str, Any]] = None) -> None:
+        """The host cancelled rent_pod. A worker still running removes its pod when it finishes; a finished one's
+        result (which the host never received) is removed here. A new rental waits until removal is done."""
+        with self._cleanup:
+            self._cleanups_pending += 1
+        with rental.lock:
+            if not rental.finished:
+                rental.cancelled = True
+                return
+        threading.Thread(target=self._discard, args=(_rented_pod_id(result),), daemon=True).start()
+
+    def _discard(self, pod_id: Optional[str]) -> None:
+        try:
+            for attempt in range(self.CLEANUP_LIST_ATTEMPTS if pod_id else 0):
+                target = next((p for p in self.client.ps() if p.id == pod_id), None)
+                if target is not None:
+                    self.client.rm(target)
+                    return
+                time.sleep(self.CLEANUP_LIST_DELAY_SECONDS)
+        except Exception:  # noqa: BLE001 - best effort; list_pods still shows the pod
+            pass
+        finally:
+            with self._cleanup:
+                self._cleanups_pending -= 1
+                self._cleanup.notify_all()
 
     def list_pods(self) -> Dict[str, Any]:
         return _guarded(lambda: {"ok": True, "pods": [_pod(p) for p in self.client.ps()]})
 
     def run_command(self, pod: str, command: str, timeout_seconds: int = 300) -> Dict[str, Any]:
         def call():
-            result = self.client.exec(self._find_pod(pod), command=command, timeout=timeout_seconds)
+            target = self._find_pod(pod)
+            try:
+                result = self.client.exec(target, command=command, timeout=timeout_seconds)
+            except TimeoutError:
+                # the SDK's message repeats the command, which may hold a secret: say it without the command
+                return _error(
+                    "command_timeout",
+                    f"The command did not finish within {timeout_seconds}s on pod {target.id}.",
+                    "Raise timeout_seconds, or start long jobs in the background (nohup ... > log 2>&1 &) and read the log.",
+                )
+            except LiumError as e:
+                return _error(e.code or type(e).__name__, _redact(str(e), command), _redact(e.hint, command))
+            except Exception as e:  # noqa: BLE001
+                return _error(type(e).__name__, _redact(str(e), command))
             return {
                 "ok": True,
                 "exit_code": result.get("exit_code"),
@@ -174,7 +277,16 @@ def tool_functions(tools: LiumTools) -> List[Callable[..., Awaitable[Dict[str, A
         """Rent a GPU pod on a node from list_gpus and wait until it is running. This spends money: the pod is
         billed per second at the node's hourly price until remove_pod. Give it a short unique name. If the result
         has status "pending", the pod is already rented: do not rent again, poll list_pods or remove_pod its pod_id."""
-        return await asyncio.to_thread(tools.rent_pod, executor_id, name, template_id, timeout_seconds)
+        rental = _Rental()
+        work = asyncio.ensure_future(
+            asyncio.to_thread(tools.rent_pod, executor_id, name, template_id, timeout_seconds, rental)
+        )
+        try:
+            return await asyncio.shield(work)
+        except asyncio.CancelledError:
+            # the thread runs on; whatever pod it rents is removed, since the host will never learn its id
+            tools.cancel_rental(rental, work.result() if work.done() and not work.cancelled() else None)
+            raise
 
     async def list_pods() -> Dict[str, Any]:
         """List your pods with their status, GPU, price per hour and SSH command."""

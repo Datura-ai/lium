@@ -47,18 +47,25 @@ class FakeLium:
 
     def up(self, **kwargs):
         self.up_kwargs = kwargs
+        self.pods = [*self.pods, _pod("p2", kwargs["name"])]
         return {"id": "p2", "name": kwargs["name"], "status": "PENDING"}
 
     ready_result = "ready"
 
-    def wait_ready(self, created, timeout):
+    def wait_ready(self, created, timeout, on_poll=None):
         self.wait_timeout = timeout
+        if on_poll:
+            on_poll(None, "PENDING", 0.0)
         if isinstance(self.ready_result, Exception):
             raise self.ready_result
         return _pod(created["id"], created["name"]) if self.ready_result == "ready" else None
 
+    exec_error = None
+
     def exec(self, pod, command, timeout):
         self.exec_calls.append((pod.id, command, timeout))
+        if self.exec_error:
+            raise self.exec_error
         return {"exit_code": 0, "stdout": "x" * (OUTPUT_TAIL_CHARS + 10), "stderr": ""}
 
     def rm(self, pod):
@@ -122,6 +129,25 @@ def test_run_command_finds_the_pod_by_name_and_keeps_only_the_output_tail(tools,
     assert result["exit_code"] == 0
     assert result["stdout"].startswith("…[cut to the last")
     assert len(result["stdout"]) < OUTPUT_TAIL_CHARS + 100
+
+
+def test_a_command_timeout_does_not_echo_the_command(tools, fake):
+    command = "HF_TOKEN=secret python train.py"
+    fake.exec_error = TimeoutError(f"Command did not finish within 300s on pod job: {command}")
+
+    result = tools.run_command("p1", command)
+
+    assert result["ok"] is False and result["error"]["code"] == "command_timeout"
+    assert "secret" not in json.dumps(result)
+
+
+def test_other_command_errors_have_the_command_cut_out(tools, fake):
+    command = "HF_TOKEN=secret python train.py"
+    fake.exec_error = RuntimeError(f"ssh failed running {command}")
+
+    result = tools.run_command("p1", command)
+
+    assert "secret" not in json.dumps(result) and "<command>" in result["error"]["message"]
 
 
 def test_remove_pod_of_an_unknown_pod_is_an_error_result_not_an_exception(tools, fake):
@@ -217,6 +243,51 @@ def test_a_slow_tool_call_does_not_block_the_others(tools, fake, monkeypatch, sl
             await task
 
     asyncio.run(check())
+
+
+def test_a_rental_cancelled_mid_call_removes_its_pod_before_a_retry_rents(tools, fake, monkeypatch):
+    from lium.cli.mcp.tools import tool_functions
+
+    rent_pod = next(f for f in tool_functions(tools) if f.__name__ == "rent_pod")
+    started, release = threading.Event(), threading.Event()
+    original_up, events = fake.up, []
+
+    def slow_up(**kwargs):
+        events.append("up")
+        started.set()
+        release.wait(2)
+        return original_up(**kwargs)
+
+    def rm(pod):
+        events.append(f"rm {pod.id}")
+        fake.removed.append(pod.id)
+
+    monkeypatch.setattr(fake, "up", slow_up)
+    monkeypatch.setattr(fake, "rm", rm)
+
+    async def check():
+        task = asyncio.create_task(rent_pod("cheap", "job"))
+        assert await asyncio.to_thread(started.wait, 3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        assert (await rent_pod("cheap", "job"))["ok"] is True
+
+    asyncio.run(check())
+    assert events == ["up", "rm p2", "up"]
+
+
+def test_a_rental_cancelled_after_it_finished_still_removes_the_unseen_pod(tools, fake):
+    from lium.cli.mcp.tools import _Rental
+
+    rental = _Rental()
+    result = tools.rent_pod("cheap", "job", rental=rental)  # done, but the host cancelled before reading it
+
+    tools.cancel_rental(rental, result)
+    tools.rent_pod("cheap", "again")  # waits for the removal
+
+    assert fake.removed == ["p2"]
 
 
 def test_help_works_without_the_mcp_package_being_imported():
