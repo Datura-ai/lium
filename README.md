@@ -54,6 +54,9 @@ lium balance
 # List available nodes (GPU machines)
 lium ls
 
+# Price a job on node #1 before renting it (no API key needed)
+lium quote 1 --hours 2
+
 # Create a pod using node index
 lium up 1  # Use node #1 from previous ls
 
@@ -64,7 +67,6 @@ lium up --gpu A100  # Auto-select best A100 node
 lium ps
 lium ps --filter status=RUNNING --sort spent   # running pods, most expensive so far first
 lium spend                                     # burn per hour, spend per pod, runway
-lium quote 1 --hours 2                         # a job's cost on a node before renting it
 
 # Copy files to pod
 lium scp 1 ./my_script.py
