@@ -77,6 +77,16 @@ def test_quote_without_gpus_prices_the_free_gpus_lium_up_would_rent(requests_see
     assert requests_seen[0][2]["gpu_count"] == quoted
 
 
+def test_quote_by_uuid_of_a_node_no_longer_listed_still_asks_the_api_without_a_count(requests_seen, monkeypatch):
+    # millerserhii on #337 (549f87c): a UUID is quoted as given, even when it has left the listing
+    monkeypatch.setattr(requests_seen.client, "get_executor", lambda ref: None)
+
+    out = CliRunner().invoke(cli, ["quote", NODE, "--hours", "2", "--format", "json"])
+
+    assert out.exit_code == 0, out.output
+    assert requests_seen == [("GET", f"/executors/{NODE}/quote", {"hours": 2.0, "volume_gb": 0.0, "backup_gb": 0.0})]
+
+
 def test_quote_by_huid_resolves_the_listed_node_and_passes_gpus(requests_seen, monkeypatch):
     monkeypatch.setattr(requests_seen.client, "get_executor", lambda ref: _node())
 

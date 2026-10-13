@@ -2513,7 +2513,9 @@ class Lium:
             executor: Node UUID, or the HUID ``lium ls`` prints for it.
 
         Raises:
-            LiumNotFoundError: no listed node has that id, or the server has no quote route yet.
+            LiumNotFoundError: no listed node has that HUID, the server knows no node with that UUID, or it
+                has no quote route yet. A UUID is quoted even when it has left the listing (then without a
+                GPU count, so the server's default applies).
             ValueError: the HUID names more than one listed node.
         """
         try:
@@ -2522,10 +2524,11 @@ class Lium:
             node_id = None
         if node_id is None or gpu_count is None:
             node = self.get_executor(executor)
-            if node is None:
+            if node is None and node_id is None:
                 raise LiumNotFoundError(f"No listed node '{executor}'. Try: lium ls")
-            node_id = node.id
-            if gpu_count is None:
+            # a UUID is quoted as given: one no longer listed goes to the server without a count
+            node_id = node_id or node.id
+            if gpu_count is None and node is not None:
                 # a rent with no count takes the node's free GPUs, so a split node is quoted as that split
                 free = getattr(node, "available_gpu_count", None)
                 gpu_count = node.gpu_count if free is None else free
