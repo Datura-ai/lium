@@ -231,8 +231,7 @@ def workspaces_login_command(email: Optional[str], password_stdin: bool):
     Accounts created with GitHub or Google sign-in set a password with "Forgot password" on lium.io first.
     Without a terminal (or with LIUM_NONINTERACTIVE=1) nothing is asked: pass --email and --password-stdin.
     """
-    lium = workspace_client()
-    lium.workspaces.require_enabled()  # nothing to sign in for on a server without workspaces
+    lium = workspace_client()  # no workspace check: `lium keys` needs the session on a server without workspaces too
     email = email or ui.prompt("E-mail", hint="pass --email")
     if password_stdin:
         password = sys.stdin.readline().rstrip("\n")
@@ -246,7 +245,7 @@ def workspaces_login_command(email: Optional[str], password_stdin: bool):
         password = click.prompt("Password", hide_input=True)
     token = lium.workspaces.login(email, password)
     settings.set("session.token", token)
-    ui.success("Signed in; `lium workspaces` subcommands can now manage your teams")
+    ui.success("Signed in; `lium keys` and the `lium workspaces` subcommands can now use this session")
 
 
 @workspaces_command.command("create")
