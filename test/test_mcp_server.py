@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 
 import pytest
 from click.testing import CliRunner
@@ -12,7 +13,7 @@ from click.testing import CliRunner
 from lium.cli.cli import cli
 from lium.cli.mcp.tools import OUTPUT_TAIL_CHARS, LiumTools
 from lium.sdk import ExecutorInfo, PodInfo
-from lium.sdk.exceptions import LiumInsufficientBalanceError, PodStartError
+from lium.sdk.exceptions import LiumError, LiumInsufficientBalanceError, PodStartError
 
 TOOL_NAMES = {"list_gpus", "rent_pod", "list_pods", "run_command", "remove_pod", "get_balance"}
 
@@ -45,10 +46,16 @@ class FakeLium:
     def ps(self):
         return self.pods
 
+    next_pod = 2
+    up_calls = 0
+
     def up(self, **kwargs):
         self.up_kwargs = kwargs
-        self.pods = [*self.pods, _pod("p2", kwargs["name"])]
-        return {"id": "p2", "name": kwargs["name"], "status": "PENDING"}
+        self.up_calls += 1
+        pod_id = f"p{self.next_pod}"
+        self.next_pod += 1
+        self.pods = [*self.pods, _pod(pod_id, kwargs["name"])]
+        return {"id": pod_id, "name": kwargs["name"], "status": "PENDING"}
 
     ready_result = "ready"
 
@@ -70,6 +77,7 @@ class FakeLium:
 
     def rm(self, pod):
         self.removed.append(pod.id)
+        self.pods = [p for p in self.pods if p.id != pod.id]
 
     def balance(self):
         raise LiumInsufficientBalanceError("Balance too low", code="insufficient_balance", hint="lium fund")
@@ -82,7 +90,9 @@ def fake():
 
 @pytest.fixture
 def tools(fake):
-    return LiumTools(client_factory=lambda: fake)
+    tools = LiumTools(client_factory=lambda: fake)
+    tools.BACKGROUND_CLEANUP = False  # tests drive cleanup through rent_pod's own reconcile; one test turns it on
+    return tools
 
 
 def test_list_gpus_returns_the_cheapest_nodes_first_up_to_the_limit(tools):
@@ -248,6 +258,7 @@ def test_a_slow_tool_call_does_not_block_the_others(tools, fake, monkeypatch, sl
 def test_a_rental_cancelled_mid_call_removes_its_pod_before_a_retry_rents(tools, fake, monkeypatch):
     from lium.cli.mcp.tools import tool_functions
 
+    tools.BACKGROUND_CLEANUP = True
     rent_pod = next(f for f in tool_functions(tools) if f.__name__ == "rent_pod")
     started, release = threading.Event(), threading.Event()
     original_up, events = fake.up, []
@@ -261,6 +272,7 @@ def test_a_rental_cancelled_mid_call_removes_its_pod_before_a_retry_rents(tools,
     def rm(pod):
         events.append(f"rm {pod.id}")
         fake.removed.append(pod.id)
+        fake.pods = [p for p in fake.pods if p.id != pod.id]
 
     monkeypatch.setattr(fake, "up", slow_up)
     monkeypatch.setattr(fake, "rm", rm)
@@ -278,16 +290,143 @@ def test_a_rental_cancelled_mid_call_removes_its_pod_before_a_retry_rents(tools,
     assert events == ["up", "rm p2", "up"]
 
 
-def test_a_rental_cancelled_after_it_finished_still_removes_the_unseen_pod(tools, fake):
+def test_a_rental_cancelled_after_its_worker_finished_still_removes_the_unseen_pod(tools, fake):
     from lium.cli.mcp.tools import _Rental
 
     rental = _Rental()
-    result = tools.rent_pod("cheap", "job", rental=rental)  # done, but the host cancelled before reading it
+    tools.rent_pod("cheap", "job", rental=rental)  # finished; the host cancelled before the result reached it
 
-    tools.cancel_rental(rental, result)
-    tools.rent_pod("cheap", "again")  # waits for the removal
+    tools.cancel_rental(rental)
+    retry = tools.rent_pod("other-node", "again")
 
-    assert fake.removed == ["p2"]
+    assert retry["ok"] is True
+    assert fake.removed == ["p2"] and fake.up_calls == 2
+
+
+def _failing_until_fixed(original, error, fixed):
+    def call(*args, **kwargs):
+        if not fixed.is_set():
+            raise error
+        return original(*args, **kwargs)
+
+    return call
+
+
+@pytest.mark.parametrize("failure", ["pending_delete_refused", "delete_timeout", "listing_failed", "listed_late"])
+def test_an_unconfirmed_cleanup_blocks_renting_until_the_pod_is_confirmed_removed(tools, fake, monkeypatch, failure):
+    from lium.cli.mcp.tools import _Rental
+
+    tools.CLEANUP_WAIT_SECONDS = 0.05
+    rental, fixed = _Rental(), threading.Event()
+    tools.rent_pod("node-a", "first", rental=rental)
+    if failure == "pending_delete_refused":
+        monkeypatch.setattr(fake, "rm", _failing_until_fixed(fake.rm, LiumError("Cannot delete a PENDING pod"), fixed))
+    elif failure == "delete_timeout":
+        monkeypatch.setattr(fake, "rm", _failing_until_fixed(fake.rm, TimeoutError("delete acknowledgement lost"), fixed))
+    elif failure == "listing_failed":
+        monkeypatch.setattr(fake, "ps", _failing_until_fixed(fake.ps, ConnectionError("ps failed"), fixed))
+    else:
+        hidden = [p for p in fake.pods if p.id == "p2"]
+        fake.pods = [p for p in fake.pods if p.id != "p2"]
+
+    tools.cancel_rental(rental)
+    retry = tools.rent_pod("node-b", "retry")
+
+    assert retry["ok"] is False and retry["error"]["code"] == "cleanup_pending"
+    assert retry["unresolved"][0]["pod_ids"] == ["p2"]
+    assert fake.up_calls == 1
+    if failure != "listing_failed":
+        assert tools.list_pods()["unresolved_rentals"][0]["pod_ids"] == ["p2"]
+
+    fixed.set()
+    if failure == "listed_late":
+        fake.pods = [*fake.pods, *hidden]
+    retry = tools.rent_pod("node-b", "retry")
+
+    assert retry["ok"] is True
+    assert fake.removed == ["p2"] and fake.up_calls == 2
+    assert "unresolved_rentals" not in tools.list_pods()
+
+
+def test_removing_the_pod_by_hand_settles_an_unresolved_rental(tools, fake, monkeypatch):
+    from lium.cli.mcp.tools import _Rental
+
+    tools.CLEANUP_WAIT_SECONDS = 0.05
+    rental = _Rental()
+    tools.rent_pod("node-a", "first", rental=rental)
+    original_rm = fake.rm
+    monkeypatch.setattr(fake, "rm", lambda pod: (_ for _ in ()).throw(LiumError("Cannot delete a PENDING pod")))
+    tools.cancel_rental(rental)
+    assert tools.rent_pod("node-b", "retry")["error"]["code"] == "cleanup_pending"
+
+    monkeypatch.setattr(fake, "rm", original_rm)
+    assert tools.remove_pod("p2")["ok"] is True
+
+    assert tools.rent_pod("node-b", "retry")["ok"] is True
+
+
+@pytest.mark.parametrize("created", [True, False])
+def test_a_rent_call_with_no_answer_blocks_renting_until_its_pod_is_found_or_never_appears(tools, fake, monkeypatch, created):
+    tools.CLEANUP_WAIT_SECONDS = 0.05
+    original_up = fake.up
+
+    def lost_answer(**kwargs):
+        if created:
+            original_up(**kwargs)
+        else:
+            fake.up_calls += 1
+        raise ConnectionError("read timed out")
+
+    monkeypatch.setattr(fake, "up", lost_answer)
+    first = tools.rent_pod("node-a", "first")
+    assert first["error"]["code"] == "rent_outcome_unknown"
+    monkeypatch.setattr(fake, "up", original_up)
+
+    retry = tools.rent_pod("node-b", "retry")
+    if created:  # the pod is found by its name and removed; renting resumes
+        assert retry["ok"] is True and fake.removed == ["p2"]
+    else:  # nothing listed yet: unknown until the never-listed window passes
+        assert retry["error"]["code"] == "cleanup_pending" and fake.up_calls == 1
+        tools.NEVER_LISTED_SECONDS = 0
+        assert tools.rent_pod("node-b", "retry")["ok"] is True and fake.removed == []
+
+
+def test_a_rental_cancelled_before_its_worker_starts_never_rents_and_never_waits(tools, fake):
+    from lium.cli.mcp.tools import _Rental
+
+    rental = _Rental()
+    tools.cancel_rental(rental)
+    done = threading.Event()
+
+    def run():
+        try:
+            tools.rent_pod("cheap", "cancelled", rental=rental)
+        finally:
+            done.set()
+
+    threading.Thread(target=run, daemon=True).start()
+
+    assert done.wait(0.5)
+    assert fake.up_calls == 0
+    assert tools.rent_pod("cheap", "next")["ok"] is True
+
+
+def test_a_rental_cancelled_while_waiting_for_cleanup_leaves_without_renting(tools, fake, monkeypatch):
+    from lium.cli.mcp.tools import _Rental
+
+    first = _Rental()
+    tools.rent_pod("node-a", "first", rental=first)
+    monkeypatch.setattr(fake, "rm", lambda pod: (_ for _ in ()).throw(LiumError("Cannot delete a PENDING pod")))
+    tools.cancel_rental(first)
+    tools.CLEANUP_WAIT_SECONDS = 30
+
+    waiter, done = _Rental(), threading.Event()
+    threading.Thread(target=lambda: (tools.rent_pod("node-b", "waiter", rental=waiter), done.set()), daemon=True).start()
+    time.sleep(0.1)
+    tools.cancel_rental(waiter)
+
+    assert done.wait(1)
+    assert fake.up_calls == 1
 
 
 def test_help_works_without_the_mcp_package_being_imported():
