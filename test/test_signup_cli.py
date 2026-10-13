@@ -252,6 +252,7 @@ def test_signup_says_no_credit_was_granted_when_the_flag_is_false(monkeypatch, s
 
     assert result.exit_code == 0
     assert "No signup credit yet" in result.output
+    assert "Add a card at https://lium.io/billing" in result.output
     assert "$5 signup credit was granted" not in result.output
 
 
