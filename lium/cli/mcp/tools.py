@@ -104,6 +104,8 @@ class _Rental:
         self.scope: Optional[Dict[str, str]] = None
         self.recovered = False
         self.handed: List["_Rental"] = []
+        self.reported = False  # this call's own result names its pod
+        self.delivered = False  # a result naming the pod was handed to the transport; the host may not have it
 
     def state(self) -> Dict[str, Any]:
         """What a restarted server needs to finish this rental: the request to replay, the account it was sent
@@ -121,6 +123,7 @@ class _Rental:
                 "cancelled": self.cancelled,
                 "before": sorted(self.before),
                 "pod_ids": sorted(self.pod_ids),
+                "delivered": self.delivered,
             }
 
     @classmethod
@@ -137,6 +140,7 @@ class _Rental:
         pod_ids = state.get("pod_ids") or []
         if pod_ids:  # the API named the pod before the restart: remove it (cancelled) or hand it over, no replay needed
             rental.outcome, rental.pod_ids = "created", set(pod_ids)
+        rental.delivered = bool(state.get("delivered"))
         return rental
 
     def report(self) -> Dict[str, Any]:
@@ -232,6 +236,9 @@ class LiumTools:
         # replayed, removed or handed over
         self._unresolved: List[_Rental] = loaded
         self._recovered: List[_Rental] = []  # known pods the host has not been told of
+        # pods a result named that the host has not yet shown it knows (it names the pod in a call, or the pod is
+        # gone): a returned callback is not a written response, so their journals stay until then
+        self._delivered: List[_Rental] = []
         self._reconciling = threading.Lock()
         self._reconciler_running = False
         if self._unresolved:
@@ -250,10 +257,10 @@ class LiumTools:
         pods = self.client.ps()
         for candidate in pods:
             if candidate.id == pod:
-                return candidate
+                return self._acknowledged(candidate)
         matches = {c.id: c for c in pods if pod in (c.huid, c.name)}
         if len(matches) == 1:
-            return next(iter(matches.values()))
+            return self._acknowledged(next(iter(matches.values())))
         if matches:
             raise LookupError(
                 f"'{pod}' matches {len(matches)} pods ({', '.join(sorted(matches))}); pass the pod_id of the one you mean."
@@ -360,6 +367,8 @@ class LiumTools:
                 # the journal now names the pod, and stays until the result reaches the host (deliver): a server that
                 # stops during the wait below hands this pod over after a restart instead of renting another
                 self._save(rental)
+            with rental.lock:
+                rental.reported = True  # every result from here on names pod_id
             pending = {
                 "ok": True,
                 "status": "pending",
@@ -398,15 +407,33 @@ class LiumTools:
         return result
 
     def deliver(self, rental: _Rental) -> None:
-        """The result of the call ``rental`` reached the host: the pod it rented and every recovered pod it carried
-        are the host's now, so their journals go."""
+        """The call ``rental`` returned its result to the MCP transport. That is not proof the host read it (the
+        server can die before the response is written), so the pods it named stay journaled, marked delivered, until
+        the host names one in a call or the pod is gone. A restart before then hands them over once more."""
         with self._cleanup:
             handed, rental.handed = rental.handed, []
             with rental.lock:
-                own = rental.outcome == "created" and not rental.cancelled and rental not in self._unresolved
-        for recovered in handed:
-            self._store.forget(recovered)
-        if own:
+                # only a result that names the pod: an unknown-outcome error recovered in the background since does not
+                own = rental.reported and not rental.cancelled
+            reached = handed + ([rental] if own else [])
+            for target in reached:
+                with target.lock:
+                    target.delivered = True
+                if target not in self._delivered:
+                    self._delivered.append(target)
+        for target in reached:
+            self._save(target)
+
+    def _acknowledged(self, pod: PodInfo) -> PodInfo:
+        """The host named ``pod`` in a call, so it knows the pod: a journal kept for its delivery can go."""
+        self._forget_delivered(lambda pod_ids: pod.id in pod_ids)
+        return pod
+
+    def _forget_delivered(self, done: Callable[[Set[str]], bool]) -> None:
+        with self._cleanup:
+            finished = [r for r in self._delivered if done(set(r.pod_ids))]
+            self._delivered = [r for r in self._delivered if r not in finished]
+        for rental in finished:
             self._store.forget(rental)
 
     def cancel_rental(self, rental: _Rental) -> None:
@@ -616,11 +643,16 @@ class LiumTools:
         """Reserve the recovered rentals the host has not been told of for the call ``receiver``. Their journals stay
         until that call's result reaches the host (:meth:`deliver`); if it is cancelled they wait for the next call."""
         with self._cleanup:
+            with receiver.lock:
+                if receiver.cancelled:
+                    # cancelled already: nothing would deliver or requeue what it took, so it takes nothing
+                    return []
             delivered = [rental for rental in self._recovered if not rental.cancelled]
             self._recovered = [rental for rental in self._recovered if rental not in delivered]
             receiver.handed.extend(delivered)
         return [
-            {"name": rental.name, "pod_ids": sorted(rental.pod_ids), "idempotency_key": rental.idempotency_key}
+            {"name": rental.name, "pod_ids": sorted(rental.pod_ids), "idempotency_key": rental.idempotency_key,
+             **({"may_have_been_reported_before_a_restart": True} if rental.delivered else {})}
             for rental in delivered
         ]
 
@@ -667,7 +699,10 @@ class LiumTools:
         receiver = receiver or _Rental()
 
         def call():
-            result = {"ok": True, "pods": [_pod(p) for p in self.client.ps()]}
+            pods = self.client.ps()
+            live = {p.id for p in pods}
+            self._forget_delivered(lambda pod_ids: not pod_ids & live)  # gone: nothing left to tell the host about
+            result = {"ok": True, "pods": [_pod(p) for p in pods]}
             unresolved = self._reconcile()
             if unresolved:
                 result["unresolved_rentals"] = [rental.report() for rental in unresolved]
