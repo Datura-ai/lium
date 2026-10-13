@@ -5,6 +5,7 @@ hint}}`` instead, so the model can read what went wrong and what to do next.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import threading
@@ -78,10 +79,12 @@ class _Rental:
 
     Once ``submitted`` (``up`` was called) a pod may exist. ``outcome`` is None while ``up`` is in flight, then
     "created" (the API named the pod), "rejected" (the SDK established that no request could have rented) or
-    "unknown" (a request went unanswered: maybe a pod). An unknown rental keeps the request it sent (``replay``),
-    which is sent again with the same idempotency key until the API answers it. ``pod_ids`` are the pods the API
-    named for this rental that are not yet confirmed removed. ``candidates`` are new pods with the rental's name:
-    shown, never deleted, since a name proves nothing about who rented the pod."""
+    "unknown" (a request went unanswered: maybe a pod). The request (``replay``) is journaled to disk before it is
+    sent, with its account scope and send time, so an unknown rental can be re-sent with the same idempotency key,
+    also by a restarted server. ``pod_ids`` are the pods the API named for this rental that are not yet confirmed
+    removed. ``candidates`` are new pods with the rental's name: shown, never deleted, since a name proves nothing
+    about who rented the pod. ``recovered``: a replay named the pod of a rental the host still wants, and the
+    host has not been told yet."""
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -96,9 +99,13 @@ class _Rental:
         self.candidates: List[str] = []
         self.last_error: Optional[str] = None
         self.replay: Optional[LiumRentOutcomeUnknownError] = None
+        self.submitted_at: Optional[float] = None
+        self.scope: Optional[Dict[str, str]] = None
+        self.recovered = False
 
     def state(self) -> Dict[str, Any]:
-        """What a restarted server needs to finish this rental: the request to replay and whether to keep its pod."""
+        """What a restarted server needs to finish this rental: the request to replay, the account it was sent
+        for, when, and whether the host still wants its pod."""
         with self.lock:
             error = self.replay
             return {
@@ -107,8 +114,11 @@ class _Rental:
                 "executor_id": error.executor_id if error else None,
                 "endpoint": error.endpoint if error else None,
                 "payload": error.payload if error else None,
+                "submitted_at": self.submitted_at,
+                "scope": self.scope,
                 "cancelled": self.cancelled,
                 "before": sorted(self.before),
+                "recovered_pod_ids": sorted(self.pod_ids) if self.recovered else [],
             }
 
     @classmethod
@@ -117,10 +127,14 @@ class _Rental:
         rental.name, rental.cancelled, rental.submitted = state["name"], bool(state.get("cancelled")), True
         rental.outcome, rental.idempotency_key = "unknown", state["idempotency_key"]
         rental.before = set(state.get("before") or [])
+        rental.submitted_at, rental.scope = state.get("submitted_at"), state.get("scope")
         rental.replay = LiumRentOutcomeUnknownError(
             "restored from an earlier session", idempotency_key=state["idempotency_key"], pod_name=state["name"],
             executor_id=state.get("executor_id"), endpoint=state.get("endpoint"), payload=state.get("payload"),
         )
+        recovered = state.get("recovered_pod_ids") or []
+        if recovered:  # the replay named its pod before a restart; the host still has to be told
+            rental.outcome, rental.pod_ids, rental.recovered = "created", set(recovered), not rental.cancelled
         return rental
 
     def report(self) -> Dict[str, Any]:
@@ -136,11 +150,15 @@ class _Rental:
 
 
 class _RentalStore:
-    """Unknown rentals on disk, one file per idempotency key, so a restarted server replays the same request
-    instead of forgetting it: a new key would let the API rent a second pod for the one the first request made."""
+    """Rentals whose outcome the host has not received, on disk, one file per idempotency key. A request is
+    written before it is sent, so a server that stops mid-request replays the same key after a restart instead
+    of forgetting it: a new key would let the API rent a second pod for the one the first request made."""
 
     def __init__(self, directory: Optional[Path]):
         self.directory = directory
+
+    def path(self, rental: _Rental) -> Optional[Path]:
+        return self.directory / f"{rental.idempotency_key}.json" if self.directory and rental.idempotency_key else None
 
     def load(self) -> List[_Rental]:
         if self.directory is None or not self.directory.is_dir():
@@ -154,23 +172,29 @@ class _RentalStore:
         return rentals
 
     def save(self, rental: _Rental) -> None:
-        state = rental.state()
-        if self.directory is None or not state["idempotency_key"] or not state["endpoint"]:
+        """Raises if the record cannot be written."""
+        state, path = rental.state(), self.path(rental)
+        if path is None or not state["endpoint"]:
             return
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        path = self.directory / f"{state['idempotency_key']}.json"
         tmp = path.with_suffix(".tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             json.dump(state, f)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
 
     def forget(self, rental: _Rental) -> None:
-        if self.directory is not None and rental.idempotency_key:
-            (self.directory / f"{rental.idempotency_key}.json").unlink(missing_ok=True)
+        path = self.path(rental)
+        if path is not None:
+            path.unlink(missing_ok=True)
 
 
 DEFAULT_RENTAL_STATE_DIR = Path.home() / ".lium" / "mcp-pending-rentals"
+# The API keeps a completed idempotency record for 24 hours; after that the same key is a new rent. Replays stop an
+# hour before, and the rental stays unresolved for the user to settle by hand.
+REPLAY_WINDOW_SECONDS = 23 * 3600
 
 
 def _unlisted_pod(pod_id: str, name: str) -> PodInfo:
@@ -197,14 +221,18 @@ class LiumTools:
         self._factory = client_factory
         self._client: Optional[Lium] = None
         # Rentals whose result the host never got (it cancelled, or the rent call went unanswered). Each stays here
-        # until its pod is confirmed removed or confirmed never created; while any does, rent_pod refuses to rent.
-        # Unknown ones are also kept on disk, so a restart replays them rather than forgetting them.
+        # until its pod is confirmed removed, confirmed never created, or recovered and handed to the host; while
+        # any does, rent_pod refuses to rent. They are also kept on disk, so a restart replays rather than forgets.
         self._store = _RentalStore(state_dir or DEFAULT_RENTAL_STATE_DIR)
         self._cleanup = threading.Condition()
-        self._unresolved: List[_Rental] = self._store.load()
-        self._recovered: List[Dict[str, Any]] = []
+        loaded = self._store.load()
+        self._unresolved: List[_Rental] = [r for r in loaded if not r.recovered]
+        self._recovered: List[_Rental] = [r for r in loaded if r.recovered]  # pods the host has not been told of
         self._reconciling = threading.Lock()
         self._reconciler_running = False
+        if self._unresolved:
+            # a restored rental may be billing: settle it now, not at the first tool call, which may never come
+            self._start_reconciler()
 
     @property
     def client(self) -> Lium:
@@ -256,6 +284,10 @@ class LiumTools:
             deadline = time.monotonic() + self.CLEANUP_WAIT_SECONDS
             while True:
                 unresolved = self._reconcile()
+                recovered = self._hand_off_recovered()
+                if recovered:
+                    # an earlier rent the host never heard back from did rent: that is the answer, not a new rent
+                    return self._recovered_result(recovered)
                 if not unresolved:
                     break
                 if rental.cancelled:
@@ -274,26 +306,38 @@ class LiumTools:
                     return not_rented
                 rental.name, rental.before, rental.submitted, rental.idempotency_key = name, before, True, key
 
+            def journal(request: Dict[str, Any]) -> None:
+                # written before the first request leaves: if this server stops mid-request, the next one replays
+                # this key. If it cannot be written, up() sends nothing
+                with rental.lock:
+                    rental.replay = LiumRentOutcomeUnknownError(
+                        "sent; outcome not yet known", idempotency_key=request["idempotency_key"], pod_name=name,
+                        executor_id=executor_id, endpoint=request["endpoint"], payload=request["payload"],
+                    )
+                    rental.submitted_at, rental.scope = time.time(), self._scope()
+                self._store.save(rental)
+
             # rent and wait separately: once the rent call returns the pod bills, so a slow start must hand back its id
             # rather than an error the model would answer by renting a second pod. confirmed_only: the SDK never
             # hands back a pod found by name, which may be another client's; it reports the outcome as unknown.
             try:
                 created = self.client.up(
                     executor_id=executor_id, name=name, template_id=template_id, wait=False,
-                    idempotency_key=key, confirmed_only=True,
+                    idempotency_key=key, confirmed_only=True, before_send=journal,
                 )
             except LiumRentOutcomeUnknownError as e:
-                # a request went unanswered and nothing proved what became of it: a pod may exist. The request is
-                # kept and replayed with the same key, which the API answers with the first request's outcome
+                # a request went unanswered and nothing proved what became of it: a pod may exist. The journaled
+                # request is replayed with the same key until the API answers
                 self._settle(rental, "unknown", idempotency_key=e.idempotency_key or key)
                 with rental.lock:
-                    rental.replay, rental.candidates = e, list(e.candidates)
+                    rental.candidates = list(e.candidates)
                 self._track(rental)
                 return self._unknown_outcome_error(name, e)
             except Exception:
                 # every other failure is one the SDK raises only when no request could have rented: a check before
-                # the request, or the API's refusal of every request it sent
+                # the request (a journal that cannot be written included), or the API's refusal of every request
                 self._settle(rental, "rejected", idempotency_key=key)
+                self._store.forget(rental)
                 raise
 
             pod_id = created.get("id") if isinstance(created, dict) else getattr(created, "id", None)
@@ -301,8 +345,12 @@ class LiumTools:
             if not pod_id:
                 self._track(rental)
                 return self._unknown_outcome_error(name, ValueError("the rent call returned no pod id"))
-            if rental.cancelled:
+            with rental.lock:
+                cancelled = rental.cancelled
+            if cancelled:
                 self._track(rental)  # cancelled while up() was in flight: its pod id is known only now
+            else:
+                self._store.forget(rental)  # the host gets the pod id below
             pending = {
                 "ok": True,
                 "status": "pending",
@@ -344,23 +392,51 @@ class LiumTools:
             rental.cancelled = True
             submitted = rental.submitted
         if submitted:
-            self._track(rental)  # saves an unknown one again: after a restart its pod must be removed, not kept
+            self._track(rental)
         with self._cleanup:
             self._cleanup.notify_all()
 
     @staticmethod
     def _settle(rental: _Rental, outcome: str, pod_id: Optional[str] = None, idempotency_key: Optional[str] = None) -> None:
         with rental.lock:
-            rental.outcome, rental.idempotency_key = outcome, idempotency_key
+            rental.outcome = outcome
+            rental.idempotency_key = idempotency_key or rental.idempotency_key
             if pod_id:
                 rental.pod_ids.add(pod_id)
 
-    def _track(self, rental: _Rental) -> None:
-        if rental.outcome == "unknown":
+    def _scope(self) -> Dict[str, str]:
+        """The API and account a request is sent for, without the key itself: the API keeps idempotency keys per
+        account, so a replay under another account would be a new rent."""
+        client = self.client
+        config = getattr(client, "config", None)
+        key = (getattr(client, "headers", None) or {}).get("X-API-KEY") or ""
+        return {
+            "base_url": str(getattr(config, "base_url", "")),
+            "key_sha256": hashlib.sha256(key.encode()).hexdigest()[:16],
+        }
+
+    def _save(self, rental: _Rental) -> None:
+        try:
             self._store.save(rental)
+        except OSError as e:  # the in-memory guard already holds; only a restart would lose it
+            with rental.lock:
+                rental.last_error = f"could not save this rental to {self._store.directory}: {e}"
+
+    def _track(self, rental: _Rental) -> None:
+        """Keep ``rental`` until it is settled: in memory first, then on disk."""
         with self._cleanup:
+            if rental in self._recovered:
+                # cancelled after a replay kept its pod and before the host was told: remove the pod after all
+                self._recovered.remove(rental)
+                with rental.lock:
+                    rental.recovered = False
             if rental not in self._unresolved:
                 self._unresolved.append(rental)
+        self._save(rental)
+        self._start_reconciler()
+
+    def _start_reconciler(self) -> None:
+        with self._cleanup:
             start = self.BACKGROUND_CLEANUP and not self._reconciler_running
             self._reconciler_running = self._reconciler_running or start
         if start:
@@ -395,40 +471,51 @@ class LiumTools:
                     with rental.lock:
                         rental.last_error = f"listing pods failed: {type(e).__name__}: {e}"
                 return pending
-            resolved = [rental for rental in pending if self._settle_cleanup(rental, live)]
-            for rental in resolved:
-                self._store.forget(rental)
+            settled = {rental: self._settle_cleanup(rental, live) for rental in pending}
             with self._cleanup:
-                self._unresolved = [r for r in self._unresolved if r not in resolved]
+                for rental, disposition in settled.items():
+                    if disposition == "pending" or rental not in self._unresolved:
+                        continue
+                    with rental.lock:
+                        if rental.cancelled and disposition == "keep":
+                            # cancelled while the replay settled it: the pod is removed, not kept
+                            rental.recovered = False
+                            continue
+                        rental.recovered = disposition == "keep"
+                    self._unresolved.remove(rental)
+                    if disposition == "keep":
+                        self._recovered.append(rental)
+                    else:
+                        self._store.forget(rental)
                 self._cleanup.notify_all()
                 return list(self._unresolved)
 
-    def _settle_cleanup(self, rental: _Rental, live: Dict[str, PodInfo]) -> bool:
-        """True once this rental is settled: the SDK established that it rented nothing, the API acknowledged the
-        removal of every pod it named for a cancelled rental (or answered that the pod does not exist), or a replay
-        named the pod the host is still waiting for. Elapsed time settles nothing, and a pod is never removed
-        because of its name."""
+    def _settle_cleanup(self, rental: _Rental, live: Dict[str, PodInfo]) -> str:
+        """How far this rental is settled: "done" once nothing it made can still bill (the SDK established that it
+        rented nothing, or the API acknowledged the removal of every pod it named for a cancelled rental, or answered
+        that the pod does not exist); "keep" once a replay named the pod of a rental the host still wants; else
+        "pending". Elapsed time settles nothing, and a pod is never removed because of its name."""
         with rental.lock:
             outcome = rental.outcome
             if outcome is None:
                 rental.last_error = "the rent call has not returned yet"
-                return False
+                return "pending"
             if outcome == "rejected":
-                return True
+                return "done"
             if outcome == "unknown":
                 rental.candidates = sorted(p.id for p in live.values() if p.name == rental.name and p.id not in rental.before)
-                replay = rental.replay
-        if outcome == "unknown" and not self._replay(rental, replay):
-            return False
+        if outcome == "unknown" and not self._replay(rental):
+            return "pending"
         with rental.lock:
             if rental.outcome == "rejected":
-                return True
-            if not rental.cancelled:
-                # the replay named the pod of a rental the host still wants: report it, never remove it
-                self._recovered.append({"name": rental.name, "pod_ids": sorted(rental.pod_ids),
-                                        "idempotency_key": rental.idempotency_key})
-                return True
+                return "done"
+            keep = not rental.cancelled
+            if keep:
+                rental.recovered = True
             pod_ids = set(rental.pod_ids)
+        if keep:
+            self._save(rental)  # written before the hand-off can see it: a restart in between must still tell the host
+            return "keep"
         for pod_id in pod_ids:
             # a pod the listing does not show yet is still removed by its id: the API named it, so it exists
             target = live.get(pod_id) or _unlisted_pod(pod_id, rental.name)
@@ -444,39 +531,73 @@ class LiumTools:
                 rental.pod_ids.discard(pod_id)
                 rental.removed.add(pod_id)
         with rental.lock:
-            return not rental.pod_ids
+            return "pending" if rental.pod_ids else "done"
 
-    def _replay(self, rental: _Rental, error: Optional[LiumRentOutcomeUnknownError]) -> bool:
-        """Send an unknown rental's request again with its key; True once the API answered it (rental settled)."""
-        if error is None or not error.endpoint:
+    def _replay(self, rental: _Rental) -> bool:
+        """Send an unknown rental's request again with its key; True once the API answered it (rental settled).
+
+        A replay is sent only when the same key is still bound to the same first request: same API and account
+        (the API keeps keys per account), within the API's retention of the key, on an API that advertises
+        idempotent rents. Otherwise the rental stays unresolved for the user to settle."""
+        with rental.lock:
+            error, scope, submitted_at = rental.replay, rental.scope, rental.submitted_at
+
+        def unresolved(reason: str) -> bool:
             with rental.lock:
-                rental.last_error = ("the rent call's request was not kept, so it cannot be replayed; check "
-                                     "same_name_pods_to_check and remove_pod what you do not want")
+                rental.last_error = reason
             return False
+
+        manual = (f"; check list_pods and same_name_pods_to_check, remove_pod what you do not want, then delete "
+                  f"{self._store.path(rental)} to lift the rent block")
+        if error is None or not error.endpoint:
+            return unresolved("the rent call's request was not kept, so it cannot be replayed" + manual)
+        if scope != self._scope():
+            return unresolved("this rental was sent for another API or account than this server uses now; it is "
+                              "not replayed here (the same key would be a new rent there)" + manual)
+        if submitted_at is None or time.time() - submitted_at > REPLAY_WINDOW_SECONDS:
+            return unresolved("this rental is older than the API keeps idempotency keys, so a replay could rent a "
+                              "second pod" + manual)
+        if not self.client.supports("rent_idempotency"):
+            return unresolved("the API does not advertise idempotent rents (rent_idempotency), so a replay could "
+                              "rent a second pod" + manual)
         try:
             created = self.client.replay_rent(error)
         except LiumRentOutcomeUnknownError as e:
+            return unresolved(f"replaying the rent with the same key did not establish its outcome yet: {e}")
+        except LiumError:
+            # replay_rent raises a plain LiumError only for the API's stored refusal of the first request
             with rental.lock:
-                rental.last_error = f"replaying the rent with the same key got no answer yet: {e}"
-            return False
-        except LiumError as e:
-            with rental.lock:
-                if rental.candidates:
-                    # a refusal while a new pod with this name exists may come from a server that does not keep
-                    # idempotency keys, refusing the node our own lost request made busy: settle nothing
-                    rental.last_error = (f"the replay was refused ({e}) but a new pod with this name exists; "
-                                         "check same_name_pods_to_check and remove_pod it if it is not wanted")
-                    return False
-                rental.outcome = "rejected"  # the API answered the key with a refusal: nothing was rented
+                rental.outcome = "rejected"
             return True
         except Exception as e:  # noqa: BLE001 - nothing is established; try again later
-            with rental.lock:
-                rental.last_error = f"replaying the rent failed: {type(e).__name__}: {e}"
-            return False
+            return unresolved(f"replaying the rent failed: {type(e).__name__}: {e}")
         with rental.lock:
             rental.outcome = "created"
             rental.pod_ids.add(created["id"])
         return True
+
+    def _hand_off_recovered(self) -> List[Dict[str, Any]]:
+        """The recovered rentals the host has not been told of, now delivered: removed from memory and disk."""
+        with self._cleanup:
+            delivered = [rental for rental in self._recovered if not rental.cancelled]
+            self._recovered = [rental for rental in self._recovered if rental not in delivered]
+        for rental in delivered:
+            self._store.forget(rental)
+        return [
+            {"name": rental.name, "pod_ids": sorted(rental.pod_ids), "idempotency_key": rental.idempotency_key}
+            for rental in delivered
+        ]
+
+    @staticmethod
+    def _recovered_result(recovered: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return {
+            "ok": True,
+            "status": "recovered",
+            "recovered_rentals": recovered,
+            "next": "Nothing new was rented. An earlier rent_pod whose answer was lost did rent these pods, and they "
+            "are billing: use their pod_ids (list_pods for status, run_command once RUNNING) or remove_pod them. "
+            "Call rent_pod again only if you need another pod.",
+        }
 
     def _cleanup_pending_error(self, unresolved: List[_Rental]) -> Dict[str, Any]:
         unknown = any(rental.outcome == "unknown" for rental in unresolved)
@@ -484,8 +605,9 @@ class LiumTools:
             "cleanup_pending",
             f"{len(unresolved)} earlier rental(s) whose result never reached you may still be billing; renting again "
             "is refused until each one is settled.",
-            "An earlier rent call got no answer; it is being re-sent with the same idempotency key, which the API "
-            "answers with that call's outcome without renting twice. Retry rent_pod in a minute, or call list_pods."
+            "An earlier rent call got no answer. It is re-sent with the same idempotency key while the original "
+            "account's key is unexpired; then rent_pod returns that pod instead of renting. Retry in a minute; if "
+            "last_error says it cannot be replayed, follow it."
             if unknown
             else "Retry rent_pod in a minute, or call list_pods and remove_pod the pod ids listed under unresolved.",
         )
@@ -497,9 +619,10 @@ class LiumTools:
         return _error(
             "rent_outcome_unknown",
             f"The rent call got no clear answer ({type(e).__name__}: {e}); a pod named '{name}' may have been created.",
-            "Do NOT rent again. The call is re-sent with the same idempotency key until the API answers, and that "
-            "never rents a second pod; call list_pods in a minute: the pod shows under recovered_rentals, or "
-            "unresolved_rentals while the answer is pending. rent_pod is refused until then.",
+            "Do NOT rent again. Automatic replay requires the original account and an unexpired idempotency record; "
+            "with those, the call is re-sent with the same key, and the next rent_pod or list_pods reports the pod "
+            "under recovered_rentals. Otherwise the rental stays under unresolved_rentals, and rent_pod is refused "
+            "until it is settled.",
         )
 
     def list_pods(self) -> Dict[str, Any]:
@@ -508,8 +631,9 @@ class LiumTools:
             unresolved = self._reconcile()
             if unresolved:
                 result["unresolved_rentals"] = [rental.report() for rental in unresolved]
-            if self._recovered:
-                result["recovered_rentals"] = list(self._recovered)
+            recovered = self._hand_off_recovered()
+            if recovered:
+                result["recovered_rentals"] = recovered
             return result
 
         return _guarded(call)

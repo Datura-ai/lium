@@ -94,6 +94,7 @@ class FakeLium:
 def rental_state_dir(tmp_path, monkeypatch):
     """Unknown rentals are kept on disk; never in the real home directory."""
     monkeypatch.setattr(tools_module, "DEFAULT_RENTAL_STATE_DIR", tmp_path / "pending-rentals")
+    monkeypatch.setattr(LiumTools, "BACKGROUND_CLEANUP", False)  # tests that want the background thread turn it on
     return tmp_path / "pending-rentals"
 
 
@@ -452,39 +453,45 @@ def test_a_rent_the_sdk_says_was_never_made_does_not_block_the_next_one(tools, f
 
 
 class _Answer:
-    def __init__(self, status_code, data):
+    def __init__(self, status_code, data, headers=None):
         self.status_code, self.ok, self._data, self.text = status_code, status_code < 300, data, str(data)
-        self.headers = {}
+        self.headers = headers or {}
 
     def json(self):
         return self._data
 
 
-def _real_sdk(monkeypatch, outcomes, pods=lambda posts: []):
-    """A real Lium client whose HTTP answers come from ``outcomes`` (a response or an exception per request)."""
+class _ServerStopped(BaseException):
+    """The MCP host kills the server while a request is in flight: nothing after the send runs."""
+
+
+def _real_sdk(monkeypatch, outcomes, pods=lambda posts: [], api_key="test", features=("rent_idempotency",)):
+    """A real Lium client whose rent POSTs are answered from ``outcomes`` (a response or an exception each)."""
     from lium.sdk import Config, Lium
     from lium.sdk import client as client_module
     from lium.sdk import utils as sdk_utils
 
     monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(sdk_utils.time, "sleep", lambda seconds: None)
-    sdk = Lium(Config(api_key="test"))
+    sdk = Lium(Config(api_key=api_key))
+    sdk._features = set(features)
     monkeypatch.setattr(type(sdk.config), "ssh_public_keys", property(lambda self: ["ssh-ed25519 test"]))
     monkeypatch.setattr(sdk, "get_executor", lambda executor_id: _node("node-a", 2.0))
     monkeypatch.setattr(sdk, "_ensure_ssh_keys_registered", lambda *a, **k: None)
-    posts, removed = [], []
+    posts, removed, accounts = [], [], []
     monkeypatch.setattr(sdk, "ps", lambda: pods(posts))
     monkeypatch.setattr(sdk, "rm", lambda pod: removed.append(pod.id))
 
     def request(method, url, headers=None, timeout=None, **kwargs):
         posts.append(headers["Idempotency-Key"])
-        outcome = outcomes.pop(0)
-        if isinstance(outcome, Exception):
+        accounts.append(headers["X-API-KEY"])
+        outcome = outcomes.pop(0) if outcomes else _no_answer()
+        if isinstance(outcome, BaseException):
             raise outcome
         return outcome
 
     monkeypatch.setattr(client_module.requests, "request", request)
-    sdk.posts, sdk.removed = posts, removed
+    sdk.posts, sdk.removed, sdk.accounts = posts, removed, accounts
     return sdk
 
 
@@ -500,20 +507,27 @@ def _no_answer():
     return requests.ReadTimeout("read timed out")
 
 
-@pytest.mark.parametrize("first, second", [
+def _stored(status_code, data):
+    """The API's stored answer to the first request with this key."""
+    return _Answer(status_code, data, headers={"Idempotent-Replayed": "true"})
+
+
+LOST_RENTS = pytest.mark.parametrize("first, second", [
     (_no_answer(), _Answer(409, {"detail": "idempotency_in_progress"})),
     (_no_answer(), _Answer(400, {"detail": "A rental is already pending on this node"})),
     (_Answer(429, {"detail": "slow down"}), _no_answer()),
     (_Answer(429, {"detail": "slow down"}), _Answer(503, {"detail": "unavailable"})),
 ], ids=["timeout-409", "timeout-400", "429-timeout", "429-503"])
-def test_an_unanswered_rent_is_replayed_with_its_key_and_never_rents_twice(monkeypatch, first, second):
+
+
+@LOST_RENTS
+def test_an_unanswered_rent_is_replayed_with_its_key_and_reported_by_list_pods(monkeypatch, first, second):
     outcomes = [first, second]
     sdk = _real_sdk(monkeypatch, outcomes)
     tools = _real_tools(sdk)
 
     lost = tools.rent_pod("node-a", "job", template_id="tpl-1")
-    outcomes.append(_no_answer())  # the first replay is not answered either
-    retry = tools.rent_pod("node-a", "job-again", template_id="tpl-1")
+    retry = tools.rent_pod("node-a", "job-again", template_id="tpl-1")  # every replay meanwhile goes unanswered
     outcomes.append(_Answer(201, {"id": "pod-1"}))  # the API answers the key with the pod the lost request made
     listed = tools.list_pods()
 
@@ -522,6 +536,21 @@ def test_an_unanswered_rent_is_replayed_with_its_key_and_never_rents_twice(monke
     assert len(set(sdk.posts)) == 1  # every request, replays included, under one key: one pod at most
     assert listed["recovered_rentals"] == [{"name": "job", "pod_ids": ["pod-1"], "idempotency_key": sdk.posts[0]}]
     assert "unresolved_rentals" not in listed and sdk.removed == []
+    assert "recovered_rentals" not in tools.list_pods()  # handed over once
+
+
+@LOST_RENTS
+def test_a_retry_that_recovers_the_lost_pod_returns_it_and_rents_nothing_new(monkeypatch, first, second):
+    outcomes = [first, second]
+    sdk = _real_sdk(monkeypatch, outcomes)
+    tools = _real_tools(sdk)
+    tools.rent_pod("node-a", "job", template_id="tpl-1")
+
+    outcomes.extend([_Answer(201, {"id": "pod-1"}), _Answer(201, {"id": "pod-2"})])
+    retry = tools.rent_pod("node-b", "job", template_id="tpl-1", timeout_seconds=0)
+
+    assert len(set(sdk.posts)) == 1 and len(outcomes) == 1  # pod-2 was never asked for
+    assert retry["status"] == "recovered" and retry["recovered_rentals"][0]["pod_ids"] == ["pod-1"]
 
 
 def test_a_rate_limited_rent_whose_repeat_is_refused_rented_nothing(monkeypatch):
@@ -540,8 +569,7 @@ def test_a_rate_limited_rent_whose_repeat_is_refused_rented_nothing(monkeypatch)
 
 def test_a_same_name_pod_found_after_a_lost_rent_is_shown_never_taken_or_removed(monkeypatch):
     # another client rents a pod with this name on this node while our request is unanswered
-    outcomes = [_no_answer(), _no_answer()]
-    sdk = _real_sdk(monkeypatch, outcomes, pods=lambda posts: [_pod("theirs", "job")] if posts else [])
+    sdk = _real_sdk(monkeypatch, [_no_answer(), _no_answer()], pods=lambda posts: [_pod("theirs", "job")] if posts else [])
     tools = _real_tools(sdk)
 
     lost = tools.rent_pod("node-a", "job", template_id="tpl-1")
@@ -550,6 +578,52 @@ def test_a_same_name_pod_found_after_a_lost_rent_is_shown_never_taken_or_removed
     assert lost["error"]["code"] == "rent_outcome_unknown" and "pod_id" not in lost
     assert listed["unresolved_rentals"][0]["same_name_pods_to_check"] == ["theirs"]
     assert sdk.removed == []
+
+
+def test_the_request_is_journaled_before_it_is_sent(monkeypatch, rental_state_dir):
+    outcomes = [_Answer(201, {"id": "pod-1"})]
+    sdk = _real_sdk(monkeypatch, outcomes)
+    monkeypatch.setattr(sdk, "wait_ready", lambda created, timeout, on_poll=None: None)
+    snapshots, send = [], sdk._request
+
+    def checked_send(method, path, **kwargs):
+        if path.endswith("/rent"):
+            snapshots.append(bool(list(rental_state_dir.glob("*.json"))))
+        return send(method, path, **kwargs)
+
+    monkeypatch.setattr(sdk, "_request", checked_send)
+    rented = _real_tools(sdk).rent_pod("node-a", "job", template_id="tpl-1", timeout_seconds=0)
+
+    assert snapshots and all(snapshots)
+    assert rented["pod_id"] == "pod-1" and list(rental_state_dir.glob("*.json")) == []  # delivered: journal gone
+
+
+def test_a_rent_whose_journal_cannot_be_written_is_never_sent(monkeypatch):
+    sdk = _real_sdk(monkeypatch, [])
+    tools = _real_tools(sdk)
+
+    def disk_full(self, rental):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(tools_module._RentalStore, "save", disk_full)
+    failed = tools.rent_pod("node-a", "job", template_id="tpl-1")
+
+    assert failed["ok"] is False and "No space left" in failed["error"]["message"]
+    assert sdk.posts == [] and tools._unresolved == []
+
+
+def test_a_server_stopped_mid_request_is_replayed_with_the_same_key_after_a_restart(monkeypatch, rental_state_dir):
+    outcomes = [_ServerStopped()]
+    sdk = _real_sdk(monkeypatch, outcomes)
+    with pytest.raises(_ServerStopped):
+        _real_tools(sdk).rent_pod("node-a", "job", template_id="tpl-1")
+
+    outcomes.append(_Answer(201, {"id": "pod-1"}))
+    listed = _real_tools(sdk).list_pods()  # the restarted server
+
+    assert len(sdk.posts) == 2 and len(set(sdk.posts)) == 1
+    assert listed["recovered_rentals"][0]["pod_ids"] == ["pod-1"]
+    assert list(rental_state_dir.glob("*.json")) == []
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
@@ -565,8 +639,7 @@ def test_a_restarted_server_replays_the_lost_rent_with_the_same_key(monkeypatch,
     assert oct(rental_state_dir.stat().st_mode & 0o777) == "0o700"
 
     outcomes.append(_Answer(201, {"id": "pod-1"}))
-    after = _real_tools(sdk)  # the user restarted the MCP server
-    listed = after.list_pods()
+    listed = _real_tools(sdk).list_pods()  # the user restarted the MCP server
 
     assert len(set(sdk.posts)) == 1
     assert list(rental_state_dir.iterdir()) == []
@@ -576,8 +649,41 @@ def test_a_restarted_server_replays_the_lost_rent_with_the_same_key(monkeypatch,
         assert sdk.removed == [] and listed["recovered_rentals"][0]["pod_ids"] == ["pod-1"]
 
 
-def test_a_replay_the_api_refuses_settles_the_rental_as_never_rented(monkeypatch, rental_state_dir):
-    outcomes = [_no_answer(), _no_answer(), _Answer(402, {"detail": "insufficient balance"})]
+def test_a_restored_cancelled_rental_is_removed_without_waiting_for_a_tool_call(monkeypatch, rental_state_dir):
+    outcomes = [_no_answer(), _no_answer()]
+    sdk = _real_sdk(monkeypatch, outcomes)
+    rental = tools_module._Rental()
+    before = _real_tools(sdk)
+    before.rent_pod("node-a", "job", template_id="tpl-1", rental=rental)
+    before.cancel_rental(rental)
+
+    removed = threading.Event()
+    monkeypatch.setattr(sdk, "rm", lambda pod: removed.set())
+    monkeypatch.setattr(LiumTools, "BACKGROUND_CLEANUP", True)
+    outcomes.append(_Answer(201, {"id": "pod-1"}))
+    LiumTools(client_factory=lambda: sdk)  # the restarted server; the host calls no tool
+
+    assert removed.wait(5)
+
+
+@pytest.mark.parametrize("refusal", [
+    _Answer(403, {"detail": "insufficient balance"}),
+    _Answer(400, {"detail": "node is not available"}),
+], ids=["fresh-403", "fresh-400"])
+def test_a_fresh_refusal_of_a_replay_settles_nothing(monkeypatch, rental_state_dir, refusal):
+    outcomes = [_no_answer(), _no_answer(), refusal]
+    sdk = _real_sdk(monkeypatch, outcomes)
+    tools = _real_tools(sdk)
+
+    tools.rent_pod("node-a", "job", template_id="tpl-1")
+    listed = tools.list_pods()
+
+    assert listed["unresolved_rentals"]
+    assert list(rental_state_dir.glob("*.json"))
+
+
+def test_the_apis_stored_refusal_of_the_first_request_settles_it_as_never_rented(monkeypatch, rental_state_dir):
+    outcomes = [_no_answer(), _no_answer(), _stored(402, {"detail": "insufficient balance"})]
     sdk = _real_sdk(monkeypatch, outcomes)
     tools = _real_tools(sdk)
 
@@ -585,7 +691,50 @@ def test_a_replay_the_api_refuses_settles_the_rental_as_never_rented(monkeypatch
     listed = tools.list_pods()
 
     assert "unresolved_rentals" not in listed and "recovered_rentals" not in listed
-    assert list(rental_state_dir.iterdir()) == []
+    assert list(rental_state_dir.glob("*.json")) == []
+
+
+@pytest.mark.parametrize("change", ["other_account", "key_expired", "no_idempotency_feature"])
+def test_a_rental_is_not_replayed_where_its_key_would_be_a_new_rent(monkeypatch, rental_state_dir, change):
+    sdk = _real_sdk(monkeypatch, [_no_answer(), _no_answer()])
+    submitted = time.time()
+    _real_tools(sdk).rent_pod("node-a", "job", template_id="tpl-1")
+
+    other = _real_sdk(monkeypatch, [_Answer(201, {"id": "pod-2"})],
+                      api_key="different-account" if change == "other_account" else "test",
+                      features=() if change == "no_idempotency_feature" else ("rent_idempotency",))
+    if change == "key_expired":
+        monkeypatch.setattr(time, "time", lambda: submitted + 86_401)
+    listed = _real_tools(other).list_pods()
+
+    assert other.posts == []
+    assert listed["unresolved_rentals"][0]["last_error"]
+    assert list(rental_state_dir.glob("*.json"))
+
+
+def test_a_cancel_that_lands_while_a_replay_keeps_the_pod_still_removes_it(monkeypatch, rental_state_dir):
+    outcomes = [_no_answer(), _no_answer()]
+    sdk = _real_sdk(monkeypatch, outcomes)
+    tools = _real_tools(sdk)
+    rental = tools_module._Rental()
+    tools.rent_pod("node-a", "job", template_id="tpl-1", rental=rental)
+
+    outcomes.append(_Answer(201, {"id": "pod-1"}))
+    settle = tools._settle_cleanup
+
+    def cancel_after_resolution(r, live):
+        disposition = settle(r, live)
+        tools.cancel_rental(r)
+        return disposition
+
+    monkeypatch.setattr(tools, "_settle_cleanup", cancel_after_resolution)
+    first = tools.list_pods()
+    monkeypatch.setattr(tools, "_settle_cleanup", settle)
+    tools.list_pods()
+
+    assert "recovered_rentals" not in first
+    assert sdk.removed == ["pod-1"] and tools._unresolved == [] and tools._recovered == []
+    assert list(rental_state_dir.glob("*.json")) == []
 
 
 def test_a_rental_tracked_while_the_background_reconciler_exits_is_still_reconciled(tools, fake, monkeypatch):
