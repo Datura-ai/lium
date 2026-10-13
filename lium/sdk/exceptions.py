@@ -252,7 +252,8 @@ class LiumRentOutcomeUnknownError(LiumError):
     """A rent (:meth:`Lium.up`) was posted and its outcome could not be established: the first request got
     no answer (a timeout, a dropped connection, a 5xx), no new pod was listed yet, and the repeat was refused
     or failed too. The server may still be completing the first request, so a pod **may exist and bill**:
-    check ``ps()`` before renting again. ``idempotency_key`` is the key both requests carried.
+    check ``ps()`` before renting again. ``idempotency_key`` is the key both requests carried: pass it to
+    ``up(idempotency_key=...)`` to replay the rent and get the first request's outcome instead of a second pod.
     """
 
     def __init__(
@@ -262,6 +263,9 @@ class LiumRentOutcomeUnknownError(LiumError):
         idempotency_key: str,
         pod_name: str | None = None,
         executor_id: str | None = None,
+        candidates: list[str] | None = None,
+        endpoint: str | None = None,
+        payload: dict | None = None,
         code: str | None = None,
         hint: str | None = None,
         request_id: str | None = None,
@@ -270,6 +274,11 @@ class LiumRentOutcomeUnknownError(LiumError):
         self.idempotency_key = idempotency_key
         self.pod_name = pod_name
         self.executor_id = executor_id
+        # new pods with the rent's name, found after the answer was lost: maybe this rent's, maybe another client's
+        self.candidates = list(candidates or [])
+        # what :meth:`Lium.replay_rent` sends again, with the same key, to learn the outcome
+        self.endpoint = endpoint
+        self.payload = payload
 
 
 __all__ = [
