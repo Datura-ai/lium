@@ -66,20 +66,10 @@ def test_quote_by_uuid_with_gpus_asks_the_api_once_with_the_job(requests_seen, m
     assert json.loads(out.output)["total_usd"] == 32.05
 
 
-@pytest.mark.parametrize("available, quoted", [(2, 2), (8, 8), (None, 8)])
-def test_quote_without_gpus_prices_the_free_gpus_lium_up_would_rent(requests_seen, monkeypatch, available, quoted):
-    # millerserhii on #337 (f7c98f0): on an 8-GPU node with 2 free, `lium up NODE` rents 2, so the quote is for 2
-    monkeypatch.setattr(requests_seen.client, "get_executor", lambda ref: _node(available_gpu_count=available))
-
-    out = CliRunner().invoke(cli, ["quote", NODE, "--hours", "2", "--format", "json"])
-
-    assert out.exit_code == 0, out.output
-    assert requests_seen[0][2]["gpu_count"] == quoted
-
-
-def test_quote_by_uuid_of_a_node_no_longer_listed_still_asks_the_api_without_a_count(requests_seen, monkeypatch):
-    # millerserhii on #337 (549f87c): a UUID is quoted as given, even when it has left the listing
-    monkeypatch.setattr(requests_seen.client, "get_executor", lambda ref: None)
+def test_quote_by_uuid_without_gpus_leaves_the_count_to_the_server_and_reads_no_listing(requests_seen, monkeypatch):
+    # millerserhii on #337 (5c7a03f): a UUID is taken as given; the server quotes the node's free GPUs,
+    # what `lium up NODE` rents (lium-platform#1184)
+    monkeypatch.setattr(requests_seen.client, "get_executor", lambda ref: pytest.fail("no lookup expected"))
 
     out = CliRunner().invoke(cli, ["quote", NODE, "--hours", "2", "--format", "json"])
 
