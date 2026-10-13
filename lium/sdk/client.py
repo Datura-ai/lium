@@ -689,16 +689,17 @@ class Lium:
     def features(self) -> set:
         """Optional API capabilities the backend advertises on ``GET /version``.
 
-        Read once per client. A backend that predates the list, or one that cannot be
-        reached, advertises nothing — callers then take their client-side path.
+        Read once per client. A backend that predates the list advertises nothing; one
+        that cannot be reached advertises nothing for now and is asked again next time,
+        so a passing outage does not switch a feature off for the client's lifetime.
         """
         if self._features is None:
             try:
                 data = self._request("GET", "/version").json()
-                names = data.get("features") if isinstance(data, dict) else None
-                self._features = {str(name) for name in names} if isinstance(names, list) else set()
             except Exception:  # noqa: BLE001 — an unreachable /version is "no features", not an error
-                self._features = set()
+                return set()
+            names = data.get("features") if isinstance(data, dict) else None
+            self._features = {str(name) for name in names} if isinstance(names, list) else set()
         return self._features
 
     def supports(self, feature: str) -> bool:

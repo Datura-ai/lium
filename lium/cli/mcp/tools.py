@@ -83,8 +83,9 @@ class _Rental:
     sent, with its account scope and send time, so an unknown rental can be re-sent with the same idempotency key,
     also by a restarted server. ``pod_ids`` are the pods the API named for this rental that are not yet confirmed
     removed. ``candidates`` are new pods with the rental's name: shown, never deleted, since a name proves nothing
-    about who rented the pod. ``recovered``: a replay named the pod of a rental the host still wants, and the
-    host has not been told yet."""
+    about who rented the pod. ``recovered``: the pod of a rental the host still wants is known (a replay named it,
+    or a restart found it in the journal) and waits to be handed to a tool call. ``handed``: recovered rentals this
+    call returns; they stay journaled until the result reaches the host (:meth:`LiumTools.deliver`)."""
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -102,6 +103,7 @@ class _Rental:
         self.submitted_at: Optional[float] = None
         self.scope: Optional[Dict[str, str]] = None
         self.recovered = False
+        self.handed: List["_Rental"] = []
 
     def state(self) -> Dict[str, Any]:
         """What a restarted server needs to finish this rental: the request to replay, the account it was sent
@@ -118,7 +120,7 @@ class _Rental:
                 "scope": self.scope,
                 "cancelled": self.cancelled,
                 "before": sorted(self.before),
-                "recovered_pod_ids": sorted(self.pod_ids) if self.recovered else [],
+                "pod_ids": sorted(self.pod_ids),
             }
 
     @classmethod
@@ -132,9 +134,9 @@ class _Rental:
             "restored from an earlier session", idempotency_key=state["idempotency_key"], pod_name=state["name"],
             executor_id=state.get("executor_id"), endpoint=state.get("endpoint"), payload=state.get("payload"),
         )
-        recovered = state.get("recovered_pod_ids") or []
-        if recovered:  # the replay named its pod before a restart; the host still has to be told
-            rental.outcome, rental.pod_ids, rental.recovered = "created", set(recovered), not rental.cancelled
+        pod_ids = state.get("pod_ids") or []
+        if pod_ids:  # the API named the pod before the restart: remove it (cancelled) or hand it over, no replay needed
+            rental.outcome, rental.pod_ids = "created", set(pod_ids)
         return rental
 
     def report(self) -> Dict[str, Any]:
@@ -226,8 +228,10 @@ class LiumTools:
         self._store = _RentalStore(state_dir or DEFAULT_RENTAL_STATE_DIR)
         self._cleanup = threading.Condition()
         loaded = self._store.load()
-        self._unresolved: List[_Rental] = [r for r in loaded if not r.recovered]
-        self._recovered: List[_Rental] = [r for r in loaded if r.recovered]  # pods the host has not been told of
+        # restored rentals all start unresolved: each is checked against this server's account before anything is
+        # replayed, removed or handed over
+        self._unresolved: List[_Rental] = loaded
+        self._recovered: List[_Rental] = []  # known pods the host has not been told of
         self._reconciling = threading.Lock()
         self._reconciler_running = False
         if self._unresolved:
@@ -277,6 +281,9 @@ class LiumTools:
         timeout_seconds: int = 600,
         rental: Optional[_Rental] = None,
     ) -> Dict[str, Any]:
+        """``rental``: the async tool passes its own and calls :meth:`deliver` or :meth:`cancel_rental` once it knows
+        whether the result reached the host; a direct caller gets the result here, so it is delivered on return."""
+        direct = rental is None
         rental = rental or _Rental()
         not_rented = _error("cancelled", "The rental was cancelled before it was sent; nothing was rented.")
 
@@ -284,7 +291,7 @@ class LiumTools:
             deadline = time.monotonic() + self.CLEANUP_WAIT_SECONDS
             while True:
                 unresolved = self._reconcile()
-                recovered = self._hand_off_recovered()
+                recovered = self._hand_off_recovered(rental)
                 if recovered:
                     # an earlier rent the host never heard back from did rent: that is the answer, not a new rent
                     return self._recovered_result(recovered)
@@ -350,7 +357,9 @@ class LiumTools:
             if cancelled:
                 self._track(rental)  # cancelled while up() was in flight: its pod id is known only now
             else:
-                self._store.forget(rental)  # the host gets the pod id below
+                # the journal now names the pod, and stays until the result reaches the host (deliver): a server that
+                # stops during the wait below hands this pod over after a restart instead of renting another
+                self._save(rental)
             pending = {
                 "ok": True,
                 "status": "pending",
@@ -383,14 +392,33 @@ class LiumTools:
                 return {**pending, "warning": f"Not running after {timeout_seconds}s; some nodes take longer to start."}
             return {"ok": True, "pod": _pod(ready), "next": "run_command on this pod; remove_pod when done (billing stops)"}
 
-        return _guarded(call)
+        result = _guarded(call)
+        if direct:
+            self.deliver(rental)
+        return result
+
+    def deliver(self, rental: _Rental) -> None:
+        """The result of the call ``rental`` reached the host: the pod it rented and every recovered pod it carried
+        are the host's now, so their journals go."""
+        with self._cleanup:
+            handed, rental.handed = rental.handed, []
+            with rental.lock:
+                own = rental.outcome == "created" and not rental.cancelled and rental not in self._unresolved
+        for recovered in handed:
+            self._store.forget(recovered)
+        if own:
+            self._store.forget(rental)
 
     def cancel_rental(self, rental: _Rental) -> None:
-        """The host cancelled rent_pod and will never see its result. A rental not yet sent stops before renting; a sent
-        one is tracked until its pod is confirmed removed, whatever stage the worker thread has reached."""
+        """The host cancelled the call and will never see its result. A rental not yet sent stops before renting; a sent
+        one is tracked until its pod is confirmed removed, whatever stage the worker thread has reached. Recovered
+        pods the call was about to hand over wait for the next call."""
         with rental.lock:
             rental.cancelled = True
             submitted = rental.submitted
+        with self._cleanup:
+            handed, rental.handed = rental.handed, []
+            self._recovered.extend(r for r in handed if r not in self._recovered)
         if submitted:
             self._track(rental)
         with self._cleanup:
@@ -502,6 +530,14 @@ class LiumTools:
                 return "pending"
             if outcome == "rejected":
                 return "done"
+            scope = rental.scope
+        if scope is not None and scope != self._scope():
+            # restored from another API or account: neither replayed, removed nor handed over here
+            with rental.lock:
+                rental.last_error = (f"this rental was sent for another API or account than this server uses now; "
+                                     f"it is left for that account (journal {self._store.path(rental)})")
+            return "pending"
+        with rental.lock:
             if outcome == "unknown":
                 rental.candidates = sorted(p.id for p in live.values() if p.name == rental.name and p.id not in rental.before)
         if outcome == "unknown" and not self._replay(rental):
@@ -576,13 +612,13 @@ class LiumTools:
             rental.pod_ids.add(created["id"])
         return True
 
-    def _hand_off_recovered(self) -> List[Dict[str, Any]]:
-        """The recovered rentals the host has not been told of, now delivered: removed from memory and disk."""
+    def _hand_off_recovered(self, receiver: _Rental) -> List[Dict[str, Any]]:
+        """Reserve the recovered rentals the host has not been told of for the call ``receiver``. Their journals stay
+        until that call's result reaches the host (:meth:`deliver`); if it is cancelled they wait for the next call."""
         with self._cleanup:
             delivered = [rental for rental in self._recovered if not rental.cancelled]
             self._recovered = [rental for rental in self._recovered if rental not in delivered]
-        for rental in delivered:
-            self._store.forget(rental)
+            receiver.handed.extend(delivered)
         return [
             {"name": rental.name, "pod_ids": sorted(rental.pod_ids), "idempotency_key": rental.idempotency_key}
             for rental in delivered
@@ -625,18 +661,25 @@ class LiumTools:
             "until it is settled.",
         )
 
-    def list_pods(self) -> Dict[str, Any]:
+    def list_pods(self, receiver: Optional[_Rental] = None) -> Dict[str, Any]:
+        """``receiver``: as ``rental`` in :meth:`rent_pod`, for the recovered pods this listing hands over."""
+        direct = receiver is None
+        receiver = receiver or _Rental()
+
         def call():
             result = {"ok": True, "pods": [_pod(p) for p in self.client.ps()]}
             unresolved = self._reconcile()
             if unresolved:
                 result["unresolved_rentals"] = [rental.report() for rental in unresolved]
-            recovered = self._hand_off_recovered()
+            recovered = self._hand_off_recovered(receiver)
             if recovered:
                 result["recovered_rentals"] = recovered
             return result
 
-        return _guarded(call)
+        result = _guarded(call)
+        if direct:
+            self.deliver(receiver)
+        return result
 
     def run_command(self, pod: str, command: str, timeout_seconds: int = 300) -> Dict[str, Any]:
         def call():
@@ -700,15 +743,24 @@ def tool_functions(tools: LiumTools) -> List[Callable[..., Awaitable[Dict[str, A
         has status "pending", the pod is already rented: do not rent again, poll list_pods or remove_pod its pod_id."""
         rental = _Rental()
         try:
-            return await asyncio.to_thread(tools.rent_pod, executor_id, name, template_id, timeout_seconds, rental)
+            result = await asyncio.to_thread(tools.rent_pod, executor_id, name, template_id, timeout_seconds, rental)
         except asyncio.CancelledError:
             # the thread runs on; whatever pod it rents is removed, since the host will never learn its id
             tools.cancel_rental(rental)
             raise
+        tools.deliver(rental)
+        return result
 
     async def list_pods() -> Dict[str, Any]:
         """List your pods with their status, GPU, price per hour and SSH command."""
-        return await asyncio.to_thread(tools.list_pods)
+        receiver = _Rental()
+        try:
+            result = await asyncio.to_thread(tools.list_pods, receiver)
+        except asyncio.CancelledError:
+            tools.cancel_rental(receiver)  # recovered pods it would have reported wait for the next call
+            raise
+        tools.deliver(receiver)
+        return result
 
     async def run_command(pod: str, command: str, timeout_seconds: int = 300) -> Dict[str, Any]:
         """Run a shell command on a running pod (by pod id, or a huid or name that matches one pod) and return exit

@@ -737,6 +737,113 @@ def test_a_cancel_that_lands_while_a_replay_keeps_the_pod_still_removes_it(monke
     assert list(rental_state_dir.glob("*.json")) == []
 
 
+def test_a_server_stopped_while_waiting_for_the_pod_hands_it_over_after_a_restart(monkeypatch, rental_state_dir):
+    outcomes = [_Answer(201, {"id": "pod-1"})]
+    sdk = _real_sdk(monkeypatch, outcomes)
+
+    def stop_during_wait(*args, **kwargs):
+        raise _ServerStopped()
+
+    monkeypatch.setattr(sdk, "wait_ready", stop_during_wait)
+    with pytest.raises(_ServerStopped):
+        _real_tools(sdk).rent_pod("node-a", "job", template_id="tpl-1")
+    assert list(rental_state_dir.glob("*.json"))
+
+    outcomes.append(_Answer(201, {"id": "pod-2"}))
+    result = _real_tools(sdk).rent_pod("node-a", "retry", template_id="tpl-1")  # the restarted server
+
+    assert result["status"] == "recovered" and result["recovered_rentals"][0]["pod_ids"] == ["pod-1"]
+    assert len(sdk.posts) == 1 and len(outcomes) == 1  # the journal named the pod: no replay, no second rent
+    assert list(rental_state_dir.glob("*.json")) == []
+
+
+@pytest.mark.parametrize("receiving_call", ["rent_pod", "list_pods"])
+def test_recovered_pods_a_cancelled_call_was_handing_over_wait_for_the_next_call(monkeypatch, rental_state_dir,
+                                                                                receiving_call):
+    outcomes = [_no_answer(), _no_answer()]
+    sdk = _real_sdk(monkeypatch, outcomes)
+    tools = _real_tools(sdk)
+    tools.rent_pod("node-a", "job", template_id="tpl-1")
+    outcomes.append(_Answer(201, {"id": "pod-1"}))
+
+    receiver = tools_module._Rental()
+    if receiving_call == "rent_pod":
+        handed = tools.rent_pod("node-b", "retry", template_id="tpl-1", rental=receiver)
+    else:
+        handed = tools.list_pods(receiver)
+    assert handed["recovered_rentals"][0]["pod_ids"] == ["pod-1"]
+    tools.cancel_rental(receiver)  # the host cancelled the call: it never saw that result
+    assert list(rental_state_dir.glob("*.json"))
+
+    listed = tools.list_pods()
+
+    assert listed["recovered_rentals"][0]["pod_ids"] == ["pod-1"]
+    assert sdk.removed == [] and len(set(sdk.posts)) == 1
+    assert list(rental_state_dir.glob("*.json")) == []
+
+
+def test_a_cancelled_pod_with_a_known_id_is_removed_after_a_restart_without_a_replay(monkeypatch, rental_state_dir):
+    sdk = _real_sdk(monkeypatch, [_Answer(201, {"id": "pod-1"})])
+    monkeypatch.setattr(sdk, "wait_ready", lambda *a, **k: None)
+    before, rental = _real_tools(sdk), tools_module._Rental()
+    monkeypatch.setattr(sdk, "rm", lambda pod: (_ for _ in ()).throw(LiumError("API error 400: pod is PENDING")))
+    before.rent_pod("node-a", "job", template_id="tpl-1", rental=rental)
+    before.cancel_rental(rental)  # the removal fails before the server stops
+
+    removed = []
+    monkeypatch.setattr(sdk, "rm", lambda pod: removed.append(pod.id))
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now + 86_401)  # the next day: past any replay
+    _real_tools(sdk).list_pods()
+
+    assert removed == ["pod-1"]
+    assert len(sdk.posts) == 1  # deletion requires no replay
+    assert list(rental_state_dir.glob("*.json")) == []
+
+
+def test_a_failed_capability_lookup_does_not_switch_replays_off(monkeypatch, rental_state_dir):
+    outcomes = [_no_answer(), _no_answer()]
+    sdk = _real_sdk(monkeypatch, outcomes)
+    tools = _real_tools(sdk)
+    rental = tools_module._Rental()
+    tools.rent_pod("node-a", "job", template_id="tpl-1", rental=rental)
+    tools.cancel_rental(rental)
+    outcomes.append(_Answer(201, {"id": "pod-1"}))
+
+    sdk._features = None
+    answers = iter([_no_answer(), _Answer(200, {"features": ["rent_idempotency"]})])
+
+    def version_request(*args, **kwargs):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(sdk, "_request", version_request)
+    tools.list_pods()
+    tools.list_pods()
+
+    assert sdk.removed == ["pod-1"]
+
+
+def test_a_pod_recovered_for_one_account_is_never_handed_to_another(monkeypatch, rental_state_dir):
+    outcomes = [_no_answer(), _no_answer()]
+    sdk = _real_sdk(monkeypatch, outcomes)
+    tools = _real_tools(sdk)
+    tools.rent_pod("node-a", "job", template_id="tpl-1")
+    outcomes.append(_Answer(201, {"id": "pod-1"}))
+    receiver = tools_module._Rental()
+    tools.list_pods(receiver)
+    tools.cancel_rental(receiver)  # recovered and journaled, and the server stops before the host hears of it
+
+    other = _real_sdk(monkeypatch, [], api_key="different-account")
+    listed = _real_tools(other).list_pods()
+
+    assert "recovered_rentals" not in listed and listed["unresolved_rentals"][0]["last_error"]
+    assert other.posts == [] and other.removed == []
+    assert list(rental_state_dir.glob("*.json"))
+
+
 def test_a_rental_tracked_while_the_background_reconciler_exits_is_still_reconciled(tools, fake, monkeypatch):
     tools.BACKGROUND_CLEANUP, tools.CLEANUP_RETRY_SECONDS = True, 0.01
     late = tools_module._Rental()
