@@ -6,8 +6,9 @@ import pytest
 
 from lium.cli.fund.validation import resolve_hotkey, validate_ss58
 
-COLDKEY = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
-HOTKEY = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+# the public SS58 addresses of the Substrate dev accounts //Alice and //Bob
+ALICE = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+BOB = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
 
 
 class _Bittensor11(types.ModuleType):
@@ -24,17 +25,17 @@ class _Bittensor11(types.ModuleType):
 @pytest.mark.parametrize(
     ("check", "args", "expected"),
     [
-        (validate_ss58, (COLDKEY,), (COLDKEY, "")),
+        (validate_ss58, (ALICE,), (ALICE, "")),
         (validate_ss58, ("not-an-address",), (None, "invalid SS58 address: not-an-address")),
-        (resolve_hotkey, (HOTKEY, "default"), (HOTKEY, "")),
+        (resolve_hotkey, (BOB, "default"), (BOB, "")),
     ],
 )
 def test_address_checks_work_on_bittensor_11(check, args, expected):
-    assert check(*args, _Bittensor11({COLDKEY, HOTKEY})) == expected
+    assert check(*args, _Bittensor11({ALICE, BOB})) == expected
 
 
 def test_address_checks_still_use_bt_utils_on_older_bittensor():
-    older = types.SimpleNamespace(utils=types.SimpleNamespace(is_valid_ss58_address=lambda value: value == COLDKEY))
+    older = types.SimpleNamespace(utils=types.SimpleNamespace(is_valid_ss58_address=lambda value: value == ALICE))
 
-    assert validate_ss58(COLDKEY, older) == (COLDKEY, "")
+    assert validate_ss58(ALICE, older) == (ALICE, "")
     assert validate_ss58("not-an-address", older)[0] is None
