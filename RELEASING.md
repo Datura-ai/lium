@@ -19,7 +19,7 @@ only once the assets are up. The `lium` CLI and the
 
 ## The 0.1.0 catch-up
 
-`v0.0.42` … `v0.0.46` shipped `### Added` fragments as patch releases (DAH-3328). `changelog.d/.deferred_minimum` is
+`v0.0.42` … `v0.0.46` shipped `### Added` fragments as patch releases. `changelog.d/.deferred_minimum` is
 seeded with `0.1.0`, so the next release must be `v0.1.0` or higher; delete the file after that release. Fold the
 fragments that have piled up in `changelog.d/` in the `0.1.0` release commit (`python scripts/changelog.py --version
 0.1.0`): they carry `### Added`, so whichever release first folds them is held to a minor bump — at `0.1.0` that costs

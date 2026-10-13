@@ -1808,6 +1808,11 @@ class Lium:
             **{k: v for k, v in template.items() if v is not None},
             **kwargs,
         }
+        # Public pod templates are temporary, but the PUT requires temporary templates to be private.
+        # Keep a true one_time_template: omitting it resets the backend's cleanup flag.
+        payload.pop("is_temporary", None)
+        if not payload.get("one_time_template"):
+            payload.pop("one_time_template", None)
 
         result = self._request("PUT", f"/templates/{template_id}", json=payload).json()
         # The backend routes this PUT into a container reboot (pod_service.edit_pod ->
