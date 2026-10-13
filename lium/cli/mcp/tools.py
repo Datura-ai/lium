@@ -4,10 +4,11 @@ An exception never reaches the MCP host as a traceback: every tool returns ``{"o
 hint}}`` instead, so the model can read what went wrong and what to do next.
 """
 
-from typing import Any, Callable, Dict, List, Optional
+import asyncio
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from lium.sdk import Lium
-from lium.sdk.exceptions import LiumError
+from lium.sdk.exceptions import LiumError, PodStartError
 from lium.sdk.models import ExecutorInfo, PodInfo
 
 # exec output is cut to its tail: a training log of megabytes would fill the model's context
@@ -76,10 +77,19 @@ class LiumTools:
         return self._client
 
     def _find_pod(self, pod: str) -> PodInfo:
+        """The one pod `pod` names. An exact id wins; a huid or name must match exactly one pod, so the target
+        never depends on listing order (names are free text and need not be unique)."""
         pods = self.client.ps()
         for candidate in pods:
-            if pod in (candidate.id, candidate.huid, candidate.name):
+            if candidate.id == pod:
                 return candidate
+        matches = {c.id: c for c in pods if pod in (c.huid, c.name)}
+        if len(matches) == 1:
+            return next(iter(matches.values()))
+        if matches:
+            raise LookupError(
+                f"'{pod}' matches {len(matches)} pods ({', '.join(sorted(matches))}); pass the pod_id of the one you mean."
+            )
         raise LookupError(f"No pod '{pod}' among your {len(pods)} pods; call list_pods for their ids and names.")
 
     def list_gpus(self, gpu_type: Optional[str] = None, gpu_count: Optional[int] = None, limit: int = 20) -> Dict[str, Any]:
@@ -92,10 +102,33 @@ class LiumTools:
 
     def rent_pod(self, executor_id: str, name: str, template_id: Optional[str] = None, timeout_seconds: int = 600) -> Dict[str, Any]:
         def call():
-            pod = self.client.up(executor_id=executor_id, name=name, template_id=template_id, wait=True, timeout=timeout_seconds)
-            if isinstance(pod, PodInfo):
-                return {"ok": True, "pod": _pod(pod), "next": "run_command on this pod; remove_pod when done (billing stops)"}
-            return {"ok": True, "pod": pod, "next": "call list_pods until status is RUNNING, then run_command"}
+            # rent and wait separately: once the rent call returns the pod bills, so a slow start must hand back its id
+            # rather than an error the model would answer by renting a second pod
+            created = self.client.up(executor_id=executor_id, name=name, template_id=template_id, wait=False)
+            pod_id = created.get("id") if isinstance(created, dict) else getattr(created, "id", None)
+            pending = {
+                "ok": True,
+                "status": "pending",
+                "pod_id": pod_id,
+                "name": name,
+                "next": "The pod is rented and billing. Do NOT call rent_pod again: call list_pods until its status is "
+                "RUNNING, then run_command; or remove_pod with this pod_id to stop billing.",
+            }
+            try:
+                ready = self.client.wait_ready(created, timeout=timeout_seconds)
+            except PodStartError as e:
+                failed = _error(
+                    "pod_start_failed",
+                    f"Pod {pod_id} will not start (status {e.status}): {e}",
+                    "Call remove_pod with this pod_id so it cannot bill, then rent a different node.",
+                )
+                failed["pod_id"] = pod_id
+                return failed
+            except Exception as e:  # noqa: BLE001 - the rent went through; losing its id would cause a second rental
+                return {**pending, "warning": f"Could not confirm the pod is ready: {type(e).__name__}: {e}"}
+            if ready is None:
+                return {**pending, "warning": f"Not running after {timeout_seconds}s; some nodes take longer to start."}
+            return {"ok": True, "pod": _pod(ready), "next": "run_command on this pod; remove_pod when done (billing stops)"}
 
         return _guarded(call)
 
@@ -126,33 +159,38 @@ class LiumTools:
         return _guarded(lambda: {"ok": True, "balance_usd": self.client.balance()})
 
 
-def tool_functions(tools: LiumTools) -> List[Callable[..., Dict[str, Any]]]:
-    """The functions the server registers; their names and docstrings are what the model sees."""
+def tool_functions(tools: LiumTools) -> List[Callable[..., Awaitable[Dict[str, Any]]]]:
+    """The functions the server registers; their names and docstrings are what the model sees.
 
-    def list_gpus(gpu_type: Optional[str] = None, gpu_count: Optional[int] = None, limit: int = 20) -> Dict[str, Any]:
+    They are async and run each blocking SDK call in a worker thread: mcp 1.x calls a sync tool inside its event loop,
+    so a slow rental would otherwise stall every other request, including the remove_pod that stops billing."""
+
+    async def list_gpus(gpu_type: Optional[str] = None, gpu_count: Optional[int] = None, limit: int = 20) -> Dict[str, Any]:
         """Find GPU nodes for rent on Lium, cheapest first. Use before rent_pod to pick an executor_id.
         gpu_type filters by model ("H100", "RTX 4090", "B200"); gpu_count by GPUs on the node."""
-        return tools.list_gpus(gpu_type, gpu_count, limit)
+        return await asyncio.to_thread(tools.list_gpus, gpu_type, gpu_count, limit)
 
-    def rent_pod(executor_id: str, name: str, template_id: Optional[str] = None, timeout_seconds: int = 600) -> Dict[str, Any]:
+    async def rent_pod(executor_id: str, name: str, template_id: Optional[str] = None, timeout_seconds: int = 600) -> Dict[str, Any]:
         """Rent a GPU pod on a node from list_gpus and wait until it is running. This spends money: the pod is
-        billed per second at the node's hourly price until remove_pod. Give it a short unique name."""
-        return tools.rent_pod(executor_id, name, template_id, timeout_seconds)
+        billed per second at the node's hourly price until remove_pod. Give it a short unique name. If the result
+        has status "pending", the pod is already rented: do not rent again, poll list_pods or remove_pod its pod_id."""
+        return await asyncio.to_thread(tools.rent_pod, executor_id, name, template_id, timeout_seconds)
 
-    def list_pods() -> Dict[str, Any]:
+    async def list_pods() -> Dict[str, Any]:
         """List your pods with their status, GPU, price per hour and SSH command."""
-        return tools.list_pods()
+        return await asyncio.to_thread(tools.list_pods)
 
-    def run_command(pod: str, command: str, timeout_seconds: int = 300) -> Dict[str, Any]:
-        """Run a shell command on a running pod (by pod id, huid or name) and return exit code, stdout and stderr."""
-        return tools.run_command(pod, command, timeout_seconds)
+    async def run_command(pod: str, command: str, timeout_seconds: int = 300) -> Dict[str, Any]:
+        """Run a shell command on a running pod (by pod id, or a huid or name that matches one pod) and return exit
+        code, stdout and stderr."""
+        return await asyncio.to_thread(tools.run_command, pod, command, timeout_seconds)
 
-    def remove_pod(pod: str) -> Dict[str, Any]:
-        """Remove a pod (by pod id, huid or name). Billing stops; anything on its disk is gone."""
-        return tools.remove_pod(pod)
+    async def remove_pod(pod: str) -> Dict[str, Any]:
+        """Remove a pod (by pod id, or a huid or name that matches one pod). Billing stops; anything on its disk is gone."""
+        return await asyncio.to_thread(tools.remove_pod, pod)
 
-    def get_balance() -> Dict[str, Any]:
+    async def get_balance() -> Dict[str, Any]:
         """Your Lium account balance in USD."""
-        return tools.get_balance()
+        return await asyncio.to_thread(tools.get_balance)
 
     return [list_gpus, rent_pod, list_pods, run_command, remove_pod, get_balance]
