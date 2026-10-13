@@ -6,6 +6,7 @@ hint}}`` instead, so the model can read what went wrong and what to do next.
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 import tempfile
@@ -554,10 +555,10 @@ class LiumTools:
         client = self.client
         config = getattr(client, "config", None)
         key = (getattr(client, "headers", None) or {}).get("X-API-KEY") or ""
-        return {
-            "base_url": str(getattr(config, "base_url", "")),
-            "key_sha256": hashlib.sha256(key.encode()).hexdigest()[:16],
-        }
+        # an account fingerprint, not a stored secret: the key is the HMAC key of a fixed label, so the journal holds
+        # a short tag that tells two keys apart and says nothing about either
+        tag = hmac.new(key.encode(), b"lium-mcp-rental-scope", hashlib.sha256).hexdigest()[:16]
+        return {"base_url": str(getattr(config, "base_url", "")), "account_tag": tag}
 
     def _save(self, rental: _Rental) -> None:
         try:
