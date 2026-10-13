@@ -859,12 +859,59 @@ def test_a_server_stopped_after_returning_the_pod_but_before_writing_it_hands_it
 
     assert retry["status"] == "recovered"
     assert retry["recovered_rentals"][0] == {"name": "job", "pod_ids": ["pod-1"], "idempotency_key": sdk.posts[0],
-                                             "may_have_been_reported_before_a_restart": True}
+                                             "may_have_been_reported": True}
     assert len(sdk.posts) == 1 and len(outcomes) == 1
-    # handed over once per session: the next retry rents, and a pod that is gone needs no journal
-    assert after.rent_pod("node-a", "job-2", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-2"
-    monkeypatch.setattr(sdk, "ps", lambda: [])
-    after.list_pods()
+
+
+def test_a_retry_on_a_live_server_gets_the_unacknowledged_pod_back_until_the_host_names_it(monkeypatch,
+                                                                                        rental_state_dir):
+    outcomes = [_Answer(201, {"id": "pod-1"}), _Answer(201, {"id": "pod-2"})]
+    sdk = _real_sdk(monkeypatch, outcomes)
+    monkeypatch.setattr(sdk, "wait_ready", lambda *a, **k: None)
+    tools = _real_tools(sdk)
+    assert tools.rent_pod("node-a", "job", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-1"
+    # the host timed out or dropped that response; the server lives on and the host retries
+
+    for _ in range(2):
+        retry = tools.rent_pod("node-a", "job", template_id="tpl-1", timeout_seconds=0)
+        assert retry["status"] == "recovered"
+        assert retry["recovered_rentals"] == [{"name": "job", "pod_ids": ["pod-1"], "idempotency_key": sdk.posts[0],
+                                               "may_have_been_reported": True}]
+    assert len(sdk.posts) == 1 and len(outcomes) == 1  # one POST, one key, one pod
+    assert list(rental_state_dir.glob("*.json"))
+
+    # the host names the pod it holds: that is the acknowledgment, and a second pod is what it asked for
+    second = tools.rent_pod("node-a", "job-2", template_id="tpl-1", timeout_seconds=0, known_pod_ids=["pod-1"])
+    assert second["pod_id"] == "pod-2" and len(set(sdk.posts)) == 2
+    assert [p.name for p in rental_state_dir.glob("*.json")] == [f"{sdk.posts[1]}.json"]
+
+
+def test_a_listing_older_than_the_delivery_does_not_erase_the_journal(monkeypatch, rental_state_dir):
+    outcomes = [_Answer(201, {"id": "pod-1"})]
+    sdk = _real_sdk(monkeypatch, outcomes)
+    monkeypatch.setattr(sdk, "wait_ready", lambda *a, **k: None)
+    tools = _real_tools(sdk)
+    listing = {"rent_meanwhile": True, "pods": []}
+
+    def ps():
+        if listing["rent_meanwhile"]:
+            # this listing was taken while the account had no pods; the rent is delivered before it returns
+            listing["rent_meanwhile"] = False
+            assert tools.rent_pod("node-a", "job", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-1"
+            return []
+        return listing["pods"]
+
+    monkeypatch.setattr(sdk, "ps", ps)
+    tools.list_pods()
+    assert list(rental_state_dir.glob("*.json"))  # the stale snapshot says nothing about pod-1
+
+    tools.list_pods()  # a newer listing the pod is not in yet: still nothing
+    assert list(rental_state_dir.glob("*.json"))
+
+    listing["pods"] = [_pod("pod-1", "job")]
+    tools.list_pods()
+    listing["pods"] = []
+    tools.list_pods()  # listed after the delivery, then gone: nothing left to tell the host about
     assert list(rental_state_dir.glob("*.json")) == []
 
 
