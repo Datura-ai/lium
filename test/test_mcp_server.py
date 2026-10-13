@@ -787,6 +787,11 @@ def test_recovered_pods_a_cancelled_call_was_handing_over_wait_for_the_next_call
     else:
         handed = tools.list_pods(receiver)
     assert handed["recovered_rentals"][0]["pod_ids"] == ["pod-1"]
+    # a retry that overlaps the call still holding pod-1 gets pod-1, not a new rent
+    outcomes.append(_Answer(201, {"id": "pod-2"}))
+    overlapping = tools.rent_pod("node-b", "retry", template_id="tpl-1")
+    assert overlapping["status"] == "recovered" and overlapping["recovered_rentals"][0]["pod_ids"] == ["pod-1"]
+    assert len(set(sdk.posts)) == 1 and len(outcomes) == 1
     tools.cancel_rental(receiver)  # the host cancelled the call: it never saw that result
     assert list(rental_state_dir.glob("*.json"))
 
@@ -913,6 +918,67 @@ def test_a_listing_older_than_the_delivery_does_not_erase_the_journal(monkeypatc
     listing["pods"] = []
     tools.list_pods()  # listed after the delivery, then gone: nothing left to tell the host about
     assert list(rental_state_dir.glob("*.json")) == []
+
+
+def test_an_empty_listing_taken_before_one_that_showed_the_pod_does_not_erase_the_journal(monkeypatch,
+                                                                                         rental_state_dir):
+    outcomes = [_Answer(201, {"id": "pod-1"}), _Answer(201, {"id": "pod-2"})]
+    sdk = _real_sdk(monkeypatch, outcomes)
+    monkeypatch.setattr(sdk, "wait_ready", lambda *a, **k: None)
+    tools = _real_tools(sdk)
+    assert tools.rent_pod("node-a", "job", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-1"
+    listing, shown = {"overlap": True}, []
+
+    def ps():
+        if listing["overlap"]:
+            # listing A is taken before the new pod shows; listing B starts later, shows it and returns first
+            listing["overlap"] = False
+            shown.append(tools.list_pods())
+            return []
+        return [_pod("pod-1", "job")]
+
+    monkeypatch.setattr(sdk, "ps", ps)
+    assert tools.list_pods()["pods"] == []  # A returns last, with the older empty snapshot
+    assert [p["pod_id"] for p in shown[0]["pods"]] == ["pod-1"]
+
+    assert list(rental_state_dir.glob("*.json"))
+    retry = tools.rent_pod("node-a", "job", template_id="tpl-1", timeout_seconds=0)
+    assert retry["status"] == "recovered" and retry["recovered_rentals"][0]["pod_ids"] == ["pod-1"]
+    assert len(sdk.posts) == 1 and len(outcomes) == 1
+
+
+@pytest.mark.parametrize("first_call_is", ["about_to_send", "waiting_for_the_pod_to_start"])
+def test_a_retry_while_the_first_rent_pod_is_still_running_rents_nothing(monkeypatch, rental_state_dir,
+                                                                         first_call_is):
+    outcomes = [_Answer(201, {"id": "pod-1"}), _Answer(201, {"id": "pod-2"})]
+    sdk = _real_sdk(monkeypatch, outcomes)
+    tools = _real_tools(sdk)
+    reached, release, results = threading.Event(), threading.Event(), []
+
+    def block(*args, **kwargs):
+        reached.set()
+        release.wait(5)
+        return [] if first_call_is == "about_to_send" else None
+
+    # the first call has passed admission: it holds either nothing yet (its snapshot listing) or a billing pod
+    monkeypatch.setattr(sdk, "ps" if first_call_is == "about_to_send" else "wait_ready", block)
+    first = threading.Thread(
+        target=lambda: results.append(tools.rent_pod("node-a", "job", template_id="tpl-1", timeout_seconds=0)))
+    first.start()
+    assert reached.wait(5)
+
+    retry = tools.rent_pod("node-a", "job", template_id="tpl-1", timeout_seconds=0)  # the host timed out and retried
+
+    assert retry["error"]["code"] == "rent_in_progress"
+    assert len(sdk.posts) == (0 if first_call_is == "about_to_send" else 1)
+    if first_call_is == "waiting_for_the_pod_to_start":
+        assert retry["in_progress"][0]["pod_ids"] == ["pod-1"]
+    release.set()
+    first.join(5)
+    assert results[0]["pod_id"] == "pod-1"
+    again = tools.rent_pod("node-a", "job", template_id="tpl-1", timeout_seconds=0)
+    assert again["status"] == "recovered" and again["recovered_rentals"][0]["pod_ids"] == ["pod-1"]
+    assert len(sdk.posts) == 1 and len(outcomes) == 1  # one POST, one key, one pod
 
 
 def test_a_cancelled_pod_with_a_known_id_is_removed_after_a_restart_without_a_replay(monkeypatch, rental_state_dir):

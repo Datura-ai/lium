@@ -107,7 +107,8 @@ class _Rental:
         self.reported = False  # this call's own result names its pod
         self.delivered = False  # a result naming the pod was handed to the transport; the host may not have it
         self.delivered_at: Optional[float] = None  # time.monotonic() of that hand-over
-        self.seen_listed = False  # a listing started after the hand-over showed the pod
+        # time.monotonic() at which a listing started after the hand-over last showed the pod
+        self.listed_at: Optional[float] = None
 
     def state(self) -> Dict[str, Any]:
         """What a restarted server needs to finish this rental: the request to replay, the account it was sent
@@ -241,6 +242,12 @@ class LiumTools:
         # pods a result named that the host has not yet shown it knows (it names the pod in a call, or the pod is
         # gone): a returned callback is not a written response, so their journals stay until then
         self._delivered: List[_Rental] = []
+        # Every submitted rental the host has not acknowledged is in one of these lists at every moment, and moves
+        # between them only under _cleanup, so admission never sees a gap. _in_flight: rent_pod calls admitted and
+        # not yet finished (one at a time). _handing: recovered rentals reserved for a call whose result is on
+        # its way to the host.
+        self._in_flight: List[_Rental] = []
+        self._handing: List[_Rental] = []
         self._reconciling = threading.Lock()
         self._reconciler_running = False
         if self._unresolved:
@@ -301,26 +308,47 @@ class LiumTools:
         def call():
             deadline = time.monotonic() + self.CLEANUP_WAIT_SECONDS
             while True:
-                unresolved = self._reconcile()
-                recovered = self._hand_off_recovered(rental)
+                self._reconcile()
                 # a pod already returned whose result the host may have dropped (a timeout, a lost response) is
                 # returned again rather than rented again, until the host names it
                 self._forget_delivered(lambda pod_ids: bool(pod_ids & set(known_pod_ids or [])))
-                recovered += self._unacknowledged(exclude=rental.handed)
+                with self._cleanup:
+                    # one look at every list, and the admission itself, under the lock the lists change under: two
+                    # calls cannot both find nothing and both rent
+                    recovered = self._hand_off_recovered(rental)
+                    recovered += self._unacknowledged(exclude=rental.handed)
+                    unresolved = list(self._unresolved)
+                    renting = [r for r in self._in_flight if r is not rental]
+                    if not (recovered or unresolved or renting or self._recovered or rental.cancelled):
+                        self._in_flight.append(rental)
+                        break
                 if recovered:
                     # an earlier rent the host never heard back from did rent: that is the answer, not a new rent
                     return self._recovered_result(recovered)
-                if not unresolved:
-                    break
                 if rental.cancelled:
                     return not_rented
                 remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                started = renting and not unresolved and all(r.pod_ids for r in renting)
+                if remaining <= 0 or started:
+                    # a rent_pod call still waiting for its pod to start will not finish soon: say so now
+                    if renting and not unresolved:
+                        return self._rent_in_progress_error(renting)
                     return self._cleanup_pending_error(unresolved)
                 with self._cleanup:
                     if not rental.cancelled:
                         self._cleanup.wait(min(remaining, self.CLEANUP_RETRY_SECONDS))
 
+            try:
+                return rent()
+            finally:
+                with rental.lock:
+                    reported = rental.reported
+                if not reported:
+                    # nothing to deliver: rejected, never sent, or unknown (tracked as unresolved before this). A
+                    # result that names the pod keeps its place until deliver or cancel_rental moves it
+                    self._release(rental)
+
+        def rent():
             before = {p.id for p in self.client.ps()}
             key = str(uuid.uuid4())
             with rental.lock:
@@ -414,21 +442,32 @@ class LiumTools:
             self.deliver(rental)
         return result
 
+    def _release(self, rental: _Rental) -> None:
+        with self._cleanup:
+            if rental in self._in_flight:
+                self._in_flight.remove(rental)
+            self._cleanup.notify_all()
+
     def deliver(self, rental: _Rental) -> None:
         """The call ``rental`` returned its result to the MCP transport. That is not proof the host read it (the
         server can die before the response is written), so the pods it named stay journaled, marked delivered, until
         the host names one in a call or the pod is gone. A restart before then hands them over once more."""
         with self._cleanup:
             handed, rental.handed = rental.handed, []
+            handed = [r for r in handed if r in self._handing]  # one cancelled meanwhile is being removed instead
             with rental.lock:
                 # only a result that names the pod: an unknown-outcome error recovered in the background since does not
-                own = rental.reported and not rental.cancelled
+                own = rental.reported and not rental.cancelled and rental in self._in_flight
             reached = handed + ([rental] if own else [])
+            # one step under the lock: a rental leaves _handing or _in_flight only as it enters _delivered
+            self._handing = [r for r in self._handing if r not in handed]
+            self._in_flight = [r for r in self._in_flight if r is not rental]
             for target in reached:
                 with target.lock:
-                    target.delivered, target.delivered_at, target.seen_listed = True, time.monotonic(), False
+                    target.delivered, target.delivered_at, target.listed_at = True, time.monotonic(), None
                 if target not in self._delivered:
                     self._delivered.append(target)
+            self._cleanup.notify_all()
         for target in reached:
             self._save(target)
 
@@ -446,16 +485,17 @@ class LiumTools:
 
     def _forget_gone(self, live: Set[str], listing_started: float) -> None:
         """Drop delivered pods that a listing shows are gone: nothing is left to tell the host about. Only a listing
-        that started after the delivery counts, and only once such a listing has shown the pod: an older snapshot,
-        or one the new pod is not in yet, says nothing about it."""
+        that started after the delivery counts, and only one that also started after a listing showed the pod: an
+        older snapshot, or one the new pod is not in yet, says nothing about it. Listings overlap, so the order
+        they return in is not the order they were taken in."""
         with self._cleanup:
             finished = []
             for rental in self._delivered:
                 if rental.delivered_at is None or rental.delivered_at >= listing_started:
                     continue
                 if rental.pod_ids & live:
-                    rental.seen_listed = True
-                elif rental.seen_listed:
+                    rental.listed_at = time.monotonic()
+                elif rental.listed_at is not None and rental.listed_at < listing_started:
                     finished.append(rental)
             self._delivered = [r for r in self._delivered if r not in finished]
         for rental in finished:
@@ -463,7 +503,9 @@ class LiumTools:
 
     def _unacknowledged(self, exclude: List[_Rental]) -> List[Dict[str, Any]]:
         with self._cleanup:
-            return [self._recovered_report(rental) for rental in self._delivered if rental not in exclude]
+            # _handing: another call is reporting it right now; until the host names the pod it is not known to
+            return [{**self._recovered_report(r), "may_have_been_reported": True}
+                    for r in self._handing + self._delivered if r not in exclude]
 
     @staticmethod
     def _recovered_report(rental: _Rental) -> Dict[str, Any]:
@@ -480,7 +522,9 @@ class LiumTools:
             rental.cancelled = True
             submitted = rental.submitted
         with self._cleanup:
-            handed, rental.handed = rental.handed, []
+            # one step under the lock: a reserved rental leaves _handing only as it re-enters _recovered
+            handed, rental.handed = [r for r in rental.handed if r in self._handing], []
+            self._handing = [r for r in self._handing if r not in handed]
             self._recovered.extend(r for r in handed if r not in self._recovered)
         if submitted:
             self._track(rental)
@@ -523,6 +567,9 @@ class LiumTools:
                     rental.recovered = False
             if rental not in self._unresolved:
                 self._unresolved.append(rental)
+            # only now does it leave the lists that held it, under the same lock
+            self._handing = [r for r in self._handing if r is not rental]
+            self._in_flight = [r for r in self._in_flight if r is not rental]
         self._save(rental)
         self._start_reconciler()
 
@@ -685,6 +732,8 @@ class LiumTools:
                     return []
             delivered = [rental for rental in self._recovered if not rental.cancelled]
             self._recovered = [rental for rental in self._recovered if rental not in delivered]
+            # reserved, and still in a list admission reads: a rent_pod running beside this call sees them
+            self._handing.extend(delivered)
             receiver.handed.extend(delivered)
         return [self._recovered_report(rental) for rental in delivered]
 
@@ -713,6 +762,18 @@ class LiumTools:
             else "Retry rent_pod in a minute, or call list_pods and remove_pod the pod ids listed under unresolved.",
         )
         failed["unresolved"] = [rental.report() for rental in unresolved]
+        return failed
+
+    @staticmethod
+    def _rent_in_progress_error(renting: List[_Rental]) -> Dict[str, Any]:
+        failed = _error(
+            "rent_in_progress",
+            f"{len(renting)} earlier rent_pod call(s) are still running; nothing new was rented.",
+            "Wait for that call's result instead of renting again: a pod listed under in_progress is already rented "
+            "and billing. If you no longer want it, cancel that call or remove_pod the pod. To rent another pod as "
+            "well, call rent_pod again once that call has returned, with known_pod_ids set to its pod id.",
+        )
+        failed["in_progress"] = [rental.report() for rental in renting]
         return failed
 
     @staticmethod
@@ -816,7 +877,8 @@ def tool_functions(tools: LiumTools) -> List[Callable[..., Awaitable[Dict[str, A
         billed per second at the node's hourly price until remove_pod. Give it a short unique name. If the result
         has status "pending", the pod is already rented: do not rent again, poll list_pods or remove_pod its pod_id.
         If it has status "recovered", nothing new was rented: it lists pods earlier calls rented that you have not
-        used yet. To rent another pod next to those, pass their ids as known_pod_ids."""
+        used yet. To rent another pod next to those, pass their ids as known_pod_ids. One rent_pod runs at a time:
+        while one is still running, another returns the error rent_in_progress and rents nothing."""
         rental = _Rental()
         try:
             result = await asyncio.to_thread(
