@@ -2,12 +2,18 @@
 ``transfer_stake`` / ``get_stake_info_for_coldkey`` (extrinsics are intents run by ``execute``, reads go
 through ``read``), and ``Balance`` takes its subnet in ``from_rao`` instead of ``set_unit``."""
 
+import functools
 import sys
 import types
 
 import pytest
 
-from lium.cli.fund.actions import LIUM_FUNDING_ADDRESS, ExecuteAlphaTransferAction, ExecuteTransferAction
+from lium.cli.fund.actions import (
+    LIUM_FUNDING_ADDRESS,
+    CheckFreeAlphaAction,
+    ExecuteAlphaTransferAction,
+    ExecuteTransferAction,
+)
 from lium.cli.fund.validation import alpha_balance, resolve_hotkey, validate_ss58
 
 # the public SS58 addresses of the Substrate dev accounts //Alice and //Bob
@@ -48,6 +54,7 @@ def test_address_checks_still_use_bt_utils_on_older_bittensor():
 # ---------------------------------------------------------------------------------------- transfers
 
 
+@functools.total_ordering
 class _Balance:
     """bittensor 11's Balance as far as fund uses it: the subnet is given to ``from_rao``; no ``set_unit``."""
 
@@ -79,17 +86,33 @@ class _Intent:
 
 
 class _Subtensor11:
-    """No legacy methods: reads through ``read``, extrinsics through ``execute`` (records them)."""
+    """No legacy methods: reads through ``read``, extrinsics through ``execute`` (records them).
 
-    def __init__(self, positions=(), available_rao=0, success=True):
+    ``at(block)`` returns the snapshot the free-alpha reads must use; reading stake from the live
+    client instead is recorded in ``live_reads``.
+    """
+
+    def __init__(self, positions=(), available_rao=0, success=True, collateral_rao=None, snapshot=None):
         self.positions, self.available_rao, self.success = list(positions), available_rao, success
-        self.executed = []
+        self.collateral_rao = collateral_rao
+        self.finalized_block = 100
+        self.snapshot = snapshot
+        self.executed, self.at_blocks, self.live_reads = [], [], []
+
+    def at(self, block=None):
+        self.at_blocks.append(block)
+        return self.snapshot or _Subtensor11(self.positions, self.available_rao, collateral_rao=self.collateral_rao)
 
     def read(self, name, **params):
+        self.live_reads.append(name)
         if name == "stake_for_coldkey":
             return self.positions
         if name == "stake_availability":
             return {"available": _Balance(self.available_rao, params["netuid"])}
+        if name == "miner_collateral":
+            if self.collateral_rao is None:
+                return None
+            return {"locked_alpha": _Balance(self.collateral_rao, params["netuid"])}
         raise AssertionError(f"unexpected read {name}")
 
     def execute(self, intent, wallet):
@@ -133,14 +156,69 @@ def test_alpha_transfer_runs_a_transfer_stake_intent_on_bittensor_11():
     assert result.data["free"] == _Balance(3 * 10**9, 51) and result.data["fee_modeled"] is False
 
 
-def test_alpha_transfer_counts_the_coldkey_lock_on_bittensor_11():
-    """5 alpha staked on the hotkey, 3 available on the subnet (a conviction lock): 4 is refused unsent."""
-    subtensor = _Subtensor11([_position()], available_rao=3 * 10**9)
+@pytest.mark.parametrize("advancing_head", [False, True])
+def test_alpha_transfer_counts_the_coldkey_lock_on_bittensor_11(advancing_head):
+    """5 alpha staked on the hotkey, 1 available at the finalized block (a conviction lock): 4 is refused unsent.
+
+    With an advancing head the live client already shows 5 available (stake moved to another hotkey);
+    stake and availability must both come from the one snapshot, so the answer is still 1.
+    """
+    pinned = _Subtensor11([_position()], available_rao=10**9)
+    subtensor = _Subtensor11([_position()], available_rao=(5 if advancing_head else 1) * 10**9, snapshot=pinned)
 
     result = ExecuteAlphaTransferAction().execute(_alpha_ctx(_bt11(subtensor), 4 * 10**9))
 
     assert not result.ok and "Insufficient free alpha" in result.error
-    assert subtensor.executed == []
+    assert subtensor.executed == [] and subtensor.live_reads == []
+    assert subtensor.at_blocks == [100]
+
+
+@pytest.mark.parametrize(
+    "collateral_rao, free_rao",
+    [(None, 5 * 10**9), (3 * 10**9, 2 * 10**9), (9 * 10**9, 0)],
+    ids=["no collateral", "3 of 5 bonded on this position", "bond larger than the stake"],
+)
+def test_free_alpha_leaves_out_collateral_on_the_position_on_bittensor_11(collateral_rao, free_rao):
+    """The coldkey has 7 available on the subnet, but collateral bonded on this hotkey cannot leave it."""
+    subtensor = _Subtensor11([_position()], available_rao=7 * 10**9, collateral_rao=collateral_rao)
+    ctx = _alpha_ctx(_bt11(subtensor), 4 * 10**9)
+
+    check = CheckFreeAlphaAction().execute(ctx)
+    transfer = ExecuteAlphaTransferAction().execute(ctx)
+
+    assert check.ok and check.data["free"] == _Balance(free_rao, 51)
+    if free_rao >= 4 * 10**9:
+        assert transfer.ok and len(subtensor.executed) == 1
+    else:
+        assert not transfer.ok and "Insufficient free alpha" in transfer.error
+        assert subtensor.executed == []
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["intent", "legacy transfer_stake"])
+@pytest.mark.parametrize("phase", ["preflight", "rejected", "lost"])
+def test_a_failed_alpha_transfer_says_whether_it_was_sent(legacy, phase):
+    """A read that fails was never sent. A rejection, or a call that raises once submitted, may be on chain."""
+    subtensor = _Subtensor11([_position()], available_rao=5 * 10**9)
+
+    def submit(*args, **kwargs):
+        subtensor.executed.append((args, kwargs))
+        if phase == "lost":
+            raise TimeoutError("confirmation lost after inclusion")
+        return types.SimpleNamespace(success=False, message="rejected")
+
+    subtensor.execute = submit
+    if legacy:
+        subtensor.transfer_stake = submit
+    if phase == "preflight":
+        def fail_at(block=None):
+            raise TimeoutError("read failed before submission")
+        subtensor.at = fail_at
+
+    result = ExecuteAlphaTransferAction().execute(_alpha_ctx(_bt11(subtensor), 2 * 10**9))
+
+    assert not result.ok
+    assert len(subtensor.executed) == int(phase != "preflight")
+    assert result.data.get("transfer_attempted", False) == (phase != "preflight")
 
 
 def test_tao_transfer_runs_a_transfer_intent_on_bittensor_11(monkeypatch):

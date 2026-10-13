@@ -30,7 +30,7 @@ from .actions import (
 # A signed transfer may have reached the chain even though the command failed;
 # the generic "re-run" hint would send the TAO twice.
 TRANSFER_FAILED_HINT = (
-    "Do not re-send yet: the transfer was signed and submitted. Check the wallet and "
+    "Do not re-send yet: the transfer may have reached the chain. Check the wallet and "
     "'lium balance' (credits can take a few minutes) before funding again"
 )
 

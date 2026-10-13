@@ -46,20 +46,26 @@ def _free_alpha(subtensor, coldkey_ss58, hotkey_ss58, netuid):
 
     bittensor <= 10 lists ``StakeInfo`` rows with a per-row ``locked``. bittensor 11 dropped
     ``get_stake_info_for_coldkey``: its ``stake_for_coldkey`` read lists positions (``hotkey``,
-    no lock), and a conviction lock is a floor on the whole coldkey on a subnet, so what this
-    hotkey can hand over without moving lock mass is its stake capped by the coldkey's
-    ``available`` on that subnet (``stake_availability``).
+    no lock), a conviction lock is a floor on the whole coldkey on a subnet (``stake_availability``)
+    and miner collateral is held on the position itself (``miner_collateral``). What this hotkey
+    can hand over is ``min(stake - position collateral, coldkey available)``, as the chain computes
+    it. The three reads go through one snapshot of the finalized block, so they describe the same
+    block even while the wallet moves stake.
     """
     if hasattr(subtensor, "get_stake_info_for_coldkey"):
         return _select_free_alpha(subtensor.get_stake_info_for_coldkey(coldkey_ss58), hotkey_ss58, netuid)
-    positions = subtensor.read("stake_for_coldkey", coldkey_ss58=coldkey_ss58)
+    snapshot = subtensor.at(subtensor.finalized_block)
+    positions = snapshot.read("stake_for_coldkey", coldkey_ss58=coldkey_ss58)
     rows = [p for p in positions or [] if p.hotkey == hotkey_ss58 and p.netuid == netuid]
     if not rows:
         return None, f"No free alpha: no stake found for hotkey {hotkey_ss58} on netuid {netuid}"
     if len(rows) > 1:
         return None, f"Unexpected multiple stake entries for hotkey {hotkey_ss58} on netuid {netuid}; aborting"
-    available = subtensor.read("stake_availability", coldkey_ss58=coldkey_ss58, netuid=netuid)["available"]
+    available = snapshot.read("stake_availability", coldkey_ss58=coldkey_ss58, netuid=netuid)["available"]
     stake = rows[0].stake
+    collateral = snapshot.read("miner_collateral", netuid=netuid, hotkey_ss58=hotkey_ss58, coldkey_ss58=coldkey_ss58)
+    if collateral:
+        stake = type(stake).from_rao(max(0, stake.rao - collateral["locked_alpha"].rao), netuid)
     return (available if available < stake else stake), ""
 
 
@@ -337,6 +343,7 @@ class ExecuteAlphaTransferAction:
         amount = ctx["amount_bal"]
         netuid = ctx["netuid"]
         dest_coldkey = ctx["dest_coldkey"]
+        transfer_attempted = False
 
         try:
             subtensor = subtensor_class(bt)()
@@ -356,7 +363,20 @@ class ExecuteAlphaTransferAction:
                     error=f"Insufficient free alpha: need {amount}, free {free}",
                 )
 
-            if hasattr(subtensor, "transfer_stake"):
+            legacy = hasattr(subtensor, "transfer_stake")
+            if not legacy:
+                # bittensor 11: the same extrinsic as an intent; the stake stays on ``hotkey`` and subnet
+                intent = bt.intents.TransferStake(
+                    dest_coldkey_ss58=dest_coldkey,
+                    hotkey_ss58=hotkey,
+                    origin_netuid=netuid,
+                    dest_netuid=netuid,
+                    amount_alpha=amount,
+                )
+            # From here the extrinsic may reach the chain even if the call raises (a lost
+            # confirmation is not proof it was not sent), so a failure must not read as "retry".
+            transfer_attempted = True
+            if legacy:
                 resp = subtensor.transfer_stake(
                     wallet=bt_wallet,
                     destination_coldkey_ss58=dest_coldkey,
@@ -366,17 +386,7 @@ class ExecuteAlphaTransferAction:
                     amount=amount,
                 )
             else:
-                # bittensor 11: the same extrinsic as an intent; the stake stays on ``hotkey`` and subnet
-                resp = subtensor.execute(
-                    bt.intents.TransferStake(
-                        dest_coldkey_ss58=dest_coldkey,
-                        hotkey_ss58=hotkey,
-                        origin_netuid=netuid,
-                        dest_netuid=netuid,
-                        amount_alpha=amount,
-                    ),
-                    bt_wallet,
-                )
+                resp = subtensor.execute(intent, bt_wallet)
             # bittensor >=8 returns an ExtrinsicResponse (.success/.message); older
             # versions returned a bare bool. Accept either.
             ok = getattr(resp, "success", resp)
@@ -398,4 +408,5 @@ class ExecuteAlphaTransferAction:
                 data={"free": free, "fee": fee, "fee_modeled": modeled},
             )
         except Exception as e:
-            return ActionResult(ok=False, data={}, error=str(e))
+            data = {"transfer_attempted": True} if transfer_attempted else {}
+            return ActionResult(ok=False, data=data, error=str(e))

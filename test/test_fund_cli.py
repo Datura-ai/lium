@@ -657,6 +657,29 @@ def test_alpha_transfer_failure_surfaces_message(monkeypatch):
     assert sub.transfer_called  # we did attempt it, but it failed
 
 
+def test_alpha_lost_confirmation_never_says_retry(monkeypatch):
+    # The transfer can land and the call still raise while waiting for the result. That is
+    # not proof nothing was sent, so the error must carry the "do not re-send" hint, not "Retry".
+    sub = FakeSubtensor([[_stake(stake=5.0)]], fee=0.01)
+
+    def lost(**kwargs):
+        sub.transfer_called = True
+        raise TimeoutError("confirmation lost after inclusion")
+
+    sub.transfer_stake = lost
+    _patch_common(monkeypatch, sub)
+
+    result = CliRunner().invoke(
+        cli, ["fund", "--alpha", "-k", HK, "-w", "default", "-a", "2", "-y", "--json"]
+    )
+
+    assert result.exit_code != 0 and sub.transfer_called
+    error = json.loads(result.output.strip().splitlines()[-1])["error"]
+    assert error["code"] == "transfer_failed"
+    assert error["hint"] == fund_module.TRANSFER_FAILED_HINT
+    assert "may have reached the chain" in error["hint"] and "Retry" not in error["hint"]
+
+
 def test_alpha_shrink_between_reads(monkeypatch):
     # Phase A read shows ample; Phase B re-read shows shrunk -> abort, no transfer.
     sub = FakeSubtensor([[_stake(stake=5.0)], [_stake(stake=1.0)]], fee=0.01)
