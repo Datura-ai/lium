@@ -609,6 +609,29 @@ def test_the_request_is_journaled_before_it_is_sent(monkeypatch, rental_state_di
     _host_uses_the_pod(tools, sdk, monkeypatch, rental_state_dir, "pod-1")
 
 
+def test_two_saves_of_one_rental_at_once_leave_the_newer_record_whole(monkeypatch, rental_state_dir):
+    sdk = _real_sdk(monkeypatch, [_no_answer(), _no_answer()])
+    tools = _real_tools(sdk)
+    tools.rent_pod("node-a", "job", template_id="tpl-1")
+    rental, dump, overlapped = tools._unresolved[0], json.dump, []
+
+    def worker_saves_meanwhile(state, f):
+        if not overlapped:
+            # a cancellation is writing its snapshot; the worker learns the pod id and saves the same rental
+            rental.pod_ids.add("pod-1")
+            overlapped.append(threading.Thread(target=tools._store.save, args=(rental,)))
+            overlapped[0].start()
+            overlapped[0].join(0.3)
+        dump(state, f)
+
+    monkeypatch.setattr(tools_module.json, "dump", worker_saves_meanwhile)
+    tools._save(rental)
+    overlapped[0].join(5)
+
+    assert [p.suffix for p in rental_state_dir.iterdir()] == [".json"]
+    assert [r.pod_ids for r in tools._store.load()] == [{"pod-1"}]  # readable after a restart, and names the pod
+
+
 def test_a_rent_whose_journal_cannot_be_written_is_never_sent(monkeypatch):
     sdk = _real_sdk(monkeypatch, [])
     tools = _real_tools(sdk)

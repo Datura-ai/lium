@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import os
+import tempfile
 import threading
 import time
 import uuid
@@ -165,6 +166,7 @@ class _RentalStore:
 
     def __init__(self, directory: Optional[Path]):
         self.directory = directory
+        self._lock = threading.Lock()
 
     def path(self, rental: _Rental) -> Optional[Path]:
         return self.directory / f"{rental.idempotency_key}.json" if self.directory and rental.idempotency_key else None
@@ -182,22 +184,29 @@ class _RentalStore:
 
     def save(self, rental: _Rental) -> None:
         """Raises if the record cannot be written."""
-        state, path = rental.state(), self.path(rental)
-        if path is None or not state["endpoint"]:
-            return
-        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump(state, f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
+        # one writer at a time, each reading the rental only once it holds the lock: a cancellation and the worker
+        # that just learned the pod id both save, and the record on disk must end as the newer of the two, whole
+        with self._lock:
+            state, path = rental.state(), self.path(rental)
+            if path is None or not state["endpoint"]:
+                return
+            self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=self.directory, prefix=f"{path.stem}.", suffix=".tmp")  # 0600, its own
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(state, f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, path)
+            except BaseException:
+                Path(tmp).unlink(missing_ok=True)
+                raise
 
     def forget(self, rental: _Rental) -> None:
         path = self.path(rental)
         if path is not None:
-            path.unlink(missing_ok=True)
+            with self._lock:
+                path.unlink(missing_ok=True)
 
 
 DEFAULT_RENTAL_STATE_DIR = Path.home() / ".lium" / "mcp-pending-rentals"
