@@ -89,6 +89,8 @@ from .workspaces import WorkspacesClient
 
 # The backend feature `Lium.rent` looks for on GET /version before using POST /executors/rent-by-spec.
 RENT_BY_SPEC = "rent_by_spec"
+# The backend feature that says GET /pods/{id}/record is served (lium-platform#1204).
+RUN_RECORD = "run_record"
 # Node specs report RAM and disk in KiB and GPU memory in MiB.
 _KIB_PER_GB = 1024 * 1024
 _MIB_PER_GB = 1024
@@ -2498,9 +2500,20 @@ class Lium:
         ``GET /pods/{id}/record``: GPU model and count, the image (with its digest when the template pins
         one), the node's driver/CUDA/interconnect when the container came up (``environment``, null for
         older runs), start and end, ``close_reason``, ``billed_seconds``, ``total`` (what the ledger
-        charged) and ``price_segments``. A server without the route answers 404 (``LiumNotFoundError``).
+        charged) and ``price_segments``. A 404 is ``LiumNotFoundError`` (no such pod of yours) on a server that
+        lists ``run_record`` on ``GET /version``; on one that does not, it is a ``LiumError`` saying the server
+        does not serve run records yet, so a removed pod is not reported as missing.
         """
-        return self._request("GET", f"/pods/{uuid.UUID(str(pod_id))}/record").json()
+        try:
+            return self._request("GET", f"/pods/{uuid.UUID(str(pod_id))}/record").json()
+        except LiumNotFoundError as exc:
+            if self.supports(RUN_RECORD):
+                raise
+            raise LiumError(
+                "This Lium server does not serve run records yet (GET /version does not list 'run_record').",
+                hint="Until it does, 'lium billing history' shows what the pod was charged.",
+                request_id=exc.request_id,
+            ) from exc
 
     @staticmethod
     def ambiguous_executor_message(executor: str, matches: List[ExecutorInfo]) -> str:
