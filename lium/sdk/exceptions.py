@@ -248,6 +248,30 @@ class LiumChargeOutcomeUnknownError(LiumError):
         super().__init__(message, code=code, hint=hint, request_id=request_id)
         self.idempotency_key = idempotency_key
 
+class LiumRentOutcomeUnknownError(LiumError):
+    """A rent (:meth:`Lium.up`) was posted and its outcome could not be established: the first request got
+    no answer (a timeout, a dropped connection, a 5xx), no new pod was listed yet, and the repeat was refused
+    or failed too. The server may still be completing the first request, so a pod **may exist and bill**:
+    check ``ps()`` before renting again. ``idempotency_key`` is the key both requests carried.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        idempotency_key: str,
+        pod_name: str | None = None,
+        executor_id: str | None = None,
+        code: str | None = None,
+        hint: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message, code=code, hint=hint, request_id=request_id)
+        self.idempotency_key = idempotency_key
+        self.pod_name = pod_name
+        self.executor_id = executor_id
+
+
 __all__ = [
     "LiumError",
     "LiumAuthError",
@@ -263,4 +287,5 @@ __all__ = [
     "RemoteExecutionError",
     "LiumCardTopUpError",
     "LiumChargeOutcomeUnknownError",
+    "LiumRentOutcomeUnknownError",
 ]

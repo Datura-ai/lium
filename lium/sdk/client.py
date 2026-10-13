@@ -39,6 +39,7 @@ from .exceptions import (
     LiumBudgetExceededError,
     LiumCardTopUpError,
     LiumChargeOutcomeUnknownError,
+    LiumRentOutcomeUnknownError,
     LiumError,
     LiumHostKeyError,
     LiumNotFoundError,
@@ -1223,7 +1224,7 @@ class Lium:
             response = self._request(
                 "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
             ).json()
-        except (requests.RequestException, LiumServerError, LiumRateLimitError):
+        except (requests.RequestException, LiumServerError, LiumRateLimitError) as first:
             # "Could not look" (the network that failed the POST fails ps() the
             # same way) must fall through to the second POST, not escape here.
             existing = self._find_pod_by_name(
@@ -1232,9 +1233,27 @@ class Lium:
             if existing:
                 return existing
             time.sleep(1)
-            response = self._request(
-                "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
-            ).json()
+            try:
+                response = self._request(
+                    "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
+                ).json()
+            except Exception as second:
+                if isinstance(first, LiumRateLimitError):
+                    raise  # a 429 is an answer: the first request rented nothing
+                # The first request went unanswered and the server may still be working on it
+                # (the repeat is then refused: 409 idempotency_in_progress, or 400 while the rent
+                # is pending). A refusal of the repeat says nothing about the first request.
+                raise LiumRentOutcomeUnknownError(
+                    f"The rent of pod {name!r} got no answer ({type(first).__name__}: {first}) and the "
+                    f"repeat failed ({type(second).__name__}: {second}); a pod may have been created and "
+                    f"be billing — check `lium ps` before renting again",
+                    idempotency_key=rent_headers["Idempotency-Key"],
+                    pod_name=name,
+                    executor_id=executor_info.id,
+                    code=getattr(second, "code", None),
+                    hint=getattr(second, "hint", None),
+                    request_id=getattr(second, "request_id", None),
+                ) from second
 
         # API should return pod info
         if response and "id" in response:
@@ -1263,7 +1282,14 @@ class Lium:
         if existing:
             return existing
 
-        raise LiumError(f"Failed to create pod{' ' + name if name else ''}")
+        # A 2xx without a pod id, and no new pod listed: the rent may well have gone through.
+        raise LiumRentOutcomeUnknownError(
+            f"Failed to create pod{' ' + name if name else ''}: the API answered without a pod id and "
+            f"no new pod is listed yet; one may still appear — check `lium ps` before renting again",
+            idempotency_key=rent_headers["Idempotency-Key"],
+            pod_name=name,
+            executor_id=executor_info.id,
+        )
 
     def _list_pods_or_none(self) -> Optional[List[PodInfo]]:
         """``ps()`` for the rent lookups: ``None`` when the listing itself failed,

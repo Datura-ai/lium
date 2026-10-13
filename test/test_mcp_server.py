@@ -13,7 +13,13 @@ from click.testing import CliRunner
 from lium.cli.cli import cli
 from lium.cli.mcp.tools import OUTPUT_TAIL_CHARS, LiumTools
 from lium.sdk import ExecutorInfo, PodInfo
-from lium.sdk.exceptions import LiumError, LiumInsufficientBalanceError, PodStartError
+from lium.sdk.exceptions import (
+    LiumError,
+    LiumInsufficientBalanceError,
+    LiumNotFoundError,
+    LiumRentOutcomeUnknownError,
+    PodStartError,
+)
 
 TOOL_NAMES = {"list_gpus", "rent_pod", "list_pods", "run_command", "remove_pod", "get_balance"}
 
@@ -312,7 +318,7 @@ def _failing_until_fixed(original, error, fixed):
     return call
 
 
-@pytest.mark.parametrize("failure", ["pending_delete_refused", "delete_timeout", "listing_failed", "listed_late"])
+@pytest.mark.parametrize("failure", ["pending_delete_refused", "delete_timeout", "listing_failed"])
 def test_an_unconfirmed_cleanup_blocks_renting_until_the_pod_is_confirmed_removed(tools, fake, monkeypatch, failure):
     from lium.cli.mcp.tools import _Rental
 
@@ -323,11 +329,8 @@ def test_an_unconfirmed_cleanup_blocks_renting_until_the_pod_is_confirmed_remove
         monkeypatch.setattr(fake, "rm", _failing_until_fixed(fake.rm, LiumError("Cannot delete a PENDING pod"), fixed))
     elif failure == "delete_timeout":
         monkeypatch.setattr(fake, "rm", _failing_until_fixed(fake.rm, TimeoutError("delete acknowledgement lost"), fixed))
-    elif failure == "listing_failed":
-        monkeypatch.setattr(fake, "ps", _failing_until_fixed(fake.ps, ConnectionError("ps failed"), fixed))
     else:
-        hidden = [p for p in fake.pods if p.id == "p2"]
-        fake.pods = [p for p in fake.pods if p.id != "p2"]
+        monkeypatch.setattr(fake, "ps", _failing_until_fixed(fake.ps, ConnectionError("ps failed"), fixed))
 
     tools.cancel_rental(rental)
     retry = tools.rent_pod("node-b", "retry")
@@ -338,9 +341,9 @@ def test_an_unconfirmed_cleanup_blocks_renting_until_the_pod_is_confirmed_remove
     if failure != "listing_failed":
         assert tools.list_pods()["unresolved_rentals"][0]["pod_ids"] == ["p2"]
 
+    monkeypatch.setattr(time, "monotonic", lambda real=time.monotonic: real() + 86_400)  # a day later: still held
+    assert tools.rent_pod("node-b", "retry")["error"]["code"] == "cleanup_pending" and fake.up_calls == 1
     fixed.set()
-    if failure == "listed_late":
-        fake.pods = [*fake.pods, *hidden]
     retry = tools.rent_pod("node-b", "retry")
 
     assert retry["ok"] is True
@@ -365,8 +368,29 @@ def test_removing_the_pod_by_hand_settles_an_unresolved_rental(tools, fake, monk
     assert tools.rent_pod("node-b", "retry")["ok"] is True
 
 
+@pytest.mark.parametrize("answer", ["removed", "not_found"])
+def test_a_pod_the_listing_does_not_show_is_still_removed_by_its_id(tools, fake, monkeypatch, answer):
+    from lium.cli.mcp.tools import _Rental
+
+    rental, asked = _Rental(), []
+    tools.rent_pod("node-a", "first", rental=rental)
+    fake.pods = [p for p in fake.pods if p.id != "p2"]  # the API named p2, the listing lags
+
+    def rm(pod):
+        asked.append(pod.id)
+        if answer == "not_found":
+            raise LiumNotFoundError("Resource not found: pod")
+
+    monkeypatch.setattr(fake, "rm", rm)
+    tools.cancel_rental(rental)
+
+    assert tools.rent_pod("node-b", "retry")["ok"] is True
+    assert asked == ["p2"]
+
+
 @pytest.mark.parametrize("created", [True, False])
-def test_a_rent_call_with_no_answer_blocks_renting_until_its_pod_is_found_or_never_appears(tools, fake, monkeypatch, created):
+@pytest.mark.parametrize("seconds_later", [0, 121, 86_400])
+def test_a_rent_call_with_no_answer_blocks_renting_however_long_ago_it_was(tools, fake, monkeypatch, created, seconds_later):
     tools.CLEANUP_WAIT_SECONDS = 0.05
     original_up = fake.up
 
@@ -375,20 +399,97 @@ def test_a_rent_call_with_no_answer_blocks_renting_until_its_pod_is_found_or_nev
             original_up(**kwargs)
         else:
             fake.up_calls += 1
-        raise ConnectionError("read timed out")
+        raise LiumRentOutcomeUnknownError("no answer, repeat refused", idempotency_key="key-1", pod_name=kwargs["name"])
 
     monkeypatch.setattr(fake, "up", lost_answer)
     first = tools.rent_pod("node-a", "first")
     assert first["error"]["code"] == "rent_outcome_unknown"
     monkeypatch.setattr(fake, "up", original_up)
+    monkeypatch.setattr(time, "monotonic", lambda real=time.monotonic: real() + seconds_later)
 
     retry = tools.rent_pod("node-b", "retry")
-    if created:  # the pod is found by its name and removed; renting resumes
-        assert retry["ok"] is True and fake.removed == ["p2"]
-    else:  # nothing listed yet: unknown until the never-listed window passes
-        assert retry["error"]["code"] == "cleanup_pending" and fake.up_calls == 1
-        tools.NEVER_LISTED_SECONDS = 0
-        assert tools.rent_pod("node-b", "retry")["ok"] is True and fake.removed == []
+
+    assert retry["error"]["code"] == "cleanup_pending"
+    assert fake.up_calls == 1 and fake.removed == []
+    unresolved = tools.list_pods()["unresolved_rentals"][0]
+    assert unresolved["outcome"] == "unknown" and unresolved["idempotency_key"] == "key-1"
+    assert unresolved["same_name_pods_to_check"] == (["p2"] if created else [])
+
+
+def test_a_pod_someone_else_rented_with_the_same_name_is_never_removed(tools, fake, monkeypatch):
+    tools.CLEANUP_WAIT_SECONDS = 0.05
+
+    def lost_answer(**kwargs):
+        raise LiumRentOutcomeUnknownError("no answer, repeat refused", idempotency_key="key-1", pod_name=kwargs["name"])
+
+    monkeypatch.setattr(fake, "up", lost_answer)
+    tools.rent_pod("node-a", "job-7")
+    fake.pods = [*fake.pods, _pod("theirs", "job-7")]  # another client rents a pod with this name on another node
+
+    tools.rent_pod("node-b", "retry")
+    tools.list_pods()
+
+    assert fake.removed == []
+    assert [p.id for p in fake.pods] == ["p1", "theirs"]
+
+
+@pytest.mark.parametrize("failure", [ValueError("No SSH keys found"), LiumError("API error 400: node is not available")])
+def test_a_rent_the_sdk_says_was_never_made_does_not_block_the_next_one(tools, fake, monkeypatch, failure):
+    original_up = fake.up
+    monkeypatch.setattr(fake, "up", lambda **kwargs: (_ for _ in ()).throw(failure))
+    assert tools.rent_pod("node-a", "first")["ok"] is False
+    monkeypatch.setattr(fake, "up", original_up)
+
+    assert tools.rent_pod("node-b", "retry")["ok"] is True
+
+
+class _Answer:
+    def __init__(self, status_code, data):
+        self.status_code, self.ok, self._data, self.text = status_code, status_code < 300, data, str(data)
+        self.headers = {}
+
+    def json(self):
+        return self._data
+
+
+@pytest.mark.parametrize("refusal", [
+    _Answer(409, {"detail": "idempotency_in_progress"}),
+    _Answer(400, {"detail": "A rental is already pending on this node"}),
+])
+def test_a_refused_repeat_of_an_unanswered_rent_is_an_unknown_outcome_with_the_real_sdk(monkeypatch, refusal):
+    import requests
+
+    from lium.sdk import Config, Lium
+    from lium.sdk import client as client_module
+    from lium.sdk import utils as sdk_utils
+
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(sdk_utils.time, "sleep", lambda seconds: None)
+    sdk = Lium(Config(api_key="test"))
+    monkeypatch.setattr(type(sdk.config), "ssh_public_keys", property(lambda self: ["ssh-ed25519 test"]))
+    monkeypatch.setattr(sdk, "get_executor", lambda executor_id: _node("node-a", 2.0))
+    monkeypatch.setattr(sdk, "_ensure_ssh_keys_registered", lambda *a, **k: None)
+    monkeypatch.setattr(sdk, "ps", lambda: [])
+    posts, outcomes = [], [requests.ReadTimeout("read timed out"), refusal]
+
+    def request(method, url, headers=None, timeout=None, **kwargs):
+        posts.append(headers["Idempotency-Key"])
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(client_module.requests, "request", request)
+    tools = LiumTools(client_factory=lambda: sdk)
+    tools.BACKGROUND_CLEANUP, tools.CLEANUP_WAIT_SECONDS = False, 0.05
+
+    first = tools.rent_pod("node-a", "job", template_id="tpl-1")
+    retry = tools.rent_pod("node-a", "job-again", template_id="tpl-1")
+
+    assert first["error"]["code"] == "rent_outcome_unknown"
+    assert retry["error"]["code"] == "cleanup_pending"
+    assert len(posts) == 2 and posts[0] == posts[1]  # one key, and no third request under a new one
+    assert retry["unresolved"][0]["idempotency_key"] == posts[0]
 
 
 def test_a_rental_cancelled_before_its_worker_starts_never_rents_and_never_waits(tools, fake):
