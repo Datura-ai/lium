@@ -562,7 +562,9 @@ def charge_outcome_unknown_failure(error: LiumChargeOutcomeUnknownError) -> CliF
 
 def card_retry_command(amount: float | None, payment_method_id: str | None, idempotency_key: str) -> str:
     """The exact ``lium topup card`` that repeats this call: same amount, same card, same key."""
-    amount_text = "<same amount>" if amount is None else format(amount, "f").rstrip("0").rstrip(".")
+    # 17 significant digits round-trip the float exactly, so the repeat sends the same amount and the
+    # backend rounds it to the same cents (a shortened "10.005" for 10.0049999 would be one cent more).
+    amount_text = "<same amount>" if amount is None else format(amount, ".17g")
     parts = ["lium", "topup", "card", "-a", amount_text]
     if payment_method_id:
         parts += ["--card", shlex.quote(payment_method_id)]

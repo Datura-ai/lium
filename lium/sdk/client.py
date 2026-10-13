@@ -347,7 +347,10 @@ CARD_TOPUP_ERROR_CODES = frozenset(
 )
 # 502s from the same route that fire before Stripe is asked to charge (or that Stripe refused
 # before processing). A 5xx without one of these still means the charge may have gone through.
-CARD_TOPUP_NOT_CHARGED_CODES = frozenset({"STRIPE_UNAVAILABLE", "STRIPE_REFUSED", "TOP_UP_BUSY"})
+# Not `TOP_UP_BUSY`: that 503 only says this attempt submitted nothing; a same-key repeat after an
+# open step-up or a lost answer can still find that earlier payment going through, so it stays an
+# unknown outcome that carries the key.
+CARD_TOPUP_NOT_CHARGED_CODES = frozenset({"STRIPE_UNAVAILABLE", "STRIPE_REFUSED"})
 
 CHECKOUT_SUCCESS_PATH = "/billing?success=true"
 CHECKOUT_CANCEL_PATH = "/billing"

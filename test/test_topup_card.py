@@ -318,24 +318,64 @@ def test_a_server_error_is_sent_once_and_is_an_unknown_outcome_carrying_the_key(
     assert "may have gone through" in str(raised.value)
 
 
-@responses.activate
 @pytest.mark.parametrize(
-    ("status", "code"),
-    [(502, "STRIPE_UNAVAILABLE"), (503, "TOP_UP_BUSY")],
+    ("prior", "status", "code", "expected"),
+    [
+        (None, 502, "STRIPE_UNAVAILABLE", LiumServerError),
+        (None, 503, "TOP_UP_BUSY", LiumChargeOutcomeUnknownError),
+        ("step_up", 503, "TOP_UP_BUSY", LiumChargeOutcomeUnknownError),
+        ("timeout", 503, "TOP_UP_BUSY", LiumChargeOutcomeUnknownError),
+    ],
 )
-def test_a_5xx_before_the_card_is_touched_is_a_server_error_not_an_unknown_outcome(client, status, code):
-    """Retrieve/list failures and a full submission pool charge nothing, so neither is exit 6."""
+@responses.activate
+def test_a_5xx_before_the_card_is_touched_is_a_server_error_not_an_unknown_outcome(
+    client, prior, status, code, expected
+):
+    """`STRIPE_UNAVAILABLE` is a retrieve/list failure: nothing was charged, so it is not exit 6. A busy
+    submission pool (`TOP_UP_BUSY`) only says this attempt submitted nothing: a same-key repeat after an
+    open step-up or a lost answer can still find the earlier payment going through, so it stays an
+    unknown outcome that carries the key."""
+    if prior:
+        if prior == "step_up":
+            responses.post(TOPUP, status=402, json=STEP_UP)
+        else:
+            responses.post(TOPUP, body=requests.exceptions.ReadTimeout())
+        with pytest.raises(LiumError):
+            client.topup_card(50, idempotency_key="nightly-1")
+
     responses.post(
         TOPUP,
         status=status,
-        json=_error_body(status, {"code": code, "message": "Nothing was charged."}),
+        json=_error_body(status, {"code": code, "message": "Busy"}),
     )
-
-    with pytest.raises(LiumServerError) as raised:
+    with pytest.raises(expected) as raised:
         client.topup_card(50, idempotency_key="nightly-1")
 
-    assert raised.value.code == code
-    assert len(responses.calls) == 1
+    if expected is LiumChargeOutcomeUnknownError:
+        assert raised.value.idempotency_key == "nightly-1"
+    else:
+        assert raised.value.code == code
+    assert len(responses.calls) == 1 + bool(prior)
+
+
+@pytest.mark.parametrize(
+    "amount",
+    [50.0, 10.5, 12.34, 10.0049999, 12.3449999, 999999.9849999, 0.1 + 0.2],
+)
+def test_the_printed_retry_amount_is_the_same_charge_in_cents(amount):
+    """The re-run printed after a step-up must send the amount the backend rounds to the same cents
+    (decimal half-up on str(float)); a shortened "10.005" for 10.0049999 would charge a cent more under
+    a different Stripe key, i.e. a second payment."""
+    from decimal import ROUND_HALF_UP, Decimal
+
+    def cents(value):
+        return int(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) * 100)
+
+    command = topup_module.card_retry_command(amount, None, "nightly-1")
+    printed = command.split(" -a ", 1)[1].split(" ", 1)[0]
+
+    assert float(printed) == amount
+    assert cents(float(printed)) == cents(amount)
 
 
 def test_a_nan_amount_is_refused_before_any_request(client):
