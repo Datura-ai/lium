@@ -555,6 +555,7 @@ def test_no_email_signup_is_one_call_and_keeps_the_fingerprint_and_key(monkeypat
     out = json.loads(result.stdout)
     assert out["fingerprint"] == FP and out["api_key"] == "sk_rent_fp"
     assert signup_env == {"account.fingerprint": FP, "api.api_key": "sk_rent_fp"}
+    assert "Add a card at" in out["next_steps"][1]
     assert [(m, u.rsplit("/api", 1)[1]) for m, u, _ in calls] == [("POST", "/auth/signup")]
 
 
