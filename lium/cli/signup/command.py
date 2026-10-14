@@ -11,14 +11,20 @@ from lium.cli.utils import CliFailure, handle_errors
 from .actions import FingerprintSignupAction, MintBillingKeyAction, SignupAction, generate_password
 
 
-def _credit_line(credit_granted: bool | None) -> str:
-    # wording follows the backend's signup_credit_granted flag; older backends omit it, so nothing is asserted then
+def _credit_line(credit_granted: bool | None, no_email: bool) -> str:
+    # wording follows the backend's signup_credit_granted flag; older backends omit it, so nothing is asserted then.
+    # What unlocks a withheld credit depends on the signup kind: a card for --no-email, the confirmation link for --email.
     if credit_granted is True:
         return "A $5 signup credit was granted — check it with 'lium balance'."
     if credit_granted is False:
-        return ("No signup credit yet. Add a card at https://lium.io/billing within 14 days to get $5 in free "
-                "credits (subject to restrictions: one per person and card; the abuse checks, caps or a pause can "
-                "still withhold it). Fund the account before renting.")
+        if no_email:
+            return ("No signup credit yet. Add a card at https://lium.io/billing within 14 days to get $5 in free "
+                    "credits (subject to restrictions: one per person and card; the abuse checks, caps or a pause "
+                    "can still withhold it). Fund the account before renting.")
+        return ("No signup credit yet. Click the confirmation link in the e-mail within 14 days to get $5 in free "
+                "credits (subject to restrictions: one per person; an uncommon e-mail domain may also need a card "
+                "at https://lium.io/billing; the abuse checks, caps or a pause can still withhold it). "
+                "Fund the account before renting.")
     return "Check the balance with 'lium balance' and fund the account before renting."
 
 
@@ -106,7 +112,7 @@ def signup_command(email: str | None, no_email: bool, display_name: str | None, 
             "signup_credit_granted": credit_granted,
             **billing_fields,
             "next_steps": [
-                _credit_line(credit_granted),
+                _credit_line(credit_granted, no_email=False),
                 ("Top up: lium topup link -a 10 --wait 900 (a person pays by card) or "
                  "lium topup create -a 10 -c USDC -n base --wait 900 (send the stablecoin)."),
                 "Then: lium ls, lium up <node-id>.",
@@ -130,7 +136,7 @@ def signup_command(email: str | None, no_email: bool, display_name: str | None, 
 
     ui.print("")
     ui.info("Before the first rental:")
-    ui.print(f"  1. {_credit_line(credit_granted)}")
+    ui.print(f"  1. {_credit_line(credit_granted, no_email=False)}")
     ui.print("  2. Then 'lium ls' and 'lium up <node-id>'.")
     ui.print("")
     ui.dim("  The verification link in the confirmation email does not gate renting — it confirms")
@@ -176,7 +182,7 @@ def _signup_without_email(billing_key: bool, json_output: bool) -> None:
             **billing_fields,
             "next_steps": [
                 "Store the fingerprint: it is the only login (https://lium.io) and cannot be recovered.",
-                _credit_line(credit_granted),
+                _credit_line(credit_granted, no_email=True),
                 ("Top up: lium topup link -a 10 --wait 900 (a person pays by card) or "
                  "lium topup create -a 10 -c USDC -n base --wait 900 (send the stablecoin)."),
                 "Then: lium ls, lium up <node-id>.",
@@ -196,4 +202,4 @@ def _signup_without_email(billing_key: bool, json_output: bool) -> None:
         else:
             ui.warning(f"Billing key not minted: {escape(str(billing_result.error))}")
     ui.print("")
-    ui.info(f"Next: {escape(_credit_line(credit_granted))} Then 'lium ls' and 'lium up <node-id>'.")
+    ui.info(f"Next: {escape(_credit_line(credit_granted, no_email=True))} Then 'lium ls' and 'lium up <node-id>'.")

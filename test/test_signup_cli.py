@@ -252,8 +252,24 @@ def test_signup_says_no_credit_was_granted_when_the_flag_is_false(monkeypatch, s
 
     assert result.exit_code == 0
     assert "No signup credit yet" in result.output
-    assert "Add a card at https://lium.io/billing" in result.output
+    assert "Click the confirmation link" in result.output  # an --email signup unlocks it with the link, not a card
+    assert "Add a card at" not in result.output
     assert "$5 signup credit was granted" not in result.output
+
+
+def test_a_withheld_credit_names_the_unlock_that_fits_the_signup_kind():
+    """--email: the confirmation link (a card only for an uncommon domain); --no-email: a saved card."""
+    by_email = signup_command._credit_line(False, no_email=False)
+    by_fingerprint = signup_command._credit_line(False, no_email=True)
+
+    assert "Click the confirmation link" in by_email
+    assert not by_email.startswith("No signup credit yet. Add a card")
+    assert "uncommon e-mail domain may also need a card" in by_email
+    assert "Add a card at https://lium.io/billing" in by_fingerprint
+    assert "confirmation link" not in by_fingerprint
+    for kind in (False, True):
+        assert "was granted" in signup_command._credit_line(True, no_email=kind)
+        assert "$5" not in signup_command._credit_line(None, no_email=kind)
 
 
 def test_a_generated_password_containing_dollar_five_is_not_mistaken_for_the_credit(
