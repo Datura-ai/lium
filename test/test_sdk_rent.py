@@ -362,3 +362,19 @@ def test_older_backend_reads_the_nvlink_verdict_off_a_summary_row(client):
 
     assert result.executor.id == "linked" and result.candidates == 1
     assert "interconnect" not in linked["specs"]
+
+
+@pytest.mark.parametrize("reserve_gib, matches", [(None, True), (4, False)])
+def test_the_client_side_ram_floor_counts_the_host_reserve_like_the_server(reserve_gib, matches):
+    # DAH-4487: rent-by-spec compares the RAM a pod gets (host total less the published reserve);
+    # the client-side pick for older backends reads the same figure, so 254 GiB fails on 256 - 4
+    from types import SimpleNamespace
+
+    row = _node("exec-1")
+    row["specs"]["ram"]["pod_reserve"] = None if reserve_gib is None else reserve_gib * GIB_KB
+    executor = SimpleNamespace(
+        specs=row["specs"], gpu_count=1, effective_download_speed_mbps=900.0, available_port_count=10,
+        price_per_gpu=1.2, location=row["location"], docker_in_docker=False, nvlink=None,
+    )
+
+    assert client_module._satisfies_spec(executor, {"gpu_count": 1, "min_ram_gb": 254}) is matches
