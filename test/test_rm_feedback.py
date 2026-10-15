@@ -7,7 +7,7 @@ from click.testing import CliRunner
 
 from lium.cli.cli import cli
 from lium.cli.rm import command as rm_module
-from lium.sdk import Config, Lium, LiumError
+from lium.sdk import Config, Lium, LiumError, LiumPermissionError
 
 
 class _Response:
@@ -55,10 +55,26 @@ def test_down_sends_feedback_in_the_delete(monkeypatch, outcomes):
         try:
             client.down(SimpleNamespace(id="pod-1"), rating=1)
         except LiumError:
-            pass
+            pass  # a rejected removal is one of the outcomes under test; the next attempt retries it
 
     payload = {"feedback_text": "", "rating": 1, "reason": "unrent"}
     assert calls == [("DELETE", "/pods/pod-1", payload)] * len(outcomes)
+
+
+def test_down_removes_the_pod_when_the_edge_refuses_the_feedback(monkeypatch):
+    client, calls = _client(monkeypatch)
+
+    def request(method, endpoint, json=None, **kwargs):
+        calls.append((method, endpoint, json))
+        if json is not None:
+            raise LiumPermissionError("Forbidden")
+        return _Response({"success": True})
+
+    monkeypatch.setattr(client, "_request", request)
+    client.down(SimpleNamespace(id="pod-1"), rating=1, feedback="jupyter at http://203.0.113.7:8888 never answered")
+
+    assert calls[-1] == ("DELETE", "/pods/pod-1", None)
+    assert len(calls) == 2
 
 
 def test_down_without_feedback_only_deletes(monkeypatch):

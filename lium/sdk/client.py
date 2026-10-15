@@ -2015,14 +2015,21 @@ class Lium:
 
         Returns:
             API response payload from the delete call. The feedback is recorded once per pod, so a
-            retried removal does not rate the node twice, and it never blocks the removal.
+            retried removal does not rate the node twice. It never blocks the removal: feedback the
+            API edge refuses (403) is dropped and the pod is removed with a plain delete.
         """
         if rating is not None and not 1 <= rating <= 5:
             raise ValueError("rating must be 1-5")
         payload = None
         if feedback is not None or rating is not None:
             payload = {"feedback_text": feedback or "", "rating": rating, "reason": "unrent"}
-        result = self._request("DELETE", f"/pods/{pod.id}", json=payload).json()
+        try:
+            result = self._request("DELETE", f"/pods/{pod.id}", json=payload).json()
+        except LiumPermissionError:
+            # the edge WAF refuses some bodies (an http://IPv4 URL, ../../, >64 KB): drop the feedback, not the removal
+            if payload is None:
+                raise
+            result = self._request("DELETE", f"/pods/{pod.id}").json()
         forget_host_key(pod)
         return result
 
