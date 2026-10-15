@@ -497,6 +497,7 @@ One object per node, sorted as the table is; the names are stable and pinned by 
 | `index` | row number, what `lium up <index>` takes |
 | `id`, `huid` | node UUID (what the API wants) and its human id (`lium up <huid>`) |
 | `config`, `gpu_type`, `gpu_count`, `machine_name` | `8×H100`, `H100`, `8`, `NVIDIA H100 80GB HBM3` |
+| `available_gpu_count` | GPUs free on the node now (`null` when the server does not say); rent at most this many with `-c` |
 | `price_per_gpu_hour`, `price_per_hour` | USD per GPU-hour and for the whole node |
 | `country`, `country_code`, `city` | country name, ISO code, city |
 | `vram_gb`, `ram_gb`, `cpu_count` | per-GPU VRAM (GiB), host RAM (GiB), CPU threads |
