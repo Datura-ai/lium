@@ -618,6 +618,8 @@ lium fund -w default -a 1.5 -y     # values that would be prompted for must be p
 
 ### MCP server for agent hosts
 
+<!-- mcp-name: io.github.Datura-ai/lium -->
+
 `lium mcp` serves Lium as a Model Context Protocol server over stdio, so Claude Desktop, Claude Code, Cursor or any
 MCP host can rent and use GPUs itself. Tools: `list_gpus`, `rent_pod`, `list_pods`, `run_command`, `remove_pod`,
 `get_balance`. It uses the API key `lium init` saved, or `LIUM_API_KEY`.
