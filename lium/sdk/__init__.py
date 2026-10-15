@@ -18,6 +18,7 @@ from .exceptions import (
     LiumScopeError,
     LiumServerError,
     LiumSessionError,
+    LiumSSHError,
     PodStartError,
     RemoteExecutionError,
 )
@@ -82,6 +83,7 @@ __all__ = [
     "LiumPermissionError",
     "PodStartError",
     "LiumHostKeyError",
+    "LiumSSHError",
     "LiumInsufficientBalanceError",
     "LiumScopeError",
     "LiumBudgetExceededError",

@@ -212,7 +212,7 @@ def test_a_changed_host_key_is_a_host_key_error(home, monkeypatch):
 def test_an_unreachable_pod_names_sshs_reason(home, monkeypatch):
     ssh = _Ssh(live=False, start_code=255, start_stderr=b"ssh: connect to host 203.0.113.10 port 20299: Connection refused\n")
     monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
-    with pytest.raises(LiumError, match="SSH to pod warm-pod .* Connection refused"):
+    with pytest.raises(ssh_mux.LiumSSHError, match="SSH to pod warm-pod .* Connection refused"):
         ssh_mux.exec_over_master(_lium(home), _pod(), command="true")
 
 

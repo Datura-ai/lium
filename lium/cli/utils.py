@@ -20,6 +20,7 @@ from lium.sdk import (
     LiumError,
     LiumBudgetExceededError,
     LiumHostKeyError,
+    LiumSSHError,
     LiumInsufficientBalanceError,
     LiumScopeError,
     LiumNotFoundError,
@@ -506,6 +507,8 @@ def _classify_sdk_error(error: LiumError) -> tuple[str, int]:
         # the pod's pinned ssh host key changed (client.py ssh_connection): an ssh failure the
         # user must look at, not an API call to retry — exit 4 like the other ssh errors
         return "ssh_host_key_changed", EXIT_SSH_ERROR
+    if isinstance(error, LiumSSHError):
+        return "ssh_connection_failed", EXIT_SSH_ERROR
     if isinstance(error, LiumInsufficientBalanceError):
         return "insufficient_balance", EXIT_PERMISSION_DENIED
     if isinstance(error, LiumBudgetExceededError):

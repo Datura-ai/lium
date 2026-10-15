@@ -494,12 +494,25 @@ def test_a_refused_channel_does_not_close_the_connection_other_calls_use(monkeyp
         raise sdk_client.paramiko.ChannelException(1, "administratively prohibited")
 
     transport.open_session = refuse
-    with pytest.raises(sdk_client.paramiko.ChannelException):
-        lium.exec(pod, command="second")
+    result = lium.exec(pod, command="second")   # the pod's session limit: this call runs on a connection of its own
     transport.open_session = real_open
 
-    assert transport.active and world.closes == 0 and len(world.connects) == 1
+    assert result["stdout"] == "ran second" and world.sent == ["first", "second"]
+    assert transport.active and len(world.connects) == 2 and world.closes == 1   # the extra one closed after the call
     assert other.users == 1 and lium._ssh_pool and _kept(lium) is other
+
+
+def test_a_refused_channel_inside_ssh_session_is_reported(monkeypatch, world):
+    lium = _lium(monkeypatch, world)
+    pod = _pod()
+    with lium.ssh_session(pod):
+        def refuse(timeout=None):
+            raise sdk_client.paramiko.ChannelException(1, "administratively prohibited")
+
+        world.clients[0].transport.open_session = refuse
+        with pytest.raises(sdk_client.paramiko.ChannelException):
+            lium.exec(pod, command="second")
+    assert len(world.connects) == 1
 
 
 def test_transport_loss_with_users_still_replaces_the_connection(monkeypatch, world):

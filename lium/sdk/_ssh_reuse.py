@@ -54,6 +54,7 @@ class PooledConnection:
         self._timer: Optional[threading.Timer] = None
         self._pool: Optional[dict] = None          # the pool (not the client) this entry is listed in
         self._pool_lock: Optional[threading.Lock] = None
+        self.one_off = False   # opened for one call the kept connection had no room for; closed when it ends
 
     def listed_in(self, pool: dict, lock: threading.Lock) -> None:
         """Tell the entry which pool holds it, so an idle expiry can take it out of there."""

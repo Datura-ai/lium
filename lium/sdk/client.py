@@ -2902,7 +2902,9 @@ class Lium:
 
     def _done_with(self, pod: PodInfo, entry: PooledConnection) -> None:
         entry.release()
-        if not entry.alive():
+        if entry.one_off:
+            entry.close()
+        elif not entry.alive():
             self._drop_pooled(pod, entry)
 
     def _on_kept_connection(self, pod: PodInfo, entry: PooledConnection, open_on: Callable[[PooledConnection], Any]):
@@ -2917,9 +2919,19 @@ class Lium:
             return entry, open_on(entry)
         except paramiko.ChannelException:
             # The server refused this one channel (its session limit): the connection is fine and other
-            # calls are running on it. Give back this call's use and report the refusal.
+            # calls are running on it. Outside ssh_session() (which shares one connection, as before) this call
+            # gets a connection of its own, closed when it ends, as every call had before connections were kept.
             entry.release()
-            raise
+            if self.__dict__.get("_ssh_session_entries", {}).get(pod.id) is entry:
+                raise
+            own = PooledConnection.open(lambda: self.ssh_connection(pod))
+            own.one_off = True
+            own.acquire()
+            try:
+                return own, open_on(own)
+            except BaseException:
+                own.close()
+                raise
         except (paramiko.SSHException, EOFError, OSError):
             entry.release()
             self._drop_pooled(pod, entry)

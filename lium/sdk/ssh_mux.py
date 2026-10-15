@@ -26,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .exceptions import LiumError, LiumHostKeyError
+from .exceptions import LiumError, LiumHostKeyError, LiumSSHError
 from .models import PodInfo
 
 PERSIST_ENV = "LIUM_SSH_PERSIST"
@@ -169,7 +169,7 @@ class ControlMaster:
                 f"delete the pod's file under ~/.lium/known_hosts/ and reconnect; LIUM_SSH_INSECURE=1 disables pinning."
             )
         detail = message.splitlines()[-1] if message else f"ssh exited {started.returncode}"
-        raise LiumError(f"SSH to pod {name} ({self.destination}) failed: {detail}")
+        raise LiumSSHError(f"SSH to pod {name} ({self.destination}) failed: {detail}")
 
     def ensure(self) -> None:
         if not self.alive():

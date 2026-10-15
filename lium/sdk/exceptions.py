@@ -98,6 +98,10 @@ class LiumHostKeyError(LiumError):
     """A pod presented an SSH host key that differs from the pinned one."""
 
 
+class LiumSSHError(LiumError):
+    """SSH could not connect to a pod (refused, timed out, login rejected)."""
+
+
 class RemoteExecutionError(LiumError):
     """A function offloaded with ``@lium.machine`` did not return a result from the pod.
 
