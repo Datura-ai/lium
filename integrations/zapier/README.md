@@ -18,7 +18,7 @@ Built on Lium's public REST API (`https://lium.io/api`, `X-API-KEY` header), the
 value that stays the same when Zapier replays the step, such as the trigger item's ID. The pod is named
 `<Pod Name or zap>-<12 hex of sha256(key)>`. Before renting, the action looks for one of your pods with that name and
 returns it (`replayed: true`) instead of renting again, which covers a replay at any age while that pod still exists.
-Lium also keeps the key for 24 hours, so a replay in that window returns the first pod even if the listing missed it.
+Lium also keeps the key for 24 hours, so a replay in that window returns the first pod even if the listing missed it. Zapier's automatic replays all land within that window; a manual replay more than 24 hours later, after the pod was renamed or deleted, rents a new pod.
 If an earlier call with the key is still running, or its outcome was not recorded, Lium answers 409 and the step stops
 with an error asking you to check your pods before retrying.
 

@@ -147,7 +147,7 @@ const rentPod = {
         label: 'Idempotency Key',
         required: true,
         helpText:
-          'A value that stays the same if Zapier replays this step, so a retry returns the first pod instead of renting a second one. Map a stable value from the trigger step, e.g. the trigger item\'s ID; do not use a timestamp or a random value. Lium remembers a key for 24 hours; after that, a replay still finds and returns the pod this key rented as long as that pod exists, marked `replayed: true`.',
+          'A value that stays the same if Zapier replays this step, so a retry returns the first pod instead of renting a second one. Map a stable value from the trigger step, e.g. the trigger item\'s ID; do not use a timestamp or a random value. Lium remembers a key for 24 hours; after that, a replay still finds and returns the pod this key rented as long as that pod exists under the same name, marked `replayed: true`. Replaying a rent by hand more than 24 hours later, after renaming or deleting its pod, rents a new pod.',
       },
       { key: 'template_id', label: 'Template ID', required: false, helpText: 'Optional Lium template (docker image) ID. Empty: the server\'s recommended PyTorch image.' },
     ],
