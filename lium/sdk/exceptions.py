@@ -101,8 +101,9 @@ class LiumHostKeyError(LiumError):
 class RemoteExecutionError(LiumError):
     """A function offloaded with ``@lium.machine`` did not return a result from the pod.
 
-    When the function raised, the caller sees the original exception type and this
-    error is its ``__cause__``; ``remote_traceback`` is the traceback from the pod.
+    Supported builtin exceptions and ``ResultEncodingError`` are re-raised with this
+    error as their ``__cause__``. Other remote exceptions raise this error directly.
+    It carries the available ``remote_traceback``, ``exit_code``, ``stdout`` and ``stderr``.
     """
 
     def __init__(
