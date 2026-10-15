@@ -423,7 +423,7 @@ def keys_show_command(key: str, workspace: Optional[str], json_output: bool):
 
 def _refusals(lium: Lium, key_id: str, workspace_id: str) -> Optional[List[ApiKeyRefusal]]:
     """The key's refusal ledger, newest first; `None` on a server without `GET /keys/{id}/refusals` (404,
-    server support pending) — shown as "no refusal ledger on this server", not as "none"."""
+    an older server) — shown as "no refusal ledger on this server", not as "none"."""
     try:
         return lium.api_keys.refusals(key_id, workspace_id)
     except LiumNotFoundError as exc:
