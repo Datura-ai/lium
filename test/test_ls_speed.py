@@ -118,10 +118,13 @@ def test_a_summary_row_carries_every_field_the_table_and_json_render():
     assert set(row) == {
         "index", "id", "huid", "config", "gpu_type", "gpu_count", "price_per_gpu_hour", "price_per_hour", "country",
         "country_code", "city", "vram_gb", "ram_gb", "cpu_count", "disk_gb", "disk_total_gb", "upload_mbps",
-        "download_mbps", "available_ports", "docker_in_docker", "is_pareto", "max_cuda_version", "tier", "machine_name",
-        "link", "nvlink", "p2p", "interconnect", "gpu_power_limited", "gpu_power_limit_w", "gpu_power_limit_default_w",
+        "download_mbps", "upload_source", "download_source", "available_ports", "docker_in_docker", "is_pareto",
+        "max_cuda_version", "tier", "machine_name", "link", "nvlink", "p2p", "interconnect", "gpu_power_limited",
+        "gpu_power_limit_w", "gpu_power_limit_default_w",
     }
     assert None not in row.values()
+    # the fixture's effective figures equal its scrape: the summary view carries no measurement in between
+    assert (row["download_source"], row["upload_source"]) == ("reported", "reported")
     assert (row["country"], row["vram_gb"], row["ram_gb"], row["disk_gb"], row["available_ports"]) == ("The Netherlands", 140, 1512, 6199, 30)
     assert (row["country_code"], row["city"], row["cpu_count"], row["disk_total_gb"], row["machine_name"]) == ("NL", "Amsterdam", 192, 6676, "NVIDIA H200")
     assert (row["link"], row["nvlink"], row["p2p"], row["interconnect"]["nvlink_links"]) == ("NV18", True, True, 18)

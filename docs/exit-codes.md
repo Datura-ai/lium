@@ -55,6 +55,17 @@ The envelope goes to **stderr**, stdout is left empty, and the process exits
 with `exit_code`. On success stdout carries the result JSON. Read both streams;
 do not `2>/dev/null`.
 
+Under `--wait` (`topup link`, `topup create`, `topup card`), stderr may first
+carry the progress line (`"event": "handoff"`, `"invoice_created"` or
+`"charged"`, once the page, invoice or charge exists); the envelope is always
+the **last line** of stderr. Parse the last line, not the whole stream. After
+a card charge that timed out (`credit_not_seen`, exit 6, `data.charged: true`)
+the card was charged: do not run the charge again, keep waiting with
+`lium topup wait --above <data.balance_before>`. A repeat of `topup card` must
+carry that line's `data.idempotency_key` and the same amount
+(`data.amount_usd`) within 24 h; the same key with a different amount is a new
+charge.
+
 `lium up --json` acts before it answers, so its progress lines (the node
 picked, the rent, the wait, the price prompt) go to stderr and stdout holds
 exactly one document, the bare payload, as `ps`, `describe` and `rm --format
@@ -97,9 +108,9 @@ Codes raised by the shared error handler (any command can produce them) when the
 | `value_error` | 2 | A value the command received was invalid (SDK `ValueError`). | Check the options. |
 | `invalid_arguments` | 2 | Options that contradict each other or a malformed value. | `lium <command> --help`. |
 | `confirmation_required` | 2 | A yes/no question could not be asked: no terminal can answer, or the terminal went away mid-prompt (`ui.confirm`); `lium rm` without `--yes` when stdin is not a terminal, whatever the target; `lium topup card --json` (not released yet) without `--yes`, terminal or not. | Re-run with `--yes`. |
-| `input_required` | 2 | A value would have been prompted for and no terminal can answer (`ui.prompt`, DAH-2883). | Pass it as an option. |
+| `input_required` | 2 | A value would have been prompted for and no terminal can answer (`ui.prompt`). | Pass it as an option. |
 | `permission_denied` | 6 | The API answered 403. | `lium balance`; verification on https://lium.io. |
-| `insufficient_balance` | 6 | 403 whose `error.code` is `insufficient_balance` (the platform's structured error body, lium-platform#210), or, from an older server, whose message says "Insufficient balance"; the SDK raises `LiumInsufficientBalanceError` with `required`/`available` parsed from the message when the server stated them. | `lium topup` or `lium fund`, or a cheaper node (`lium ls --sort price_total`). |
+| `insufficient_balance` | 6 | 403 whose `error.code` is `insufficient_balance` (the platform's structured error body), or, from an older server, whose message says "Insufficient balance"; the SDK raises `LiumInsufficientBalanceError` with `required`/`available` parsed from the message when the server stated them. | `lium topup` or `lium fund`, or a cheaper node (`lium ls --sort price_total`). |
 | `budget_exceeded` | 6 | 402 from a route the key's budget guards — a rent, a pod's schedule change (`rm --in/--at`), a top-up (`fund`, `topup`, `topup card`): the API key's daily, monthly or lifetime budget (`lium keys create --daily-budget / --monthly-budget / --max-budget`, `lium keys budget`) is reached, so the request is refused — the message names the window hit — and the billing tick deletes the key's pods (data outside a volume is lost) (needs a server with per-key budgets, not on lium.io yet; the server's own `error.code` is `API_KEY_BUDGET_EXCEEDED` and is the code you get when it sends one). The SDK raises `LiumBudgetExceededError` with `window` (`daily` / `monthly` / `max`), `budget_usd`, `spent_usd` and `api_key_id` when the server stated them; the envelope's `data` repeats them. | `lium keys show <name>` shows the figures; raise or clear the budget with `lium keys budget <name>` (a signed-in session) or use another key. |
 | `missing_scope` | 6 | 403 whose message says the API key "does not have the '<scope>' scope": the key lacks `read`, `rent`, `manage` or `billing` for this route; the SDK raises `LiumScopeError` with `scope` set, and the envelope's `data.scope` names it. | `lium keys scopes` explains each scope; `lium keys create <name> --scope <scope>` mints a key that holds it. |
 | `pod_not_found` | 5 | The pod named on the command line matched nothing. | `lium ps`. |
@@ -121,11 +132,17 @@ Commands add their own codes for the failures only they can have — for example
 `unreadable_dockerfile`; `exec` raises `unreadable_script`; `rm` raises
 `removal_failed`; `fund` raises `transfer_failed`, `netuid_not_accepted` (2: `--netuid` names a subnet whose alpha
 Lium does not accept right now; `data` carries `netuid` and the `accepted` list) and `netuid_needs_alpha` (2: `--netuid`
-without `--alpha`); `topup card` (not released yet) passes on the platform's own
-`CARD_AUTHENTICATION_REQUIRED`, `CARD_DECLINED`, `NO_SAVED_CARD` and
-`NO_DEFAULT_CARD` (3: the
+without `--alpha`); `topup link`, `topup create`, `topup card` and `topup wait` with `--wait` raise `balance_unreadable` (3: the balance could not be read before the payment, so nothing was created or charged) and `credit_not_seen` (the balance did not rise in time; `data.charged` says whether money already left: 3 with `charged: null` (not known: a payment may be made and its credit on the way) after a payment page, an invoice or `topup wait` — keep waiting with `lium topup wait --above <data.balance_before>`; 6 with `charged: true` after `topup card` — the card was charged, do not run the charge again except with `data.idempotency_key` and the same amount within 24 h); `topup card` (not released yet) passes on the platform's own
+`CARD_AUTHENTICATION_REQUIRED`, `CARD_AUTHENTICATION_NOT_COMPLETED`, `CARD_AUTHENTICATION_UNAVAILABLE`,
+`CARD_AUTHENTICATION_EXPIRED`, `CARD_DECLINED`, `NO_SAVED_CARD`,
+`NO_DEFAULT_CARD` and `WALLET_NOT_SUPPORTED` (a saved Link, Apple Pay or Google Pay wallet) (3: the
 API refused the charge and the balance did not move; `data` carries `dashboard_url`, the bank's
-`decline_code` and the `payment_intent_id`) and raises `charge_outcome_unknown` (6: a timeout or
+`decline_code` and the `payment_intent_id`; a repeat needs a new key) — except a
+`CARD_AUTHENTICATION_REQUIRED` that carries `data.next_action_url` (6: a 3-D Secure step-up, the
+payment is still open; the cardholder confirms at `data.next_action_url` and the balance is credited
+with no further call; `data` also carries `transaction_id`, `idempotency_key` and `amount_usd`, and
+the hint is the exact `lium topup card … --idempotency-key <data.idempotency_key>` to repeat. Repeat
+only with that key, never a new one: a new key opens a second payment on the card) — and raises `charge_outcome_unknown` (6: a timeout or
 5xx after the charge was posted — it may have gone through; the message says to check `lium
 balance` before trying again, `data.idempotency_key` is the key a repeat must carry with the
 same amount within 24 h to get the
@@ -154,10 +171,11 @@ the detail the hints promise.
 ```bash
 set -o pipefail
 if ! out=$(LIUM_OUTPUT=json lium ps --format json 2>err.json); then
-  code=$(jq -r .error.code err.json)
-  hint=$(jq -r .error.hint err.json)
+  err=$(tail -n 1 err.json)   # the envelope is the last line of stderr
+  code=$(jq -r .error.code <<<"$err")
+  hint=$(jq -r .error.hint <<<"$err")
   echo "lium failed: $code — $hint" >&2
-  exit $(jq -r .error.exit_code err.json)
+  exit $(jq -r .error.exit_code <<<"$err")
 fi
 echo "$out" | jq '.[0].huid'
 ```
@@ -170,7 +188,7 @@ proc = subprocess.run(
     capture_output=True, text=True, env={**os.environ, "LIUM_OUTPUT": "json"},
 )
 if proc.returncode != 0:
-    error = json.loads(proc.stderr)["error"]
+    error = json.loads(proc.stderr.strip().splitlines()[-1])["error"]   # the envelope is the last line
     raise RuntimeError(f"{error['code']}: {error['message']} ({error['hint']})")
 pods = json.loads(proc.stdout)
 ```

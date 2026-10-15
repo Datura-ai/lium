@@ -75,7 +75,10 @@ class ResolveExecutorAction:
                 # server's hint and request_id ride along in data (DAH-3057); the command lifts
                 # the hint out into the failure's own.
                 data = {**(_api_error_data(exc) or {}), **({"hint": exc.hint} if exc.hint else {})}
-                return ActionResult(ok=False, data=data, error=str(exc))
+                error = str(exc)
+                if gpu:
+                    error += f". Ask providers for it: lium request {gpu}" + (f" -n {count}" if count else "")
+                return ActionResult(ok=False, data=data, error=error)
             return ActionResult(
                 ok=True,
                 data={
@@ -93,7 +96,8 @@ class ResolveExecutorAction:
             executors = lium.ls(gpu_type=gpu, min_cpus=min_cpus)
 
             if count:
-                executors = [e for e in executors if e.gpu_count == count]
+                # a rent with no count takes the node's free GPUs, not the host total
+                executors = [e for e in executors if rented_gpu_count(e) == count]
             if country:
                 executors = [
                     e for e in executors
@@ -123,11 +127,12 @@ class ResolveExecutorAction:
                 if ports:
                     filters.append(f"min ports={ports}")
                 filter_desc = ', '.join(filters) if filters else "specified filters"
-                return ActionResult(ok=False, data={}, error=f"No nodes available with {filter_desc}")
+                error = f"No nodes available with {filter_desc}"
+                if gpu:
+                    error += f". Ask providers for it: lium request {gpu}" + (f" -n {count}" if count else "")
+                return ActionResult(ok=False, data={}, error=error)
 
-            from lium.cli.ls.command import ls_store_executor
             from lium.cli.ls.display import sort_executors
-            ls_store_executor(gpu_type=gpu)
 
             # One rule for `ls` and `up`: the pick is row 1 of `lium ls` with the same
             # filters, in the order `ls` prints (cheapest $/GPU·h first, unpriced last;
@@ -173,9 +178,13 @@ class CreateEphemeralTemplateAction:
         cmd: Optional[str] = ctx.get("cmd", "")
         ports: List[int] = ctx.get("ports", [22])
 
-        # Parse image:tag
-        if ":" in image:
-            docker_image, docker_tag = image.rsplit(":", 1)
+        # A ':' before the last '/' is a registry port (localhost:5000/img), not a tag
+        name, sep, tag = image.rpartition(":")
+        if "@" in image:
+            # a digest reference goes whole: the backend splits name, tag and digest itself
+            docker_image, docker_tag = image, ""
+        elif sep and "/" not in tag:
+            docker_image, docker_tag = name, tag
         else:
             docker_image = image
             docker_tag = "latest"

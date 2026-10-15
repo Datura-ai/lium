@@ -30,7 +30,7 @@ from .actions import (
 # A signed transfer may have reached the chain even though the command failed;
 # the generic "re-run" hint would send the TAO twice.
 TRANSFER_FAILED_HINT = (
-    "Do not re-send yet: the transfer was signed and submitted. Check the wallet and "
+    "Do not re-send yet: the transfer may have reached the chain. Check the wallet and "
     "'lium balance' (credits can take a few minutes) before funding again"
 )
 
@@ -45,7 +45,7 @@ _USD_CAVEAT = "credited USD valued at on-chain inclusion time; may differ from q
 
 
 def _legacy_tao_fund(wallet: Optional[str], amount: Optional[str], yes: bool) -> None:
-    """Run the Bittensor TAO funding flow."""
+    """Run the TAO funding flow."""
     try:
         import bittensor as bt
     except ImportError as e:
@@ -58,7 +58,7 @@ def _legacy_tao_fund(wallet: Optional[str], amount: Optional[str], yes: bool) ->
     if not wallet:
         default_wallet = config.get("funding.default_wallet", "default")
         wallet_name = ui.prompt(
-            "Bittensor wallet name", default=default_wallet, hint="pass --wallet"
+            "Wallet name", default=default_wallet, hint="pass --wallet"
         ).strip()
     else:
         wallet_name = wallet
@@ -123,7 +123,7 @@ def _legacy_tao_fund(wallet: Optional[str], amount: Optional[str], yes: bool) ->
             EXIT_GENERAL_ERROR,
         )
 
-    ui.info("Waiting for bittensor...")
+    ui.info("Sending the transfer...")
     ctx = {
         "bt": bt,
         "bt_wallet": bt_wallet,
@@ -188,7 +188,7 @@ def _alpha_fund(
     if not wallet:
         default_wallet = config.get("funding.default_wallet", "default")
         wallet = ui.prompt(
-            "Bittensor wallet name", default=default_wallet, hint="pass --wallet"
+            "Wallet name", default=default_wallet, hint="pass --wallet"
         ).strip()
 
     # Resolve and validate the origin hotkey. Accept either an SS58 address or a
@@ -297,12 +297,12 @@ def _alpha_fund(
     subnet_label = subnet_label or f"netuid {netuid}"
 
     # Decimal -> Balance: floor the quoted alpha at integer rao with ROUND_DOWN BEFORE
-    # set_unit, so we never transfer more than quoted (keeps the free+fee gate exact).
+    # tagging it with the subnet, so we never transfer more than quoted (keeps the free+fee gate exact).
     # Never via from_tao(float), which would inject binary-float error on a money path.
     floored_rao = int(
         (quote.alpha_amount * _RAO_PER_ALPHA).quantize(Decimal(1), rounding=ROUND_DOWN)
     )
-    amount_bal = bt.Balance.from_rao(floored_rao).set_unit(netuid)
+    amount_bal = validation.alpha_balance(bt, floored_rao, netuid)
     alpha_amount = floored_rao / float(_RAO_PER_ALPHA)
 
     # Phase A: display free alpha + fee before the confirm prompt.
@@ -407,7 +407,7 @@ def _alpha_fund(
 
 
 @click.command("fund")
-@click.option("--wallet", "-w", help="Bittensor wallet name to fund from")
+@click.option("--wallet", "-w", help="Name of the local wallet to fund from")
 @click.option("--amount", "-a", help="Amount to fund with (TAO; USD when --alpha)")
 @click.option(
     "--alpha", is_flag=True, default=False, help="Fund with free alpha stake"

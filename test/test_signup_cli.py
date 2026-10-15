@@ -95,6 +95,28 @@ def test_signup_skips_dead_keys_and_stores_the_newest_live_one(monkeypatch, stor
     assert stored_config["api.api_key"] == "sk_live"
 
 
+def test_signup_never_stores_a_masked_billing_key(monkeypatch, stored_config, ssh_setup_ok):
+    """Since lium-platform#765 GET /keys lists a billing key as a prefix plus a mask (key_retrievable false); that
+    string 401s every call. A key without the rent scope is no login key either."""
+    monkeypatch.setattr(
+        signup_actions.requests, "post",
+        lambda url, **kwargs: FakeResponse(200, {"msg": "success"} if url.endswith("/users") else {"token": "jwt"}),
+    )
+    monkeypatch.setattr(signup_actions.requests, "get", lambda url, **kwargs: FakeResponse(200, [
+        {"name": "Default", "key": "sk_bill********", "key_retrievable": False, "scopes": ["billing"],
+         "is_active": True, "created_at": "2026-10-13T10:00:00"},
+        {"name": "Default", "key": "sk_readonly", "scopes": ["read"], "is_active": True,
+         "created_at": "2026-10-13T09:00:00"},
+        {"name": "Default", "key": "sk_live", "key_retrievable": True, "scopes": ["read", "rent", "manage"],
+         "is_active": True, "created_at": "2026-10-12T09:00:00"},
+    ]))
+
+    result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com"])
+
+    assert result.exit_code == 0
+    assert stored_config["api.api_key"] == "sk_live"
+
+
 def test_signup_takes_the_password_from_the_environment(monkeypatch, stored_config, ssh_setup_ok):
     """A password passed as a flag leaks into shell history and `ps`; the env var is the safer source."""
     sent = {}
@@ -251,7 +273,7 @@ def test_signup_says_no_credit_was_granted_when_the_flag_is_false(monkeypatch, s
     result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com", "--password", "s3cret-pw"])
 
     assert result.exit_code == 0
-    assert "No signup credit was granted" in result.output
+    assert "No signup credit yet" in result.output
     assert "$5 signup credit was granted" not in result.output
 
 
@@ -271,7 +293,7 @@ def test_a_generated_password_containing_dollar_five_is_not_mistaken_for_the_cre
 
     assert result.exit_code == 0
     assert "EyH@j&dQO5$5cayT#Y" in result.output  # the generated password is shown to the user
-    assert "No signup credit was granted" in result.output
+    assert "No signup credit yet" in result.output
     assert "$5 signup credit was granted" not in result.output
 
 

@@ -207,7 +207,7 @@ def audit_command(
     """Show who did what to the account's pods, and when.
 
     Every rent, reboot, edit and delete names the session or API key that requested it; entries the
-    platform wrote by itself (a validator reply, a balance stop) say "platform".
+    platform wrote by itself (a node check reply, a balance stop) say "platform".
 
     With --account: the account audit log — one entry per request that changed something (a pod created or
     deleted, a key created or revoked, a login, a top-up requested, a setting or a team member changed),

@@ -253,7 +253,7 @@ def test_config_set_password_json_requires_password(patched_build_client) -> Non
     assert result.exit_code == 1, result.output
     payload = json.loads(result.output.strip())
     assert payload["ok"] is False
-    assert payload["error"]["code"] == "ARG_INVALID"
+    assert (payload["error"]["code"], payload["error"]["legacy_code"]) == ("input.arg_invalid", "ARG_INVALID")
     assert portal.posts == []
 
 

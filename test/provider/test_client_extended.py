@@ -12,12 +12,13 @@ CLI/agent side:
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import pytest
 
 from lium.provider.client import ProviderClient
-from lium.provider.errors import ProviderError
+from lium.provider.errors import ARG_INVALID, ProviderError
 from lium.provider.models import OptInStatusResponse
 
 
@@ -260,8 +261,68 @@ def test_node_pods(client) -> None:
 def test_create_notice_period(client) -> None:
     portal = _Portal(post_body={})
     c = client(portal)
-    c.create_notice_period("e-1")
+    c.create_notice_period(
+        "e-1", starting_at="2026-10-01T09:00:00+00:00", period_in_minute=60
+    )
     assert portal.posts[0][0] == "/executors/e-1/notice-period"
+    assert portal.posts[0][1] == {
+        "starting_at": "2026-10-01T09:00:00+00:00",
+        "period_in_minute": 60,
+        "reason": None,
+        "permanent_removal": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"starting_at": "2026-10-01T09:00:00"},
+        {"starting_at": "2026-10-01T09:00:00+00:00"},
+        {"starting_at": "2026-10-01T09:00:00+00:00", "period_in_minute": 30, "permanent_removal": True},
+        {"starting_at": "2026-10-01T09:00:00+00:00", "period_in_minute": 61},
+    ],
+    ids=["no-offset", "no-kind", "both-kinds", "window-over-60"],
+)
+def test_create_notice_period_refuses_a_payload_the_portal_would_refuse(client, kwargs) -> None:
+    portal = _Portal(post_body={})
+    c = client(portal)
+    with pytest.raises(ProviderError) as exc:
+        c.create_notice_period("e-1", **kwargs)
+    assert exc.value.code == ARG_INVALID
+    assert portal.posts == []
+
+
+def test_create_notice_period_without_starting_at_posts_mains_empty_body(client) -> None:
+    portal = _Portal(post_body={})
+    c = client(portal)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        c.create_notice_period("e-1")
+    assert portal.posts == [("/executors/e-1/notice-period", {}, True)]
+
+
+def test_create_notice_period_removal_does_not_need_a_period(client) -> None:
+    portal = _Portal(post_body={})
+    c = client(portal)
+    c.create_notice_period("e-1", starting_at="2026-10-01T09:00:00+00:00", permanent_removal=True)
+    assert portal.posts[0][1]["permanent_removal"] is True
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "named"),
+    [
+        ({"starting_at": "bad", "period_in_minute": 30}, "starting_at: ISO 8601"),
+        ({"starting_at": "2026-10-01T09:00:00+00:00", "period_in_minute": 61}, "period_in_minute: 1-60"),
+        ({"starting_at": "2026-10-01T09:00:00+00:00"}, "permanent_removal"),
+    ],
+    ids=["starting-at", "period", "no-kind"],
+)
+def test_create_notice_period_refusal_hint_names_the_field(client, kwargs, named) -> None:
+    c = client(_Portal(post_body={}))
+    with pytest.raises(ProviderError) as exc:
+        c.create_notice_period("e-1", **kwargs)
+    assert named in exc.value.hint
+    assert "gpu_count" not in exc.value.hint
 
 
 def test_delete_notice_period(client) -> None:

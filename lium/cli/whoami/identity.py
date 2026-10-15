@@ -103,11 +103,11 @@ def collect_identity(lium_factory=None) -> Identity:
     identity.ssh_public_key_found = material is not None
 
     if not api_key:
-        identity.warnings.append("No API key: set LIUM_API_KEY or run 'lium init'")
+        # no warning here: `whoami` fails with no_api_key, whose hint already says how to set one up
         return identity
 
     try:
-        # The effective config, so LIUM_BASE_URL / LIUM_PAY_URL apply here as in every other command.
+        # The effective config, so LIUM_BASE_URL applies here as in every other command.
         config = Config.load()
         config.ssh_key_path = key_path
         lium = lium_factory(config)

@@ -6,11 +6,13 @@ the second command to the same pod must open only a channel on the connection it
 import hashlib
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import threading
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -120,6 +122,9 @@ class _Sftp:
     def __init__(self, world):
         self.world = world
         self.closed = False
+
+    def stat(self, remote):
+        return SimpleNamespace(st_mode=stat.S_IFREG | 0o644)
 
     def get(self, remote, local):
         self.world.gets.append(remote)

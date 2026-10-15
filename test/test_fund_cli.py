@@ -657,6 +657,29 @@ def test_alpha_transfer_failure_surfaces_message(monkeypatch):
     assert sub.transfer_called  # we did attempt it, but it failed
 
 
+def test_alpha_lost_confirmation_never_says_retry(monkeypatch):
+    # The transfer can land and the call still raise while waiting for the result. That is
+    # not proof nothing was sent, so the error must carry the "do not re-send" hint, not "Retry".
+    sub = FakeSubtensor([[_stake(stake=5.0)]], fee=0.01)
+
+    def lost(**kwargs):
+        sub.transfer_called = True
+        raise TimeoutError("confirmation lost after inclusion")
+
+    sub.transfer_stake = lost
+    _patch_common(monkeypatch, sub)
+
+    result = CliRunner().invoke(
+        cli, ["fund", "--alpha", "-k", HK, "-w", "default", "-a", "2", "-y", "--json"]
+    )
+
+    assert result.exit_code != 0 and sub.transfer_called
+    error = json.loads(result.output.strip().splitlines()[-1])["error"]
+    assert error["code"] == "transfer_failed"
+    assert error["hint"] == fund_module.TRANSFER_FAILED_HINT
+    assert "may have reached the chain" in error["hint"] and "Retry" not in error["hint"]
+
+
 def test_alpha_shrink_between_reads(monkeypatch):
     # Phase A read shows ample; Phase B re-read shows shrunk -> abort, no transfer.
     sub = FakeSubtensor([[_stake(stake=5.0)], [_stake(stake=1.0)]], fee=0.01)
@@ -1275,9 +1298,10 @@ def test_sdk_convert_alpha_parses_quote(monkeypatch):
     assert quote.alpha_amount == Decimal("12.5")
     assert quote.rate == Decimal("0.8")
     assert captured["method"] == "GET"
-    assert captured["endpoint"] == "/balance/convert/alpha"
+    assert captured["endpoint"] == "/tao/pay/balance/convert/alpha"
     assert captured["kwargs"]["params"] == {"amount": "10"}
-    assert captured["kwargs"]["base_url"] == lium.config.base_pay_url
+    # sec-audit-1012-4: the backend proxy with the caller's own key, never the pay API with a shared one
+    assert "base_url" not in captured["kwargs"] and "headers" not in captured["kwargs"]
 
 
 def test_sdk_convert_alpha_sends_netuid_when_given(monkeypatch):
@@ -1323,8 +1347,9 @@ def test_sdk_alpha_subnets_parses_list(monkeypatch):
     assert subnets.get(64) == AlphaSubnet(netuid=64, name="Chutes", symbol="ش")
     assert subnets.get(51) is None
     assert captured["method"] == "GET"
-    assert captured["endpoint"] == "/balance/alpha/subnets"
-    assert captured["kwargs"]["base_url"] == lium.config.base_pay_url
+    assert captured["endpoint"] == "/tao/pay/balance/alpha/subnets"
+    # sec-audit-1012-4: the backend proxy with the caller's own key, never the pay API with a shared one
+    assert "base_url" not in captured["kwargs"] and "headers" not in captured["kwargs"]
 
 
 def test_sdk_convert_alpha_503_propagates(monkeypatch):
@@ -1349,9 +1374,10 @@ def test_sdk_company_wallet_returns_hash(monkeypatch):
 
     monkeypatch.setattr(lium, "_request", fake_request)
     assert lium.company_wallet("app-1") == "5Funding"
-    assert captured["endpoint"] == "/wallet/company/"
+    assert captured["endpoint"] == "/tao/pay/wallet/company/"
     assert captured["kwargs"]["params"] == {"app_id": "app-1"}
-    assert captured["kwargs"]["base_url"] == lium.config.base_pay_url
+    # sec-audit-1012-4: the backend proxy with the caller's own key, never the pay API with a shared one
+    assert "base_url" not in captured["kwargs"] and "headers" not in captured["kwargs"]
 
 
 def test_sdk_company_wallet_404_propagates(monkeypatch):
@@ -1372,7 +1398,6 @@ def test_sdk_discover_app_id_single_create_transfer(monkeypatch):
     def fake_request(method, endpoint, **kwargs):
         calls.append(endpoint)
         assert endpoint == "/tao/create-transfer"
-        # Must use the DEFAULT base_url + no pay header (unlike the pay-API calls).
         assert "base_url" not in kwargs
         assert "headers" not in kwargs
         return _Resp({"url": "https://pay/redirect?app_id=APP&customer_id=CUS"})
@@ -1388,15 +1413,15 @@ def test_sdk_add_wallet_returns_app_id_single_create_transfer(monkeypatch):
 
     def fake_request(method, endpoint, **kwargs):
         calls.append(endpoint)
-        if endpoint == "/token/generate":
+        if endpoint == "/tao/pay/token/generate":
             return _Resp({"access_key": "ak"})
         if endpoint == "/tao/create-transfer":
             return _Resp({"url": "https://pay/redirect?app_id=APP&customer_id=CUS"})
-        if endpoint == "/token/verify":
+        if endpoint == "/tao/pay/token/verify":
             return _Resp({"status": "ok"})
         if endpoint == "/users/me":
             return _Resp({"stripe_customer_id": "CUS"})
-        if endpoint.startswith("/wallet/available-wallets"):
+        if endpoint.startswith("/tao/pay/wallet/available-wallets"):
             return _Resp([{"wallet_hash": "coldkey"}])
         raise AssertionError(f"unexpected endpoint {endpoint}")
 
@@ -1424,3 +1449,19 @@ def test_fund_no_alpha_uses_tao_path(monkeypatch):
 
     assert result.exit_code == 0
     assert calls["tao"] and not calls["alpha"]
+
+
+def test_sdk_wallets_without_stripe_customer_is_empty(monkeypatch):
+    lium = _sdk_lium()
+    calls = []
+
+    def fake_request(method, endpoint, **kwargs):
+        calls.append(endpoint)
+        if endpoint == "/users/me":
+            return _Resp({"stripe_customer_id": None})
+        raise AssertionError(f"unexpected endpoint {endpoint}")
+
+    monkeypatch.setattr(lium, "_request", fake_request)
+
+    assert lium.wallets() == []
+    assert calls == ["/users/me"]

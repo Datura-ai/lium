@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import click
 
+from lium.cli.provider import _blocking
 from lium.cli.provider._client import build_client
 from lium.cli.provider._overrides import with_provider_overrides
 from lium.cli.provider._render import emit_error, render
-from lium.provider.errors import ARG_INVALID, ProviderError
+from lium.provider.errors import ARG_INVALID, PORTAL_AUTH_INVALID, ProviderError
+from lium.provider.models import ExecutorInfo
 
 
 @click.command("status", short_help="Aggregated provider snapshot.")
@@ -47,6 +49,13 @@ def status_command(ctx: click.Context, netuid: int) -> None:
         ctx.exit(emit_error(ctx, e))
         return
 
+    if snapshot.nodes:
+        rows = [n.model_dump() for n in snapshot.nodes]
+        idle = _blocking.fetch_idle_pay_reasons(client) if _blocking.needs_fallback(rows) else {}
+        _blocking.attach(rows, idle)
+        snapshot.nodes = [ExecutorInfo.model_validate(row) for row in rows]
+        snapshot.blocked_node_count = _blocking.blocked_count(rows)
+
     summary_parts: list[str] = []
     if snapshot.hotkey:
         summary_parts.append(f"hotkey={snapshot.hotkey}")
@@ -55,7 +64,13 @@ def status_command(ctx: click.Context, netuid: int) -> None:
         if snapshot.registered_on_subnet is not None
         else "registered=unknown"
     )
-    summary_parts.append(f"portal={'active' if snapshot.portal_session_active else 'down'}")
+    if snapshot.portal_session_active:
+        portal_state = "active"
+    elif f"whoami: {PORTAL_AUTH_INVALID}" in (snapshot.warnings or []):
+        portal_state = "not-signed-in"  # the portal answered; this hotkey has no valid session
+    else:
+        portal_state = "down"
+    summary_parts.append(f"portal={portal_state}")
     if snapshot.discord_connected is not None:
         summary_parts.append(f"discord_connected={snapshot.discord_connected}")
     if snapshot.extra_incentive_eligible is not None:
@@ -63,6 +78,8 @@ def status_command(ctx: click.Context, netuid: int) -> None:
             f"extra_incentive_eligible={snapshot.extra_incentive_eligible}"
         )
     summary_parts.append(f"nodes={snapshot.node_count or 0}")
+    if snapshot.blocked_node_count is not None:
+        summary_parts.append(f"blocked={snapshot.blocked_node_count}")
     summary_parts.append(f"weights={len(snapshot.validator_weights)}")
     summary = "provider status: " + ", ".join(summary_parts)
     render(ctx, snapshot, summary=summary)

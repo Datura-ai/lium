@@ -14,7 +14,19 @@ import time
 
 import pytest
 
-from conftest import API_URL, MAX_PRICE, MIN_RELIABILITY, Rental, Session, keep_pod, ps, reliability_scores, rentable
+from conftest import (
+    API_URL,
+    MAX_PRICE,
+    MIN_RELIABILITY,
+    Rental,
+    Session,
+    cheapest_first,
+    keep_pod,
+    ps,
+    reliability_scores,
+    rentable,
+    up_first_accepting,
+)
 
 pytestmark = pytest.mark.timeout(600)
 
@@ -50,7 +62,9 @@ def test_ls_json_lists_nodes_with_stable_fields(session: Session, rental: Rental
     candidates = [n for n in nodes if rentable(n.get("gpu_count"), n.get("price_per_hour"), n.get("country"), n.get("id"), n.get("huid"), scores.get(str(n.get("id"))))]
     if not candidates:
         pytest.skip(f"no rentable node with ≥1 GPU at ≤ ${MAX_PRICE}/h and reliability ≥ {MIN_RELIABILITY:g} listed right now (E2E_EXCLUDE_* applied) — nothing to rent")
-    cheapest = min(candidates, key=lambda n: float(n["price_per_hour"]))
+    # every candidate, cheapest first: `up` goes to the first one, and to the next when a node refuses the rent (DAH-3488)
+    rental.candidates = cheapest_first(candidates)
+    cheapest = rental.candidates[0]
     rental.executor_id, rental.price_per_hour, rental.gpu_type = cheapest["id"], float(cheapest["price_per_hour"]), str(cheapest.get("gpu_type"))
 
 
@@ -110,10 +124,14 @@ def test_up_rents_exactly_one_pod(session: Session, rental: Rental):
     # ssh_cmd, so this call's timeout is the suite's RUNNING budget: 540 s, under the module's 600 s
     # pytest-timeout (timeout_method = thread exits the process with no finalizer). A killed `up` may still leave
     # a pod without a TTL (killed between the two calls); the rental fixture removes it by name.
+    # A node that answers the rent with a refusal (400 "Can't rent node") gives way to the next candidate, up to
+    # MAX_UP_TRIES distinct executors, all inside the same 540 s; every other failure lands on the assertion below
+    # and is not retried.
     try:
-        r = session.lium("up", rental.executor_id, "--name", rental.name, "--ttl", "30m", "-y", "--no-ssh", timeout=540)
+        r = up_first_accepting(session, rental, budget_s=540)
     except subprocess.TimeoutExpired:
-        pytest.fail(f"lium up {rental.name} did not return within 540 s (the fixture removes the rented pod by name)")
+        pytest.fail(f"the rent step for {rental.name} did not finish within its 540 s budget "
+                    f"(last node tried: {rental.executor_id}, refused before it: {len(rental.refused)}; the fixture removes a rented pod by name)")
     assert r.rc == 0, r
     mine = [p for p in ps(session) if p.get("name") == rental.name]
     assert len(mine) == 1, f"pods named {rental.name}: {len(mine)} (a retried POST must never rent twice)"
@@ -203,13 +221,17 @@ def test_billing_moves_while_the_pod_runs(session: Session, rental: Rental):
         pytest.skip("pod not running")
     if rental.balance_before is None:
         pytest.skip("balance before the rent unknown")
-    elapsed = time.monotonic() - rental.up_called_at
-    if elapsed < 330:
-        # the first accrual tick may not have landed yet; wait for it once
-        time.sleep(330 - elapsed)
+    # the tick is the wall-clock */5 beat and charges only pods already RUNNING, so the first charge lands at the
+    # first boundary after RUNNING (up to 5 min + provisioning after `up`, not a fixed 330 s), plus the queue
+    running_wall = time.time() - (time.monotonic() - rental.running_at)
+    first_tick = (int(running_wall) // 300 + 1) * 300
+    deadline = first_tick + 120
     bal = _balance(session)
-    elapsed = time.monotonic() - rental.up_called_at
-    assert bal < rental.balance_before, f"balance {rental.balance_before}→{bal} unchanged after {elapsed:.0f}s of rental"
+    while bal >= rental.balance_before and time.time() < deadline:
+        time.sleep(15)
+        bal = _balance(session)
+    elapsed = time.monotonic() - rental.running_at
+    assert bal < rental.balance_before, f"balance {rental.balance_before}→{bal} unchanged {elapsed:.0f}s after RUNNING, 2 min past the first billing tick"
 
 
 def test_rm_removes_the_pod_and_the_final_charge_matches_the_clock(session: Session, rental: Rental):

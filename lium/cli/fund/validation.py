@@ -30,7 +30,7 @@ def validate_ss58(address: str, bt) -> tuple[str | None, str]:
     addr = (address or "").strip()
     if not addr:
         return None, "SS58 address is required"
-    if not bt.utils.is_valid_ss58_address(addr):
+    if not is_ss58_address(bt, addr):
         return None, f"invalid SS58 address: {addr}"
     return addr, ""
 
@@ -52,7 +52,7 @@ def resolve_hotkey(hotkey: str, wallet_name: str, bt) -> tuple[str | None, str]:
     raw = (hotkey or "").strip()
     if not raw:
         return None, "hotkey is required for --alpha (SS58 or wallet hotkey name)"
-    if bt.utils.is_valid_ss58_address(raw):
+    if is_ss58_address(bt, raw):
         return raw, ""
 
     # Not an SS58: treat ``raw`` as a hotkey name under the coldkey wallet.
@@ -73,12 +73,35 @@ def resolve_hotkey(hotkey: str, wallet_name: str, bt) -> tuple[str | None, str]:
             ss58 = candidate
             break
 
-    if not ss58 or not bt.utils.is_valid_ss58_address(ss58):
+    if not ss58 or not is_ss58_address(bt, ss58):
         return None, (
             f"hotkey '{raw}' in wallet '{wallet_name}' is neither a valid SS58 "
             f"address nor a known hotkey name"
         )
     return ss58, ""
+
+
+def is_ss58_address(bt, value: str) -> bool:
+    """Whether ``value`` is a Bittensor SS58 address, across library versions.
+
+    bittensor 11 removed ``bt.utils``; its checker is ``bt.wallets.is_bittensor_address``. Older releases
+    have ``bt.utils.is_valid_ss58_address``.
+    """
+    check = getattr(getattr(bt, "wallets", None), "is_bittensor_address", None)
+    if check is None:
+        check = bt.utils.is_valid_ss58_address
+    return bool(check(value))
+
+
+def alpha_balance(bt, rao: int, netuid: int):
+    """A ``Balance`` of ``rao`` in subnet ``netuid``'s alpha, across library versions.
+
+    bittensor 11 takes the subnet in ``Balance.from_rao(rao, netuid)`` and has no ``set_unit``;
+    older releases tag the unit with ``set_unit``.
+    """
+    balance = bt.Balance.from_rao(rao)
+    set_unit = getattr(balance, "set_unit", None)
+    return set_unit(netuid) if set_unit else bt.Balance.from_rao(rao, netuid)
 
 
 def wallet_class(bt):

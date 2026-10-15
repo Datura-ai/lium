@@ -7,7 +7,7 @@ import click
 
 from lium.sdk import Lium, Template
 from lium.cli import ui
-from lium.cli.utils import handle_errors, resolve_output_format
+from lium.cli.utils import SIGNUP_NUDGE, browsing_client, handle_errors, resolve_output_format
 from . import arch, display
 from .actions import GetTemplatesAction
 
@@ -42,7 +42,7 @@ def templates_command(search: Optional[str], output_format: str, json_output: bo
     """
     output_format = resolve_output_format(output_format, json_output)
 
-    lium = Lium()
+    lium, anonymous = browsing_client(Lium)
     ctx = {"lium": lium, "search": search}
 
     action = GetTemplatesAction()
@@ -70,3 +70,5 @@ def templates_command(search: Optional[str], output_format: str, json_output: bo
     ui.print(table)
     if not wanted_arch:
         ui.dim("Runs on: read from the CUDA build in the tag; Blackwell (B200/B300/RTX PRO 6000/RTX 50x0) needs CUDA 12.8+. --arch filters on it.")
+    if anonymous:
+        ui.dim(SIGNUP_NUDGE)

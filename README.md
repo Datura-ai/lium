@@ -237,7 +237,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium templates [SEARCH] [--arch hopper|blackwell] [--format json]` - List Docker templates with the CUDA build and the GPU generations it runs on
 - `lium fund` - Fund account with TAO from your wallet (`--alpha -k <hotkey> -a <USD>` pays with alpha stake instead; add `--netuid <N>` to pay from any subnet Lium accepts, the primary subnet otherwise)
 - `lium topup create -a <USD> -c <COIN> -n <NETWORK>` - Top up with a stablecoin (`lium topup currencies` lists them)
-- `lium topup card -a <USD> [--card <pm_id>] [--yes]` - Charge a card saved on the account, with no browser; the API key needs the `billing` scope (not released: the platform switch is off). Asks first; `--yes` skips the question and `--json` needs it. Sent once with an idempotency key; a lost answer or a 202 without a payment_intent_id exits 6 ("the charge may have gone through" / "still being confirmed") with the key and the same amount to re-run with, never a bare retry. A 202 with a payment_intent_id is success (exit 0). The same key with a different amount is a new charge
+- `lium topup card -a <USD> [--card <pm_id>] [--yes]` - Charge a card saved on the account, with no browser; the API key needs the `billing` scope (not released: the platform switch is off). Asks first; `--yes` skips the question and `--json` needs it. Sent once with an idempotency key; a lost answer or a 202 without a payment_intent_id exits 6 ("the charge may have gone through" / "still being confirmed") with the key and the same amount to re-run with, never a bare retry. A 202 with a payment_intent_id is success (exit 0). The same key with a different amount is a new charge. A 3-D Secure step-up (`CARD_AUTHENTICATION_REQUIRED` with a URL) exits 6 with the URL to confirm at, the transaction id and the exact re-run with the same `--idempotency-key`; a new key would open a second payment
 - `lium ssh-keys list|sync` - SSH public keys registered on the account
 
 `ls`, `ps`, `spend`, `templates`, `balance` and `describe` all accept `--format json` (and `--json`); `rm` accepts `--format json`; `up` accepts `--json`. All of them print a JSON error envelope on stderr when the command fails, so the same flag works across commands in scripts.
@@ -246,7 +246,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 
 - `lium volumes list` - List all volumes
 - `lium volumes new <NAME>` - Create a new volume
-- `lium volumes rm <VOLUME>` - Remove a volume
+- `lium volumes rm <INDICES>` - Remove volumes by their row numbers in the last `lium volumes` list (`1` or `1,3`); the list must come from the same shell and be under 10 minutes old, or the command asks you to list again
 
 ### Cluster Commands
 
@@ -314,7 +314,8 @@ Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, 
 - `lium provider node min-gpu set|unset <NODE_ID> [COUNT]` - Min GPU count for rental matchmaking
 - `lium provider node pods <NODE_ID>` - Pods currently rented on a node
 - `lium provider node machine-requests <NODE_ID>` - Pending tenant requests on a node
-- `lium provider node notice-period set|unset <NODE_ID>` - Open/close a maintenance notice period
+- `lium provider node notice-period set <NODE_ID> --start <ISO 8601> --minutes N | --permanent [--reason TEXT]` - Open a notice period: a maintenance window of up to 60 minutes, or a permanent removal
+- `lium provider node notice-period unset <NODE_ID>` - Close the node's notice period
 - `lium provider node notify-added <NODE_ID> --request-id <REQ>` - Mark a tenant machine request fulfilled
 - `lium provider config show|opt-in|opt-out|set-email|set-subscriptions` - Portal-account configuration (incl. lium.io central miner server toggle)
 - `lium provider sync from-miner-server|to-miner-server` - Batch node-state sync between portal and the central miner server
@@ -364,6 +365,9 @@ lium mine --auto --hotkey <HOTKEY>
 # one-hour token; GPU model/count, port and address are read from the host, the price is the portal base price for the model
 curl -fsSL https://lium.io/mine.sh | bash -s -- --register <TOKEN>
 lium mine --register <TOKEN> --wait 0          # add the node, do not wait for the validator
+
+# Node behind CGNAT or a port-forwarding VPS: register the VPS address and forwarded port
+lium mine --auto --hotkey <HOTKEY> --ip <VPS_IP> --external-port <FORWARDED_PORT> --internal-port 8080
 
 # Provider-portal automation (same surface as the portal frontend)
 lium config set provider.coldkey miner-prod        # one-time: persist wallet identity
@@ -443,7 +447,7 @@ lium update my-pod --jupyter 8888
 # Manage volumes
 lium volumes list
 lium volumes new mydata --desc "My dataset"
-lium volumes rm <VOLUME_HUID>
+lium volumes rm 1                              # row 1 of the list above (same shell, under 10 minutes old)
 
 # Multi-node clusters
 lium clusters                                  # fabrics with free nodes
@@ -500,7 +504,8 @@ One object per node, sorted as the table is; the names are stable and pinned by 
 | `country`, `country_code`, `city` | country name, ISO code, city |
 | `vram_gb`, `ram_gb`, `cpu_count` | per-GPU VRAM (GiB), host RAM (GiB), CPU threads |
 | `disk_gb`, `disk_total_gb` | free and total host disk (GiB) |
-| `upload_mbps`, `download_mbps` | the backend's effective speeds |
+| `upload_mbps`, `download_mbps` | the backend's effective speeds: a VerifyX download or an average over the validator's cycles when it has one, else the node's latest speed-test sample |
+| `upload_source`, `download_source` | `measured` (checked or averaged) or `reported` (a single speed-test sample — the table's `~`); `null` with no figure |
 | `available_ports` | ports free for `--ports` |
 | `docker_in_docker` | sysbox runtime, i.e. `docker run` works inside the pod |
 | `is_pareto` | the ★ mark |

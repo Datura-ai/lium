@@ -7,13 +7,20 @@ provider confirms the transfer — the transfer itself happens outside Lium.
 """
 
 import json
+import logging
 import math
+import os
+import shlex
+from typing import Optional
 
 import click
 from rich.markup import escape
 
 from lium.sdk import Lium, LiumCardTopUpError, LiumChargeOutcomeUnknownError, LiumError
+from lium.sdk.config import Config
 from lium.cli import ui
+from lium.cli.settings import config
+from lium.cli.signup.actions import BILLING_KEY_BOUND_OPTION, rent_key_tag
 from lium.cli.utils import (
     EXIT_API_ERROR,
     EXIT_CONFIGURATION_ERROR,
@@ -21,6 +28,125 @@ from lium.cli.utils import (
     CliFailure,
     handle_errors,
 )
+
+logger = logging.getLogger(__name__)
+
+BILLING_KEY_ENV_VAR = "LIUM_BILLING_API_KEY"
+BILLING_KEY_OPTION = "api.billing_api_key"
+WAIT_HELP = ("Wait up to SECONDS for the balance to rise (the payment provider's webhook credits it), "
+             "then print how long it took; under --json the payment details go to stderr first")
+
+
+def workspace_requested() -> bool:
+    """A workspace is asked for (`-w` / LIUM_WORKSPACE) or selected (`lium workspaces use`)."""
+    return bool(os.getenv("LIUM_WORKSPACE") or config.get("workspaces.active"))
+
+
+def rent_key_from_environment() -> bool:
+    return bool(os.getenv("LIUM_API_KEY") or os.getenv("LIUM_API_API_KEY"))
+
+
+def saved_billing_key_matches_rent_key() -> bool:
+    """`lium init` or `config set api.api_key` can swap the rent key under a saved billing key; the tag
+    written at signup says which rent key it belongs to. Only LIUM_BILLING_API_KEY overrides this."""
+    bound = config.get(BILLING_KEY_BOUND_OPTION)
+    return bool(bound) and bound == rent_key_tag(config.get("api.api_key"))
+
+
+def billing_client() -> Lium:
+    """The client for money routes: the `billing` key when one is set (LIUM_BILLING_API_KEY, then
+    `[api] billing_api_key`, which `lium signup --billing-key` writes), else the usual key.
+
+    A billing key belongs to one account. Under a workspace the workspace's own key pays, so the money
+    lands on the balance the workspace rents from."""
+    if workspace_requested():
+        return Lium()
+    key = os.getenv(BILLING_KEY_ENV_VAR)
+    source = f"env:{BILLING_KEY_ENV_VAR}"
+    if not key and not rent_key_from_environment() and saved_billing_key_matches_rent_key():
+        # the saved billing key goes with the rent key it was minted next to (one signup, one account);
+        # an exported or since-replaced rent key may be another account's, so that key pays instead
+        key = config.get(BILLING_KEY_OPTION)
+        source = config.get_source(BILLING_KEY_OPTION) or f"config:{config.get_config_path()} [api] billing_api_key"
+    if not key:
+        return Lium()
+    return Lium(config=Config(
+        api_key=key,
+        base_url=os.getenv("LIUM_BASE_URL", "https://lium.io/api"),
+        api_key_source=source,
+    ))
+
+
+def read_balance(client: Lium) -> Optional[float]:
+    # best effort: the baseline and the final figure are reports, never a reason to fail after money moved
+    try:
+        reader = getattr(client, "balance_or_none", None) or client.balance
+        return reader()
+    except Exception as exc:
+        # no session or transaction to roll back: one HTTP GET; the caller decides (baseline_or_fail refuses,
+        # a post-payment read reports None) and wait_for_credit polls again
+        logger.debug("balance read failed: %s", exc)
+        return None
+
+
+def baseline_or_fail(client: Lium, *, what: str) -> float:
+    """The balance before a payment starts, read with the client that pays (the same account).
+    Refused before anything is created or charged when it cannot be read."""
+    baseline = read_balance(client)
+    if baseline is None:
+        raise CliFailure(
+            "balance_unreadable",
+            f"Could not read the balance to wait on, so no {what} was made. Check 'lium balance --json', "
+            "or run without --wait.",
+            EXIT_API_ERROR,
+            hint="Run 'lium balance --json'; retry with --wait once it answers, or without --wait.",
+        )
+    return baseline
+
+
+def wait_for_credit_or_fail(client: Lium, baseline: float, wait: float, extra: dict, *, charged: bool = False) -> dict:
+    """Wait for the balance to pass `baseline`; the result dict on success, a CliFailure when time runs out.
+
+    After a card charge (`charged`) the timeout is exit 6, like `charge_pending`: the money has left the
+    card, so the command must not look like one to run again."""
+    outcome = client.wait_for_credit(baseline, timeout=wait)
+    if not outcome["credited"]:
+        resume = f"lium topup wait --above {baseline:.2f}"
+        if charged:
+            key = extra.get("idempotency_key")
+            raise CliFailure(
+                "credit_not_seen",
+                f"The card was charged, but the balance did not rise above ${baseline:,.2f} within {wait:g} s. "
+                "Do not run the charge again.",
+                EXIT_PERMISSION_DENIED,
+                data={**extra, "charged": True, "balance_before": baseline, "balance": outcome["balance"],
+                      "waited_seconds": outcome["seconds"]},
+                hint=f"The card WAS charged. Keep waiting with '{resume}'; a repeat of the charge must carry "
+                     f"--idempotency-key {key} and the same amount (within 24 h) so it cannot charge twice.",
+            )
+        raise CliFailure(
+            "credit_not_seen",
+            f"The balance did not rise above ${baseline:,.2f} within {wait:g} s.",
+            EXIT_API_ERROR,
+            data={**extra, "charged": None, "balance_before": baseline, "balance": outcome["balance"],
+                  "waited_seconds": outcome["seconds"]},
+            hint=f"Not known whether money moved: a payment may be made and its credit still on the way. Keep "
+                 f"waiting with '{resume}'; check 'lium balance --json' before paying again.",
+        )
+    return {"credited": True, "balance_before": baseline, "balance": outcome["balance"],
+            "seconds_to_credit": outcome["seconds"]}
+
+
+def announce(payload: dict, json_output: bool) -> None:
+    """Under --json with --wait: the payment details on stderr now, so an agent can act on them while
+    the command waits; stdout keeps its one final document."""
+    if json_output:
+        click.echo(json.dumps(payload, sort_keys=True), err=True)
+
+
+def check_wait(wait: Optional[float]) -> None:
+    if wait is not None and (not math.isfinite(wait) or wait <= 0):
+        raise CliFailure("invalid_arguments", "--wait must be a positive number of seconds.", EXIT_CONFIGURATION_ERROR)
 
 # What to do next when the server's 402 carried no hint (an older server); the current server
 # sends one naming the Billing page (lium-platform errors/codes.py) and that one wins.
@@ -30,6 +156,14 @@ _CARD_HINTS = {
     "CARD_DECLINED": "Use another saved card (--card <pm_id>) or fix the card on the Billing page",
     "NO_SAVED_CARD": "Add a card, or top up once by card, on the Billing page; then retry",
     "NO_DEFAULT_CARD": "Pass --card <pm_id>, or set a default card on the Billing page",
+    "WALLET_NOT_SUPPORTED": "Pass --card <pm_id> of a card saved as a card (not Link, Apple Pay or "
+                            "Google Pay), or set such a card as the default on the Billing page",
+    "CARD_AUTHENTICATION_NOT_COMPLETED": "Nothing was charged; run the command again with a new "
+                                         "--idempotency-key (or none) for a new confirmation page",
+    "CARD_AUTHENTICATION_UNAVAILABLE": "Nothing was charged; top up by card on the Billing page, or use a card "
+                                       "that supports 3-D Secure with a new --idempotency-key",
+    "CARD_AUTHENTICATION_EXPIRED": "Nothing was charged; run the command again with a new "
+                                   "--idempotency-key (or none) for a new confirmation page",
 }
 
 
@@ -41,6 +175,7 @@ def topup_command():
     Examples:
       lium topup currencies
       lium topup create -a 20 -c USDT -n tron
+      lium topup link -a 10 --wait 900
       lium topup card -a 50
     """
 
@@ -82,28 +217,53 @@ def currencies_command(refresh: bool, json_output: bool):
 @click.option("--amount", "-a", type=float, required=True, help="Top-up amount in USD")
 @click.option("--currency", "-c", required=True, help="Stablecoin code, e.g. USDT")
 @click.option("--network", "-n", required=True, help="Network, e.g. tron")
+@click.option("--wait", type=float, default=None, metavar="SECONDS", help=WAIT_HELP)
 @click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON")
 @handle_errors
-def create_command(amount: float, currency: str, network: str, json_output: bool):
+def create_command(amount: float, currency: str, network: str, wait: float | None, json_output: bool):
     """Create a top-up invoice and print its deposit address.
 
     Send exactly the returned crypto_amount of the currency to the deposit
     address on the given network. The balance is credited automatically once
     the transfer is confirmed.
 
+    With `--wait SECONDS` the command stays up until the credit lands: the invoice
+    is printed first (on stderr under --json, as one JSON line), then the final
+    document adds `seconds_to_credit`. Time out: exit 3, credit_not_seen.
+
     \b
     Examples:
       lium topup create -a 20 -c USDT -n tron
-      lium topup create -a 20 -c USDT -n tron --json
+      lium topup create -a 20 -c USDC -n base --json
+      lium topup create -a 20 -c USDC -n base --wait 900 --json
     """
-    invoice = Lium().topup_create_invoice(
+    check_wait(wait)
+    client = billing_client()
+    baseline = baseline_or_fail(client, what="invoice") if wait else None
+    invoice = client.topup_create_invoice(
         amount=amount, crypto_currency=currency, crypto_network=network
     )
+
+    if wait:
+        announce({**invoice, "event": "invoice_created"}, json_output)
+        if not json_output:
+            print_invoice(invoice)
+            ui.info(f"Waiting up to {wait:g} s for the transfer to be credited…")
+        credit = wait_for_credit_or_fail(client, baseline, wait, {"invoice_id": invoice.get("invoice_id")})
+        if json_output:
+            click.echo(json.dumps({**invoice, **credit}, sort_keys=True))
+        else:
+            ui.success(f"Credited in {credit['seconds_to_credit']:g} s — balance ${credit['balance']:,.2f}")
+        return
 
     if json_output:
         click.echo(json.dumps(invoice, sort_keys=True))
         return
 
+    print_invoice(invoice)
+
+
+def print_invoice(invoice: dict) -> None:
     ui.success("Invoice created")
     ui.info(f"Invoice ID:      {invoice.get('invoice_id', '')}")
     ui.info(f"Deposit address: {invoice.get('deposit_address', '')}")
@@ -121,6 +281,97 @@ def create_command(amount: float, currency: str, network: str, json_output: bool
         ui.dim(f"Hosted page:     {invoice.get('hosted_invoice_url')}")
 
 
+@topup_command.command("link")
+@click.option("--amount", "-a", type=float, required=True, help="Top-up amount in USD (at least $10)")
+@click.option("--wait", type=float, default=None, metavar="SECONDS", help=WAIT_HELP)
+@click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON")
+@handle_errors
+def link_command(amount: float, wait: float | None, json_output: bool):
+    """Make a card payment page for a person to pay; nothing is charged by this command.
+
+    For an agent with no card of its own: it hands the printed `url` (Stripe Checkout) to
+    a person, who enters a card there — and passes the bank's 3-D Secure check if it asks.
+    The balance is credited by Stripe's webhook seconds after the payment. The card is saved
+    on the account only while the platform's card top-up switch is on (not released yet: off
+    on lium.io). The key must hold the `billing` scope: LIUM_BILLING_API_KEY, else
+    `[api] billing_api_key` (written by `lium signup --billing-key`), else the usual key.
+
+    With `--wait SECONDS` the command waits for the credit: the link is printed first (on
+    stderr under --json, as one JSON line with `"event": "handoff"`), and the final document
+    adds `seconds_to_credit`. Time out: exit 3, credit_not_seen — `lium topup wait` resumes.
+
+    \b
+    Examples:
+      lium topup link -a 10
+      lium topup link -a 10 --json
+      lium topup link -a 10 --wait 900 --json
+    """
+    if not math.isfinite(amount) or amount <= 0:
+        raise CliFailure("invalid_arguments", "--amount must be a positive number of dollars (at least 10).",
+                         EXIT_CONFIGURATION_ERROR)
+    check_wait(wait)
+    client = billing_client()
+    baseline = baseline_or_fail(client, what="payment page") if wait else read_balance(client)
+    link = client.topup_checkout_link(amount)
+    payload = {
+        **link,
+        "balance_before": baseline,
+        "handoff": {
+            "step": "card_payment",
+            "who": "a person with a card",
+            "what": f"open the url and pay ${amount:,.2f}; the balance is credited seconds after",
+        },
+    }
+
+    if wait:
+        announce({**payload, "event": "handoff"}, json_output)
+        if not json_output:
+            ui.info(f"Pay here: {escape(link['url'])}")
+            ui.info(f"Waiting up to {wait:g} s for the payment…")
+        credit = wait_for_credit_or_fail(client, baseline, wait, {"session_id": link.get("session_id")})
+        if json_output:
+            click.echo(json.dumps({**payload, **credit}, sort_keys=True))
+        else:
+            ui.success(f"Credited in {credit['seconds_to_credit']:g} s — balance ${credit['balance']:,.2f}")
+        return
+
+    if json_output:
+        click.echo(json.dumps(payload, sort_keys=True))
+        return
+    ui.success(f"Payment page for ${amount:,.2f}")
+    ui.info(f"URL: {escape(link['url'])}")
+    ui.dim("Nothing is charged until someone pays there. 'lium topup wait' waits for the credit.")
+
+
+@topup_command.command("wait")
+@click.option("--above", type=float, default=None, metavar="USD",
+              help="Wait for the balance to rise above this (default: the balance now)")
+@click.option("--timeout", "timeout_s", type=float, default=600, show_default=True, metavar="SECONDS",
+              help="Give up after this many seconds")
+@click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON")
+@handle_errors
+def wait_command(above: float | None, timeout_s: float, json_output: bool):
+    """Wait until a top-up is on the balance.
+
+    Pass the balance read before paying (`balance_before` from `topup link`, or
+    `lium balance --json`) as --above; without it, the balance now is the baseline, so
+    a credit that already landed is not seen. Exit 0 with `seconds_to_credit`, or exit 3
+    with credit_not_seen when the time runs out.
+
+    \b
+    Examples:
+      lium topup wait --above 0 --timeout 900 --json
+    """
+    check_wait(timeout_s)
+    client = billing_client()
+    baseline = above if above is not None else baseline_or_fail(client, what="wait")
+    credit = wait_for_credit_or_fail(client, baseline, timeout_s, {})
+    if json_output:
+        click.echo(json.dumps(credit, sort_keys=True))
+        return
+    ui.success(f"Credited in {credit['seconds_to_credit']:g} s — balance ${credit['balance']:,.2f}")
+
+
 @topup_command.command("card")
 @click.option("--amount", "-a", type=float, required=True, help="Top-up amount in USD (at least $10)")
 @click.option(
@@ -131,13 +382,15 @@ def create_command(amount: float, currency: str, network: str, json_output: bool
     "--idempotency-key", default=None, metavar="KEY",
     help="Use a new key for each top-up. A used key and the same amount return the first charge "
          "(or its status) within 24 h instead of making a second one; after that, check "
-         "`lium balance` before repeating. Omitted, one is made and printed",
+         "`lium balance` before repeating. After a 3-D Secure step-up, repeat only with the key it "
+         "printed. Omitted, one is made and printed",
 )
 @click.option("--yes", "-y", is_flag=True, help="Charge without asking first (required with --json)")
+@click.option("--wait", type=float, default=None, metavar="SECONDS", help=WAIT_HELP)
 @click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON")
 @handle_errors
 def card_command(amount: float, payment_method_id: str | None, idempotency_key: str | None, yes: bool,
-                 json_output: bool):
+                 wait: float | None, json_output: bool):
     """Charge a saved card and top up the balance, with no browser (not released: the platform
     switch is off).
 
@@ -149,10 +402,14 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     it yet. The API key must hold the `billing` scope: today's read / rent / manage keys are
     refused.
 
-    A bank that wants a one-time confirmation (3-D Secure) cannot get one through this path:
-    the command fails with CARD_AUTHENTICATION_REQUIRED and the Billing page to confirm the
-    card on; a decline fails with CARD_DECLINED and the bank's reason. Nothing is charged
-    in either case.
+    When the bank wants the cardholder to confirm (3-D Secure), the command exits 6 with
+    CARD_AUTHENTICATION_REQUIRED, the URL to confirm at, the transaction id and the
+    idempotency key: the payment stays open and the balance is credited once the cardholder
+    confirms. Repeat only with that same `--idempotency-key`, never a new one (a new key opens
+    a second payment). Without a URL, CARD_AUTHENTICATION_REQUIRED is final (exit 3): confirm
+    the card once on the Billing page. A decline fails with CARD_DECLINED and the bank's
+    reason. A saved wallet (Link, Apple Pay, Google Pay) fails with WALLET_NOT_SUPPORTED: pass
+    `--card <pm_id>` of a plain saved card. Nothing is charged in any of these cases.
 
     The request is sent once, always with an idempotency key. If the answer is lost (a
     timeout, a 5xx) the charge may still have gone through: the command exits 6 with
@@ -164,9 +421,14 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     outcome is not known yet — exit 6 with charge_pending, the key and the amount; a
     repeat with both shows the charge's status within 24 h.
 
+    `--wait SECONDS` keeps the command running until the credit is on the balance and adds
+    `seconds_to_credit`; if the time runs out it exits 6 with credit_not_seen, `data.charged`
+    true and the idempotency key — the charge was made, so do not run the command again without it.
+
     \b
     Examples:
       lium topup card -a 50
+      lium topup card -a 50 --yes --wait 60 --json
       lium topup card -a 50 --card pm_1Abc... --yes --json
       lium topup card -a 50 --idempotency-key nightly-2026-09-21
     """
@@ -178,6 +440,7 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
             "--amount must be a finite number of dollars (at least 10).",
             EXIT_CONFIGURATION_ERROR,
         )
+    check_wait(wait)
 
     if not yes:
         # Real money leaves a card here, so the gate is `lium fund`'s: ask, and under --json refuse
@@ -194,13 +457,14 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
             ui.info("Nothing charged.")
             return
 
-    client = Lium()
+    client = billing_client()
+    baseline = baseline_or_fail(client, what="charge") if wait else None
     try:
         result = client.topup_card(
             amount, payment_method_id=payment_method_id, idempotency_key=idempotency_key
         )
     except LiumCardTopUpError as e:
-        raise card_topup_failure(e)
+        raise card_topup_failure(e, amount=amount, payment_method_id=payment_method_id)
     except LiumChargeOutcomeUnknownError as e:
         raise charge_outcome_unknown_failure(e)
 
@@ -217,13 +481,23 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     # Best effort: the charge is done, so a balance read that fails must not turn the command
     # into a failure a caller would retry (and charge again). `balance()` re-raises a raw
     # `requests.RequestException` after its retries (not a LiumError), so this is Exception.
-    try:
-        balance = client.balance()
-    except Exception:
-        balance = None
+    credit = {}
+    if wait:
+        announce({**result, "event": "charged"}, json_output)
+        if not json_output:
+            # before polling: a Ctrl-C during the wait must not lose the key a safe repeat needs
+            ui.info(f"Charged; idempotency key: {escape(str(result.get('idempotency_key')))}")
+            ui.info(f"Waiting up to {wait:g} s for the credit…")
+        credit = wait_for_credit_or_fail(
+            client, baseline, wait, {"idempotency_key": result.get("idempotency_key"), "amount_usd": amount},
+            charged=True,
+        )
+        balance = credit["balance"]
+    else:
+        balance = read_balance(client)
 
     if json_output:
-        click.echo(json.dumps({**result, "balance": balance}, sort_keys=True))
+        click.echo(json.dumps({**result, **credit, "balance": balance}, sort_keys=True))
         return
 
     card = result.get("card") or {}
@@ -237,7 +511,10 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
         ui.info(f"Idempotency key: {escape(str(result['idempotency_key']))}")
     if balance is not None:
         ui.info(f"Balance:         ${balance:,.2f}")
-    ui.dim("The credit lands within seconds of Stripe's confirmation; 'lium balance' shows it.")
+    if credit:
+        ui.info(f"Credited in:     {credit['seconds_to_credit']:g} s")
+    else:
+        ui.dim("The credit lands within seconds of Stripe's confirmation; 'lium balance' shows it.")
 
 
 def charge_pending_failure(result: dict) -> CliFailure:
@@ -282,11 +559,68 @@ def charge_outcome_unknown_failure(error: LiumChargeOutcomeUnknownError) -> CliF
     )
 
 
-def card_topup_failure(error: LiumCardTopUpError) -> CliFailure:
+def card_retry_command(amount: float | None, payment_method_id: str | None, idempotency_key: str) -> str:
+    """The exact ``lium topup card`` that repeats this call: same amount, same card, same key."""
+    # 17 significant digits round-trip the float exactly, so the repeat sends the same amount and the
+    # backend rounds it to the same cents (a shortened "10.005" for 10.0049999 would be one cent more).
+    amount_text = "<same amount>" if amount is None else format(amount, ".17g")
+    parts = ["lium", "topup", "card", "-a", amount_text]
+    if payment_method_id:
+        parts += ["--card", shlex.quote(payment_method_id)]
+    return " ".join([*parts, "--idempotency-key", shlex.quote(idempotency_key), "--yes"])
+
+
+def card_step_up_failure(error: LiumCardTopUpError, amount: float | None,
+                         payment_method_id: str | None) -> CliFailure:
+    """A 3-D Secure step-up (402 ``CARD_AUTHENTICATION_REQUIRED`` with ``next_action_url``): the
+    payment is open, not refused. The cardholder confirms at the URL and the balance is credited
+    with no further call; a repeat with the same key answers the same URL (then the charge), a
+    new key opens a second payment. Exit 6, as for the other "do not repeat without the key"
+    outcomes; the URL, ``transaction_id`` and key are in the text and in ``data``."""
+    key = error.idempotency_key
+    lines = [
+        "The bank asks the cardholder to confirm this payment (3-D Secure); the balance is credited once "
+        "they confirm, with no further command.",
+        f"Complete it at: {error.next_action_url}",
+    ]
+    if error.transaction_id:
+        lines.append(f"Transaction: {error.transaction_id}")
+    if key:
+        retry = card_retry_command(amount, payment_method_id, key)
+        lines.append(f"Idempotency key: {key}")
+        lines.append(f"To check on it, re-run with the same key: {retry}")
+        hint = (f"Open the URL or hand it to the cardholder. Repeat only with `{retry}`; do not retry with a "
+                "new --idempotency-key (or without one): that opens a second payment on the card.")
+    else:
+        hint = ("Open the URL or hand it to the cardholder. Do not retry with a new --idempotency-key: that "
+                "opens a second payment on the card.")
+    data = {
+        name: value
+        for name, value in {
+            "status": error.status,
+            "next_action_url": error.next_action_url,
+            "transaction_id": error.transaction_id,
+            "idempotency_key": key,
+            "amount_usd": amount,
+            "payment_intent_id": error.payment_intent_id,
+            "dashboard_url": error.dashboard_url,
+            "request_id": error.request_id,
+        }.items()
+        if value is not None
+    }
+    return CliFailure(error.code or "CARD_AUTHENTICATION_REQUIRED", "\n".join(lines), EXIT_PERMISSION_DENIED,
+                      data=data, hint=hint)
+
+
+def card_topup_failure(error: LiumCardTopUpError, amount: float | None = None,
+                       payment_method_id: str | None = None) -> CliFailure:
     """The failure for a 402 from ``POST /payments/topup``: the server's code (``CARD_DECLINED``, …)
     and sentence, the bank's ``decline_code`` in the text, and the structured fields — ``status``,
     ``decline_code``, ``dashboard_url``, ``payment_intent_id``, ``request_id`` — in ``data`` for a
-    machine reader. Exit 3: the API refused the call, and the balance did not change."""
+    machine reader. Exit 3: the API refused the call, and the balance did not change. A 3-D Secure
+    step-up is not a refusal: :func:`card_step_up_failure`."""
+    if error.is_step_up:
+        return card_step_up_failure(error, amount, payment_method_id)
     message = str(error)
     if error.decline_code:
         message = f"{message.rstrip('.')} (decline_code: {error.decline_code})."

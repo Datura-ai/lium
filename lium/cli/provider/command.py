@@ -38,6 +38,7 @@ from lium.cli.provider.queries import (
 from lium.cli.provider.status import status_command
 from lium.cli.provider.sync import sync_command
 from lium.cli.settings import ConfigManager
+from lium.cli.utils import json_output_requested
 from lium.provider.errors import ProviderError
 
 
@@ -68,7 +69,7 @@ from lium.provider.errors import ProviderError
     "--json",
     "json_mode",
     is_flag=True,
-    help="Emit machine-readable JSON output (one envelope per command).",
+    help="Emit machine-readable JSON output (one envelope per command). LIUM_OUTPUT=json does the same.",
 )
 @click.option(
     "--debug",
@@ -87,7 +88,7 @@ from lium.provider.errors import ProviderError
     "--dry-run",
     "dry_run",
     is_flag=True,
-    help="Skip irreversible subprocess calls (e.g. ssh) and report intent only.",
+    help="Send no portal write: print what the command would send and exit 0.",
 )
 @click.pass_context
 def provider_command(
@@ -102,9 +103,8 @@ def provider_command(
 ) -> None:
     """Provider-side commands.
 
-    Use ``lium mine`` for renter workflows. ``lium provider ...`` is the
-    provider persona: portal session management, managing nodes,
-    installing GPU nodes, and reporting validator weights. Hotkey
+    ``lium mine`` sets up a node on this host; ``lium provider ...`` manages
+    the portal account: session, nodes, prices, sync and billing. Hotkey
     registration on SN51 itself is done directly with ``btcli subnet
     register``.
     """
@@ -120,7 +120,7 @@ def provider_command(
         "coldkey": coldkey or cfg.get("provider.coldkey"),
         "hotkey": hotkey or cfg.get("provider.hotkey"),
         "portal_url": portal_url or cfg.get("provider.portal_url"),
-        "json": json_mode,
+        "json": json_mode or json_output_requested(),
         "debug": debug,
         "yes": yes_flag,
         "dry_run": dry_run,
