@@ -12,6 +12,7 @@ import shlex
 import socket
 import stat
 import subprocess
+import threading
 import time
 import uuid
 import warnings
@@ -630,6 +631,34 @@ class AlphaSubnets:
 
     def get(self, netuid: int) -> Optional[AlphaSubnet]:
         return next((s for s in self.subnets if s.netuid == netuid), None)
+
+
+@contextmanager
+def _transfer_deadline(client: Any, timeout: Optional[float], what: str):
+    """Close ``client`` once ``timeout`` runs out, which ends a stalled or dripping SFTP read or
+    write at once, and turn the error that follows into :class:`TimeoutError`."""
+    if timeout is None:
+        yield
+        return
+    cut = threading.Event()
+
+    def stop() -> None:
+        cut.set()
+        client.close()
+
+    timer = threading.Timer(max(0.0, timeout), stop)
+    timer.daemon = True
+    timer.start()
+    try:
+        yield
+    except Exception as exc:
+        if cut.is_set() and not isinstance(exc, TimeoutError):
+            raise TimeoutError(f"the {what} did not finish within {timeout:.0f}s") from exc
+        raise
+    finally:
+        timer.cancel()
+    if cut.is_set():
+        raise TimeoutError(f"the {what} did not finish within {timeout:.0f}s")
 
 
 # Main SDK Class
@@ -1451,6 +1480,8 @@ class Lium:
         name: Optional[str] = None,
         boot_timeout: float = 600,
         output_reserve_s: float = 120,
+        max_output_bytes: int = 16 << 20,
+        max_download_bytes: int = 10 << 30,
         **rent_kwargs: Any,
     ) -> JobResult:
         """Run one bounded job on a rented GPU and remove the pod; never raises for the job's outcome.
@@ -1462,7 +1493,8 @@ class Lium:
         ``outputs`` (after a failure or a timeout too; each transfer bounded by the time left),
         then deletes the pod, waits until it is gone and reads its billed cost.
 
-        After server-side scheduling succeeds, removal survives caller exit. A crash during rent
+        After server-side scheduling succeeds, removal survives caller exit. A Ctrl-C during the
+        rent still finds the pod by name and removes it (then re-raises); a hard kill during rent
         or scheduling can leave a billable pod without a removal bound. The limits are best
         effort: scheduled removal is processed periodically, so charges can exceed the budget.
 
@@ -1478,6 +1510,9 @@ class Lium:
                 call's pod matches it when a lost rent response is looked up.
             boot_timeout: Seconds to wait for the pod to become ready (never past the limits).
             output_reserve_s: Seconds kept back from the command for copying outputs.
+            max_output_bytes: Keep the last this many bytes of stdout and of stderr each (16 MiB).
+            max_download_bytes: Refuse an output file past this size (10 GiB); it is reported
+                in ``missing_outputs``.
             **rent_kwargs: Any other :meth:`rent` constraint (``max_price_per_gpu_hour``,
                 ``template_id``, ``min_vram_gb``, ``country``, ...).
 
@@ -1497,7 +1532,8 @@ class Lium:
         return run_job(
             self, command=command, gpu_type=gpu_type, max_cost_usd=max_cost_usd, deadline_s=deadline_s,
             gpu_count=gpu_count, inputs=inputs, outputs=outputs, env=env, name=name,
-            boot_timeout=boot_timeout, output_reserve_s=output_reserve_s, **rent_kwargs,
+            boot_timeout=boot_timeout, output_reserve_s=output_reserve_s,
+            max_output_bytes=max_output_bytes, max_download_bytes=max_download_bytes, **rent_kwargs,
         )
 
     def _pod_ids_or_none(self) -> Optional[frozenset]:
@@ -2839,6 +2875,7 @@ class Lium:
         timeout: Optional[float] = None,
         detach: bool = False,
         log_path: Optional[str] = None,
+        max_output_bytes: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Execute a shell command on a pod over SSH.
 
@@ -2862,6 +2899,10 @@ class Lium:
             log_path: Log file for ``detach`` (default
                 ``/workspace/logs/exec-<UTC timestamp>-<id>.log``, the ``<id>`` a
                 6-hex tail that keeps two launches in the same second apart).
+            max_output_bytes: Keep only the last this many bytes of stdout and of stderr
+                each; the rest is read and dropped while the command runs, and ``truncated``
+                is ``True`` in the result. ``timeout`` then also bounds reading the
+                output, so a host that never stops sending cannot hold the call.
 
         Returns:
             Dict containing stdout, stderr, exit_code, and success flag; with
@@ -2890,6 +2931,8 @@ class Lium:
             # and this call has no stdin to give it.
             stdin.close()
             channel = stdout.channel
+            if max_output_bytes is not None:
+                return self._drain_capped(channel, max_output_bytes, timeout, pod, command)
             if timeout is not None:
                 deadline = time.monotonic() + timeout
                 while not channel.exit_status_ready():
@@ -2906,6 +2949,39 @@ class Lium:
                 "exit_code": exit_code,
                 "success": exit_code == 0
             }
+
+    @staticmethod
+    def _drain_capped(channel: Any, cap: int, timeout: Optional[float], pod: PodInfo, command: str) -> Dict[str, Any]:
+        """Read both streams as they arrive, keeping the last ``cap`` bytes of each, until the remote
+        closes them and exits; ``timeout`` bounds the whole read, the remote's data included."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        kept = {"stdout": bytearray(), "stderr": bytearray()}
+        truncated = False
+        while True:
+            moved = False
+            for key, ready, recv in (("stdout", channel.recv_ready, channel.recv),
+                                     ("stderr", channel.recv_stderr_ready, channel.recv_stderr)):
+                if ready():
+                    data, moved = recv(65536), True
+                    kept[key] += data
+                    if len(kept[key]) > cap:  # the tail: an error, or the timeout marker, comes last
+                        truncated = True
+                        del kept[key][:-cap]
+            if not moved and channel.exit_status_ready() and channel.eof_received:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                channel.close()
+                raise TimeoutError(f"Command did not finish within {timeout}s on pod {pod.name or pod.huid}: {command}")
+            if not moved:
+                time.sleep(0.05)
+        exit_code = channel.recv_exit_status()
+        return {
+            "stdout": kept["stdout"].decode("utf-8", errors="replace"),
+            "stderr": kept["stderr"].decode("utf-8", errors="replace"),
+            "exit_code": exit_code,
+            "success": exit_code == 0,
+            "truncated": truncated,
+        }
 
     @staticmethod
     def default_detach_log_path() -> str:
@@ -3476,36 +3552,63 @@ class Lium:
             time.sleep(self.poll_delay(elapsed, poll_interval))
         return None
 
-    def scp(self, pod: PodInfo, *, local: str, remote: str) -> None:
+    def scp(self, pod: PodInfo, *, local: str, remote: str, timeout: Optional[float] = None) -> None:
         """Upload a local file to a pod via SFTP.
 
         ``remote`` is a file path, or a directory: an existing remote directory, or a
         path ending in ``/`` (created if missing), receives the file under its own name.
+        ``timeout`` bounds the whole transfer, connecting included (:class:`TimeoutError`).
         """
-        with self.ssh_connection(pod) as client:
-            sftp = client.open_sftp()
-            try:
-                sftp.put(local, _remote_file_path(sftp, local, remote))
-            finally:
-                sftp.close()
+        start = time.monotonic()
+        connect_s = 30 if timeout is None else max(1, math.ceil(min(30, timeout)))
+        with self.ssh_connection(pod, timeout=connect_s) as client:
+            rest = None if timeout is None else timeout - (time.monotonic() - start)
+            with _transfer_deadline(client, rest, f"upload of {local}"):
+                sftp = client.open_sftp()
+                try:
+                    sftp.put(local, _remote_file_path(sftp, local, remote))
+                finally:
+                    sftp.close()
 
-    def download(self, pod: PodInfo, *, remote: str, local: str) -> None:
+    def download(
+        self, pod: PodInfo, *, remote: str, local: str,
+        max_bytes: Optional[int] = None, timeout: Optional[float] = None,
+    ) -> None:
         """Download a file from a pod via SFTP.
 
         Args:
             pod: The pod to download from.
             remote: Remote file path on the pod.
             local: Local destination path.
+            max_bytes: Refuse a file larger than this; the transfer stops there.
+            timeout: Seconds for the whole transfer, connecting included; the
+                connection is closed when they run out.
 
         Raises:
-            ValueError: If SSH is not configured for the pod.
+            ValueError: If SSH is not configured for the pod, or the file passes ``max_bytes``.
+            TimeoutError: The transfer did not finish within ``timeout``.
         """
-        with self.ssh_connection(pod) as client:
-            sftp = client.open_sftp()
-            sftp.get(remote, local)
-            sftp.close()
+        if max_bytes is None and timeout is None:
+            with self.ssh_connection(pod) as client:
+                sftp = client.open_sftp()
+                sftp.get(remote, local)
+                sftp.close()
+            return
+        start = time.monotonic()
+        connect_s = 30 if timeout is None else max(1, math.ceil(min(30, timeout)))
+        with self.ssh_connection(pod, timeout=connect_s) as client:
+            rest = None if timeout is None else timeout - (time.monotonic() - start)
+            with _transfer_deadline(client, rest, f"download of {remote}"):
+                sftp = client.open_sftp()
+                with sftp.open(remote, "rb") as src, open(local, "wb") as dst:
+                    total = 0
+                    while chunk := src.read(32768):
+                        total += len(chunk)
+                        if max_bytes is not None and total > max_bytes:
+                            raise ValueError(f"{remote} is larger than the {max_bytes}-byte limit")
+                        dst.write(chunk)
 
-    def upload(self, pod: PodInfo, *, local: str, remote: str) -> None:
+    def upload(self, pod: PodInfo, *, local: str, remote: str, timeout: Optional[float] = None) -> None:
         """Upload a file to a pod via SFTP.
 
         This is an alias for :meth:`scp` for parity with the CLI.
@@ -3514,11 +3617,12 @@ class Lium:
             pod: The pod to upload to.
             local: Local file path to upload.
             remote: Remote destination path on the pod.
+            timeout: Seconds for the whole transfer, as in :meth:`scp`.
 
         Raises:
             ValueError: If SSH is not configured for the pod.
         """
-        self.scp(pod, local=local, remote=remote)
+        self.scp(pod, local=local, remote=remote, timeout=timeout)
 
     def ssh_argv(self, pod: PodInfo) -> List[str]:
         """The OpenSSH argument list that opens a shell on a pod.

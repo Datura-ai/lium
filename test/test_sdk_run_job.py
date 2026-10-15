@@ -59,9 +59,9 @@ def lium(monkeypatch, tmp_path):
     monkeypatch.setattr(client, "schedule_termination",
                         lambda pod, termination_time: calls["schedules"].append((pod, termination_time)))
     monkeypatch.setattr(client, "wait_ready", lambda pod, timeout: _pod(pod["name"]))
-    monkeypatch.setattr(client, "upload", lambda pod, local, remote: calls["uploads"].append((local, remote)))
-    monkeypatch.setattr(client, "download", lambda pod, remote, local: _write(local) or calls["downloads"].append((remote, local)))
-    monkeypatch.setattr(client, "exec", lambda pod, command, env=None, timeout=None: (
+    monkeypatch.setattr(client, "upload", lambda pod, local, remote, **_: calls["uploads"].append((local, remote)))
+    monkeypatch.setattr(client, "download", lambda pod, remote, local, **kw: _write(local) or calls["downloads"].append((remote, local, kw)))
+    monkeypatch.setattr(client, "exec", lambda pod, command, env=None, timeout=None, **_: (
         calls["execs"].append((command, timeout)) or {"exit_code": 0, "stdout": "done\n", "stderr": "", "success": True}
     ))
     monkeypatch.setattr(client, "billing_statement", lambda **kw: {"pods": [{"pod_id": "pod-1", "total": 0.0421}]})
@@ -114,7 +114,7 @@ def test_run_job_schedules_removal_when_the_budget_is_spent_and_reports_budget_e
     assert result.status == "budget_exhausted" and result.cleanup == "removed"
 
 
-def _exec_locally(pod, command, env=None, timeout=None):
+def _exec_locally(pod, command, env=None, timeout=None, **_):
     """The generated `timeout … bash -c …` wrapper, run for real on this machine."""
     run = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=timeout)
     return {"exit_code": run.returncode, "stdout": run.stdout, "stderr": run.stderr}
@@ -140,7 +140,7 @@ def test_run_job_slow_ssh_does_not_turn_a_fast_124_exit_into_a_timeout(lium, mon
     real, offset = bounded_job.time.monotonic, [0.0]
     monkeypatch.setattr(bounded_job.time, "monotonic", lambda: real() + offset[0])
 
-    def slow_ssh_exec(pod, command, env=None, timeout=None):
+    def slow_ssh_exec(pod, command, env=None, timeout=None, **_):
         offset[0] += 5  # connecting took longer than the whole command limit
         return _exec_locally(pod, command, env, timeout)
 
@@ -152,9 +152,9 @@ def test_run_job_slow_ssh_does_not_turn_a_fast_124_exit_into_a_timeout(lium, mon
 
 
 def test_run_job_failed_command_still_copies_outputs_and_names_the_missing_one(lium, monkeypatch):
-    monkeypatch.setattr(lium, "exec", lambda pod, command, env=None, timeout=None: {"exit_code": 2, "stdout": "", "stderr": "boom"})
+    monkeypatch.setattr(lium, "exec", lambda pod, command, env=None, timeout=None, **_: {"exit_code": 2, "stdout": "", "stderr": "boom"})
 
-    def download(pod, remote, local):
+    def download(pod, remote, local, **_):
         if remote == "/root/model.pt":
             raise FileNotFoundError("no such file")
         _write(local)
@@ -239,7 +239,7 @@ def test_run_job_boot_failure_removes_the_pod(lium, monkeypatch):
 
 
 def test_run_job_ssh_error_reports_error_and_removes_the_pod(lium, monkeypatch):
-    def exec_(pod, command, env=None, timeout=None):
+    def exec_(pod, command, env=None, timeout=None, **_):
         raise OSError("connection reset")
 
     monkeypatch.setattr(lium, "exec", exec_)
@@ -250,16 +250,12 @@ def test_run_job_ssh_error_reports_error_and_removes_the_pod(lium, monkeypatch):
     assert result.cleanup == "removed"
 
 
-class _OutputLimitExceeded(LiumError):
-    """Stands in for lium#314's OutputLimitExceeded, which `Lium.exec` raises past `max_output_bytes`."""
-
-
 def _exec_exits(code):
-    return lambda pod, command, env=None, timeout=None: {"exit_code": code, "stdout": "", "stderr": ""}
+    return lambda pod, command, env=None, timeout=None, **_: {"exit_code": code, "stdout": "", "stderr": ""}
 
 
 def _exec_raises(exc):
-    def exec_(pod, command, env=None, timeout=None):
+    def exec_(pod, command, env=None, timeout=None, **_):
         raise exc
 
     return exec_
@@ -272,14 +268,14 @@ def _exec_raises(exc):
         (_exec_exits(2), "failed"),
         (_exec_exits(124), "failed"),
         (_exec_raises(TimeoutError("exec timed out")), "timed_out"),
-        (_exec_raises(_OutputLimitExceeded("output over 64 MiB")), "error"),
+        (_exec_raises(LiumError("SSH connection dropped")), "error"),
     ],
-    ids=["success", "non-zero-exit", "fast-124-exit", "exec-timeout", "output-limit"],
+    ids=["success", "non-zero-exit", "fast-124-exit", "exec-timeout", "ssh-error"],
 )
 def test_run_job_copies_the_outputs_before_it_removes_the_pod(lium, monkeypatch, exec_, status):
     events = []
     monkeypatch.setattr(lium, "exec", exec_)
-    monkeypatch.setattr(lium, "download", lambda pod, remote, local: _write(local) or events.append(("download", remote)))
+    monkeypatch.setattr(lium, "download", lambda pod, remote, local, **_: _write(local) or events.append(("download", remote)))
     monkeypatch.setattr(lium, "_request", lambda method, path, **kw: events.append((method, path)))
 
     result = lium.run_job(command="python train.py", gpu_type="H100", max_cost_usd=5, deadline_s=600,
@@ -382,22 +378,6 @@ def test_run_job_counts_a_slow_rent_response_in_the_budget_and_the_statement(liu
     assert statements[0]["start_day"] == "2026-10-15"
 
 
-@pytest.mark.parametrize("phase", ["upload", "download"])
-def test_run_job_stalled_transfer_is_cut_at_the_deadline_and_the_pod_removed(lium, monkeypatch, phase):
-    stall = threading.Event()
-    monkeypatch.setattr(lium, phase, lambda pod, **kw: stall.wait(30))
-
-    r = lium.run_job(command="true", gpu_type="H100", max_cost_usd=100, deadline_s=2, output_reserve_s=0.5,
-                     inputs={"a": "/root/a"}, outputs={"/root/b": "b"})
-    stall.set()
-
-    assert r.seconds < 10 and lium.calls["deletes"] == ["/pods/pod-1"] and r.cleanup == "removed"
-    if phase == "upload":
-        assert r.status == "error" and "did not finish" in r.error and lium.calls["execs"] == []
-    else:
-        assert "/root/b" in r.missing_outputs
-
-
 def test_run_job_no_time_left_after_boot_does_not_run(lium, monkeypatch):
     result = lium.run_job(command="true", gpu_type="H100", max_cost_usd=5, deadline_s=60, output_reserve_s=120)
 
@@ -412,23 +392,183 @@ def test_run_job_refuses_a_non_positive_limit(lium, kwargs):
     assert "rent" not in lium.calls
 
 
-def test_run_job_download_cut_at_the_deadline_never_writes_the_callers_path(lium, monkeypatch, tmp_path):
-    release, finished = threading.Event(), threading.Event()
+def test_run_job_download_that_fails_midway_never_writes_the_callers_path(lium, monkeypatch, tmp_path):
+    def broken_download(pod, remote, local, **_):
+        _write(local)  # a partial file, then the host goes away
+        raise TimeoutError("download of /root/ckpt.pt did not finish within 2s")
 
-    def late_download(pod, remote, local):
-        release.wait(30)
-        _write(local)
-        finished.set()
+    monkeypatch.setattr(lium, "download", broken_download)
 
-    monkeypatch.setattr(lium, "download", late_download)
-
-    r = lium.run_job(command="true", gpu_type="H100", max_cost_usd=100, deadline_s=2, output_reserve_s=0.5,
+    r = lium.run_job(command="true", gpu_type="H100", max_cost_usd=100, deadline_s=600,
                      outputs={"/root/ckpt.pt": "ckpt.pt"})
-    release.set()  # connectivity comes back after run_job returned
-    assert finished.wait(5)
 
     assert "/root/ckpt.pt" in r.missing_outputs and r.outputs == {}
     assert sorted(p.name for p in tmp_path.iterdir()) == []  # neither ckpt.pt nor a partial side file
+
+
+def test_run_job_bounds_every_transfer_and_the_captured_output(lium, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(lium, "upload", lambda pod, local, remote, **kw: seen.setdefault("upload", kw))
+    monkeypatch.setattr(lium, "exec", lambda pod, command, env=None, timeout=None, **kw: (
+        seen.setdefault("exec", kw) and None) or {"exit_code": 0, "stdout": "tail", "stderr": "", "truncated": True})
+
+    r = lium.run_job(command="true", gpu_type="H100", max_cost_usd=100, deadline_s=600, inputs={"a": "/root/a"},
+                     outputs={"/root/b": "b"}, max_output_bytes=1000, max_download_bytes=5000)
+
+    assert 0 < seen["upload"]["timeout"] <= 600 and seen["exec"] == {"max_output_bytes": 1000}
+    (_, _, kw), = lium.calls["downloads"]
+    assert kw["max_bytes"] == 5000 and 0 < kw["timeout"] <= 600
+    assert r.status == "succeeded" and "cut to their last 1000 bytes" in r.error
+
+
+def test_run_job_interrupted_during_the_rent_removes_the_pod_it_created_and_re_raises(lium, monkeypatch):
+    def rent(**kwargs):
+        lium.calls["rent"] = kwargs
+        raise KeyboardInterrupt  # the server created the pod; Ctrl-C landed before the answer
+
+    monkeypatch.setattr(lium, "rent", rent)
+    monkeypatch.setattr(lium, "ps", lambda: [p for p in [_pod(lium.calls["rent"]["name"])]
+                                             if f"/pods/{p.id}" not in lium.calls["deletes"]])
+
+    with pytest.raises(KeyboardInterrupt):
+        lium.run_job(command="true", gpu_type="H100", max_cost_usd=5, deadline_s=600)
+
+    assert lium.calls["deletes"] == ["/pods/pod-1"]
+
+
+def test_run_job_interrupted_after_the_rent_still_removes_the_pod(lium, monkeypatch):
+    def interrupted(pod, termination_time):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(lium, "schedule_termination", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        lium.run_job(command="true", gpu_type="H100", max_cost_usd=5, deadline_s=600)
+
+    assert lium.calls["deletes"] == ["/pods/pod-1"]
+
+
+class _StallingClient:
+    """An SSH client whose remote file never answers (or answers forever) until the client is closed."""
+
+    def __init__(self, endless=False):
+        self.closed, self.endless, self.read = threading.Event(), endless, 0
+
+    def close(self):
+        self.closed.set()
+
+    def open_sftp(self):
+        client = self
+
+        class File:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, n):
+                if client.endless:
+                    client.read += n
+                    return b"x" * n
+                if client.closed.wait(30):
+                    raise EOFError("connection closed")
+                return b""
+
+        return Mock(open=lambda remote, mode: File(), close=lambda: None)
+
+
+def _ssh_with(monkeypatch, lium, client):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def ssh_connection(pod, timeout=30):
+        try:
+            yield client
+        finally:
+            client.close()
+
+    monkeypatch.setattr(lium, "ssh_connection", ssh_connection)
+
+
+def test_download_from_a_stalling_host_is_cut_at_the_timeout_and_its_connection_closed(lium, monkeypatch, tmp_path):
+    del lium.download  # the real SDK transfer, not the fixture's stand-in
+    threads = threading.active_count()
+    for _ in range(3):  # repeated stalls leave no transfer behind
+        client = _StallingClient()
+        _ssh_with(monkeypatch, lium, client)
+        started = datetime.now()
+        with pytest.raises(TimeoutError):
+            lium.download(_pod("p"), remote="/root/b", local=str(tmp_path / "b"), timeout=0.3)
+        assert (datetime.now() - started).total_seconds() < 5 and client.closed.is_set()
+    assert threading.active_count() == threads
+
+
+def test_download_past_the_byte_limit_stops_reading(lium, monkeypatch, tmp_path):
+    del lium.download
+    client = _StallingClient(endless=True)
+    _ssh_with(monkeypatch, lium, client)
+
+    with pytest.raises(ValueError, match="limit"):
+        lium.download(_pod("p"), remote="/dev/zero", local=str(tmp_path / "b"), max_bytes=100_000, timeout=30)
+
+    assert client.read < 200_000 and os.path.getsize(tmp_path / "b") <= 100_000
+
+
+class _Channel:
+    """An exec channel that sends ``chunks`` (then, if ``endless``, never stops) before exiting 0."""
+
+    def __init__(self, chunks, endless=False):
+        self.chunks, self.endless, self.closed = list(chunks), endless, False
+
+    def recv_ready(self):
+        return bool(self.chunks) or self.endless
+
+    def recv(self, n):
+        return self.chunks.pop(0) if self.chunks else b"y" * n
+
+    def recv_stderr_ready(self):
+        return False
+
+    def recv_stderr(self, n):
+        return b""
+
+    def exit_status_ready(self):
+        return True
+
+    eof_received = True
+
+    def recv_exit_status(self):
+        return 0
+
+    def close(self):
+        self.closed = True
+
+
+def _exec_over(monkeypatch, lium, channel):
+    stdout = Mock(channel=channel)
+    client = Mock(exec_command=lambda command: (Mock(), stdout, Mock()))
+    _ssh_with(monkeypatch, lium, Mock(wraps=client, exec_command=client.exec_command, close=lambda: None))
+
+
+def test_exec_with_an_output_limit_keeps_the_tail(lium, monkeypatch):
+    del lium.exec
+    _exec_over(monkeypatch, lium, _Channel([b"a" * 70_000, b"b" * 70_000, b"END\n"]))
+
+    out = lium.exec(_pod("p"), command="noisy", timeout=30, max_output_bytes=1000)
+
+    assert out["truncated"] and len(out["stdout"]) == 1000 and out["stdout"].endswith("bEND\n")
+
+
+def test_exec_with_an_output_limit_cuts_a_host_that_never_stops_sending(lium, monkeypatch):
+    del lium.exec
+    channel = _Channel([], endless=True)
+    _exec_over(monkeypatch, lium, channel)
+
+    with pytest.raises(TimeoutError):
+        lium.exec(_pod("p"), command="true", timeout=0.3, max_output_bytes=1000)
+
+    assert channel.closed
 
 
 def test_run_job_timeout_marker_needs_the_signal_not_elapsed_time(lium, monkeypatch, tmp_path):

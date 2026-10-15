@@ -3,8 +3,10 @@
 The caller states the job (a command, files in, files out), the hardware (a GPU type and count,
 plus any :meth:`Lium.rent` constraint), an approximate budget in USD and a deadline in seconds.
 Right after the rent the pod's removal is scheduled server-side for the earlier of the two limits;
-once that schedule is acknowledged, removal survives this process exiting. A crash during the rent
-or the scheduling call can leave a billable pod without a removal bound. The ``finally`` block
+once that schedule is acknowledged, removal survives this process exiting. An interruption
+(Ctrl-C) during the rent still looks the pod up by its name and removes it; a hard kill (SIGKILL,
+a lost machine) during the rent or the scheduling call can leave a billable pod without a removal
+bound. The ``finally`` block
 deletes the pod and waits until it is gone from the pod list. Limits are best effort: the server
 processes scheduled removals periodically, so charges can exceed the budget.
 The result names a terminal status, the exit code, the outputs copied, how the pod was cleaned
@@ -111,6 +113,8 @@ def run_job(
     name: Optional[str] = None,
     boot_timeout: float = 600,
     output_reserve_s: float = 120,
+    max_output_bytes: int = 16 << 20,
+    max_download_bytes: int = 10 << 30,
     **rent_kwargs: Any,
 ) -> JobResult:
     """See :meth:`Lium.run_job`."""
@@ -133,15 +137,19 @@ def run_job(
     try:
         try:
             rented = lium.rent(gpu_type=gpu_type, gpu_count=gpu_count, name=result.name, **rent_kwargs)
-        except Exception as exc:  # noqa: BLE001 - every rent failure is this job's terminal state
-            result.status, result.error = RENT_FAILED, str(exc)
-            # the server may have created the pod before the response was lost; the name is this call's own
-            result.cleanup = _remove_by_name(lium, result.name, unanswered=_rent_may_exist(exc))
+            result.pod_id = rented.pod["id"]
+        except BaseException as exc:  # noqa: BLE001 - every rent failure is this job's terminal state
+            result.status, result.error = RENT_FAILED, str(exc) or type(exc).__name__
+            # the server may have created the pod before the response was lost, or before a Ctrl-C
+            # cut the wait for it; the name is this call's own
+            interrupted = not isinstance(exc, Exception)
+            result.cleanup = _remove_by_name(lium, result.name, unanswered=interrupted or _rent_may_exist(exc))
             if result.cleanup == "unknown":
                 result.error += f"; the rent may still have created a pod named {result.name}: check Lium.ps()"
+            if interrupted:
+                raise
             return result
 
-        result.pod_id = rented.pod["id"]
         result.price_per_hour = rented.price_per_hour
         if rented.price_per_hour and rented.price_per_hour > 0:
             budget_at = rented_at + timedelta(hours=max_cost_usd / rented.price_per_hour)
@@ -165,7 +173,9 @@ def run_job(
             return result
 
         for local, remote in (inputs or {}).items():
-            _bounded(lambda local=local, remote=remote: lium.upload(pod, local=local, remote=remote), left(), f"upload of {local}")
+            if left() <= 0:
+                raise TimeoutError(f"no time left for the upload of {local}")
+            lium.upload(pod, local=local, remote=remote, timeout=left())
 
         run_s = left() - output_reserve_s
         if run_s < 1:
@@ -180,10 +190,10 @@ def run_job(
             f"else cat \"$f\" >&2; fi; rm -f \"$f\"; exit $rc; }}"
         )
         try:
-            run = lium.exec(pod, command=remote, env=env, timeout=run_s + 30)
+            run = lium.exec(pod, command=remote, env=env, timeout=run_s + 30, max_output_bytes=max_output_bytes)
         except TimeoutError as exc:
             result.status, result.error = stopped_by, str(exc)
-        except Exception as exc:  # noqa: BLE001 - e.g. OutputLimitExceeded (lium#314): the outputs below still matter
+        except Exception as exc:  # noqa: BLE001 - e.g. SSH dropped: the outputs below still matter
             result.status, result.error = ERROR, str(exc)
         else:
             result.exit_code = run.get("exit_code")
@@ -192,6 +202,8 @@ def run_job(
             timed_out = result.exit_code in _TIMEOUT_EXITS and result.stderr.endswith(mark)
             if timed_out:
                 result.stderr = result.stderr[: -len(mark)]
+            if run.get("truncated"):
+                result.error = f"stdout/stderr cut to their last {max_output_bytes} bytes each"
             if result.exit_code == 0:
                 result.status = SUCCEEDED
             elif timed_out:
@@ -202,7 +214,7 @@ def run_job(
         # copied after a failure, an exec error or a timeout too: a partial log or checkpoint is what the caller needs
         for remote_path, local in (outputs or {}).items():
             try:
-                _download(lium, pod, remote_path, local, left())
+                _download(lium, pod, remote_path, local, left(), max_download_bytes)
                 result.outputs[remote_path] = local
             except Exception as exc:  # noqa: BLE001 - one missing output must not lose the others
                 result.missing_outputs[remote_path] = str(exc)
@@ -234,8 +246,7 @@ def run_job(
 
 
 def _bounded(transfer, seconds: float, what: str) -> None:
-    """Run ``transfer`` with a total deadline. SFTP has no transfer deadline of its own, so a stalled
-    transfer is left on a daemon thread; the pod's removal right after closes its connection."""
+    """Run an API call with a total deadline; one that stalls past it is left on a daemon thread."""
     if seconds <= 0:
         raise TimeoutError(f"no time left for the {what}")
     box: Dict[str, BaseException] = {}
@@ -265,33 +276,18 @@ def _rent_may_exist(exc: BaseException) -> bool:
     )
 
 
-def _download(lium: "Lium", pod: Any, remote: str, local: str, seconds: float) -> None:
-    """Download to a side file and move it onto ``local`` only when it finished in time, so a
-    transfer cut at the deadline but still running on its thread never writes the caller's path."""
+def _download(lium: "Lium", pod: Any, remote: str, local: str, seconds: float, max_bytes: int) -> None:
+    """Download to a side file and move it onto ``local`` only once complete, so a transfer cut
+    at the deadline or the size limit never leaves a partial file at the caller's path."""
+    if seconds <= 0:
+        raise TimeoutError(f"no time left for the download of {remote}")
     part = f"{local}.lium-part-{uuid.uuid4().hex[:8]}"
-    lock, state = threading.Lock(), {"moved": False, "abandoned": False}
-
-    def fetch() -> None:
-        try:
-            lium.download(pod, remote=remote, local=part)
-            with lock:
-                if not state["abandoned"]:
-                    os.replace(part, local)
-                    state["moved"] = True
-        finally:
-            with contextlib.suppress(OSError):  # gone after the move; a partial file otherwise
-                os.remove(part)
-
     try:
-        _bounded(fetch, seconds, f"download of {remote}")
-    except TimeoutError:
-        with lock:
-            if state["moved"]:  # finished just as the wait ran out
-                return
-            state["abandoned"] = True
-        with contextlib.suppress(OSError):
+        lium.download(pod, remote=remote, local=part, max_bytes=max_bytes, timeout=seconds)
+        os.replace(part, local)
+    finally:
+        with contextlib.suppress(OSError):  # gone after the move; a partial file otherwise
             os.remove(part)
-        raise
 
 
 def _remove(lium: "Lium", pod_id: str) -> bool:

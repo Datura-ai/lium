@@ -248,8 +248,10 @@ acknowledged server-side removal at `removal_scheduled_at` stands, or `unknown` 
 whose answer was lost may still have created a pod named `name` (check `lium ps`). `cost_usd` is read from the billing statement only after a confirmed removal; otherwise use
 `estimated_cost_usd`.
 
-After server-side scheduling succeeds, removal survives caller exit. A crash during rent or scheduling can leave a
-billable pod without a removal bound.
+After server-side scheduling succeeds, removal survives caller exit. A Ctrl-C during the rent still finds the pod by name
+and removes it before re-raising; a hard kill (SIGKILL, a lost machine) during rent or scheduling can leave a billable
+pod without a removal bound. Captured stdout and stderr keep their last `max_output_bytes` (16 MiB) each, and an output
+file past `max_download_bytes` (10 GiB) is refused into `missing_outputs`; every transfer is cut at the time left.
 
 From the shell, `lium job run` makes the same call. Its exit code follows the job: 0 on success, the command's own
 code when it failed, 124 when the budget or deadline stopped it, and 1 otherwise:
