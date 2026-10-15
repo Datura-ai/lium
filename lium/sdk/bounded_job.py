@@ -13,7 +13,9 @@ up and what it cost.
 
 from __future__ import annotations
 
+import contextlib
 import math
+import os
 import shlex
 import threading
 import time
@@ -24,7 +26,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import requests
 
-from .exceptions import LiumRateLimitError, LiumServerError, PodStartError
+from .exceptions import ClusterNotListedError, LiumRateLimitError, LiumServerError, PodStartError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .client import Lium
@@ -39,11 +41,14 @@ BOOT_FAILED = "boot_failed"        # the pod was rented but never became ready
 ERROR = "error"                    # anything else after the rent (SSH, an input upload, …)
 
 # `timeout` exits 124 when its TERM stopped the command, 137 when the KILL after `-k` had to; the
-# command can exit with these itself, so the pod prints this marker only when the limit had passed there
+# command can exit with these itself, so the pod prints this marker only when `timeout --verbose`
+# reported sending the signal (to a file of its own, not to the command's stderr)
 _TIMEOUT_EXITS = (124, 137)
 _TIMED_OUT_MARK = "lium-run-job: the time limit stopped the command"
 # the rent errors after which the server may still have created the pod (see Lium.rent)
-_UNANSWERED = (requests.RequestException, LiumServerError, LiumRateLimitError, TimeoutError)
+_UNANSWERED = (requests.RequestException, LiumServerError, LiumRateLimitError, TimeoutError, ClusterNotListedError)
+# error codes the API and SDK use for a request whose outcome is not known yet
+_UNKNOWN_CODES = ("rent_outcome_unknown", "idempotency_in_progress", "idempotency_outcome_unknown")
 _DELETE_ATTEMPTS = 3
 _CONFIRM_S = 60  # wall-clock budget for one pod's cleanup: the DELETE, its retries and the pod-list checks
 _POLL_S = 5
@@ -131,7 +136,7 @@ def run_job(
         except Exception as exc:  # noqa: BLE001 - every rent failure is this job's terminal state
             result.status, result.error = RENT_FAILED, str(exc)
             # the server may have created the pod before the response was lost; the name is this call's own
-            result.cleanup = _remove_by_name(lium, result.name, unanswered=isinstance(exc, _UNANSWERED))
+            result.cleanup = _remove_by_name(lium, result.name, unanswered=_rent_may_exist(exc))
             if result.cleanup == "unknown":
                 result.error += f"; the rent may still have created a pod named {result.name}: check Lium.ps()"
             return result
@@ -167,10 +172,12 @@ def run_job(
             result.status, result.error = stopped_by, "no time left to run the command"
             return result
         limit_s = math.floor(run_s)
+        # timeout's own stderr goes to $f, the command gets the real stderr back through fd 3
+        script = shlex.quote("exec 2>&3 3>&-\n" + command)
         remote = (
-            f"{{ s=$(date +%s%N); timeout -k 10 {limit_s} bash -c {shlex.quote(command)}; rc=$?; "
-            f"if [ $rc -eq 124 -o $rc -eq 137 ] && [ $(( $(date +%s%N) - s )) -ge {limit_s}000000000 ]; "
-            f"then echo {shlex.quote(_TIMED_OUT_MARK)} >&2; fi; exit $rc; }}"
+            f"{{ f=$(mktemp); timeout --verbose -k 10 {limit_s} bash -c {script} 3>&2 2>\"$f\"; rc=$?; "
+            f"if grep -q '^timeout: sending signal' \"$f\"; then echo {shlex.quote(_TIMED_OUT_MARK)} >&2; "
+            f"else cat \"$f\" >&2; fi; rm -f \"$f\"; exit $rc; }}"
         )
         try:
             run = lium.exec(pod, command=remote, env=env, timeout=run_s + 30)
@@ -195,7 +202,7 @@ def run_job(
         # copied after a failure, an exec error or a timeout too: a partial log or checkpoint is what the caller needs
         for remote_path, local in (outputs or {}).items():
             try:
-                _bounded(lambda remote_path=remote_path, local=local: lium.download(pod, remote=remote_path, local=local), left(), f"download of {remote_path}")
+                _download(lium, pod, remote_path, local, left())
                 result.outputs[remote_path] = local
             except Exception as exc:  # noqa: BLE001 - one missing output must not lose the others
                 result.missing_outputs[remote_path] = str(exc)
@@ -246,6 +253,45 @@ def _bounded(transfer, seconds: float, what: str) -> None:
         raise TimeoutError(f"the {what} did not finish within {seconds:.0f}s")
     if "exc" in box:
         raise box["exc"]
+
+
+def _rent_may_exist(exc: BaseException) -> bool:
+    """Whether a failed rent may still have created the pod: its answer was lost, or the SDK says
+    the outcome is unknown (a replay key on the error, or an unknown-outcome code)."""
+    return (
+        isinstance(exc, _UNANSWERED)
+        or getattr(exc, "idempotency_key", None) is not None
+        or getattr(exc, "code", None) in _UNKNOWN_CODES
+    )
+
+
+def _download(lium: "Lium", pod: Any, remote: str, local: str, seconds: float) -> None:
+    """Download to a side file and move it onto ``local`` only when it finished in time, so a
+    transfer cut at the deadline but still running on its thread never writes the caller's path."""
+    part = f"{local}.lium-part-{uuid.uuid4().hex[:8]}"
+    lock, state = threading.Lock(), {"moved": False, "abandoned": False}
+
+    def fetch() -> None:
+        try:
+            lium.download(pod, remote=remote, local=part)
+            with lock:
+                if not state["abandoned"]:
+                    os.replace(part, local)
+                    state["moved"] = True
+        finally:
+            with contextlib.suppress(OSError):  # gone after the move; a partial file otherwise
+                os.remove(part)
+
+    try:
+        _bounded(fetch, seconds, f"download of {remote}")
+    except TimeoutError:
+        with lock:
+            if state["moved"]:  # finished just as the wait ran out
+                return
+            state["abandoned"] = True
+        with contextlib.suppress(OSError):
+            os.remove(part)
+        raise
 
 
 def _remove(lium: "Lium", pod_id: str) -> bool:

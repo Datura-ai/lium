@@ -1,5 +1,6 @@
 """`Lium.run_job`: one bounded job that always ends with the pod removed and a terminal status."""
 
+import os
 import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
@@ -10,7 +11,7 @@ import requests
 
 from lium.sdk import Config, Lium, LiumError, PodStartError, RentResult
 from lium.sdk import bounded_job
-from lium.sdk.exceptions import LiumServerError
+from lium.sdk.exceptions import ClusterNotListedError, LiumServerError
 from lium.sdk.models import ExecutorInfo, PodInfo
 
 
@@ -30,8 +31,14 @@ def _pod(name, id="pod-1", status="RUNNING"):
     )
 
 
+def _write(local):
+    with open(local, "w") as f:
+        f.write("out")
+
+
 @pytest.fixture
-def lium(monkeypatch):
+def lium(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)  # downloads land in the working directory
     client = Lium(Config(api_key="test"))
     calls = {"deletes": [], "schedules": [], "execs": [], "downloads": [], "uploads": [], "delete_fails": 0}
     client.calls = calls
@@ -53,7 +60,7 @@ def lium(monkeypatch):
                         lambda pod, termination_time: calls["schedules"].append((pod, termination_time)))
     monkeypatch.setattr(client, "wait_ready", lambda pod, timeout: _pod(pod["name"]))
     monkeypatch.setattr(client, "upload", lambda pod, local, remote: calls["uploads"].append((local, remote)))
-    monkeypatch.setattr(client, "download", lambda pod, remote, local: calls["downloads"].append((remote, local)))
+    monkeypatch.setattr(client, "download", lambda pod, remote, local: _write(local) or calls["downloads"].append((remote, local)))
     monkeypatch.setattr(client, "exec", lambda pod, command, env=None, timeout=None: (
         calls["execs"].append((command, timeout)) or {"exit_code": 0, "stdout": "done\n", "stderr": "", "success": True}
     ))
@@ -80,8 +87,8 @@ def test_run_job_success_runs_copies_removes_and_reports_billed_cost(lium):
     assert lium.calls["rent"]["max_price_per_gpu_hour"] == 3 and lium.calls["rent"]["name"] == result.name
     assert lium.calls["uploads"] == [("train.py", "/root/train.py")]
     (command, timeout), = lium.calls["execs"]
-    assert "timeout -k 10 " in command and "bash -c 'python train.py --epochs 1';" in command
-    assert int(command.split("timeout -k 10 ")[1].split()[0]) <= 1800 - 120 and timeout <= 1800 - 120 + 30
+    assert "timeout --verbose -k 10 " in command and "python train.py --epochs 1'" in command
+    assert int(command.split("-k 10 ")[1].split()[0]) <= 1800 - 120 and timeout <= 1800 - 120 + 30
     assert result.outputs == {"/root/model.pt": "model.pt"}
     assert lium.calls["deletes"] == ["/pods/pod-1"] and result.cleanup == "removed"
     assert result.cost_usd == 0.0421 and result.estimated_cost_usd is not None
@@ -150,7 +157,7 @@ def test_run_job_failed_command_still_copies_outputs_and_names_the_missing_one(l
     def download(pod, remote, local):
         if remote == "/root/model.pt":
             raise FileNotFoundError("no such file")
-        lium.calls["downloads"].append((remote, local))
+        _write(local)
 
     monkeypatch.setattr(lium, "download", download)
 
@@ -188,6 +195,11 @@ def test_run_job_rent_failure_leaves_a_pre_existing_pod_with_the_same_name(lium,
     assert result.name.startswith("train-") and result.name != "train"
 
 
+def _with_replay_key(exc):
+    exc.idempotency_key = "same-rental-key"
+    return exc
+
+
 @pytest.mark.parametrize(
     "exc, cleanup",
     [
@@ -195,8 +207,13 @@ def test_run_job_rent_failure_leaves_a_pre_existing_pod_with_the_same_name(lium,
         (requests.ReadTimeout("response lost"), "unknown"),
         (requests.ConnectionError("connection reset"), "unknown"),
         (LiumServerError("502"), "unknown"),
+        (LiumError("rent outcome unknown", code="rent_outcome_unknown"), "unknown"),
+        (LiumError("still in progress", code="idempotency_in_progress"), "unknown"),
+        (_with_replay_key(LiumError("rent outcome unknown; a pod may exist")), "unknown"),
+        (ClusterNotListedError("not listed", confirmed=False), "unknown"),
     ],
-    ids=["refused", "read-timeout", "connection-lost", "server-error"],
+    ids=["refused", "read-timeout", "connection-lost", "server-error", "unknown-code", "in-progress-code",
+         "replay-key", "cluster-not-listed"],
 )
 def test_run_job_rent_failure_with_no_pod_listed(lium, monkeypatch, exc, cleanup):
     monkeypatch.setattr(lium, "rent", Mock(side_effect=exc))
@@ -262,7 +279,7 @@ def _exec_raises(exc):
 def test_run_job_copies_the_outputs_before_it_removes_the_pod(lium, monkeypatch, exec_, status):
     events = []
     monkeypatch.setattr(lium, "exec", exec_)
-    monkeypatch.setattr(lium, "download", lambda pod, remote, local: events.append(("download", remote)))
+    monkeypatch.setattr(lium, "download", lambda pod, remote, local: _write(local) or events.append(("download", remote)))
     monkeypatch.setattr(lium, "_request", lambda method, path, **kw: events.append((method, path)))
 
     result = lium.run_job(command="python train.py", gpu_type="H100", max_cost_usd=5, deadline_s=600,
@@ -393,3 +410,38 @@ def test_run_job_refuses_a_non_positive_limit(lium, kwargs):
     with pytest.raises(ValueError):
         lium.run_job(command="true", gpu_type="H100", **kwargs)
     assert "rent" not in lium.calls
+
+
+def test_run_job_download_cut_at_the_deadline_never_writes_the_callers_path(lium, monkeypatch, tmp_path):
+    release, finished = threading.Event(), threading.Event()
+
+    def late_download(pod, remote, local):
+        release.wait(30)
+        _write(local)
+        finished.set()
+
+    monkeypatch.setattr(lium, "download", late_download)
+
+    r = lium.run_job(command="true", gpu_type="H100", max_cost_usd=100, deadline_s=2, output_reserve_s=0.5,
+                     outputs={"/root/ckpt.pt": "ckpt.pt"})
+    release.set()  # connectivity comes back after run_job returned
+    assert finished.wait(5)
+
+    assert "/root/ckpt.pt" in r.missing_outputs and r.outputs == {}
+    assert sorted(p.name for p in tmp_path.iterdir()) == []  # neither ckpt.pt nor a partial side file
+
+
+def test_run_job_timeout_marker_needs_the_signal_not_elapsed_time(lium, monkeypatch, tmp_path):
+    # a `date` that jumps an hour between calls stands in for the wrapper being descheduled or the VM paused
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "date").write_text(f"#!/bin/sh\nn=$(cat {fake}/n 2>/dev/null || echo 0); "
+                               f"echo $((n + 3600000000000)) > {fake}/n; echo $n\n")
+    (fake / "date").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}:{os.environ['PATH']}")
+    monkeypatch.setattr(lium, "exec", _exec_locally)
+
+    r = lium.run_job(command="echo oops >&2; exit 124", gpu_type="H100", max_cost_usd=100, deadline_s=600,
+                     output_reserve_s=1)
+
+    assert (r.status, r.exit_code, r.stderr) == ("failed", 124, "oops\n")
