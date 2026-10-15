@@ -107,6 +107,7 @@ def pack(context_dir: Path, max_bytes: Optional[int] = None, dockerfile: Optiona
     def _reset_owner(info: tarfile.TarInfo) -> tarfile.TarInfo:
         info.uid = info.gid = 0
         info.uname = info.gname = ""
+        info.mtime = 0  # same tree, same bytes and sha256, whatever the files' timestamps
         return info
 
     buffer = io.BytesIO()

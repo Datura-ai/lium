@@ -103,8 +103,27 @@ def test_pack_is_the_same_bytes_for_the_same_tree(tmp_path):
     # Arrange
     _tree(tmp_path, {"app.py": "x", "src/lib.py": "y"})
 
+    first = build_context.pack(tmp_path)
+    os.utime(tmp_path / "app.py", (1720000000, 1720000000))
+
     # Act / Assert
-    assert build_context.pack(tmp_path) == build_context.pack(tmp_path)
+    assert build_context.pack(tmp_path) == first
+
+
+@pytest.mark.parametrize(
+    "pattern, ignored",
+    [("*.env", ["secrets.env"]), ("**/*.env", ["secrets.env", "services/api/secrets.env"])],
+)
+def test_a_slashless_pattern_is_rooted_as_in_docker(tmp_path, pattern, ignored):
+    # Arrange: Docker matches `*.env` from the context root only; `**/*.env` reaches every depth
+    _tree(tmp_path, {".dockerignore": pattern + "\n"})
+    rules = build_context.read_dockerignore(tmp_path)
+
+    # Act
+    result = [p for p in ("secrets.env", "services/api/secrets.env") if build_context.is_ignored(p, rules)]
+
+    # Assert
+    assert result == ignored
 
 
 def test_pack_keeps_a_symlink_inside_the_context(tmp_path):
