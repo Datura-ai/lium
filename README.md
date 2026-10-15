@@ -310,7 +310,8 @@ Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, 
 
 - `lium provider portal {login,logout,whoami}` - Manage the cached portal JWT
 - `lium provider status [--netuid 51]` - Aggregated provider snapshot (registration, portal session, nodes, validator weights)
-- `lium provider node list|get|add|rm|update-price|update-gpu` - Node lifecycle on the portal; `node list [--all | --miner-hotkey HK]` shows the active hotkey's nodes by default, `--all` every provider's
+- `lium provider node list|get|add|rm|update-price|update-gpu|address` - Node lifecycle on the portal; `node list [--all | --miner-hotkey HK]` shows the active hotkey's nodes by default, `--all` every provider's
+- `lium provider node address <NODE_ID> <IP> <PORT>` - Change a node's IP and port in place (keeps its id and history), e.g. after an ISP changes the IP
 - `lium provider node min-gpu set|unset <NODE_ID> [COUNT]` - Min GPU count for rental matchmaking
 - `lium provider node pods <NODE_ID>` - Pods currently rented on a node
 - `lium provider node machine-requests <NODE_ID>` - Pending tenant requests on a node
@@ -375,6 +376,7 @@ lium provider node list --limit 50
 lium provider node add --gpu-type "NVIDIA H200 NVL" --gpu-count 8 \
     --ip 203.0.113.42 --port 8080 --price 1.85 --yes
 lium provider node update-price <NODE_ID> --price 2.10 --yes
+lium provider node address <NODE_ID> 203.0.113.77 8080 --yes
 lium provider config opt-in --yes                  # use lium.io's central miner server
 lium provider machine estimate --gpu-type "NVIDIA H200 NVL" --gpu-count 8
 lium provider --json status                        # JSON envelope for scripts/agents
