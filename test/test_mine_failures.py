@@ -70,7 +70,7 @@ def test_explicit_public_ssh_port_is_kept(tmp_path: Path):
 
 
 def test_a_failed_step_exits_non_zero(monkeypatch):
-    monkeypatch.setattr(mine, "_gather_inputs", lambda hotkey, auto: {
+    monkeypatch.setattr(mine, "_gather_inputs", lambda hotkey, auto, *ports: {
         "hotkey": "5F" + "x" * 46, "internal_port": "8080", "external_port": "8080", "ssh_port": "2200",
         "ssh_public_port": "", "port_range": ""})
 
@@ -86,7 +86,7 @@ def test_a_failed_step_exits_non_zero(monkeypatch):
 def test_a_failed_step_prints_bracketed_tool_output_as_text(monkeypatch):
     """The failure text carries tool output verbatim (compose `ps -a`, log tails): a `[type=…]` token from a
     pydantic error or a `[/x]` is Rich markup and used to be eaten — or to raise MarkupError in place of the diagnosis."""
-    monkeypatch.setattr(mine, "_gather_inputs", lambda hotkey, auto: {
+    monkeypatch.setattr(mine, "_gather_inputs", lambda hotkey, auto, *ports: {
         "hotkey": "5F" + "x" * 46, "internal_port": "8080", "external_port": "8080", "ssh_port": "2200",
         "ssh_public_port": "", "port_range": ""})
 

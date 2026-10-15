@@ -99,7 +99,8 @@ class LiumHostKeyError(LiumError):
 
 
 class RemoteExecutionError(LiumError):
-    """A function offloaded with ``@lium.machine`` did not return a result from the pod.
+    """A function offloaded with ``@lium.machine`` did not return a result from the pod,
+    or a command streamed with ``Lium.stream_exec(check=True)`` exited non-zero.
 
     When the function raised, the caller sees the original exception type and this
     error is its ``__cause__``; ``remote_traceback`` is the traceback from the pod.
@@ -201,12 +202,24 @@ class LiumBudgetExceededError(LiumPermissionError):
 class LiumCardTopUpError(LiumError):
     """A card top-up (``POST /payments/topup``, :meth:`Lium.topup_card`) did not charge (402).
 
-    ``code`` says why: ``CARD_AUTHENTICATION_REQUIRED`` (the bank wants a one-time confirmation
-    the API cannot show — top up once by card at ``dashboard_url``, then retry), ``CARD_DECLINED``
-    (``decline_code`` is the bank's reason), ``NO_SAVED_CARD``, ``NO_DEFAULT_CARD``, or
-    ``WALLET_NOT_SUPPORTED`` (the saved method is Link, Apple Pay or Google Pay). A key
-    budget refusal is not this class. The message is the server's plain sentence; the balance
-    did not change.
+    ``code`` says why: ``CARD_AUTHENTICATION_REQUIRED`` (the bank wants the cardholder to confirm
+    with 3-D Secure, see below), ``CARD_AUTHENTICATION_NOT_COMPLETED`` (the cardholder failed or
+    abandoned that confirmation), ``CARD_AUTHENTICATION_UNAVAILABLE`` (3-D Secure cannot run for
+    this card), ``CARD_AUTHENTICATION_EXPIRED`` (not confirmed within 7 days, canceled),
+    ``CARD_DECLINED`` (``decline_code`` is the bank's reason), ``NO_SAVED_CARD``,
+    ``NO_DEFAULT_CARD``, or ``WALLET_NOT_SUPPORTED`` (the saved method is Link, Apple Pay or
+    Google Pay). A key budget refusal is not this class. The message is the server's plain
+    sentence; the balance did not change.
+
+    ``idempotency_key`` is the key the call was sent with (yours, or the one the SDK made), and
+    ``transaction_id`` the platform's row for it when the server named one.
+
+    A ``CARD_AUTHENTICATION_REQUIRED`` **with** ``next_action_url`` (``is_step_up``) is not final:
+    the payment is open. The cardholder confirms at ``next_action_url`` and the balance is credited
+    with no further call. Repeat only with the **same** ``idempotency_key`` (it answers the same URL
+    until the cardholder confirms, then the charge); a new key opens a second payment on the card.
+    Without ``next_action_url`` it is final: top up once by card at ``dashboard_url``, then retry
+    with a new key. Every other code is final too: retry with a new key once the cause is fixed.
     """
 
     def __init__(
@@ -220,12 +233,24 @@ class LiumCardTopUpError(LiumError):
         decline_code: str | None = None,
         dashboard_url: str | None = None,
         payment_intent_id: str | None = None,
+        transaction_id: str | None = None,
+        next_action_url: str | None = None,
+        idempotency_key: str | None = None,
     ) -> None:
         super().__init__(message, code=code, hint=hint, request_id=request_id)
         self.status = status
         self.decline_code = decline_code
         self.dashboard_url = dashboard_url
         self.payment_intent_id = payment_intent_id
+        self.transaction_id = transaction_id
+        self.next_action_url = next_action_url
+        self.idempotency_key = idempotency_key
+
+    @property
+    def is_step_up(self) -> bool:
+        """True for a 3-D Secure step-up: the payment is open until the cardholder confirms at
+        ``next_action_url``; repeat only with the same ``idempotency_key``."""
+        return self.code == "CARD_AUTHENTICATION_REQUIRED" and bool(self.next_action_url)
 
 
 class LiumChargeOutcomeUnknownError(LiumError):
@@ -260,7 +285,7 @@ class LiumRentOutcomeUnknownError(LiumError):
         self,
         message: str,
         *,
-        idempotency_key: str,
+        idempotency_key: str | None = None,
         pod_name: str | None = None,
         executor_id: str | None = None,
         candidates: list[str] | None = None,

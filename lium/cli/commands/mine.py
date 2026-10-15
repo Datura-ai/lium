@@ -2,6 +2,7 @@
 
 import json
 import re
+import shlex
 import shutil
 import time
 from pathlib import Path
@@ -181,6 +182,44 @@ def _has_sysbox() -> bool:
     except ValueError:
         return False
     return isinstance(parsed, dict) and "sysbox-runc" in parsed
+
+
+# VerifyX refuses a node with under 100 GiB free, measured after the node images are pulled (~40 GiB: executor,
+# runner, validator preflight). On 7 Oct 2026 a 100 GB disk passed every earlier check and failed only at step 6.
+NODE_FREE_DISK_GIB = 100
+NODE_IMAGES_GIB = 40
+GIB = 1024**3
+
+
+def _node_images_present(executor_dir: Path) -> bool:
+    """Every image this run would pull is already local. The runner image carries the compose file with the executor
+    digest the runner injects at build, so that file, not the unrendered docker-compose.app.yml, names the images."""
+    try:
+        images = set(_run("docker compose config --images", cwd=str(executor_dir))[0].split())
+        runner = next(i for i in images if "executor-runner" in i)
+        # inspect first: docker run pulls a missing image, which is the download this check exists to precede
+        # (not --pull=never, which Docker before 20.10 rejects)
+        _run(f"docker image inspect {shlex.quote(runner)}")
+        baked = _run(f"docker run --rm --entrypoint cat {shlex.quote(runner)} /root/executor/docker-compose.yml")[0]
+        images.update(re.findall(r"^\s*image:\s*(\S+)", baked, re.MULTILINE))
+        images.add(PREFLIGHT_IMAGE)
+        for image in images:
+            _run(f"docker image inspect {shlex.quote(image)}")
+    except (RuntimeError, StopIteration):
+        return False
+    return True
+
+
+def _check_free_disk(executor_dir: Path):
+    root = _run("docker info --format '{{.DockerRootDir}}'", check=False)[0].strip() or "/var/lib/docker"
+    free = shutil.disk_usage(root if Path(root).exists() else "/").free
+    needed_gib = NODE_FREE_DISK_GIB + (0 if _node_images_present(executor_dir) else NODE_IMAGES_GIB)
+    if free < needed_gib * GIB:
+        raise Exception(
+            f"Not enough free disk: {free / GIB:.1f} GiB free on {root}, {needed_gib} GiB needed "
+            f"(validation requires {NODE_FREE_DISK_GIB} GiB free after about {NODE_IMAGES_GIB} GiB of node images). "
+            "Use a host with a disk of at least 160 GB, or free space and re-run."
+        )
 
 
 def _install_executor_tools(compute_dir: Path):
@@ -485,15 +524,18 @@ def _apply_env_overrides(
 def _gather_inputs(
     hotkey: Optional[str],
     auto: bool,
+    internal_port: int | None = None,
+    external_port: int | None = None,
 ) -> dict:
     """Ask everything up-front; return a dict of resolved inputs."""
     answers = {}
     if auto:
         # Auto mode - use all defaults
         answers["hotkey"] = hotkey or ""
+        internal = str(internal_port or 8080)
         answers.update(dict(
-            internal_port="8080",
-            external_port="8080",
+            internal_port=internal,
+            external_port=str(external_port) if external_port else internal,
             ssh_port="2200",
             ssh_public_port="",
             port_range=""
@@ -522,9 +564,9 @@ def _gather_inputs(
                 console.warning("Port must be an integer between 1 and 65535.")
         
         # Service ports
-        service_port = ask_port("Service port (where the node API will be reachable)", 8080)
+        service_port = ask_port("Service port (where the node API will be reachable)", internal_port or 8080)
         answers["internal_port"] = service_port
-        answers["external_port"] = service_port  # Set external same as internal
+        answers["external_port"] = str(external_port) if external_port else service_port
         answers["ssh_port"] = ask_port("Node SSH port (used by validator to SSH into the container)", 2200)
         
         # Optional ports
@@ -694,6 +736,17 @@ def _mine_status(args: list[str], hotkey: Optional[str] = None) -> int:
 # --------------------------
 # CLI
 # --------------------------
+def _ipv4(ctx, param, value: str | None) -> str | None:
+    if value is None:
+        return None
+    import ipaddress
+
+    try:
+        return str(ipaddress.IPv4Address(value))
+    except ValueError:
+        raise click.BadParameter(f"{value!r} is not an IPv4 address.")
+
+
 @click.command("mine", context_settings=dict(ignore_unknown_options=True, allow_extra_args=True), add_help_option=False)
 @click.option("--hotkey", "-k", help="Miner hotkey SS58 address (for `mine status`: the wallet hotkey name)")
 @click.option("--dir", "-d", "dir_", default="compute-subnet", help="Target directory")
@@ -737,9 +790,28 @@ def _mine_status(args: list[str], hotkey: Optional[str] = None) -> int:
     help="Minutes to wait for the node to be listed after registering; 0 returns right after the add. "
     "Only with --register.",
 )
+@click.option(
+    "--ip",
+    callback=_ipv4,
+    help="Public IPv4 the node is registered at, instead of the auto-detected one (a node behind CGNAT or a "
+    "port-forwarding VPS: the VPS address).",
+)
+@click.option(
+    "--internal-port",
+    type=click.IntRange(1, 65535),
+    default=None,
+    help="Port the node's service listens on (default 8080).",
+)
+@click.option(
+    "--external-port",
+    type=click.IntRange(1, 65535),
+    default=None,
+    help="Port the node is registered at and validators connect to (default: --internal-port).",
+)
 @click.pass_context
 @handle_errors
-def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token, portal_url, price, gpu_type, wait_minutes):
+def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token, portal_url, price, gpu_type,
+                 wait_minutes, ip, internal_port, external_port):
     """Set up this host as a Lium provider node: clone, configure, start and validate the executor.
 
     Before `docker compose up`, the service and SSH ports are checked on this host: a port
@@ -752,7 +824,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     node reports under come from the token (an account created with e-mail or Google has no key of its own;
     the portal's is written to the executor's .env) and two steps follow: the node
     is added to your account with the GPU model and count nvidia-smi reports, this host's public
-    IPv4 and the executor's port, at the model's base price from lium.io's public shared-config; then the node's
+    IPv4 (or --ip) and the executor's port, at the model's base price from lium.io's public shared-config; then the node's
     status is polled every 15 s until it is listed (exit 0), the portal names something to fix
     (OFFLINE or VALIDATION_FAILED, exit 1), or --wait minutes pass (exit 2). The node page URL is
     printed in every case.
@@ -807,7 +879,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 "If registration fails with an expired token, copy a fresh command from the portal."
             )
 
-    answers = _gather_inputs(hotkey, auto)
+    answers = _gather_inputs(hotkey, auto, internal_port, external_port)
     target_dir = Path(dir_).absolute()
 
     TOTAL_STEPS = 8 if token else 6
@@ -821,6 +893,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
 
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
             _check_prereqs()
+            _check_free_disk(target_dir / "neurons" / "executor")
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.
         preflight_pull = _start_preflight_pull()
@@ -885,11 +958,12 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             gpu_type_override=gpu_type,
             wait_minutes=wait_minutes,
             total_steps=TOTAL_STEPS,
+            ip_override=ip,
         ))
 
     # Get executor details for summary
     gpu_info = _get_gpu_info()
-    public_ip = _get_public_ip()
+    public_ip = ip or _get_public_ip()
     
     # Get the external port from answers
     external_port = answers.get("external_port", "8080")
@@ -924,9 +998,10 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     add_url = f"https://provider.lium.io/nodes?{urlencode(params)}"
     
     console.print("\n[bold cyan]Register this node in the Provider Portal:[/bold cyan]")
-    console.print(f"[yellow]{add_url}[/yellow]\n")
+    # soft_wrap: a hard wrap split the IP across lines and the clicked link opened Add Node with a wrong address
+    console.print(f"[yellow]{add_url}[/yellow]\n", soft_wrap=True)
     console.print("[bold cyan]…or from this terminal:[/bold cyan]")
-    console.print(f"[yellow]{_provider_add_command(gpu_info, public_ip, external_port)}[/yellow]")
+    console.print(f"[yellow]{_provider_add_command(gpu_info, public_ip, external_port)}[/yellow]", soft_wrap=True)
     console.dim(_registration_note())
 
 
@@ -939,6 +1014,7 @@ def _register_and_wait(
     gpu_type_override: Optional[str],
     wait_minutes: int,
     total_steps: int,
+    ip_override: str | None = None,
 ) -> int:
     """Steps 7–8 of `lium mine --register`: add the node to the account, then watch its status. Returns the exit code."""
     from rich.markup import escape
@@ -952,7 +1028,7 @@ def _register_and_wait(
             inventory = reg.read_gpu_inventory(_run)
             gpu_type = gpu_type_override or inventory.gpu_type
             port = reg.executor_port(executor_dir)
-            ip = reg.public_ipv4_or_fail(_get_public_ip())
+            ip = ip_override or reg.public_ipv4_or_fail(_get_public_ip())
             price_per_gpu = reg.resolve_price(gpu_type, price)
             record = reg.register_node(
                 http,
@@ -1031,9 +1107,9 @@ def _provider_add_command(gpu_info: dict, public_ip: str, external_port: str | i
 
 def _registration_note() -> str:
     return (
-        "Validators only reach nodes of providers with a running coordinator: opt in to the "
-        "Lium Central Provider Server (`lium provider config opt-in --yes`, or Profile Settings "
-        "in the portal) or run a self-hosted provider. Until then the node stays "
-        "VALIDATION_PENDING. The first validation takes roughly 15 minutes; add --price to "
-        "`node add` to override the default price."
+        "If your account is not opted in to the Lium Central Provider Server yet (Profile Settings "
+        "in the portal; on by default for new accounts), run `lium provider config opt-in --yes` "
+        "or a self-hosted provider, or the node stays VALIDATION_PENDING. The first validation "
+        "takes roughly 15 minutes. The node is listed at the model's default price; add --price "
+        "to `node add` to set your own within the range the portal shows for the model."
     )

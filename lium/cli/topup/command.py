@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import shlex
 from typing import Optional
 
 import click
@@ -72,7 +73,6 @@ def billing_client() -> Lium:
     return Lium(config=Config(
         api_key=key,
         base_url=os.getenv("LIUM_BASE_URL", "https://lium.io/api"),
-        base_pay_url=os.getenv("LIUM_PAY_URL", "https://pay-api.lium.io"),
         api_key_source=source,
     ))
 
@@ -158,6 +158,12 @@ _CARD_HINTS = {
     "NO_DEFAULT_CARD": "Pass --card <pm_id>, or set a default card on the Billing page",
     "WALLET_NOT_SUPPORTED": "Pass --card <pm_id> of a card saved as a card (not Link, Apple Pay or "
                             "Google Pay), or set such a card as the default on the Billing page",
+    "CARD_AUTHENTICATION_NOT_COMPLETED": "Nothing was charged; run the command again with a new "
+                                         "--idempotency-key (or none) for a new confirmation page",
+    "CARD_AUTHENTICATION_UNAVAILABLE": "Nothing was charged; top up by card on the Billing page, or use a card "
+                                       "that supports 3-D Secure with a new --idempotency-key",
+    "CARD_AUTHENTICATION_EXPIRED": "Nothing was charged; run the command again with a new "
+                                   "--idempotency-key (or none) for a new confirmation page",
 }
 
 
@@ -376,7 +382,8 @@ def wait_command(above: float | None, timeout_s: float, json_output: bool):
     "--idempotency-key", default=None, metavar="KEY",
     help="Use a new key for each top-up. A used key and the same amount return the first charge "
          "(or its status) within 24 h instead of making a second one; after that, check "
-         "`lium balance` before repeating. Omitted, one is made and printed",
+         "`lium balance` before repeating. After a 3-D Secure step-up, repeat only with the key it "
+         "printed. Omitted, one is made and printed",
 )
 @click.option("--yes", "-y", is_flag=True, help="Charge without asking first (required with --json)")
 @click.option("--wait", type=float, default=None, metavar="SECONDS", help=WAIT_HELP)
@@ -395,11 +402,14 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     it yet. The API key must hold the `billing` scope: today's read / rent / manage keys are
     refused.
 
-    A bank that wants a one-time confirmation (3-D Secure) cannot get one through this path:
-    the command fails with CARD_AUTHENTICATION_REQUIRED and the Billing page to confirm the
-    card on; a decline fails with CARD_DECLINED and the bank's reason. A saved wallet (Link,
-    Apple Pay, Google Pay) fails with WALLET_NOT_SUPPORTED: pass `--card <pm_id>` of a plain
-    saved card. Nothing is charged in any of these cases.
+    When the bank wants the cardholder to confirm (3-D Secure), the command exits 6 with
+    CARD_AUTHENTICATION_REQUIRED, the URL to confirm at, the transaction id and the
+    idempotency key: the payment stays open and the balance is credited once the cardholder
+    confirms. Repeat only with that same `--idempotency-key`, never a new one (a new key opens
+    a second payment). Without a URL, CARD_AUTHENTICATION_REQUIRED is final (exit 3): confirm
+    the card once on the Billing page. A decline fails with CARD_DECLINED and the bank's
+    reason. A saved wallet (Link, Apple Pay, Google Pay) fails with WALLET_NOT_SUPPORTED: pass
+    `--card <pm_id>` of a plain saved card. Nothing is charged in any of these cases.
 
     The request is sent once, always with an idempotency key. If the answer is lost (a
     timeout, a 5xx) the charge may still have gone through: the command exits 6 with
@@ -454,7 +464,7 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
             amount, payment_method_id=payment_method_id, idempotency_key=idempotency_key
         )
     except LiumCardTopUpError as e:
-        raise card_topup_failure(e)
+        raise card_topup_failure(e, amount=amount, payment_method_id=payment_method_id)
     except LiumChargeOutcomeUnknownError as e:
         raise charge_outcome_unknown_failure(e)
 
@@ -549,11 +559,68 @@ def charge_outcome_unknown_failure(error: LiumChargeOutcomeUnknownError) -> CliF
     )
 
 
-def card_topup_failure(error: LiumCardTopUpError) -> CliFailure:
+def card_retry_command(amount: float | None, payment_method_id: str | None, idempotency_key: str) -> str:
+    """The exact ``lium topup card`` that repeats this call: same amount, same card, same key."""
+    # 17 significant digits round-trip the float exactly, so the repeat sends the same amount and the
+    # backend rounds it to the same cents (a shortened "10.005" for 10.0049999 would be one cent more).
+    amount_text = "<same amount>" if amount is None else format(amount, ".17g")
+    parts = ["lium", "topup", "card", "-a", amount_text]
+    if payment_method_id:
+        parts += ["--card", shlex.quote(payment_method_id)]
+    return " ".join([*parts, "--idempotency-key", shlex.quote(idempotency_key), "--yes"])
+
+
+def card_step_up_failure(error: LiumCardTopUpError, amount: float | None,
+                         payment_method_id: str | None) -> CliFailure:
+    """A 3-D Secure step-up (402 ``CARD_AUTHENTICATION_REQUIRED`` with ``next_action_url``): the
+    payment is open, not refused. The cardholder confirms at the URL and the balance is credited
+    with no further call; a repeat with the same key answers the same URL (then the charge), a
+    new key opens a second payment. Exit 6, as for the other "do not repeat without the key"
+    outcomes; the URL, ``transaction_id`` and key are in the text and in ``data``."""
+    key = error.idempotency_key
+    lines = [
+        "The bank asks the cardholder to confirm this payment (3-D Secure); the balance is credited once "
+        "they confirm, with no further command.",
+        f"Complete it at: {error.next_action_url}",
+    ]
+    if error.transaction_id:
+        lines.append(f"Transaction: {error.transaction_id}")
+    if key:
+        retry = card_retry_command(amount, payment_method_id, key)
+        lines.append(f"Idempotency key: {key}")
+        lines.append(f"To check on it, re-run with the same key: {retry}")
+        hint = (f"Open the URL or hand it to the cardholder. Repeat only with `{retry}`; do not retry with a "
+                "new --idempotency-key (or without one): that opens a second payment on the card.")
+    else:
+        hint = ("Open the URL or hand it to the cardholder. Do not retry with a new --idempotency-key: that "
+                "opens a second payment on the card.")
+    data = {
+        name: value
+        for name, value in {
+            "status": error.status,
+            "next_action_url": error.next_action_url,
+            "transaction_id": error.transaction_id,
+            "idempotency_key": key,
+            "amount_usd": amount,
+            "payment_intent_id": error.payment_intent_id,
+            "dashboard_url": error.dashboard_url,
+            "request_id": error.request_id,
+        }.items()
+        if value is not None
+    }
+    return CliFailure(error.code or "CARD_AUTHENTICATION_REQUIRED", "\n".join(lines), EXIT_PERMISSION_DENIED,
+                      data=data, hint=hint)
+
+
+def card_topup_failure(error: LiumCardTopUpError, amount: float | None = None,
+                       payment_method_id: str | None = None) -> CliFailure:
     """The failure for a 402 from ``POST /payments/topup``: the server's code (``CARD_DECLINED``, …)
     and sentence, the bank's ``decline_code`` in the text, and the structured fields — ``status``,
     ``decline_code``, ``dashboard_url``, ``payment_intent_id``, ``request_id`` — in ``data`` for a
-    machine reader. Exit 3: the API refused the call, and the balance did not change."""
+    machine reader. Exit 3: the API refused the call, and the balance did not change. A 3-D Secure
+    step-up is not a refusal: :func:`card_step_up_failure`."""
+    if error.is_step_up:
+        return card_step_up_failure(error, amount, payment_method_id)
     message = str(error)
     if error.decline_code:
         message = f"{message.rstrip('.')} (decline_code: {error.decline_code})."
