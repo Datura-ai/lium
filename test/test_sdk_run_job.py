@@ -3,6 +3,7 @@
 import os
 import subprocess
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
@@ -71,9 +72,38 @@ def lium(monkeypatch, tmp_path):
 
 
 def _scheduled_at(lium):
-    (pod_id, when), = lium.calls["schedules"]
+    # set before boot, and again once booted (the server's termination_hours replaces it then)
+    first, again = lium.calls["schedules"]
+    assert first == again
+    pod_id, when = first
     assert pod_id == "pod-1"
     return datetime.fromisoformat(when.replace("Z", "+00:00"))
+
+
+@pytest.mark.parametrize("deadline_s, hours", [(600, 1), (3601, 2), (10**7, 720)])
+def test_run_job_sends_a_server_side_removal_with_the_rent(lium, deadline_s, hours):
+    lium.run_job(command="true", gpu_type="H100", max_cost_usd=5, deadline_s=deadline_s)
+    assert lium.calls["rent"]["termination_hours"] == hours
+
+
+def test_rent_by_spec_and_up_send_termination_hours(monkeypatch):
+    client = Lium(Config(api_key="test"))
+    monkeypatch.setattr(client, "get_executor", lambda executor_id: Mock(id=executor_id))
+    sent = []
+    monkeypatch.setattr(client, "supports", lambda feature: True)
+    monkeypatch.setattr(client, "_ensure_ssh_keys_registered", lambda *a, **k: None)
+    monkeypatch.setattr(client, "_pod_ids_before_rent", lambda: frozenset())
+
+    def request(method, path, json=None, **kwargs):
+        sent.append(json)
+        raise LiumError("stop here")
+
+    monkeypatch.setattr(client, "_request", request)
+    with pytest.raises(LiumError):
+        client.rent(gpu_type="H100", ssh_keys=["ssh-ed25519 AAAA k"], termination_hours=3)
+    with pytest.raises(LiumError):
+        client.up(executor_id="e1", template_id="t1", ssh_keys=["ssh-ed25519 AAAA k"], termination_hours=4)
+    assert [body["termination_hours"] for body in sent] == [3, 4]
 
 
 def test_run_job_success_runs_copies_removes_and_reports_billed_cost(lium):
@@ -482,7 +512,7 @@ def _ssh_with(monkeypatch, lium, client):
     from contextlib import contextmanager
 
     @contextmanager
-    def ssh_connection(pod, timeout=30):
+    def ssh_connection(pod, timeout=30, deadline=None):
         try:
             yield client
         finally:
@@ -519,15 +549,83 @@ def test_transfer_deadline_covers_the_ssh_handshake(lium, monkeypatch, tmp_path)
     del lium.download
     asked = []
 
-    def ssh_connection(pod, timeout=30):
-        asked.append(timeout)
+    def ssh_connection(pod, timeout=30, deadline=None):
+        asked.append(deadline - time.monotonic())
         raise TimeoutError("auth stalled")
 
     monkeypatch.setattr(lium, "ssh_connection", ssh_connection)
     with pytest.raises(TimeoutError):
         lium.download(_pod("p"), remote="/root/b", local=str(tmp_path / "b"), timeout=6)
-    # TCP connect, banner and auth each get a third, so the three fit inside the transfer's 6 s
-    assert asked == [2]
+    # the connect gets the transfer's own deadline, not a separate budget of its own
+    assert len(asked) == 1 and 5 < asked[0] <= 6
+
+
+def test_download_with_only_a_timeout_copies_the_file(lium, monkeypatch, tmp_path):
+    del lium.download
+    data = [b"a" * 40000, b"b" * 10]
+
+    class File:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, n):
+            return data.pop(0) if data else b""
+
+    client = Mock(open_sftp=lambda: Mock(open=lambda remote, mode: File(), stat=lambda remote: Mock(st_mode=0o100644)))
+    _ssh_with(monkeypatch, lium, client)
+    lium.download(_pod("p"), remote="/root/result", local=str(tmp_path / "result"), timeout=60)
+    assert (tmp_path / "result").read_bytes() == b"a" * 40000 + b"b" * 10
+
+
+def _stubborn_ssh(monkeypatch, attempts):
+    """An SSHClient whose connect makes auth attempt after auth attempt, each 0.2 s, until closed."""
+    from lium.sdk import client as sdk_client
+
+    class Client:
+        def __init__(self):
+            self.closed = threading.Event()
+
+        def set_missing_host_key_policy(self, policy):
+            pass
+
+        def connect(self, **kwargs):
+            attempts.append(kwargs)
+            for _ in range(100):
+                if self.closed.wait(0.2):
+                    raise EOFError("closed")
+
+        def close(self):
+            self.closed.set()
+
+    monkeypatch.setattr(sdk_client.paramiko, "SSHClient", Client)
+    monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
+
+
+def test_ssh_connect_with_a_deadline_ends_by_it_whatever_auth_retries(monkeypatch, tmp_path):
+    attempts = []
+    _stubborn_ssh(monkeypatch, attempts)
+    key = tmp_path / "id"
+    key.write_text("not a key")
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        with Lium(Config(api_key="k", ssh_key_path=key)).ssh_connection(_pod("p"), deadline=started + 0.5):
+            pass
+    assert time.monotonic() - started < 1.5
+    assert attempts[0]["timeout"] <= 0.5 and attempts[0]["auth_timeout"] <= 0.5  # no wait past the deadline
+
+
+def test_ssh_connect_past_its_deadline_fails_without_connecting(monkeypatch, tmp_path):
+    attempts = []
+    _stubborn_ssh(monkeypatch, attempts)
+    key = tmp_path / "id"
+    key.write_text("not a key")
+    with pytest.raises(TimeoutError):
+        with Lium(Config(api_key="k", ssh_key_path=key)).ssh_connection(_pod("p"), deadline=time.monotonic()):
+            pass
+    assert attempts == []
 
 
 def test_ssh_connect_bounds_banner_and_auth_by_the_connect_timeout(monkeypatch, tmp_path):

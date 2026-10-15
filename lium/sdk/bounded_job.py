@@ -5,8 +5,9 @@ plus any :meth:`Lium.rent` constraint), an approximate budget in USD and a deadl
 Right after the rent the pod's removal is scheduled server-side for the earlier of the two limits;
 once that schedule is acknowledged, removal survives this process exiting. An interruption
 (Ctrl-C) during the rent still looks the pod up by its name and removes it; a hard kill (SIGKILL,
-a lost machine) during the rent or the scheduling call can leave a billable pod without a removal
-bound. The ``finally`` block
+a lost machine) during the rent or the scheduling call leaves the pod to the removal sent with the
+rent (``termination_hours``): the deadline rounded up to whole hours, at most 720, counted by the
+server from boot. The ``finally`` block
 deletes the pod and waits until it is gone from the pod list. Limits are best effort: the server
 processes scheduled removals periodically, so charges can exceed the budget.
 The result names a terminal status, the exit code, the outputs copied, how the pod was cleaned
@@ -138,7 +139,11 @@ def run_job(
     stop_at = deadline_at
     try:
         try:
-            rented = lium.rent(gpu_type=gpu_type, gpu_count=gpu_count, name=result.name, **rent_kwargs)
+            # the server's own removal, sent with the rent: whole hours from boot, so a kill -9 before
+            # the exact schedule below is acknowledged still leaves a pod that ends on its own
+            hours = min(720, math.ceil(deadline_s / 3600), rent_kwargs.pop("termination_hours", None) or 720)
+            rented = lium.rent(gpu_type=gpu_type, gpu_count=gpu_count, name=result.name,
+                               termination_hours=hours, **rent_kwargs)
             result.pod_id = rented.pod["id"]
         except BaseException as exc:  # noqa: BLE001 - every rent failure is this job's terminal state
             result.status, result.error = RENT_FAILED, str(exc) or type(exc).__name__
@@ -173,6 +178,8 @@ def run_job(
             result.status = stopped_by if left() <= 1 else BOOT_FAILED
             result.error = "the pod did not become ready in time"
             return result
+        if left() > 1:  # at boot the server replaces the exact end with boot + termination_hours: set it again
+            lium.schedule_termination(result.pod_id, termination_time=_iso(stop_at))
 
         for local, remote in (inputs or {}).items():
             if left() <= 0:

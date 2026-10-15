@@ -648,13 +648,15 @@ def _transfer_deadline(client: Any, timeout: Optional[float], what: str):
     if timeout is None:
         yield
         return
+    if timeout <= 0:
+        raise TimeoutError(f"no time left for the {what}")
     cut = threading.Event()
 
     def stop() -> None:
         cut.set()
         client.close()
 
-    timer = threading.Timer(max(0.0, timeout), stop)
+    timer = threading.Timer(timeout, stop)
     timer.daemon = True
     timer.start()
     try:
@@ -667,6 +669,32 @@ def _transfer_deadline(client: Any, timeout: Optional[float], what: str):
         timer.cancel()
     if cut.is_set():
         raise TimeoutError(f"the {what} did not finish within {timeout:.0f}s")
+
+
+def _connect_by(client: Any, connect_kwargs: Dict[str, Any], deadline: float, what: str) -> None:
+    """``client.connect`` that ends by ``deadline`` however many auth attempts paramiko makes:
+    the client is closed at the deadline, and again every 50 ms until connect returns, since
+    its transport may not exist yet at the first close."""
+    done, late = threading.Event(), threading.Event()
+
+    def cut() -> None:
+        while not done.wait(0.05 if late.is_set() else max(0.0, deadline - time.monotonic())):
+            late.set()
+            client.close()
+
+    watcher = threading.Thread(target=cut, daemon=True)
+    watcher.start()
+    try:
+        client.connect(**connect_kwargs)
+    except Exception as exc:
+        if late.is_set():
+            raise TimeoutError(f"the {what} did not finish in time") from exc
+        raise
+    finally:
+        done.set()
+        watcher.join()
+    if late.is_set():
+        raise TimeoutError(f"the {what} did not finish in time")
 
 
 # Main SDK Class
@@ -1109,6 +1137,7 @@ class Lium:
         gpu_count: Optional[int] = None,
         wait: bool = False,
         timeout: int = 600,
+        termination_hours: Optional[int] = None,
     ) -> Union[Dict[str, Any], PodInfo]:
         """Start a new pod on a specific node.
 
@@ -1151,6 +1180,8 @@ class Lium:
                 takes every GPU that is free on the node right now (the whole node when
                 none of it is rented). The API rejects a count above the free GPUs, below
                 the provider's minimum, or on nodes that do not allow splitting.
+            termination_hours: Sent with the rent (1 to 720): the server removes the pod this
+                many hours after it starts, even if this process never gets to schedule it.
 
         Returns:
             Pod metadata as returned by the rent API (id, name, status, ssh command,
@@ -1170,6 +1201,7 @@ class Lium:
             backup_id=backup_id,
             restore_path=restore_path,
             gpu_count=gpu_count,
+            termination_hours=termination_hours,
         )
         if not wait:
             return created
@@ -1199,6 +1231,7 @@ class Lium:
         backup_id: Optional[str],
         restore_path: Optional[str],
         gpu_count: Optional[int] = None,
+        termination_hours: Optional[int] = None,
     ) -> Dict[str, Any]:
         """The rent call itself; :meth:`up` adds the optional wait on top."""
         if sum(x is not None for x in (template_id, image, dockerfile_content)) > 1:
@@ -1245,6 +1278,8 @@ class Lium:
         }
         if gpu_count is not None:
             payload["gpu_count"] = gpu_count
+        if termination_hours is not None:
+            payload["termination_hours"] = termination_hours
 
         # The rent call is not idempotent, so it is never retried blindly. A
         # timeout or a 5xx may have created the pod anyway; look for it before
@@ -1514,7 +1549,8 @@ class Lium:
 
         After server-side scheduling succeeds, removal survives caller exit. A Ctrl-C during the
         rent still finds the pod by name and removes it (then re-raises); a hard kill during rent
-        or scheduling can leave a billable pod without a removal bound. The limits are best
+        or scheduling leaves the pod to the removal sent with the rent (``termination_hours``):
+        the deadline rounded up to whole hours, at most 720, counted by the server from boot. The limits are best
         effort: scheduled removal is processed periodically, so charges can exceed the budget.
 
         Args:
@@ -1618,6 +1654,7 @@ class Lium:
         backup_id: Optional[str] = None,
         restore_path: Optional[str] = None,
         dry_run: bool = False,
+        termination_hours: Optional[int] = None,
     ) -> RentResult:
         """Rent the cheapest available node that satisfies a spec, without listing the fleet.
 
@@ -1645,7 +1682,7 @@ class Lium:
                 Client-side only: a rent-by-spec backend has no such field, so the call is
                 refused there rather than sent with a constraint the server would not check.
             volume_id, ports, ssh_keys, ssh_name, enable_volume_encryption, backup_id,
-                restore_path: as in :meth:`up`.
+                restore_path, termination_hours: as in :meth:`up`.
             dry_run: Choose and price only; nothing is rented and no SSH key is registered
                 with the account. Against a rent-by-spec backend the request still carries
                 your SSH public key (``ssh_keys`` or the configured key: the server validates
@@ -1698,6 +1735,7 @@ class Lium:
             "enable_volume_encryption": enable_volume_encryption,
             "backup_id": backup_id,
             "restore_path": restore_path,
+            "termination_hours": termination_hours,
         }
         if self.supports(RENT_BY_SPEC):
             return self._rent_on_server(spec, rental, dry_run)
@@ -1733,6 +1771,8 @@ class Lium:
             "restore_path": rental["restore_path"],
             "dry_run": dry_run,
         }
+        if rental["termination_hours"] is not None:
+            payload["termination_hours"] = rental["termination_hours"]
         gpu_count = int(spec.get("gpu_count") or 1)
         # A rent is billable and a lost response may have succeeded server-side, so it is sent
         # once, as in `up`; a dry run rents nothing and keeps the retries. Pods that exist before
@@ -1819,6 +1859,7 @@ class Lium:
                 enable_volume_encryption=rental["enable_volume_encryption"],
                 backup_id=rental["backup_id"],
                 restore_path=rental["restore_path"],
+                termination_hours=rental["termination_hours"],
             )
         return RentResult(
             executor=executor,
@@ -2782,12 +2823,14 @@ class Lium:
                 return t
 
     @contextmanager
-    def ssh_connection(self, pod: PodInfo, timeout: int = 30):
+    def ssh_connection(self, pod: PodInfo, timeout: int = 30, deadline: Optional[float] = None):
         """SSH connection context manager.
 
         Args:
             pod: Pod whose SSH metadata is used.
             timeout: Connection timeout in seconds.
+            deadline: A ``time.monotonic()`` instant the whole connect (TCP, banner and every
+                auth attempt) must end by; no wait runs past it (:class:`TimeoutError`).
 
         Yields:
             An active ``paramiko.SSHClient``.
@@ -2813,6 +2856,11 @@ class Lium:
         # The same shape check the OpenSSH path (ssh_argv, pod_ssh_command) applies: only
         # `ssh <user>@<host> [-p <port>]` reaches connect(); anything else is a ValueError here.
         user, host, port = ssh_target(pod.ssh_cmd)
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError(f"no time left to connect to pod {pod.name}")
+            timeout = min(timeout, left)
 
         # Load SSH key
         key = None
@@ -2852,7 +2900,10 @@ class Lium:
             connect_kwargs["key_filename"] = str(self.config.ssh_key_path)
             connect_kwargs["allow_agent"] = True
         try:
-            client.connect(**connect_kwargs)
+            if deadline is None:
+                client.connect(**connect_kwargs)
+            else:
+                _connect_by(client, connect_kwargs, deadline, f"SSH connection to pod {pod.name}")
         except paramiko.BadHostKeyException as e:
             hosts_file = known_hosts_path(pod)
             raise LiumHostKeyError(
@@ -3636,10 +3687,10 @@ class Lium:
         path ending in ``/`` (created if missing), receives the file under its own name.
         ``timeout`` bounds the whole transfer, connecting included (:class:`TimeoutError`).
         """
-        start = time.monotonic()
-        connect_s = 30 if timeout is None else max(1, math.ceil(min(30, timeout / 3)))  # as in download
-        with self.ssh_connection(pod, timeout=connect_s) as client:
-            rest = None if timeout is None else timeout - (time.monotonic() - start)
+        # one deadline for connect, auth and transfer: every wait ends by it
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self.ssh_connection(pod, deadline=deadline) as client:
+            rest = None if deadline is None else deadline - time.monotonic()
             with _transfer_deadline(client, rest, f"upload of {local}"):
                 sftp = client.open_sftp()
                 try:
@@ -3667,11 +3718,9 @@ class Lium:
                 nothing is written locally.
             TimeoutError: The transfer did not finish within ``timeout``.
         """
-        start = time.monotonic()
-        # a third of the time for each of TCP connect, banner and auth, so the handshake fits in it too
-        connect_s = 30 if timeout is None else max(1, math.ceil(min(30, timeout / 3)))
-        with self.ssh_connection(pod, timeout=connect_s) as client:
-            rest = None if timeout is None else timeout - (time.monotonic() - start)
+        deadline = None if timeout is None else time.monotonic() + timeout  # as in scp
+        with self.ssh_connection(pod, deadline=deadline) as client:
+            rest = None if deadline is None else deadline - time.monotonic()
             with _transfer_deadline(client, rest, f"download of {remote}"):
                 sftp = client.open_sftp()
                 try:
@@ -3687,7 +3736,7 @@ class Lium:
                                 total = 0
                                 while chunk := src.read(32768):
                                     total += len(chunk)
-                                    if total > max_bytes:
+                                    if max_bytes is not None and total > max_bytes:
                                         raise ValueError(f"{remote} is larger than the {max_bytes}-byte limit")
                                     dst.write(chunk)
                     except BaseException:
