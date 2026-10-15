@@ -657,7 +657,8 @@ def up_command(
         # generic rent_rejected, the hint replaces the default one, the id is printed under it.
         raise CliFailure(
             exc.code or "rent_rejected",
-            f"Node {executor.huid} could not be rented: {exc}. Run 'lium ps' to check whether a pod was created. "
+            f"Node {executor.huid} {'may or may not be rented' if exc.code == 'rent_outcome_unknown' else 'could not be rented'}: "
+            f"{exc}. Run 'lium ps' to check whether a pod was created. "
             f"Run 'lium ls --format json' for the nodes rentable now.{kept}",
             EXIT_API_ERROR,
             # the server's request_id (DAH-3057) next to the volume the rent leaves behind
