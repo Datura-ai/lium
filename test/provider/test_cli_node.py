@@ -876,6 +876,7 @@ def test_node_address_on_a_portal_without_the_endpoint(patched_build_client, sta
     assert result.exit_code != 0
     assert "this portal does not support address edits yet" in result.output
     assert "wrong UUID" not in result.output
+    assert "node id is fine" not in result.output and "add it again" not in result.output
 
 
 def test_node_address_unknown_node_is_not_reported_as_unsupported(patched_build_client) -> None:
