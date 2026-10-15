@@ -18,14 +18,12 @@ class _Response:
         return self.body
 
 
-def _client(monkeypatch, fail_feedback=False):
+def _client(monkeypatch):
     client = Lium(Config(api_key="test"))
     calls = []
 
     def fake_request(method, endpoint, json=None, **kwargs):
         calls.append((method, endpoint, json))
-        if endpoint.endswith("/feedback") and fail_feedback:
-            raise LiumError("feedback down")
         return _Response({"success": True})
 
     monkeypatch.setattr(client, "_request", fake_request)
@@ -33,15 +31,34 @@ def _client(monkeypatch, fail_feedback=False):
     return client, calls
 
 
-def test_down_sends_feedback_before_the_delete(monkeypatch):
+@pytest.mark.parametrize("outcomes", [
+    ("ok",),
+    ("rejected",),
+    ("rejected", "ok"),
+    ("ok", "in_progress"),
+])
+def test_down_sends_feedback_in_the_delete(monkeypatch, outcomes):
+    # a retried removal must not POST a second rating: the backend records DELETE-body feedback once
     client, calls = _client(monkeypatch)
+    pending = iter(outcomes)
 
-    client.down(SimpleNamespace(id="pod-1"), feedback="slow disk", rating=2)
+    def request(method, endpoint, json=None, **kwargs):
+        calls.append((method, endpoint, json))
+        if method == "DELETE":
+            outcome = next(pending)
+            if outcome == "rejected":
+                raise LiumError("pod is not running")
+        return _Response({"success": True})
 
-    assert calls == [
-        ("POST", "/pods/pod-1/feedback", {"feedback_text": "slow disk", "rating": 2, "reason": "unrent"}),
-        ("DELETE", "/pods/pod-1", None),
-    ]
+    monkeypatch.setattr(client, "_request", request)
+    for _ in outcomes:
+        try:
+            client.down(SimpleNamespace(id="pod-1"), rating=1)
+        except LiumError:
+            pass
+
+    payload = {"feedback_text": "", "rating": 1, "reason": "unrent"}
+    assert calls == [("DELETE", "/pods/pod-1", payload)] * len(outcomes)
 
 
 def test_down_without_feedback_only_deletes(monkeypatch):
@@ -50,15 +67,6 @@ def test_down_without_feedback_only_deletes(monkeypatch):
     client.down(SimpleNamespace(id="pod-1"))
 
     assert calls == [("DELETE", "/pods/pod-1", None)]
-
-
-def test_down_removes_the_pod_when_feedback_fails(monkeypatch):
-    client, calls = _client(monkeypatch, fail_feedback=True)
-
-    result = client.down(SimpleNamespace(id="pod-1"), rating=5)
-
-    assert calls[-1] == ("DELETE", "/pods/pod-1", None)
-    assert result["feedback_error"] == "feedback down"
 
 
 def test_down_refuses_an_out_of_range_rating_before_deleting(monkeypatch):

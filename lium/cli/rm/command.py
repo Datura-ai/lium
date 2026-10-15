@@ -213,7 +213,7 @@ def refuse_without_a_terminal(plan: RemovalPlan, rerun: str) -> NoReturn:
 @click.option("--json", "json_output", is_flag=True, hidden=True, help="Alias for --format json")
 @click.option(
     "--feedback", "feedback",
-    help="Tell Lium how the pod's node went (sent before the pod is removed; never blocks the removal).",
+    help="Tell Lium how the pod's node went (sent with the removal, recorded once; never blocks it).",
 )
 @click.option("--rating", type=click.IntRange(1, 5), help="Rate the pod's node 1-5 (with or without --feedback).")
 @handle_errors
@@ -298,7 +298,6 @@ def rm_command(
     failed_huids = list(result.data.get("failed_huids") or [])
     budget_errors = list(result.data.get("budget_errors") or [])
     budget_huids = list(result.data.get("budget_huids") or [])
-    feedback_errors = dict(result.data.get("feedback_errors") or {})
     not_done = set(failed_huids) | set(budget_huids)
     done_pods = [pod for pod in plan.pods if pod.huid not in not_done]
     removed_huids = [pod.huid for pod in done_pods]
@@ -316,8 +315,6 @@ def rm_command(
             ],
             "failed": failed_huids,
         }
-        if feedback is not None or rating is not None:
-            payload["feedback_failed"] = feedback_errors
         if plan.termination_time:
             payload["termination_time"] = context["termination_time"]
             payload["budget_refused"] = budget_huids
@@ -328,8 +325,6 @@ def rm_command(
         if not plan.termination_time:
             for pod in done_pods:
                 ui.info(display.format_removed_line(pod, spends[pod.huid]))
-        for huid, error in feedback_errors.items():
-            ui.warning(f"Feedback for {huid} was not recorded: {error}")
 
     if budget_errors:
         # A 402 is the key's budget, not a generic failed huid. Print scheduled/failed

@@ -567,6 +567,12 @@ def up_command(
             f"{executor.huid} runs its GPUs at a reduced power limit "
             f"({executor.gpu_power_limit_w} W of {executor.gpu_power_limit_default_w or '?'} W)."
         )
+    if spec:
+        # a --gpu rental selects again at rent time, so the node checked above may not be the one rented
+        ui.notice_warning(
+            "Selection is repeated when renting. The rented node may be Spot, reclaimable at any time "
+            "with no refund, or run its GPUs at a reduced power limit."
+        )
 
     if not yes:
         confirm_msg = (

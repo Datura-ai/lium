@@ -188,7 +188,7 @@ Tell us how the node went in the same call, when it was bad or good — it reach
 lium rm "$POD" --yes --rating 2 --feedback "disk throughput ~50 MB/s, training stalled"
 ```
 
-From Python: `Lium().down(pod, rating=2, feedback="...")`. Over the API: `POST /pods/{id}/feedback` with `{"rating": 1-5, "feedback_text": "...", "reason": "..."}` before `DELETE /pods/{id}`, or the same object as the `DELETE` body.
+From Python: `Lium().down(pod, rating=2, feedback="...")`. Over the API: send the feedback object (`{"rating": 1-5, "feedback_text": "...", "reason": "..."}`) as the body of `DELETE /pods/{id}`. Use `POST /pods/{id}/feedback` to leave feedback without removing the pod.
 
 `lium rm --all --yes` removes every pod on the account; do not use it from a shared account.
 

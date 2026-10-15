@@ -15,20 +15,17 @@ class RemovePodsAction:
         feedback = {k: ctx[k] for k in ("feedback", "rating") if ctx.get(k) is not None}
 
         failed_huids = []
-        feedback_errors = {}
 
         for pod in pods:
             try:
-                result = lium.rm(pod, **feedback)
-                if isinstance(result, dict) and result.get("feedback_error"):
-                    feedback_errors[pod.huid] = result["feedback_error"]
+                lium.rm(pod, **feedback)
             except Exception as e:
                 ui.debug(f"Failed to remove {pod.huid}: {e}")
                 failed_huids.append(pod.huid)
 
         return ActionResult(
             ok=(len(failed_huids) == 0),
-            data={"failed_huids": failed_huids, "feedback_errors": feedback_errors}
+            data={"failed_huids": failed_huids}
         )
 
 
