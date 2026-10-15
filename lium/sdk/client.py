@@ -1972,8 +1972,8 @@ class Lium:
         """The account's pod charges grouped by pod (``GET /billing/statement``), most recently billed first.
 
         Every pod the account was charged for in the period — removed pods included — with ``days``, one
-        entry per ledger row, oldest first; a UTC day can have more than one row (for example when a pod
-        moves to another node or billing stops and resumes). Each pod's ``total`` is what the ledger
+        entry per ledger row, oldest first; a UTC day can have more than one row (for example when billing
+        stops and resumes). Each pod's ``total`` is what the ledger
         debited. ``start_day`` / ``end_day`` are UTC billing days (``YYYY-MM-DD``), both inclusive and
         optional. ``api_key_id`` keeps only the pods rented
         through that key (the rows then carry ``api_key_name``); a server without the
