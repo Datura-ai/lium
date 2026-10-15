@@ -107,7 +107,7 @@ def collect_identity(lium_factory=None) -> Identity:
         return identity
 
     try:
-        # The effective config, so LIUM_BASE_URL / LIUM_PAY_URL apply here as in every other command.
+        # The effective config, so LIUM_BASE_URL applies here as in every other command.
         config = Config.load()
         config.ssh_key_path = key_path
         lium = lium_factory(config)
