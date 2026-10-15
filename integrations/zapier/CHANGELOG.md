@@ -1,3 +1,8 @@
+## 1.0.2
+
+- Rent GPU Pod: the pod name carries a code from the Idempotency Key (`zap-<12 hex>`, or your Pod Name as prefix); a replay finds that pod and returns it with `replayed: true` instead of renting, also after the 24-hour key window.
+- Rent GPU Pod: a 409 for an earlier call that is still running or whose outcome was not recorded stops with a clear error telling you to check your pods before retrying.
+
 ## 1.0.1
 
 - Rent GPU Pod: required Idempotency Key, sent as the `Idempotency-Key` header, so a replayed step returns the first pod (24-hour window). A max price of 0 or an invalid one is refused instead of ignored.

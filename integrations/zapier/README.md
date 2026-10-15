@@ -15,10 +15,12 @@ Built on Lium's public REST API (`https://lium.io/api`, `X-API-KEY` header), the
 | Action  | `terminate_pod`      | Request deletion of a pod (`deletion_requested: true`); teardown may finish asynchronously | `DELETE /pods/{id}` |
 
 **Rent GPU Pod idempotency.** The required Idempotency Key field is sent as the `Idempotency-Key` header. Map a
-value that stays the same when Zapier replays the step, such as the trigger item's ID. Lium keeps a key for 24 hours:
-a replay inside that window returns the first pod instead of renting a second one; a replay after it rents again. A
-replay while the first call is still running, or after a call whose outcome was not recorded, is refused (HTTP 409);
-check your pods before retrying with a new key.
+value that stays the same when Zapier replays the step, such as the trigger item's ID. The pod is named
+`<Pod Name or zap>-<12 hex of sha256(key)>`. Before renting, the action looks for one of your pods with that name and
+returns it (`replayed: true`) instead of renting again, which covers a replay at any age while that pod still exists.
+Lium also keeps the key for 24 hours, so a replay in that window returns the first pod even if the listing missed it.
+If an earlier call with the key is still running, or its outcome was not recorded, Lium answers 409 and the step stops
+with an error asking you to check your pods before retrying.
 
 ## Develop
 
