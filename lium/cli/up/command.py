@@ -647,15 +647,15 @@ def up_command(
             )
 
     # Uploaded after the confirmation, so a declined prompt sends nothing, and only while the
-    # budget lasts: a spent budget sends nothing either. The check after it counts the upload.
+    # budget lasts: a spent budget sends nothing either. A finished upload always goes on to the
+    # rent, so an upload that crossed the deadline never leaves source behind with no pod (review).
     # The API keeps the context for a limited time only.
     build_context_sha256 = None
+    _check_deadline()
     if archive is not None:
-        _check_deadline()
         build_context_sha256 = ui.load(
             f"Uploading build context ({len(archive) // 1024} KiB)", lambda: lium.upload_build_context(archive)
         )
-    _check_deadline()
 
     ui.dim(f"renting {executor.huid}…")
     action = RentPodAction()

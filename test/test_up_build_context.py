@@ -210,7 +210,7 @@ def test_rent_pod_action_passes_the_build_context_to_up():
 @pytest.mark.parametrize("answer", ["--yes", "declined", "expired", "slow-upload"])
 def test_up_command_uploads_the_dockerfiles_directory_when_the_backend_takes_it(monkeypatch, tmp_path, answer):
     # Arrange: a declined confirmation or a spent --timeout must send nothing; an upload that
-    # spends the rest of the budget must not reach the rent
+    # spends the rest of the budget still goes on to the rent, so its source is not orphaned
     _tree(tmp_path, {"app.py": "print('hi')\n", "secrets.env": "x", ".dockerignore": "*.env\n"})
     dockerfile = tmp_path / "Dockerfile"
     dockerfile.write_text("FROM python:3.12-slim\nCOPY app.py /app/app.py\n")
@@ -256,8 +256,8 @@ def test_up_command_uploads_the_dockerfiles_directory_when_the_backend_takes_it(
         assert uploads == [] and "ctx" not in captured
         assert f"Uploads {tmp_path.resolve()} as the build context" in prompts[0]
         return
-    if answer in ("expired", "slow-upload"):
-        assert len(uploads) == (0 if answer == "expired" else 1) and "ctx" not in captured
+    if answer == "expired":
+        assert uploads == [] and "ctx" not in captured
         assert result.exit_code == 1 and "ran out before renting" in result.output
         return
     assert captured["ctx"]["build_context_sha256"] == "ab" * 32
