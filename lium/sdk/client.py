@@ -4213,7 +4213,7 @@ class Lium:
 
         Like every pay call here it goes to the main Lium API with the caller's own
         key; the pay API's calls go through the backend's ``/tao/pay`` proxy, which
-        holds the pay API's key (sec-audit-1012-4).
+        holds the pay API's key.
         """
         create_transfer_response = self._request(
             "POST", "/tao/create-transfer", json={"amount": 10}
