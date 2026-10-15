@@ -447,6 +447,7 @@ def update_address(ctx: click.Context, node_id: str, ip_address: str, port: int)
             e = ProviderError(
                 "this portal does not support address edits yet",
                 code=PORTAL_NOT_FOUND,
+                hint="the node id is fine; until the portal ships it, remove the node and add it again",
                 context=e.context,
             )
         ctx.exit(handle_provider_error(ctx, e))
