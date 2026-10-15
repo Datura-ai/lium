@@ -237,7 +237,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium templates [SEARCH] [--arch hopper|blackwell] [--format json]` - List Docker templates with the CUDA build and the GPU generations it runs on
 - `lium fund` - Fund account with TAO from your wallet (`--alpha -k <hotkey> -a <USD>` pays with alpha stake instead; add `--netuid <N>` to pay from any subnet Lium accepts, the primary subnet otherwise)
 - `lium topup create -a <USD> -c <COIN> -n <NETWORK>` - Top up with a stablecoin (`lium topup currencies` lists them)
-- `lium topup card -a <USD> [--card <pm_id>] [--yes]` - Charge a card saved on the account, with no browser; the API key needs the `billing` scope (not released: the platform switch is off). Asks first; `--yes` skips the question and `--json` needs it. Sent once with an idempotency key; a lost answer or a 202 without a payment_intent_id exits 6 ("the charge may have gone through" / "still being confirmed") with the key and the same amount to re-run with, never a bare retry. A 202 with a payment_intent_id is success (exit 0). The same key with a different amount is a new charge
+- `lium topup card -a <USD> [--card <pm_id>] [--yes]` - Charge a card saved on the account, with no browser; the API key needs the `billing` scope (not released: the platform switch is off). Asks first; `--yes` skips the question and `--json` needs it. Sent once with an idempotency key; a lost answer or a 202 without a payment_intent_id exits 6 ("the charge may have gone through" / "still being confirmed") with the key and the same amount to re-run with, never a bare retry. A 202 with a payment_intent_id is success (exit 0). The same key with a different amount is a new charge. A 3-D Secure step-up (`CARD_AUTHENTICATION_REQUIRED` with a URL) exits 6 with the URL to confirm at, the transaction id and the exact re-run with the same `--idempotency-key`; a new key would open a second payment
 - `lium ssh-keys list|sync` - SSH public keys registered on the account
 
 `ls`, `ps`, `spend`, `templates`, `balance` and `describe` all accept `--format json` (and `--json`); `rm` accepts `--format json`; `up` accepts `--json`. All of them print a JSON error envelope on stderr when the command fails, so the same flag works across commands in scripts.
@@ -246,7 +246,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 
 - `lium volumes list` - List all volumes
 - `lium volumes new <NAME>` - Create a new volume
-- `lium volumes rm <VOLUME>` - Remove a volume
+- `lium volumes rm <INDICES>` - Remove volumes by their row numbers in the last `lium volumes` list (`1` or `1,3`); the list must come from the same shell and be under 10 minutes old, or the command asks you to list again
 
 ### Cluster Commands
 
@@ -366,6 +366,9 @@ lium mine --auto --hotkey <HOTKEY>
 curl -fsSL https://lium.io/mine.sh | bash -s -- --register <TOKEN>
 lium mine --register <TOKEN> --wait 0          # add the node, do not wait for the validator
 
+# Node behind CGNAT or a port-forwarding VPS: register the VPS address and forwarded port
+lium mine --auto --hotkey <HOTKEY> --ip <VPS_IP> --external-port <FORWARDED_PORT> --internal-port 8080
+
 # Provider-portal automation (same surface as the portal frontend)
 lium config set provider.coldkey miner-prod        # one-time: persist wallet identity
 lium config set provider.hotkey  miner-1
@@ -444,7 +447,7 @@ lium update my-pod --jupyter 8888
 # Manage volumes
 lium volumes list
 lium volumes new mydata --desc "My dataset"
-lium volumes rm <VOLUME_HUID>
+lium volumes rm 1                              # row 1 of the list above (same shell, under 10 minutes old)
 
 # Multi-node clusters
 lium clusters                                  # fabrics with free nodes

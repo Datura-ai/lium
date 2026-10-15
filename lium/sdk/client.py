@@ -48,7 +48,9 @@ from .exceptions import (
     LiumRateLimitError,
     LiumScopeError,
     LiumServerError,
+    LiumRentOutcomeUnknownError,
     PodStartError,
+    RemoteExecutionError,
 )
 from .bounded_job import JobResult, run_job
 from .jobs import (
@@ -105,10 +107,6 @@ IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # provider portal, signup (DAH-3543); `_MAX_REDIRECTS` stays as the name the tests read.
 _MAX_REDIRECTS = MAX_REDIRECTS
 
-
-# Public API key for the pay API (pay-tao-api-v2). Single source of truth so the
-# literal is not re-typed across every pay-API call site.
-_PAY_API_KEY = "6RhXQ788J9BdnqeLua8z7ZSkXBDahclxhwjMB17qW1M"
 
 # Set LIUM_SSH_INSECURE=1 to restore the old behaviour (accept any host key, never pin).
 _SSH_INSECURE_ENV = "LIUM_SSH_INSECURE"
@@ -338,6 +336,9 @@ def _response_error_code(response: requests.Response) -> Optional[str]:
 CARD_TOPUP_ERROR_CODES = frozenset(
     {
         "CARD_AUTHENTICATION_REQUIRED",
+        "CARD_AUTHENTICATION_NOT_COMPLETED",
+        "CARD_AUTHENTICATION_UNAVAILABLE",
+        "CARD_AUTHENTICATION_EXPIRED",
         "CARD_DECLINED",
         "NO_SAVED_CARD",
         "NO_DEFAULT_CARD",
@@ -346,6 +347,9 @@ CARD_TOPUP_ERROR_CODES = frozenset(
 )
 # 502s from the same route that fire before Stripe is asked to charge (or that Stripe refused
 # before processing). A 5xx without one of these still means the charge may have gone through.
+# Not `TOP_UP_BUSY`: that 503 only says this attempt submitted nothing; a same-key repeat after an
+# open step-up or a lost answer can still find that earlier payment going through, so it stays an
+# unknown outcome that carries the key.
 CARD_TOPUP_NOT_CHARGED_CODES = frozenset({"STRIPE_UNAVAILABLE", "STRIPE_REFUSED"})
 
 CHECKOUT_SUCCESS_PATH = "/billing?success=true"
@@ -356,7 +360,9 @@ CREDIT_EPSILON_USD = 0.005
 
 def card_topup_error(response: requests.Response, **context: Optional[str]) -> LiumCardTopUpError:
     """The exception for a card top-up 402: the server's sentence as the message, and the fields
-    of its structured body (``status``, ``decline_code``, ``dashboard_url``, ``payment_intent_id``)."""
+    of its structured body (``status``, ``decline_code``, ``dashboard_url``, ``payment_intent_id``,
+    and on a 3-D Secure step-up ``transaction_id`` and ``next_action_url``). The body does not carry
+    the idempotency key; :meth:`Lium.topup_card` sets the one it sent."""
     try:
         payload = response.json()
     except ValueError:
@@ -373,6 +379,8 @@ def card_topup_error(response: requests.Response, **context: Optional[str]) -> L
         decline_code=text(detail.get("decline_code")),
         dashboard_url=text(detail.get("dashboard_url")),
         payment_intent_id=text(detail.get("payment_intent_id")),
+        transaction_id=text(detail.get("transaction_id")),
+        next_action_url=text(detail.get("next_action_url")),
         **context,
     )
 
@@ -1262,9 +1270,20 @@ class Lium:
             if existing:
                 return existing
             time.sleep(1)
-            response = self._request(
-                "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
-            ).json()
+            try:
+                response = self._request(
+                    "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
+                ).json()
+            except LiumError as exc:
+                # Any failure of the repeat (auth, permission, 429, 5xx, a plain refusal) does not undo
+                # the first POST, which may still be running.
+                raise LiumRentOutcomeUnknownError(
+                    f"The first rent request got no answer and its repeat was refused ({exc}); a pod may still appear. "
+                    "Run 'lium ps' before renting again.",
+                    code="rent_outcome_unknown",
+                    hint="Do not rent again until 'lium ps' shows whether the first request created a pod.",
+                    request_id=exc.request_id,
+                ) from exc
 
         # API should return pod info
         if response and "id" in response:
@@ -1480,7 +1499,7 @@ class Lium:
         name: Optional[str] = None,
         boot_timeout: float = 600,
         output_reserve_s: float = 120,
-        max_output_bytes: int = 16 << 20,
+        output_tail_bytes: int = 16 << 20,
         max_download_bytes: int = 10 << 30,
         **rent_kwargs: Any,
     ) -> JobResult:
@@ -1510,7 +1529,8 @@ class Lium:
                 call's pod matches it when a lost rent response is looked up.
             boot_timeout: Seconds to wait for the pod to become ready (never past the limits).
             output_reserve_s: Seconds kept back from the command for copying outputs.
-            max_output_bytes: Keep the last this many bytes of stdout and of stderr each (16 MiB).
+            output_tail_bytes: Keep the last this many bytes of stdout and of stderr each (16 MiB;
+                ``0`` keeps none). The timeout check does not depend on it.
             max_download_bytes: Refuse an output file past this size (10 GiB); it is reported
                 in ``missing_outputs``.
             **rent_kwargs: Any other :meth:`rent` constraint (``max_price_per_gpu_hour``,
@@ -1533,7 +1553,7 @@ class Lium:
             self, command=command, gpu_type=gpu_type, max_cost_usd=max_cost_usd, deadline_s=deadline_s,
             gpu_count=gpu_count, inputs=inputs, outputs=outputs, env=env, name=name,
             boot_timeout=boot_timeout, output_reserve_s=output_reserve_s,
-            max_output_bytes=max_output_bytes, max_download_bytes=max_download_bytes, **rent_kwargs,
+            output_tail_bytes=output_tail_bytes, max_download_bytes=max_download_bytes, **rent_kwargs,
         )
 
     def _pod_ids_or_none(self) -> Optional[frozenset]:
@@ -1892,13 +1912,23 @@ class Lium:
             >>> lium.edit(pod_id, startup_commands="python main.py", environment={"DEBUG": "1"})
         """
         pod = self.pod(pod_id=pod_id)
+        template_id = pod["template"]["id"]
+        # The pod row's template omits docker_credential_id, supports_docker, ...; the PUT writes every
+        # field it is given, so the base is the template row itself. Its NULL columns (volumes, environment,
+        # entrypoint on most older templates) are dropped: the PUT accepts none of them as null.
+        template = self._request("GET", f"/templates/{template_id}").json()
 
         payload = {
-            **pod["template"],
+            **{k: v for k, v in template.items() if v is not None},
             **kwargs,
         }
+        # Public pod templates are temporary, but the PUT requires temporary templates to be private.
+        # Keep a true one_time_template: omitting it resets the backend's cleanup flag.
+        payload.pop("is_temporary", None)
+        if not payload.get("one_time_template"):
+            payload.pop("one_time_template", None)
 
-        result = self._request("PUT", f"/templates/{pod['template']['id']}", json=payload).json()
+        result = self._request("PUT", f"/templates/{template_id}", json=payload).json()
         # The backend routes this PUT into a container reboot (pod_service.edit_pod ->
         # reboot_rental_container), so the pod's SSH host key changes with it.
         forget_host_key(pod_id)
@@ -2065,9 +2095,11 @@ class Lium:
     ) -> Dict[str, Any]:
         """The account's pod charges grouped by pod (``GET /billing/statement``), most recently billed first.
 
-        Every pod the account was charged for in the period — removed pods included — with per-UTC-day
-        rows; each pod's ``total`` is what the ledger debited. ``start_day`` / ``end_day`` are UTC billing
-        days (``YYYY-MM-DD``), both inclusive and optional. ``api_key_id`` keeps only the pods rented
+        Every pod the account was charged for in the period — removed pods included — with ``days``, one
+        entry per ledger row, oldest first; a UTC day can have more than one row (for example when billing
+        stops and resumes). Each pod's ``total`` is what the ledger
+        debited. ``start_day`` / ``end_day`` are UTC billing days (``YYYY-MM-DD``), both inclusive and
+        optional. ``api_key_id`` keeps only the pods rented
         through that key (the rows then carry ``api_key_name``); a server without the
         filter ignores it. Returns the server's ``{"start_day", "end_day", "total", "pods": [...]}``.
         A key needs the ``read`` scope.
@@ -2686,6 +2718,31 @@ class Lium:
             return None
         return sorted({t for t in (extract_gpu_type(n) for n in names) if re.fullmatch(r"[A-Z]*\d{2,4}[A-Z]*", t)})
 
+    def request_machine(self, gpu: str, count: Optional[int] = None) -> Dict[str, Any]:
+        """Ask providers for a GPU type that is sold out (``POST /machine-requests``).
+
+        ``gpu`` is a short type (``B300``, ``4090``) or a full catalog name. The providers who
+        list that type are told, and the request shows in ``lium.io/machine-requests``. A short
+        type that covers several catalog names must be given by one of them.
+
+        Returns:
+            The API's answer: ``provider_notified_count`` and, when present, ``confirmation``.
+        """
+        names = sorted(name for name in self.gpu_types() if name)
+        if gpu in names:
+            machine_name = gpu
+        else:
+            matches = [name for name in names if gpu_short_matches(gpu, extract_gpu_type(name))]
+            if not matches:
+                raise ValueError(f"No GPU type matches '{gpu}'")
+            if len(matches) > 1:
+                raise ValueError(f"'{gpu}' covers several GPU types; name one: {', '.join(matches)}")
+            machine_name = matches[0]
+        payload: Dict[str, Any] = {"machine_name": machine_name}
+        if count:
+            payload["gpu_count"] = count
+        return self._request("POST", "/machine-requests", json=payload).json()
+
     def get_template(self, template_id: str) -> Optional[Template]:
         """Fetch a template by ID/HUID/name.
 
@@ -2781,6 +2838,9 @@ class Lium:
             "port": port,
             "username": user,
             "timeout": timeout,
+            # paramiko's banner (15s) and auth (30s) waits are separate; keep them inside timeout
+            "banner_timeout": min(15, timeout),
+            "auth_timeout": timeout,
             "look_for_keys": False,
         }
         if key:
@@ -2875,7 +2935,7 @@ class Lium:
         timeout: Optional[float] = None,
         detach: bool = False,
         log_path: Optional[str] = None,
-        max_output_bytes: Optional[int] = None,
+        output_tail_bytes: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Execute a shell command on a pod over SSH.
 
@@ -2899,9 +2959,10 @@ class Lium:
             log_path: Log file for ``detach`` (default
                 ``/workspace/logs/exec-<UTC timestamp>-<id>.log``, the ``<id>`` a
                 6-hex tail that keeps two launches in the same second apart).
-            max_output_bytes: Keep only the last this many bytes of stdout and of stderr
-                each; the rest is read and dropped while the command runs, and ``truncated``
-                is ``True`` in the result. ``timeout`` then also bounds reading the
+            output_tail_bytes: Keep only the last this many bytes of stdout and of stderr
+                each (``0`` keeps none); the rest is read and dropped while the command runs,
+                and ``truncated`` is ``True`` in the result. The call still succeeds: this
+                keeps a tail, it is not a limit that fails the call. ``timeout`` then also bounds reading the
                 output, so a host that never stops sending cannot hold the call.
 
         Returns:
@@ -2909,9 +2970,11 @@ class Lium:
             ``detach`` a dict with ``pid``, ``log_path`` and ``command``.
 
         Raises:
-            ValueError: an ``env`` name is not a shell identifier. Raised before
-                the connection is opened, so nothing reaches the pod.
+            ValueError: an ``env`` name is not a shell identifier, or ``output_tail_bytes``
+                is negative. Raised before the connection is opened, so nothing reaches the pod.
         """
+        if output_tail_bytes is not None and output_tail_bytes < 0:
+            raise ValueError(f"output_tail_bytes must be 0 or more, got {output_tail_bytes!r}")
         if log_path is not None and not detach:
             raise ValueError("log_path only applies with detach=True")
         if detach:
@@ -2931,8 +2994,8 @@ class Lium:
             # and this call has no stdin to give it.
             stdin.close()
             channel = stdout.channel
-            if max_output_bytes is not None:
-                return self._drain_capped(channel, max_output_bytes, timeout, pod, command)
+            if output_tail_bytes is not None:
+                return self._drain_capped(channel, output_tail_bytes, timeout, pod, command)
             if timeout is not None:
                 deadline = time.monotonic() + timeout
                 while not channel.exit_status_ready():
@@ -2966,7 +3029,7 @@ class Lium:
                     kept[key] += data
                     if len(kept[key]) > cap:  # the tail: an error, or the timeout marker, comes last
                         truncated = True
-                        del kept[key][:-cap]
+                        del kept[key][: len(kept[key]) - cap]  # not [:-cap]: cap 0 would keep all
             if not moved and channel.exit_status_ready() and channel.eof_received:
                 break
             if deadline is not None and time.monotonic() >= deadline:
@@ -3245,6 +3308,7 @@ class Lium:
         command: str,
         env: Optional[Dict[str, str]] = None,
         pty: bool = True,
+        check: bool = False,
     ) -> Generator[Dict[str, str], None, int]:
         """Execute a shell command and stream incremental output.
 
@@ -3255,17 +3319,24 @@ class Lium:
             pty: Request a pseudo-terminal (default). A pty merges stderr into stdout
                 and turns ``\n`` into ``\r\n``; pass ``False`` to keep the two
                 streams apart, as :func:`lium.machine` does to relay a function's output.
+            check: Raise :class:`RemoteExecutionError` when the command exits
+                non-zero, after its last chunk, so a plain ``for`` loop fails
+                with the command instead of finishing silently.
 
         Yields:
             Streaming output chunks as ``{"type": "stdout"|"stderr", "data": str}``.
 
         Returns:
             The command's exit status (the generator's ``StopIteration.value``).
+
+        Raises:
+            RemoteExecutionError: with ``check=True``, the command exited non-zero;
+                ``exit_code`` holds the status.
         """
-        command = self._prep_command(command, env)
+        remote_command = self._prep_command(command, env)  # ``command`` alone goes in errors: no env values
 
         with self.ssh_connection(pod) as client:
-            stdin, stdout, stderr = client.exec_command(command, get_pty=pty)
+            stdin, stdout, stderr = client.exec_command(remote_command, get_pty=pty)
             stdin.close()
 
             channel = stdout.channel
@@ -3294,7 +3365,13 @@ class Lium:
                         tail = decoder.decode(b"", final=True)
                         if tail:
                             yield {"type": kind, "data": tail}
-                    return channel.recv_exit_status()
+                    exit_code = channel.recv_exit_status()
+                    if check and exit_code != 0:
+                        raise RemoteExecutionError(
+                            f"Command exited with status {exit_code} on pod {pod.name or pod.huid}: {command}",
+                            exit_code=exit_code,
+                        )
+                    return exit_code
                 time.sleep(0.05)  # nothing pending: do not spin at 100% CPU until the command ends
 
     def exec_all(
@@ -3560,7 +3637,7 @@ class Lium:
         ``timeout`` bounds the whole transfer, connecting included (:class:`TimeoutError`).
         """
         start = time.monotonic()
-        connect_s = 30 if timeout is None else max(1, math.ceil(min(30, timeout)))
+        connect_s = 30 if timeout is None else max(1, math.ceil(min(30, timeout / 3)))  # as in download
         with self.ssh_connection(pod, timeout=connect_s) as client:
             rest = None if timeout is None else timeout - (time.monotonic() - start)
             with _transfer_deadline(client, rest, f"upload of {local}"):
@@ -3586,27 +3663,39 @@ class Lium:
 
         Raises:
             ValueError: If SSH is not configured for the pod, or the file passes ``max_bytes``.
+            IsADirectoryError: If ``remote`` is a directory (SFTP copies one file);
+                nothing is written locally.
             TimeoutError: The transfer did not finish within ``timeout``.
         """
-        if max_bytes is None and timeout is None:
-            with self.ssh_connection(pod) as client:
-                sftp = client.open_sftp()
-                sftp.get(remote, local)
-                sftp.close()
-            return
         start = time.monotonic()
-        connect_s = 30 if timeout is None else max(1, math.ceil(min(30, timeout)))
+        # a third of the time for each of TCP connect, banner and auth, so the handshake fits in it too
+        connect_s = 30 if timeout is None else max(1, math.ceil(min(30, timeout / 3)))
         with self.ssh_connection(pod, timeout=connect_s) as client:
             rest = None if timeout is None else timeout - (time.monotonic() - start)
             with _transfer_deadline(client, rest, f"download of {remote}"):
                 sftp = client.open_sftp()
-                with sftp.open(remote, "rb") as src, open(local, "wb") as dst:
-                    total = 0
-                    while chunk := src.read(32768):
-                        total += len(chunk)
-                        if max_bytes is not None and total > max_bytes:
-                            raise ValueError(f"{remote} is larger than the {max_bytes}-byte limit")
-                        dst.write(chunk)
+                try:
+                    # sftp.get creates the local file before it reads the remote one, so check first.
+                    if stat.S_ISDIR(sftp.stat(remote).st_mode):
+                        raise IsADirectoryError(f"{remote} is a directory on the pod; download copies one file")
+                    existed = os.path.lexists(local)  # lexists: a dangling symlink is the user's too
+                    try:
+                        if max_bytes is None and timeout is None:
+                            sftp.get(remote, local)
+                        else:  # chunked, so the size limit and the deadline's close cut it mid-file
+                            with sftp.open(remote, "rb") as src, open(local, "wb") as dst:
+                                total = 0
+                                while chunk := src.read(32768):
+                                    total += len(chunk)
+                                    if total > max_bytes:
+                                        raise ValueError(f"{remote} is larger than the {max_bytes}-byte limit")
+                                    dst.write(chunk)
+                    except BaseException:
+                        if not existed:  # never leave a partial or 0-byte file behind, never delete the user's own file
+                            Path(local).unlink(missing_ok=True)
+                        raise
+                finally:
+                    sftp.close()
 
     def upload(self, pod: PodInfo, *, local: str, remote: str, timeout: Optional[float] = None) -> None:
         """Upload a file to a pod via SFTP.
@@ -4238,14 +4327,11 @@ class Lium:
         Returns:
             Raw wallet records returned by the pay API.
         """
-        user = self._request("GET", "/users/me").json()
-        pay_headers = {"X-API-KEY": _PAY_API_KEY}
-        resp = self._request(
-            "GET",
-            f"/wallet/available-wallets/{user['stripe_customer_id']}",
-            base_url=self.config.base_pay_url,
-            headers=pay_headers,
-        )
+        customer_id = self._request("GET", "/users/me").json()["stripe_customer_id"]
+        # No Stripe customer yet means no wallets; the backend refuses an empty id with a 400.
+        if not customer_id:
+            return []
+        resp = self._request("GET", f"/tao/pay/wallet/available-wallets/{customer_id}")
         return resp.json()
 
     def _create_transfer_app_credentials(self) -> tuple[str, str]:
@@ -4255,10 +4341,9 @@ class Lium:
         share, so the alpha flow never issues more than one ``/tao/create-transfer``
         round-trip.
 
-        Note the deliberate HTTP shape: this call uses the DEFAULT ``base_url`` (the
-        main Lium API) and NO pay ``X-API-KEY`` header — unlike the pay-API calls
-        (:meth:`wallets`, :meth:`convert_alpha`, :meth:`company_wallet`). Do not
-        "harmonize" it onto ``base_pay_url`` / the pay key; that returns 401/404.
+        Like every pay call here it goes to the main Lium API with the caller's own
+        key; the pay API's calls go through the backend's ``/tao/pay`` proxy, which
+        holds the pay API's key (sec-audit-1012-4).
         """
         create_transfer_response = self._request(
             "POST", "/tao/create-transfer", json={"amount": 10}
@@ -4291,18 +4376,13 @@ class Lium:
         Raises:
             LiumError: If verification or wallet polling fails.
         """
-        pay_headers = {"X-API-KEY": _PAY_API_KEY}
-        access_key = self._request(
-            "GET", "/token/generate", base_url=self.config.base_pay_url, headers=pay_headers
-        ).json()["access_key"]
+        access_key = self._request("GET", "/tao/pay/token/generate").json()["access_key"]
         sig = bt_wallet.coldkey.sign(access_key.encode()).hex()
         app_id, stripe_customer_id = self._create_transfer_app_credentials()
 
         verify_response = self._request(
             "POST",
-            "/token/verify",
-            base_url=self.config.base_pay_url,
-            headers=pay_headers,
+            "/tao/pay/token/verify",
             json={
                 "coldkey_address": bt_wallet.coldkeypub.ss58_address,
                 "access_key": access_key,
@@ -4329,9 +4409,7 @@ class Lium:
         """
         resp = self._request(
             "GET",
-            "/balance/alpha/subnets",
-            base_url=self.config.base_pay_url,
-            headers={"X-API-KEY": _PAY_API_KEY},
+            "/tao/pay/balance/alpha/subnets",
         ).json()
         return AlphaSubnets(
             subnets=tuple(
@@ -4355,15 +4433,12 @@ class Lium:
         and a subnet that is not accepted (400) to a ``LiumError``, so the funding
         stops before any transfer is sent.
         """
-        pay_headers = {"X-API-KEY": _PAY_API_KEY}
         params = {"amount": str(usd)}
         if netuid is not None:
             params["netuid"] = str(netuid)
         resp = self._request(
             "GET",
-            "/balance/convert/alpha",
-            base_url=self.config.base_pay_url,
-            headers=pay_headers,
+            "/tao/pay/balance/convert/alpha",
             params=params,
         ).json()
         return AlphaQuote(
@@ -4382,9 +4457,7 @@ class Lium:
         """
         resp = self._request(
             "GET",
-            "/wallet/company/",
-            base_url=self.config.base_pay_url,
-            headers={"X-API-KEY": _PAY_API_KEY},
+            "/tao/pay/wallet/company/",
             params={"app_id": app_id},
         ).json()
         return resp["wallet_hash"]
@@ -4424,6 +4497,35 @@ class Lium:
         
         response = self._request("POST", "/backup-configs", json=payload).json()
         
+        return self._dict_to_backup_config(response)
+
+    def backup_update(
+        self,
+        config_id: str,
+        *,
+        path: str,
+        frequency_hours: int,
+        retention_days: int,
+    ) -> BackupConfig:
+        """Replace the schedule of an existing backup configuration in place.
+
+        A refused update leaves the old configuration as it was.
+
+        Args:
+            config_id: Backup configuration identifier.
+            path: Explicit filesystem path inside the pod volume to back up.
+            frequency_hours: Backup interval in hours.
+            retention_days: Retention period in days.
+
+        Returns:
+            Updated :class:`BackupConfig`.
+        """
+        payload = {
+            "backup_frequency_hours": frequency_hours,
+            "retention_days": retention_days,
+            "backup_path": path,
+        }
+        response = self._request("PUT", f"/backup-configs/{quote(str(config_id), safe='')}", json=payload).json()
         return self._dict_to_backup_config(response)
 
     def backup_now(
@@ -4811,9 +4913,12 @@ class Lium:
             never a second charge. Do not repeat the call without the key.
 
         Raises:
-            LiumCardTopUpError: the bank wants a confirmation (``CARD_AUTHENTICATION_REQUIRED``,
-                see ``dashboard_url``), declined the card (``CARD_DECLINED``), or no card is
-                saved / none is the default. Nothing was charged.
+            LiumCardTopUpError: the bank wants a confirmation (``CARD_AUTHENTICATION_REQUIRED``),
+                declined the card (``CARD_DECLINED``), or no card is saved / none is the default.
+                Nothing was charged. ``idempotency_key`` on the error is the key sent. With
+                ``next_action_url`` (``is_step_up``) the payment is still open: the cardholder
+                confirms there and the balance is credited; repeat only with that same key
+                (``transaction_id`` names the row), never a new one, which opens a second payment.
             LiumChargeOutcomeUnknownError: the answer was lost (timeout, dropped connection,
                 5xx) after the charge was posted — it may have gone through. Check the balance
                 before trying again; ``idempotency_key`` on the error repeats it safely.
@@ -4828,6 +4933,10 @@ class Lium:
             payload["payment_method_id"] = payment_method_id
         try:
             body = self._request("POST", "/payments/topup", json=payload).json()
+        except LiumCardTopUpError as exc:
+            # the 402 body does not echo the key; a step-up must be followed with this one, not a new one
+            exc.idempotency_key = exc.idempotency_key or key
+            raise
         except LiumServerError as exc:
             # retrieve/list 502s, or a Stripe refusal before processing: the card was not touched
             if exc.code in CARD_TOPUP_NOT_CHARGED_CODES:

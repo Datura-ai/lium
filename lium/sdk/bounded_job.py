@@ -113,7 +113,7 @@ def run_job(
     name: Optional[str] = None,
     boot_timeout: float = 600,
     output_reserve_s: float = 120,
-    max_output_bytes: int = 16 << 20,
+    output_tail_bytes: int = 16 << 20,
     max_download_bytes: int = 10 << 30,
     **rent_kwargs: Any,
 ) -> JobResult:
@@ -122,6 +122,8 @@ def run_job(
         raise ValueError(f"max_cost_usd must be positive, got {max_cost_usd!r}")
     if deadline_s <= 0:
         raise ValueError(f"deadline_s must be positive, got {deadline_s!r}")
+    if output_tail_bytes < 0 or max_download_bytes < 0:
+        raise ValueError("output_tail_bytes and max_download_bytes must be 0 or more")
     refused = {"name", "dry_run"} & set(rent_kwargs)
     if refused:
         raise TypeError(f"run_job() does not take {sorted(refused)}")
@@ -189,8 +191,13 @@ def run_job(
             f"if grep -q '^timeout: sending signal' \"$f\"; then echo {shlex.quote(_TIMED_OUT_MARK)} >&2; "
             f"else cat \"$f\" >&2; fi; rm -f \"$f\"; exit $rc; }}"
         )
+        mark = _TIMED_OUT_MARK + "\n"
         try:
-            run = lium.exec(pod, command=remote, env=env, timeout=run_s + 30, max_output_bytes=max_output_bytes)
+            # the marker always fits in what exec keeps, whatever the caller's tail; cut to that tail below
+            run = lium.exec(
+                pod, command=remote, env=env, timeout=run_s + 30,
+                output_tail_bytes=max(output_tail_bytes, len(mark)),
+            )
         except TimeoutError as exc:
             result.status, result.error = stopped_by, str(exc)
         except Exception as exc:  # noqa: BLE001 - e.g. SSH dropped: the outputs below still matter
@@ -198,12 +205,13 @@ def run_job(
         else:
             result.exit_code = run.get("exit_code")
             result.stdout, result.stderr = run.get("stdout", ""), run.get("stderr", "") or ""
-            mark = _TIMED_OUT_MARK + "\n"
             timed_out = result.exit_code in _TIMEOUT_EXITS and result.stderr.endswith(mark)
             if timed_out:
                 result.stderr = result.stderr[: -len(mark)]
-            if run.get("truncated"):
-                result.error = f"stdout/stderr cut to their last {max_output_bytes} bytes each"
+            cut = [_tail(text, output_tail_bytes) for text in (result.stdout, result.stderr)]
+            if run.get("truncated") or cut != [result.stdout, result.stderr]:
+                result.stdout, result.stderr = cut
+                result.error = f"stdout/stderr cut to their last {output_tail_bytes} bytes each"
             if result.exit_code == 0:
                 result.status = SUCCEEDED
             elif timed_out:
@@ -264,6 +272,12 @@ def _bounded(transfer, seconds: float, what: str) -> None:
         raise TimeoutError(f"the {what} did not finish within {seconds:.0f}s")
     if "exc" in box:
         raise box["exc"]
+
+
+def _tail(text: str, size: int) -> str:
+    """The last ``size`` bytes of ``text`` (UTF-8); a character split at the cut is dropped."""
+    raw = text.encode("utf-8")
+    return text if len(raw) <= size else raw[len(raw) - size:].decode("utf-8", errors="ignore")
 
 
 def _rent_may_exist(exc: BaseException) -> bool:

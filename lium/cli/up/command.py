@@ -12,6 +12,7 @@ from lium.sdk import (
     LiumError,
     LiumPermissionError,
     LiumRateLimitError,
+    LiumRentOutcomeUnknownError,
     LiumServerError,
     PodStartError,
 )
@@ -194,7 +195,7 @@ def _post_rent_failure(exc: Exception, billing_pod: dict, doing: str, note: str 
 @click.option("--dockerfile", type=click.Path(exists=True, dir_okay=False, readable=True), help="Path to a Dockerfile to build the pod image from (custom build; mutually exclusive with --image/--template_id)")
 @click.option("-e", "--env", multiple=True, help="Environment variables (KEY=VALUE), can be repeated")
 @click.option("--entrypoint", default="", help="Container entrypoint")
-@click.option("--cmd", default="", help="Command to run in the container")
+@click.option("--cmd", default="", help="Command that keeps the container running. Base images (pytorch/pytorch, nvidia/cuda, ubuntu) need 'sleep infinity'")
 @click.option("--ssh-name", default=None, help="Name to register a new SSH key under (default: cli-<user>@<hostname>)")
 @click.option(
     "--volume-encryption/--no-volume-encryption",
@@ -630,7 +631,7 @@ def up_command(
                 "gpu_count": requested_gpu_count,
             })
         )
-    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, LiumRentOutcomeUnknownError) as exc:
         # The API did not answer the rent request. Whether a pod was created is unknown, so the
         # caller must look before renting again — a blind retry is how one `up` made two pods.
         raise CliFailure(
@@ -638,7 +639,8 @@ def up_command(
             f"The rent request for {executor.huid} got no answer from the API ({exc.__class__.__name__}). "
             f"Run 'lium ps' before retrying: a pod named {name or executor.huid} may exist and be billing.{kept}",
             EXIT_API_ERROR,
-            data=created_volume,
+            data={**((_api_error_data(exc) if isinstance(exc, LiumError) else None) or {}), **created_volume} or None,
+            hint="Do not run 'lium up' again until 'lium ps' shows whether the first request created a pod.",
         )
     except (LiumAuthError, LiumPermissionError, LiumServerError, LiumRateLimitError) as exc:
         # handle_errors already names these (bad key, no permission, server down, throttled);

@@ -24,6 +24,8 @@ def volumes_list_command():
     volumes = result.data["volumes"]
 
     if not volumes:
+        store_volume_selection([])  # a stale list would let `volumes rm 1` delete a volume not shown
+        ui.info("No volumes. Create one with: lium volumes new <name>")
         return
 
     table, header, tip = build_volumes_table(volumes)

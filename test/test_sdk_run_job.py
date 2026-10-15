@@ -413,9 +413,9 @@ def test_run_job_bounds_every_transfer_and_the_captured_output(lium, monkeypatch
         seen.setdefault("exec", kw) and None) or {"exit_code": 0, "stdout": "tail", "stderr": "", "truncated": True})
 
     r = lium.run_job(command="true", gpu_type="H100", max_cost_usd=100, deadline_s=600, inputs={"a": "/root/a"},
-                     outputs={"/root/b": "b"}, max_output_bytes=1000, max_download_bytes=5000)
+                     outputs={"/root/b": "b"}, output_tail_bytes=1000, max_download_bytes=5000)
 
-    assert 0 < seen["upload"]["timeout"] <= 600 and seen["exec"] == {"max_output_bytes": 1000}
+    assert 0 < seen["upload"]["timeout"] <= 600 and seen["exec"] == {"output_tail_bytes": 1000}
     (_, _, kw), = lium.calls["downloads"]
     assert kw["max_bytes"] == 5000 and 0 < kw["timeout"] <= 600
     assert r.status == "succeeded" and "cut to their last 1000 bytes" in r.error
@@ -475,7 +475,7 @@ class _StallingClient:
                     raise EOFError("connection closed")
                 return b""
 
-        return Mock(open=lambda remote, mode: File(), close=lambda: None)
+        return Mock(open=lambda remote, mode: File(), close=lambda: None, stat=lambda remote: Mock(st_mode=0o100644))
 
 
 def _ssh_with(monkeypatch, lium, client):
@@ -512,7 +512,40 @@ def test_download_past_the_byte_limit_stops_reading(lium, monkeypatch, tmp_path)
     with pytest.raises(ValueError, match="limit"):
         lium.download(_pod("p"), remote="/dev/zero", local=str(tmp_path / "b"), max_bytes=100_000, timeout=30)
 
-    assert client.read < 200_000 and os.path.getsize(tmp_path / "b") <= 100_000
+    assert client.read < 200_000 and not (tmp_path / "b").exists()  # the partial file is not left behind
+
+
+def test_transfer_deadline_covers_the_ssh_handshake(lium, monkeypatch, tmp_path):
+    del lium.download
+    asked = []
+
+    def ssh_connection(pod, timeout=30):
+        asked.append(timeout)
+        raise TimeoutError("auth stalled")
+
+    monkeypatch.setattr(lium, "ssh_connection", ssh_connection)
+    with pytest.raises(TimeoutError):
+        lium.download(_pod("p"), remote="/root/b", local=str(tmp_path / "b"), timeout=6)
+    # TCP connect, banner and auth each get a third, so the three fit inside the transfer's 6 s
+    assert asked == [2]
+
+
+def test_ssh_connect_bounds_banner_and_auth_by_the_connect_timeout(monkeypatch, tmp_path):
+    from lium.sdk import client as sdk_client
+
+    seen = {}
+
+    class Client(sdk_client.paramiko.SSHClient):
+        def connect(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(sdk_client.paramiko, "SSHClient", Client)
+    monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
+    key = tmp_path / "id"
+    key.write_text("not a key")
+    with Lium(Config(api_key="k", ssh_key_path=key)).ssh_connection(_pod("p"), timeout=2):
+        pass
+    assert (seen["timeout"], seen["banner_timeout"], seen["auth_timeout"]) == (2, 2, 2)
 
 
 class _Channel:
@@ -555,9 +588,47 @@ def test_exec_with_an_output_limit_keeps_the_tail(lium, monkeypatch):
     del lium.exec
     _exec_over(monkeypatch, lium, _Channel([b"a" * 70_000, b"b" * 70_000, b"END\n"]))
 
-    out = lium.exec(_pod("p"), command="noisy", timeout=30, max_output_bytes=1000)
+    out = lium.exec(_pod("p"), command="noisy", timeout=30, output_tail_bytes=1000)
 
     assert out["truncated"] and len(out["stdout"]) == 1000 and out["stdout"].endswith("bEND\n")
+
+
+def test_exec_with_a_zero_tail_keeps_no_output(lium, monkeypatch):
+    del lium.exec
+    _exec_over(monkeypatch, lium, _Channel([b"a" * 70_000, b"END\n"]))
+
+    out = lium.exec(_pod("p"), command="noisy", timeout=30, output_tail_bytes=0)
+
+    assert out["truncated"] and out["stdout"] == ""
+
+
+def test_exec_refuses_a_negative_tail_before_connecting(lium, monkeypatch):
+    del lium.exec
+    monkeypatch.setattr(lium, "ssh_connection", Mock(side_effect=AssertionError("connected")))
+    with pytest.raises(ValueError, match="output_tail_bytes"):
+        lium.exec(_pod("p"), command="true", output_tail_bytes=-1)
+
+
+@pytest.mark.parametrize("kwargs", [{"output_tail_bytes": -1}, {"max_download_bytes": -1}])
+def test_run_job_refuses_a_negative_size_limit_before_renting(lium, kwargs):
+    with pytest.raises(ValueError):
+        lium.run_job(command="true", gpu_type="H100", max_cost_usd=1, deadline_s=60, **kwargs)
+    assert "rent" not in lium.calls
+
+
+@pytest.mark.parametrize("tail", [0, 5])
+def test_run_job_timeout_is_classified_whatever_the_output_tail(lium, monkeypatch, tail):
+    def capped(pod, command, output_tail_bytes, **kw):
+        run = _exec_locally(pod, command, **kw)
+        run["stderr"] = run["stderr"].encode()[-output_tail_bytes:].decode() if output_tail_bytes else ""
+        return run
+
+    monkeypatch.setattr(lium, "exec", capped)
+
+    r = lium.run_job(command="echo started >&2; sleep 30", gpu_type="H100", max_cost_usd=100, deadline_s=3,
+                     output_reserve_s=1, output_tail_bytes=tail)
+
+    assert (r.status, r.exit_code) == ("timed_out", 124) and len(r.stderr.encode()) <= tail
 
 
 def test_exec_with_an_output_limit_cuts_a_host_that_never_stops_sending(lium, monkeypatch):
@@ -566,7 +637,7 @@ def test_exec_with_an_output_limit_cuts_a_host_that_never_stops_sending(lium, mo
     _exec_over(monkeypatch, lium, channel)
 
     with pytest.raises(TimeoutError):
-        lium.exec(_pod("p"), command="true", timeout=0.3, max_output_bytes=1000)
+        lium.exec(_pod("p"), command="true", timeout=0.3, output_tail_bytes=1000)
 
     assert channel.closed
 

@@ -64,6 +64,8 @@ def test_ssh_connection_falls_back_to_agent_when_key_file_cannot_be_loaded(monke
             "port": 20299,
             "username": "root",
             "timeout": 30,
+            "banner_timeout": 15,
+            "auth_timeout": 30,
             "look_for_keys": False,
             "key_filename": str(key_path),
             "allow_agent": True,
@@ -329,6 +331,8 @@ def test_edit_forgets_the_pinned_host_key(monkeypatch, tmp_path):
 
     def fake_request(self, m, p, **kwargs):
         seen.append((m, p, kwargs.get("json")))
+        if m == "GET" and p == "/templates/tpl-1":
+            return Resp({"id": "tpl-1", "docker_image": "a"})
         if m == "GET":
             return Resp({"id": pod.id, "pod_name": pod.name, "template": {"id": "tpl-1", "docker_image": "a"}})
         return Resp({"id": "tpl-1", "docker_image": "a", "startup_commands": "python main.py"})
@@ -340,6 +344,7 @@ def test_edit_forgets_the_pinned_host_key(monkeypatch, tmp_path):
     assert result["startup_commands"] == "python main.py"
     assert seen == [
         ("GET", f"/pods/{pod.id}", None),
+        ("GET", "/templates/tpl-1", None),
         ("PUT", "/templates/tpl-1", {"id": "tpl-1", "docker_image": "a", "startup_commands": "python main.py"}),
     ]
     assert not hosts_file.exists()
