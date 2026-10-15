@@ -2412,6 +2412,12 @@ class Lium:
         rent never asks for something it cannot get. A Dockerfile build has no template."""
         if template is None and template_id is not None:
             template = self.get_template(template_id)
+            if template is None:
+                # an unknown capability must not quietly become an unencrypted volume
+                raise LiumError(
+                    f"Could not look up template {template_id} to tell whether it supports volume "
+                    "encryption. Retry, or pass enable_volume_encryption explicitly."
+                )
         return bool(template and template.supports_volume_encryption)
 
     def default_docker_template(self, executor_id: str) -> Template:

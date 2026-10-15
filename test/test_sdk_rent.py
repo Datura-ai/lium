@@ -276,6 +276,11 @@ def test_a_rent_by_spec_backend_refuses_interconnect_before_any_call(client):
 # --- the client-side path (older backend) ------------------------------------------------------
 
 
+def _template():
+    # tpl-1 offers no volume encryption: rent() looks it up to decide what to ask for
+    responses.add(responses.GET, f"{BASE}/templates/tpl-1", json={"id": "tpl-1", "supports_volume_encryption": False})
+
+
 def _fleet():
     responses.add(responses.GET, f"{BASE}/machines", json=[{"name": "NVIDIA H100 NVL"}, {"name": "NVIDIA H100 80GB HBM3"}])
     fleet = [
@@ -292,6 +297,7 @@ def _fleet():
 @responses.activate
 def test_older_backend_lists_filters_picks_the_cheapest_and_rents_by_id(client):
     _version(None)
+    _template()
     _fleet()
     responses.add(responses.POST, f"{BASE}/executors/cheap/rent", json={"id": "pod-uuid-9", "name": "train-1"})
 
@@ -311,6 +317,7 @@ def test_older_backend_lists_filters_picks_the_cheapest_and_rents_by_id(client):
 @responses.activate
 def test_older_backend_dry_run_only_lists(client):
     _version(None)
+    _template()
     _fleet()
 
     result = client.rent(gpu_type="H100", template_id="tpl-1", ssh_keys=[KEY], dry_run=True)
@@ -335,6 +342,7 @@ def test_older_backend_reads_interconnect_from_the_node_specs(client):
     # the one constraint the server path refuses is checked here: a node that does not report
     # NVLink does not qualify, so the dearer node that does is the pick
     _version(None)
+    _template()
     responses.add(responses.GET, f"{BASE}/machines", json=[{"name": "NVIDIA H100 NVL"}])
     linked = _node("linked", price=1.5)
     linked["specs"]["interconnect"] = {"nvlink": True}
@@ -350,6 +358,7 @@ def test_older_backend_reads_the_nvlink_verdict_off_a_summary_row(client):
     # `ls()` asks for `view=summary`, whose rows carry the verdict at the top level and no `specs.interconnect`
     # (lium-platform#522); a check that read only specs.interconnect matched no node on that view
     _version(None)
+    _template()
     responses.add(responses.GET, f"{BASE}/machines", json=[{"name": "NVIDIA H100 NVL"}])
     linked = _node("linked", price=1.5)
     linked["nvlink"] = True

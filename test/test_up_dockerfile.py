@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 
-from lium.sdk import Config, Lium
+from lium.sdk import Config, Lium, LiumError
 from lium.cli import up as up_pkg  # noqa: F401  (ensures package import works)
 from lium.cli.up import command as up_command
 from lium.cli.up import validation as up_validation
@@ -139,6 +139,21 @@ def test_up_requests_encryption_only_when_the_template_supports_it(monkeypatch, 
     client.up(executor_id="exec-1", template_id="tmpl-xyz", ssh_keys=["ssh-ed25519 AAA"])
 
     assert captured["payload"]["enable_volume_encryption"] is expected
+
+
+@pytest.mark.parametrize(("entry", "server_side"), [("up", False), ("rent", False), ("rent", True)])
+def test_a_failed_template_lookup_refuses_to_rent_rather_than_drop_encryption(monkeypatch, entry, server_side):
+    client = Lium(Config(api_key="test"))
+    captured: dict = {}
+    _stub_up(monkeypatch, client, captured)
+    monkeypatch.setattr(client, "get_template", lambda template_id: None)  # the GET failed
+    monkeypatch.setattr(client, "supports", lambda feature: server_side)
+    target = {"executor_id": "exec-1"} if entry == "up" else {"gpu_type": "H100"}
+
+    with pytest.raises(LiumError, match="Could not look up template tmpl-xyz"):
+        getattr(client, entry)(**target, template_id="tmpl-xyz", ssh_keys=["ssh-ed25519 AAA"])
+
+    assert not captured  # nothing was rented
 
 
 def test_up_with_dockerfile_does_not_request_encryption(monkeypatch):
