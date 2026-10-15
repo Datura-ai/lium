@@ -177,14 +177,17 @@ class _RentalStore:
         the lock when its holder exits, so a crashed server's journals are adopted by the next one to start."""
         if key in self._held:
             return True
-        try:
-            import fcntl
-        except ImportError:  # shortcut: Windows has no fcntl, so servers there still share journals; add msvcrt locking if reported
-            return True
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = os.open(self.directory / f"{key}.lock", os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                import fcntl
+            except ImportError:  # Windows: a non-blocking lock on the file's first byte, held as long
+                import msvcrt
+
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             os.close(fd)
             return False
@@ -194,25 +197,36 @@ class _RentalStore:
     def _release(self, key: str) -> None:
         fd = self._held.pop(key, None)
         if fd is not None:
-            # unlinked while still locked: a server that opens the path now gets a new file and finds no journal
+            os.close(fd)  # drops the lock on either OS; Windows cannot unlink a file still open
+            # a server that locked the path meanwhile finds no journal and releases it; this unlink is then harmless
             (self.directory / f"{key}.lock").unlink(missing_ok=True)
-            os.close(fd)
 
     def path(self, rental: _Rental) -> Optional[Path]:
         return self.directory / f"{rental.idempotency_key}.json" if self.directory and rental.idempotency_key else None
 
-    def load(self) -> List[_Rental]:
+    def pending(self) -> bool:
+        return self.directory is not None and any(self.directory.glob("*.json"))
+
+    def load(self, scope: Dict[str, str]) -> List[_Rental]:
+        """Take the journals sent for ``scope`` (API and account) that no live server holds. Others are left
+        untouched and unlocked: the same key is a new rent under another account, so only its own server settles
+        it."""
         if self.directory is None or not self.directory.is_dir():
             return []
         rentals = []
         for path in sorted(self.directory.glob("*.json")):
             with self._lock:
+                try:
+                    if json.loads(path.read_text()).get("scope") != scope:
+                        continue
+                except (OSError, ValueError, AttributeError):
+                    continue  # gone meanwhile, or unreadable: left in place for the user, never deleted
                 if not self._claim(path.stem):
                     continue  # another running server's rental: settled and reported by that server, not here
-                try:
+                try:  # read again under the lock: the holder may have rewritten or settled it meanwhile
                     rentals.append(_Rental.from_state(json.loads(path.read_text())))
                 except (OSError, ValueError, KeyError, TypeError):
-                    self._release(path.stem)  # gone meanwhile, or unreadable: left in place for the user, never deleted
+                    self._release(path.stem)
         return rentals
 
     def save(self, rental: _Rental) -> None:
@@ -282,10 +296,11 @@ class LiumTools:
         # any does, rent_pod refuses to rent. They are also kept on disk, so a restart replays rather than forgets.
         self._store = _RentalStore(state_dir or DEFAULT_RENTAL_STATE_DIR)
         self._cleanup = threading.Condition()
-        loaded = self._store.load()
-        # restored rentals all start unresolved: each is checked against this server's account before anything is
-        # replayed, removed or handed over
-        self._unresolved: List[_Rental] = loaded
+        # restored rentals start unresolved; they are adopted (_adopt) once the account is known, which needs the
+        # client, so `lium mcp` still starts without a key
+        self._unresolved: List[_Rental] = []
+        self._adopting = threading.Lock()
+        self._adopted = False
         self._recovered: List[_Rental] = []  # known pods the host has not been told of
         # pods a result named that the host has not yet shown it knows (it names the pod in a call, or the pod is
         # gone): a returned callback is not a written response, so their journals stay until then
@@ -298,7 +313,7 @@ class LiumTools:
         self._handing: List[_Rental] = []
         self._reconciling = threading.Lock()
         self._reconciler_running = False
-        if self._unresolved:
+        if self._store.pending():
             # a restored rental may be billing: settle it now, not at the first tool call, which may never come
             self._start_reconciler()
 
@@ -645,6 +660,7 @@ class LiumTools:
     def _reconcile(self, reports: bool = False) -> List[_Rental]:
         """Try once to settle every unresolved rental; returns those still unresolved. ``reports``: the caller's
         result hands recovered pods to the host, so a wanted rental may be replayed however old it is."""
+        self._adopt()
         with self._cleanup:
             if not self._unresolved:
                 return []
@@ -676,6 +692,21 @@ class LiumTools:
                         self._store.forget(rental)
                 self._cleanup.notify_all()
                 return list(self._unresolved)
+
+    def _adopt(self) -> None:
+        """Take this account's journals from earlier sessions, once, before any rental is admitted (rent_pod
+        reconciles first)."""
+        with self._adopting:
+            if self._adopted:
+                return
+            try:
+                scope = self._scope()
+            except Exception:  # noqa: BLE001 - no client yet (e.g. no API key): nothing can be rented; try at the next call
+                return
+            loaded = self._store.load(scope)
+            with self._cleanup:
+                self._unresolved.extend(r for r in loaded if r not in self._unresolved)
+                self._adopted = True
 
     def _settle_cleanup(self, rental: _Rental, live: Dict[str, PodInfo], reports: bool = False) -> str:
         """How far this rental is settled: "done" once nothing it made can still bill (the SDK established that it

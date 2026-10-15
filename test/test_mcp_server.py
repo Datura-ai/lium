@@ -647,7 +647,7 @@ def test_two_saves_of_one_rental_at_once_leave_the_newer_record_whole(monkeypatc
     overlapped[0].join(5)
 
     assert [p.suffix for p in rental_state_dir.iterdir() if p.suffix != ".lock"] == [".json"]
-    assert [r.pod_ids for r in tools._store.load()] == [{"pod-1"}]  # readable after a restart, and names the pod
+    assert [r.pod_ids for r in tools._store.load(tools._scope())] == [{"pod-1"}]  # readable after a restart, and names the pod
 
 
 def test_a_rent_whose_journal_cannot_be_written_is_never_sent(monkeypatch):
@@ -763,14 +763,35 @@ def test_a_rental_is_not_replayed_where_its_key_would_be_a_new_rent(monkeypatch,
     listed = _real_tools(other).list_pods()
 
     assert other.posts == []
-    assert listed["unresolved_rentals"][0]["last_error"]
+    if change == "other_account":  # not even adopted: the journal is left, unlocked, for its own account's server
+        assert "unresolved_rentals" not in listed
+    else:
+        assert listed["unresolved_rentals"][0]["last_error"]
     assert list(rental_state_dir.glob("*.json"))
 
 
-def test_a_running_server_never_adopts_another_running_servers_rental(monkeypatch, rental_state_dir):
+def _windows_locking(monkeypatch):
+    """Run the store as on Windows: no fcntl, msvcrt.locking instead (emulated here with an flock of the same
+    non-blocking semantics, since CI runs on Linux)."""
+    import fcntl
+    import types
+
+    def locking(fd, mode, nbytes):
+        assert mode == msvcrt.LK_NBLCK and nbytes == 1
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # raises OSError when held, as msvcrt.locking does
+
+    msvcrt = types.SimpleNamespace(LK_NBLCK=2, locking=locking)
+    monkeypatch.setitem(sys.modules, "fcntl", None)  # `import fcntl` raises ImportError
+    monkeypatch.setitem(sys.modules, "msvcrt", msvcrt)
+
+
+@pytest.mark.parametrize("backend", ["posix", "windows"])
+def test_a_running_server_never_adopts_another_running_servers_rental(monkeypatch, rental_state_dir, backend):
     """One `lium mcp` per Claude Code session, Desktop and Cursor share the journal directory: a second server
     neither replays nor reports the first one's rental, nor refuses to rent because of it."""
     monkeypatch.setattr(sys.modules[__name__], "_SERVERS_STAY_LIVE", [True])
+    if backend == "windows":
+        _windows_locking(monkeypatch)
     sdk = _real_sdk(monkeypatch, [_no_answer(), _no_answer()])
     first = _real_tools(sdk)
     first.rent_pod("node-a", "job", template_id="tpl-1")
@@ -782,8 +803,30 @@ def test_a_running_server_never_adopts_another_running_servers_rental(monkeypatc
 
     assert second._unresolved == [] and "unresolved_rentals" not in listed and "recovered_rentals" not in listed
     assert other.posts == []
-    assert second.rent_pod("node-b", "other-job", template_id="tpl-1")["pod_id"] == "pod-2"
+    assert second.rent_pod("node-b", "other-job", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-2"
     assert journal.exists() and first._unresolved  # still the first server's to settle
+
+
+def test_a_server_for_another_account_leaves_an_orphaned_journal_to_its_own_account(monkeypatch, rental_state_dir):
+    """Account A's server exits mid-rent; account B's server starts and stays up. When A's server comes back it
+    adopts its journal and refuses a fresh rent until that one is settled."""
+    monkeypatch.setattr(sys.modules[__name__], "_SERVERS_STAY_LIVE", [True])
+    sdk = _real_sdk(monkeypatch, [_no_answer(), _no_answer()])
+    first = _real_tools(sdk)
+    first.rent_pod("node-a", "job", template_id="tpl-1")
+    for fd in first._store._held.values():  # A's server exits; the OS drops its locks
+        os.close(fd)
+    first._store._held.clear()
+
+    other = _real_sdk(monkeypatch, [], api_key="different-account")
+    foreign = _real_tools(other)
+    assert "unresolved_rentals" not in foreign.list_pods() and foreign._store._held == {}
+
+    restarted = _real_tools(sdk)  # A again, while B still runs
+    refused = restarted.rent_pod("node-b", "job", template_id="tpl-1")
+
+    assert len(restarted._unresolved) == 1 and refused["ok"] is False, refused
+    assert len(set(sdk.posts)) == 1  # every POST, the replay included, carries the first key: no second pod
 
 
 def test_the_background_replays_a_wanted_rental_only_soon_after_it_was_sent(monkeypatch, rental_state_dir):
@@ -1116,7 +1159,7 @@ def test_a_pod_recovered_for_one_account_is_never_handed_to_another(monkeypatch,
     other = _real_sdk(monkeypatch, [], api_key="different-account")
     listed = _real_tools(other).list_pods()
 
-    assert "recovered_rentals" not in listed and listed["unresolved_rentals"][0]["last_error"]
+    assert "recovered_rentals" not in listed and "unresolved_rentals" not in listed
     assert other.posts == [] and other.removed == []
     assert list(rental_state_dir.glob("*.json"))
 
