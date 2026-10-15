@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import threading
 from contextlib import ExitStack
-from time import monotonic  # bound here: the idle clock is not the one a caller's timeout loop reads
+from time import monotonic, sleep  # bound here: the idle clock is not the one a caller's timeout loop reads
 from typing import Any, Callable, ContextManager, Optional, Tuple
 
 REUSE_ENV = "LIUM_SSH_REUSE"
@@ -159,6 +159,31 @@ class PooledConnection:
             except Exception:  # noqa: BLE001 — a session on a connection that is being written off
                 pass
             raise
+
+    def drop_idle_sftp(self) -> bool:
+        """Close the kept SFTP session when no transfer is using it, freeing the channel it holds
+        (a server allowing one session per connection has no other); whether one was closed."""
+        if not self._sftp_lock.acquire(blocking=False):
+            return False   # a transfer is running on it
+        try:
+            sftp, self._sftp = self._sftp, None
+        finally:
+            self._sftp_lock.release()
+        if sftp is None:
+            return False
+        get_channel = getattr(sftp, "get_channel", None)
+        channel = get_channel() if callable(get_channel) else None
+        try:
+            sftp.close()
+        except Exception:  # noqa: BLE001 — only its channel slot is wanted back
+            pass
+        # sshd frees the slot once its own close arrives (paramiko then unlinks the channel); a channel
+        # opened before that is refused again
+        channels = getattr(getattr(channel, "transport", None), "_channels", None)
+        deadline = monotonic() + CHANNEL_OPEN_TIMEOUT
+        while channels is not None and channels.get(channel.chanid) is channel and monotonic() < deadline:
+            sleep(0.005)
+        return True
 
     def _open_sftp(self) -> Any:
         """A new SFTP session, every wait bounded by ``CHANNEL_OPEN_TIMEOUT`` (paramiko's own default is an hour)."""

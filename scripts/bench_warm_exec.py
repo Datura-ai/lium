@@ -60,8 +60,9 @@ def free_port() -> int:
 class LocalSshd:
     """``sshd -D`` on a free port, accepting only a throwaway ed25519 key, for the current user."""
 
-    def __init__(self, workdir: Path):
+    def __init__(self, workdir: Path, max_sessions: int = 100):
         self.workdir = workdir
+        self.max_sessions = max_sessions
         self.port = free_port()
         self.user = getpass.getuser()
         self.client_key = workdir / "client_ed25519"
@@ -89,7 +90,7 @@ class LocalSshd:
             UsePAM no
             StrictModes no
             MaxStartups 100
-            MaxSessions 100
+            MaxSessions {self.max_sessions}
             Subsystem sftp internal-sftp
             """))
         self._log = open(self.workdir / "sshd.log", "w")
@@ -281,12 +282,12 @@ class MockApi:
 class Bench:
     """sshd + delay proxy + mock API, and the environment a ``lium`` process needs to use them."""
 
-    def __init__(self, rtt_ms: float, api_ms: float):
+    def __init__(self, rtt_ms: float, api_ms: float, max_sessions: int = 100):
         self._tmp = tempfile.mkdtemp(prefix="lium-bench-")
         self.workdir = Path(self._tmp)
         self.home = self.workdir / "home"
         self.home.mkdir()
-        self.sshd = LocalSshd(self.workdir).start()
+        self.sshd = LocalSshd(self.workdir, max_sessions).start()
         self.proxy = DelayProxy(self.sshd.port, rtt_ms / 2000).start()
         self.api = MockApi([pod_row(self.proxy.port, self.sshd.user)], api_ms / 1000).start()
 

@@ -2980,6 +2980,15 @@ class Lium:
         try:
             return entry, open_on(entry)
         except paramiko.ChannelException:
+            # An idle kept SFTP session may hold the only channel the server allows: free it and try once more.
+            if entry.drop_idle_sftp():
+                try:
+                    return entry, open_on(entry)
+                except paramiko.ChannelException:
+                    pass
+                except BaseException:
+                    entry.release()
+                    raise
             # The server refused this one channel (its session limit): the connection is fine and other
             # calls are running on it. Outside ssh_session() (which shares one connection, as before) this call
             # gets a connection of its own, closed when it ends, as every call had before connections were kept.

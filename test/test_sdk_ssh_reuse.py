@@ -671,3 +671,69 @@ def test_an_unacknowledged_sftp_subsystem_request_is_cut_off(monkeypatch, world)
             assert isinstance(future.exception(), sdk_client.paramiko.ChannelException)
         finally:
             channel.close()
+
+
+@pytest.mark.parametrize("held", [True, False], ids=["ssh_session", "kept"])
+@pytest.mark.parametrize("transfer", ["idle", "busy"])
+def test_a_one_session_server_runs_a_command_after_a_transfer(monkeypatch, world, tmp_path, held, transfer):
+    """``MaxSessions 1``: an idle kept SFTP session gives its channel up to the next command; a running transfer keeps it."""
+    lium = _lium(monkeypatch, world)
+    pod = _pod()
+    sftps = []
+
+    def sftp_client(channel):
+        sftps.append(_Sftp(world))
+        sftps[-1].transport = channel.transport
+        return sftps[-1]
+
+    monkeypatch.setattr(sdk_client.paramiko, "SFTPClient", sftp_client)
+    real_open = _Transport.open_session
+
+    def one_session(self, timeout=None):
+        if any(s.transport is self and not s.closed for s in sftps):   # one channel per connection
+            raise sdk_client.paramiko.ChannelException(1, "open failed")
+        return real_open(self, timeout)
+
+    monkeypatch.setattr(_Transport, "open_session", one_session)
+    with (lium.ssh_session(pod) if held else contextmanager(lambda: (yield))()):
+        lium.download(pod, remote="/workspace/a", local=str(tmp_path / "a"))
+        entry = lium._ssh_session_entries[pod.id] if held else _kept(lium)
+        if transfer == "busy":
+            entry._sftp_lock.acquire()   # a transfer is running on the kept session
+        try:
+            if transfer == "busy" and held:
+                with pytest.raises(sdk_client.paramiko.ChannelException):
+                    lium.exec(pod, command="env")
+            else:
+                assert lium.exec(pod, command="env")["stdout"] == "ran env"
+        finally:
+            if transfer == "busy":
+                entry._sftp_lock.release()
+
+    assert sftps[0].closed is (transfer == "idle")
+    # idle: the same connection; busy outside ssh_session: a connection of its own for this call
+    assert len(world.connects) == (2 if transfer == "busy" and not held else 1)
+
+
+@pytest.mark.skipif(_no_sshd, reason="needs sshd and ssh-keygen")
+@pytest.mark.parametrize("held", [True, False], ids=["ssh_session", "kept"])
+def test_a_real_one_session_sshd_runs_a_command_after_an_upload(monkeypatch, tmp_path, held):
+    try:
+        bench = bench_warm_exec.Bench(rtt_ms=0, api_ms=0, max_sessions=1)
+    except (RuntimeError, OSError, subprocess.CalledProcessError) as e:
+        pytest.skip(f"no local sshd: {e}")
+    monkeypatch.setenv("HOME", str(bench.home))
+    monkeypatch.delenv("LIUM_SSH_REUSE", raising=False)
+    lium = Lium(Config(api_key="test", ssh_key_path=bench.sshd.client_key))
+    pod = _pod(ssh_cmd=f"ssh {bench.sshd.user}@127.0.0.1 -p {bench.proxy.port}")
+    local, remote = tmp_path / "up", bench.workdir / "up"
+    local.write_text("hi")
+    try:
+        with (lium.ssh_session(pod) if held else contextmanager(lambda: (yield))()):
+            lium.upload(pod, local=str(local), remote=str(remote))
+            assert lium.exec(pod, command=f"cat {remote}")["stdout"] == "hi"
+            lium.upload(pod, local=str(local), remote=str(remote))   # the SFTP session opens again
+        assert bench.proxy.connections == 1
+    finally:
+        lium.close()
+        bench.close()
