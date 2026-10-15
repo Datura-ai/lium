@@ -271,7 +271,7 @@ def test_mine_does_not_route_gpu_splitting_as_subcommand(monkeypatch):
     monkeypatch.setattr(
         legacy_mine,
         "_gather_inputs",
-        lambda hotkey, auto: {
+        lambda hotkey, auto, *ports: {
             "hotkey": "5F4hQyQ1wY2M6zS4mP7dN8kR2tV9xB3cL6jH1nT5uA7q",
             "internal_port": "8080",
             "external_port": "8080",
@@ -283,6 +283,7 @@ def test_mine_does_not_route_gpu_splitting_as_subcommand(monkeypatch):
     monkeypatch.setattr(legacy_mine, "_clone_or_update_repo", lambda *args, **kwargs: None)
     monkeypatch.setattr(legacy_mine, "_install_executor_tools", lambda *args, **kwargs: None)
     monkeypatch.setattr(legacy_mine, "_check_prereqs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(legacy_mine, "_check_free_disk", lambda *args, **kwargs: None)
     monkeypatch.setattr(legacy_mine, "_setup_executor_env", lambda *args, **kwargs: None)
     monkeypatch.setattr(legacy_mine, "_apply_env_overrides", lambda *args, **kwargs: None)
     monkeypatch.setattr(legacy_mine, "_check_ports_free", lambda *args, **kwargs: None)   # no real 8080/2200 bind here
