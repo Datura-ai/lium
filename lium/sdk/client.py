@@ -1545,10 +1545,16 @@ class Lium:
                 satisfies it; the best on offer is 48``.
             LiumError: ``interconnect`` was given and the backend rents by spec (nothing is
                 registered or rented).
-            LiumServerError, requests.RequestException: the rent-by-spec response was lost. The
-                rent is posted once (a repeat could rent a second node); the pod is looked up
-                by name for ~9 s and returned when it appears, otherwise the error propagates
-                and the pod may still exist — check :meth:`ps`.
+            LiumServerError, LiumRateLimitError, requests.RequestException: the rent-by-spec
+                response was lost. The pod is looked up by name for ~9 s and returned when it
+                appears. If it does not appear, a backend that honours the Idempotency-Key
+                (``rent_idempotency``) gets the rent once more with the same key, which replays
+                the first answer instead of renting again; after an ambiguous resend the pod is
+                looked up once more, and no third request is sent. A backend without the key
+                gets no resend, since a repeat could rent a second node. If no pod is found, the
+                error propagates and the pod may still exist — check :meth:`ps`.
+            LiumError: the resend answered ``idempotency_in_progress`` or
+                ``idempotency_outcome_unknown`` and the pod was still not listed (same advice).
         """
         if template_id is not None and dockerfile_content is not None:
             raise ValueError("Provide either template_id or dockerfile_content, not both")
