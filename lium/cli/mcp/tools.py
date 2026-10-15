@@ -203,7 +203,7 @@ class _RentalStore:
             try:
                 (self.directory / f"{key}.lock").unlink(missing_ok=True)
             except OSError:
-                pass
+                pass  # only the empty lock file is left; the journal is already gone, so nothing re-adopts it
 
     def path(self, rental: _Rental) -> Optional[Path]:
         return self.directory / f"{rental.idempotency_key}.json" if self.directory and rental.idempotency_key else None

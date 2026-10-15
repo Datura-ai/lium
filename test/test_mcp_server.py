@@ -737,8 +737,12 @@ def test_a_fresh_refusal_of_a_replay_settles_nothing(monkeypatch, rental_state_d
     assert list(rental_state_dir.glob("*.json"))
 
 
-def test_the_apis_stored_refusal_of_the_first_request_settles_it_as_never_rented(monkeypatch, rental_state_dir):
-    outcomes = [_no_answer(), _no_answer(), _stored(402, {"detail": "insufficient balance"})]
+@pytest.mark.parametrize("stored", [
+    _stored(402, {"detail": "insufficient balance"}),
+    _stored(409, {"detail": "Provider has paused new rentals for this node."}),
+], ids=["402", "409"])
+def test_the_apis_stored_refusal_of_the_first_request_settles_it_as_never_rented(monkeypatch, rental_state_dir, stored):
+    outcomes = [_no_answer(), _no_answer(), stored]
     sdk = _real_sdk(monkeypatch, outcomes)
     tools = _real_tools(sdk)
 
