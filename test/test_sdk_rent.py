@@ -245,10 +245,11 @@ def test_a_lost_rent_response_with_no_pod_raises_and_posts_nothing_more(client, 
     assert urls.count(f"{BASE}/pods") == 1 + 3  # the snapshot, then three looks for the pod
 
 
+@pytest.mark.parametrize("features", [["rent_by_spec"], ["rent_by_spec", "rent_idempotency"]])
 @responses.activate
-def test_a_dry_run_rents_nothing_so_a_transient_failure_is_retried(client, monkeypatch):
+def test_a_dry_run_rents_nothing_so_a_transient_failure_is_retried(client, monkeypatch, features):
     monkeypatch.setattr(sdk_utils.time, "sleep", lambda seconds: None)
-    _version(["rent_by_spec"])
+    _version(features)
     responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", status=502)
     responses.add(
         responses.POST, f"{BASE}/executors/rent-by-spec",
@@ -258,7 +259,10 @@ def test_a_dry_run_rents_nothing_so_a_transient_failure_is_retried(client, monke
     result = client.rent(gpu_type="H100", ssh_keys=[KEY], dry_run=True)
 
     assert result.dry_run is True and result.executor.id == "exec-cheap"
-    assert [c.request.url for c in responses.calls].count(f"{BASE}/executors/rent-by-spec") == 2
+    posts = [c.request for c in responses.calls if c.request.method == "POST"]
+    assert len(posts) == 2
+    # a key would be kept pending by the backend after the 502 and turn the retry into a 409
+    assert all("Idempotency-Key" not in p.headers for p in posts)
 
 
 @responses.activate
@@ -385,13 +389,31 @@ def test_rent_sends_a_fresh_idempotency_key_and_still_posts_once(client, monkeyp
     assert posts[0].headers["X-API-KEY"] == "test"
 
 
+@pytest.mark.parametrize(
+    "resend", ["replay", "timeout", 502, 429, "idempotency_in_progress", "idempotency_outcome_unknown"]
+)
 @responses.activate
-def test_a_lost_rent_response_is_resent_once_with_the_same_key_when_the_backend_honours_it(client, monkeypatch):
+def test_a_lost_rent_response_is_resent_once_with_the_same_key_when_the_backend_honours_it(
+    client, monkeypatch, resend
+):
+    import requests
+
     monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
     _version(["rent_by_spec", "rent_idempotency"])
-    responses.add(responses.GET, f"{BASE}/pods", json=[])
-    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", status=502)
-    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", json=RENTED)
+    for _ in range(4):  # the snapshot and three looks before the resend
+        responses.add(responses.GET, f"{BASE}/pods", json=[])
+    # an ambiguous resend may have created the pod: it is looked for again, never POSTed a third time
+    responses.add(responses.GET, f"{BASE}/pods", json=[_pod_row("pod-uuid-1", "train-1", _node("exec-cheap"), 1.2)])
+    url = f"{BASE}/executors/rent-by-spec"
+    responses.add(responses.POST, url, body=requests.Timeout("first attempt"))
+    if resend == "replay":
+        responses.add(responses.POST, url, json=RENTED)
+    elif resend == "timeout":
+        responses.add(responses.POST, url, body=requests.Timeout("after commit"))
+    elif isinstance(resend, int):
+        responses.add(responses.POST, url, status=resend)
+    else:
+        responses.add(responses.POST, url, status=409, json={"error": {"code": resend, "message": "pending"}})
 
     result = client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY])
 
@@ -400,4 +422,22 @@ def test_a_lost_rent_response_is_resent_once_with_the_same_key_when_the_backend_
     assert posts[0].headers["Idempotency-Key"] == posts[1].headers["Idempotency-Key"]
     assert posts[0].body == posts[1].body
     assert result.pod["id"] == "pod-uuid-1"
-    assert [c.request.url for c in responses.calls].count(f"{BASE}/pods") == 1 + 3  # looked before resending
+
+
+@responses.activate
+def test_a_definite_refusal_of_the_resend_propagates_without_another_look(client, monkeypatch):
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
+    _version(["rent_by_spec", "rent_idempotency"])
+    responses.add(responses.GET, f"{BASE}/pods", json=[])
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", status=502)
+    responses.add(
+        responses.POST, f"{BASE}/executors/rent-by-spec", status=409,
+        json={"error": {"code": "no_matching_node", "message": "nothing fits"}},
+    )
+
+    with pytest.raises(LiumError):
+        client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY])
+
+    urls = [c.request.url for c in responses.calls]
+    assert urls.count(f"{BASE}/executors/rent-by-spec") == 2
+    assert urls.count(f"{BASE}/pods") == 1 + 3

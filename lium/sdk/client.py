@@ -1621,7 +1621,9 @@ class Lium:
         # retried blindly; a dry run rents nothing and keeps the retries. Pods that exist before
         # the rent can never be the one it created (see `up`).
         known_pod_ids = frozenset() if dry_run else self._pod_ids_before_rent()
-        rent_headers = {**self.headers, "Idempotency-Key": str(uuid.uuid4())}
+        # No key on a dry run: the backend keeps a key whose request failed as pending, so its
+        # transient retry would get a permanent 409 idempotency_outcome_unknown for a rent of nothing.
+        rent_headers = self.headers if dry_run else {**self.headers, "Idempotency-Key": str(uuid.uuid4())}
         try:
             data = self._request(
                 "POST", "/executors/rent-by-spec", json=payload, headers=rent_headers, retry=dry_run
@@ -1634,26 +1636,26 @@ class Lium:
             # resent once with the same key only on a backend that honours it (it replays the first
             # answer); elsewhere a second rent-by-spec could pick another node, so the error
             # propagates and the docstring tells the caller to check `ps`.
-            pod = self._find_pod_info_by_name(
-                rental["name"], None, attempts=3, interval=3, exclude=known_pod_ids
-            )
-            if pod is not None and pod.executor is not None:
-                return RentResult(
-                    executor=pod.executor,
-                    price_per_hour=pod.executor.price_per_hour,  # ps() anchors it on the pod's billed price
-                    gpu_count=gpu_count,
-                    pod=self._created_pod_record(pod, pod.executor.id),
-                    template_id=rental["template_id"],
-                    candidates=1,
-                    attempts=1,
-                    server_side=True,
-                )
+            found = self._rented_pod_result(rental, gpu_count, known_pod_ids)
+            if found is not None:
+                return found
             if not self.supports(RENT_IDEMPOTENCY):
                 raise
             time.sleep(1)
-            data = self._request(
-                "POST", "/executors/rent-by-spec", json=payload, headers=rent_headers, retry=False
-            ).json()
+            try:
+                data = self._request(
+                    "POST", "/executors/rent-by-spec", json=payload, headers=rent_headers, retry=False
+                ).json()
+            except (requests.RequestException, LiumError) as exc:
+                # Either POST may have rented: an ambiguous resend is answered by looking again,
+                # never by a third POST. A definite refusal propagates as it is.
+                transient = isinstance(exc, (requests.RequestException, LiumServerError, LiumRateLimitError))
+                if not transient and exc.code not in ("idempotency_in_progress", "idempotency_outcome_unknown"):
+                    raise
+                found = self._rented_pod_result(rental, gpu_count, known_pod_ids)
+                if found is not None:
+                    return found
+                raise
         executor = self._dict_to_executor_info(data.get("selected_executor") or {})
         if executor is None:
             raise LiumError("rent-by-spec returned no node")
@@ -1670,6 +1672,24 @@ class Lium:
             alternatives=list(data.get("alternatives_considered") or []),
             attempts=int(data.get("attempts") or 0),
             dry_run=bool(data.get("dry_run", dry_run)),
+            server_side=True,
+        )
+
+    def _rented_pod_result(
+        self, rental: Dict[str, Any], gpu_count: int, known_pod_ids: frozenset
+    ) -> Optional[RentResult]:
+        """The pod a rent-by-spec with a lost answer created, if it is listed."""
+        pod = self._find_pod_info_by_name(rental["name"], None, attempts=3, interval=3, exclude=known_pod_ids)
+        if pod is None or pod.executor is None:
+            return None
+        return RentResult(
+            executor=pod.executor,
+            price_per_hour=pod.executor.price_per_hour,  # ps() anchors it on the pod's billed price
+            gpu_count=gpu_count,
+            pod=self._created_pod_record(pod, pod.executor.id),
+            template_id=rental["template_id"],
+            candidates=1,
+            attempts=1,
             server_side=True,
         )
 
