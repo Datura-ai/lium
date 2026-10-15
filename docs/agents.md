@@ -54,6 +54,8 @@ Failure on a renter command that takes `--json` (`up`, `exec`, `describe`, `bala
 
 All four keys are always there: `error.hint` is the next command or option to try, `error.exit_code` repeats the process exit code. The codes and hints are listed in [docs/exit-codes.md](exit-codes.md).
 
+`topup card` that answers `CARD_AUTHENTICATION_REQUIRED` with `data.next_action_url` (exit 6) is a 3-D Secure step-up, not a refusal: the payment is open. Hand `data.next_action_url` to the cardholder; the balance is credited once they confirm, with no further call. To check on it, run `error.hint`'s command, which repeats with the same `data.idempotency_key` and amount; never repeat with a new key or without one, which opens a second payment. In the SDK the same fields are on `LiumCardTopUpError` (`next_action_url`, `transaction_id`, `idempotency_key`, `is_step_up`).
+
 A usage error on any command — an unknown option, a missing argument — is click's plain-text `Usage: … Error: No such option '--bogus'` on stderr with exit 2, not the envelope: read exit 2 with non-JSON stderr as "fix the invocation".
 
 Failure on `ls --format json` / `ps --format json`: the same envelope on **stderr**, stdout empty — `lium ps no-such-pod --format json` exits 5 with `{"ok": false, "error": {"code": "pod_not_found", …}}` on stderr. `LIUM_OUTPUT=json` in the environment turns the envelope on for every renter command's failures, flag or no flag; success output stays JSON only where `--format json`/`--json` asks for it. `lium provider` is the exception: there `LIUM_OUTPUT=json` acts like `--json`, success output is JSON too and the error envelope is on stdout (§7).

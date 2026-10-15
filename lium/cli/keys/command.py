@@ -26,6 +26,7 @@ from lium.sdk.api_keys import (
     parse_stamp,
     unrecorded,
 )
+from lium.sdk.models import WorkspaceInfo
 from lium.sdk.exceptions import LiumError, LiumNotFoundError
 
 # The scopes the option accepts. The server's list (`lium keys scopes`) is the source of what each one does; this
@@ -86,6 +87,14 @@ def _can_do_lines(key: ApiKeyInfo, scopes: Dict[str, ApiKeyScope]) -> List[str]:
 BUDGET_RANGE = click.FloatRange(min=BUDGET_MIN_USD)
 
 
+def key_target(lium, workspace: Optional[str]) -> Optional[WorkspaceInfo]:
+    """The workspace a keys command acts in; None on a server without workspaces (lium.io), where a session
+    manages the account's own keys and no workspace is sent."""
+    if not (workspace or lium.config.workspace) and not lium.workspaces.enabled():
+        return None
+    return target_workspace(lium, workspace)
+
+
 @click.group("keys", invoke_without_command=True)
 @click.pass_context
 def keys_command(ctx):
@@ -115,8 +124,8 @@ def keys_list_command(workspace: Optional[str], json_output: bool):
     """
     lium = workspace_client()
     require_session(lium)
-    target = target_workspace(lium, workspace)
-    keys = lium.api_keys.list(target.id)
+    target = key_target(lium, workspace)
+    keys = lium.api_keys.list(target.id if target else None)
     if json_output:
         click.echo(json.dumps([key.to_dict() for key in keys], indent=2))
         return
@@ -134,7 +143,7 @@ def keys_list_command(workspace: Optional[str], json_output: bool):
             format_date(key.last_used) if key.last_used else "—",
             Text(key.id),
         )
-    ui.info(f"API keys of {escape(target.name)}  ({len(keys)} total)")
+    ui.info(f"API keys of {escape(target.name) if target else 'your account'}  ({len(keys)} total)")
     ui.print(table)
 
 
@@ -221,7 +230,14 @@ def keys_create_command(
     budgets_asked = [field_name for field_name in BUDGET_FIELDS if asked[field_name] is not None]
     if budgets_asked and not allow_unbudgeted:
         _require_budget_support(lium, budgets_asked)
-    target = target_workspace(lium, workspace)
+    target = key_target(lium, workspace)
+    if save and target is None:
+        raise CliFailure(
+            "invalid_arguments",
+            "--save keeps a key for `--workspace`, and this server has no workspaces; create the key without --save "
+            "and set it with `lium config set api.api_key <key>`",
+            EXIT_CONFIGURATION_ERROR,
+        )
     # a name config.ini cannot hold, or a section already holding another same-named workspace's key, is refused before minting
     section = section_for(target) if save else None
     if BILLING_SCOPE in chosen and not json_output:
@@ -233,13 +249,13 @@ def keys_create_command(
         monthly_budget_usd=monthly_budget,
         max_budget_usd=max_budget,
         pod_visibility=pod_visibility,
-        workspace_id=target.id,
+        workspace_id=target.id if target else None,
         allow_unrecorded=True,
     )
     try:
         missing = unrecorded(key, asked)
         if missing and not allow_unbudgeted:
-            _refuse_unrecorded(lium, key, asked, missing, target.id)
+            _refuse_unrecorded(lium, key, asked, missing, target.id if target else None)
         if section:
             settings.set_in_section(section, "id", target.id)
             settings.set_in_section(section, "api_key", key.key or "")
@@ -255,9 +271,9 @@ def keys_create_command(
     if json_output:
         if BILLING_SCOPE in chosen:
             _warn_billing(lium, json_output)
-        click.echo(json.dumps({**key.raw, "workspace_name": target.name}, indent=2))
+        click.echo(json.dumps({**key.raw, "workspace_name": target.name if target else None}, indent=2))
         return
-    ui.success(f"Key '{escape(name)}' created in {escape(target.name)}")
+    ui.success(f"Key '{escape(name)}' created" + (f" in {escape(target.name)}" if target else ""))
     ui.print(Text(key.key or ""))
     budget = budget_cell(key)
     ui.dim(escape(f"Scopes: {', '.join(key.scopes) or ', '.join(chosen)}" + (f"  ·  Budget: {budget}" if budget != "—" else "")))
@@ -384,10 +400,11 @@ def keys_show_command(key: str, workspace: Optional[str], json_output: bool):
     """
     lium = workspace_client()
     require_session(lium)
-    target = target_workspace(lium, workspace)
-    found = lium.api_keys.resolve(key, target.id)
+    target = key_target(lium, workspace)
+    target_id = target.id if target else None
+    found = lium.api_keys.resolve(key, target_id)
     can_do = _can_do_lines(found, _scopes_by_name(lium))
-    refusals = _refusals(lium, found.id, target.id)
+    refusals = _refusals(lium, found.id, target_id)
     today = _refused_today(refusals) if refusals is not None else None
     if json_output:
         rows = None if refusals is None else [r.raw for r in refusals]
@@ -400,7 +417,7 @@ def keys_show_command(key: str, workspace: Optional[str], json_output: bool):
         described = None
     ui.info(escape(f"{found.name}  ({found.id})"))
     rows = [
-        ("Workspace", target.name),
+        ("Workspace", target.name if target else "—"),
         ("Scopes", ", ".join(found.scopes) or "—"),
         ("Budget", budget_cell(found)),
         ("Pod visibility", f"{visibility} — {described}" if described else visibility),
@@ -552,8 +569,9 @@ def keys_budget_command(
         raise CliFailure("invalid_arguments", str(exc), EXIT_CONFIGURATION_ERROR) from exc
     lium = workspace_client()
     require_session(lium)
-    target = target_workspace(lium, workspace)
-    found = lium.api_keys.resolve(key, target.id)
+    target = key_target(lium, workspace)
+    target_id = target.id if target else None
+    found = lium.api_keys.resolve(key, target_id)
     # the windows not named keep the key's current budget, so the order is checked on the state PATCH would
     # leave (`--monthly-budget 5` on a key with a $50 daily budget), not only on the flags of this call
     effective = {
@@ -574,7 +592,7 @@ def keys_budget_command(
             daily_budget_usd=wanted["daily"],
             monthly_budget_usd=wanted["monthly"],
             max_budget_usd=wanted["max"],
-            workspace_id=target.id,
+            workspace_id=target_id,
         )
     except LiumError as exc:
         if _no_patch_route(exc):

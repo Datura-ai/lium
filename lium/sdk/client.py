@@ -49,7 +49,9 @@ from .exceptions import (
     LiumRateLimitError,
     LiumScopeError,
     LiumServerError,
+    LiumRentOutcomeUnknownError,
     PodStartError,
+    RemoteExecutionError,
 )
 from .jobs import (
     DEFAULT_JOB_DIR,
@@ -337,6 +339,9 @@ def _response_error_code(response: requests.Response) -> Optional[str]:
 CARD_TOPUP_ERROR_CODES = frozenset(
     {
         "CARD_AUTHENTICATION_REQUIRED",
+        "CARD_AUTHENTICATION_NOT_COMPLETED",
+        "CARD_AUTHENTICATION_UNAVAILABLE",
+        "CARD_AUTHENTICATION_EXPIRED",
         "CARD_DECLINED",
         "NO_SAVED_CARD",
         "NO_DEFAULT_CARD",
@@ -345,6 +350,9 @@ CARD_TOPUP_ERROR_CODES = frozenset(
 )
 # 502s from the same route that fire before Stripe is asked to charge (or that Stripe refused
 # before processing). A 5xx without one of these still means the charge may have gone through.
+# Not `TOP_UP_BUSY`: that 503 only says this attempt submitted nothing; a same-key repeat after an
+# open step-up or a lost answer can still find that earlier payment going through, so it stays an
+# unknown outcome that carries the key.
 CARD_TOPUP_NOT_CHARGED_CODES = frozenset({"STRIPE_UNAVAILABLE", "STRIPE_REFUSED"})
 
 CHECKOUT_SUCCESS_PATH = "/billing?success=true"
@@ -355,7 +363,9 @@ CREDIT_EPSILON_USD = 0.005
 
 def card_topup_error(response: requests.Response, **context: Optional[str]) -> LiumCardTopUpError:
     """The exception for a card top-up 402: the server's sentence as the message, and the fields
-    of its structured body (``status``, ``decline_code``, ``dashboard_url``, ``payment_intent_id``)."""
+    of its structured body (``status``, ``decline_code``, ``dashboard_url``, ``payment_intent_id``,
+    and on a 3-D Secure step-up ``transaction_id`` and ``next_action_url``). The body does not carry
+    the idempotency key; :meth:`Lium.topup_card` sets the one it sent."""
     try:
         payload = response.json()
     except ValueError:
@@ -372,6 +382,8 @@ def card_topup_error(response: requests.Response, **context: Optional[str]) -> L
         decline_code=text(detail.get("decline_code")),
         dashboard_url=text(detail.get("dashboard_url")),
         payment_intent_id=text(detail.get("payment_intent_id")),
+        transaction_id=text(detail.get("transaction_id")),
+        next_action_url=text(detail.get("next_action_url")),
         **context,
     )
 
@@ -1234,9 +1246,20 @@ class Lium:
             if existing:
                 return existing
             time.sleep(1)
-            response = self._request(
-                "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
-            ).json()
+            try:
+                response = self._request(
+                    "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
+                ).json()
+            except LiumError as exc:
+                # Any failure of the repeat (auth, permission, 429, 5xx, a plain refusal) does not undo
+                # the first POST, which may still be running.
+                raise LiumRentOutcomeUnknownError(
+                    f"The first rent request got no answer and its repeat was refused ({exc}); a pod may still appear. "
+                    "Run 'lium ps' before renting again.",
+                    code="rent_outcome_unknown",
+                    hint="Do not rent again until 'lium ps' shows whether the first request created a pod.",
+                    request_id=exc.request_id,
+                ) from exc
 
         # API should return pod info
         if response and "id" in response:
@@ -3228,6 +3251,7 @@ class Lium:
         command: str,
         env: Optional[Dict[str, str]] = None,
         pty: bool = True,
+        check: bool = False,
     ) -> Generator[Dict[str, str], None, int]:
         """Execute a shell command and stream incremental output.
 
@@ -3238,17 +3262,24 @@ class Lium:
             pty: Request a pseudo-terminal (default). A pty merges stderr into stdout
                 and turns ``\n`` into ``\r\n``; pass ``False`` to keep the two
                 streams apart, as :func:`lium.machine` does to relay a function's output.
+            check: Raise :class:`RemoteExecutionError` when the command exits
+                non-zero, after its last chunk, so a plain ``for`` loop fails
+                with the command instead of finishing silently.
 
         Yields:
             Streaming output chunks as ``{"type": "stdout"|"stderr", "data": str}``.
 
         Returns:
             The command's exit status (the generator's ``StopIteration.value``).
+
+        Raises:
+            RemoteExecutionError: with ``check=True``, the command exited non-zero;
+                ``exit_code`` holds the status.
         """
-        command = self._prep_command(command, env)
+        remote_command = self._prep_command(command, env)  # ``command`` alone goes in errors: no env values
 
         with self.ssh_connection(pod) as client:
-            stdin, stdout, stderr = client.exec_command(command, get_pty=pty)
+            stdin, stdout, stderr = client.exec_command(remote_command, get_pty=pty)
             stdin.close()
 
             channel = stdout.channel
@@ -3277,7 +3308,13 @@ class Lium:
                         tail = decoder.decode(b"", final=True)
                         if tail:
                             yield {"type": kind, "data": tail}
-                    return channel.recv_exit_status()
+                    exit_code = channel.recv_exit_status()
+                    if check and exit_code != 0:
+                        raise RemoteExecutionError(
+                            f"Command exited with status {exit_code} on pod {pod.name or pod.huid}: {command}",
+                            exit_code=exit_code,
+                        )
+                    return exit_code
                 time.sleep(0.05)  # nothing pending: do not spin at 100% CPU until the command ends
 
     def exec_all(
@@ -3560,11 +3597,24 @@ class Lium:
 
         Raises:
             ValueError: If SSH is not configured for the pod.
+            IsADirectoryError: If ``remote`` is a directory (SFTP copies one file);
+                nothing is written locally.
         """
         with self.ssh_connection(pod) as client:
             sftp = client.open_sftp()
-            sftp.get(remote, local)
-            sftp.close()
+            try:
+                # sftp.get creates the local file before it reads the remote one, so check first.
+                if stat.S_ISDIR(sftp.stat(remote).st_mode):
+                    raise IsADirectoryError(f"{remote} is a directory on the pod; download copies one file")
+                existed = os.path.lexists(local)  # lexists: a dangling symlink is the user's too
+                try:
+                    sftp.get(remote, local)
+                except BaseException:
+                    if not existed:  # never leave a partial or 0-byte file behind, never delete the user's own file
+                        Path(local).unlink(missing_ok=True)
+                    raise
+            finally:
+                sftp.close()
 
     def upload(self, pod: PodInfo, *, local: str, remote: str) -> None:
         """Upload a file to a pod via SFTP.
@@ -4782,9 +4832,12 @@ class Lium:
             never a second charge. Do not repeat the call without the key.
 
         Raises:
-            LiumCardTopUpError: the bank wants a confirmation (``CARD_AUTHENTICATION_REQUIRED``,
-                see ``dashboard_url``), declined the card (``CARD_DECLINED``), or no card is
-                saved / none is the default. Nothing was charged.
+            LiumCardTopUpError: the bank wants a confirmation (``CARD_AUTHENTICATION_REQUIRED``),
+                declined the card (``CARD_DECLINED``), or no card is saved / none is the default.
+                Nothing was charged. ``idempotency_key`` on the error is the key sent. With
+                ``next_action_url`` (``is_step_up``) the payment is still open: the cardholder
+                confirms there and the balance is credited; repeat only with that same key
+                (``transaction_id`` names the row), never a new one, which opens a second payment.
             LiumChargeOutcomeUnknownError: the answer was lost (timeout, dropped connection,
                 5xx) after the charge was posted — it may have gone through. Check the balance
                 before trying again; ``idempotency_key`` on the error repeats it safely.
@@ -4799,6 +4852,10 @@ class Lium:
             payload["payment_method_id"] = payment_method_id
         try:
             body = self._request("POST", "/payments/topup", json=payload).json()
+        except LiumCardTopUpError as exc:
+            # the 402 body does not echo the key; a step-up must be followed with this one, not a new one
+            exc.idempotency_key = exc.idempotency_key or key
+            raise
         except LiumServerError as exc:
             # retrieve/list 502s, or a Stripe refusal before processing: the card was not touched
             if exc.code in CARD_TOPUP_NOT_CHARGED_CODES:
