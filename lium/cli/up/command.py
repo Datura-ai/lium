@@ -634,14 +634,14 @@ def up_command(
     # --timeout is the whole command's budget. Everything before the rent (finding the node and
     # the template, creating the volume, uploading the build context — not the answer at the
     # prompt) counts against it; a budget that is already spent must not reach the rent, or the
-    # pod would be created and then reported as timed out one second later. The rent is the
-    # first thing that bills.
-    def _check_deadline() -> float:
+    # pod would be created and then reported as timed out one second later. It is checked before
+    # and again after the upload. The rent is the first thing that bills.
+    def _check_deadline(note: str = "") -> float:
         left = deadline - time.monotonic()
         if left <= 0:
             raise CliFailure(
                 "timeout_before_rent",
-                f"The --timeout budget of {timeout}s ran out before renting {executor.huid}; no pod was created.{kept} "
+                f"The --timeout budget of {timeout}s ran out before renting {executor.huid}; no pod was created.{kept}{note} "
                 "Run again with a larger --timeout.",
                 EXIT_GENERAL_ERROR,
                 data=created_volume,
@@ -650,11 +650,10 @@ def up_command(
 
     # Uploaded after the confirmation, so a declined prompt sends nothing, and only while the
     # budget lasts: a spent budget sends nothing either. The upload's requests timeout is the
-    # budget left, so a stalled upload fails as a timeout instead of renting late; a finished
-    # upload always goes on to the rent, so it never leaves source behind with no pod (review).
-    # shortcut: requests bounds each send/read, not the whole upload, so a steady slow upload can
-    # still overrun; a hard bound needs an API DELETE/consume for the context before BUILD_CONTEXT goes on.
-    # The API keeps the context for a limited time only.
+    # budget left, so a stalled upload fails as a timeout; requests bounds each send/read, not the
+    # whole upload, so the deadline is checked again after a finished upload and a late one does
+    # not rent. The API keeps an unused context for a limited time only; removing it at once
+    # needs an API delete/consume (a condition before BUILD_CONTEXT goes on).
     build_context_sha256 = None
     left = _check_deadline()
     if archive is not None:
@@ -672,6 +671,10 @@ def up_command(
                 EXIT_GENERAL_ERROR,
                 data=created_volume,
             )
+        _check_deadline(
+            f" The build context was uploaded (sha256 {build_context_sha256}) and is kept by the API"
+            " for a limited time."
+        )
 
     ui.dim(f"renting {executor.huid}…")
     action = RentPodAction()

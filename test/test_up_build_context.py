@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import io
+import json
 import os
 import tarfile
 from types import SimpleNamespace
@@ -230,7 +231,7 @@ def test_rent_pod_action_passes_the_build_context_to_up():
 @pytest.mark.parametrize("answer", ["--yes", "declined", "expired", "slow-upload", "stalled-upload"])
 def test_up_command_uploads_the_dockerfiles_directory_when_the_backend_takes_it(monkeypatch, tmp_path, answer):
     # Arrange: a declined confirmation or a spent --timeout must send nothing; an upload that
-    # spends the rest of the budget still goes on to the rent, so its source is not orphaned; the
+    # finishes after the budget ran out does not rent, and says the context was uploaded; the
     # upload is bounded by the budget left, and one that times out fails before the rent
     _tree(tmp_path, {"app.py": "print('hi')\n", "secrets.env": "x", ".dockerignore": "*.env\n"})
     dockerfile = tmp_path / "Dockerfile"
@@ -276,6 +277,8 @@ def test_up_command_uploads_the_dockerfiles_directory_when_the_backend_takes_it(
         clock = iter([0, 2] if answer == "expired" else [0, 0])
         monkeypatch.setattr(up_command.time, "monotonic", lambda: next(clock, 2))
         args += ["--timeout", "1"]
+    if answer == "slow-upload":
+        args.append("--json")  # the envelope carries the error code
 
     # Act
     result = CliRunner().invoke(up_command.up_command, args)
@@ -291,6 +294,15 @@ def test_up_command_uploads_the_dockerfiles_directory_when_the_backend_takes_it(
         return
     if answer != "--yes":
         assert captured["upload_timeout"] == 1  # the budget left when the upload starts
+    if answer == "slow-upload":
+        assert len(uploads) == 1 and "ctx" not in captured
+        assert result.exit_code == 1
+        envelope = json.loads(result.stderr.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "timeout_before_rent"
+        message = envelope["error"]["message"]
+        assert "no pod was created" in message
+        assert f"The build context was uploaded (sha256 {'ab' * 32}) and is kept by the API for a limited time." in message
+        return
     if answer == "stalled-upload":
         assert len(uploads) == 1 and "ctx" not in captured
         assert result.exit_code == 1 and "did not finish within the --timeout budget" in result.output
