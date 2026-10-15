@@ -3475,10 +3475,12 @@ class Lium:
                 # sftp.get creates the local file before it reads the remote one, so check first.
                 if stat.S_ISDIR(sftp.stat(remote).st_mode):
                     raise IsADirectoryError(f"{remote} is a directory on the pod; download copies one file")
+                existed = Path(local).exists()
                 try:
                     sftp.get(remote, local)
                 except BaseException:
-                    Path(local).unlink(missing_ok=True)  # never leave a partial or 0-byte file behind
+                    if not existed:  # never leave a partial or 0-byte file behind, never delete the user's own file
+                        Path(local).unlink(missing_ok=True)
                     raise
             finally:
                 sftp.close()

@@ -96,12 +96,16 @@ def scp_command(
         if directory_error:
             remote = parsed["remote_path"].rstrip("/")
             parent, name = posixpath.split(remote)
-            archive = f"{remote}.tar.gz"
-            tar = shlex.join(["tar", "czf", archive, "-C", parent or "/", name])
-            hint = (
-                f"{directory_error}. Archive it on the pod, then download the archive: "
-                f"lium exec {targets} {shlex.quote(tar)} && lium scp {targets} {shlex.quote(archive)} -d"
-            )
+            if name in ("", ".", ".."):
+                hint = f"{directory_error}. Archive it on the pod with tar, then download the archive with lium scp -d"
+            else:
+                # a relative path is relative to the SSH home, which is also where lium exec runs
+                archive = f"{remote}.tar.gz"
+                tar = shlex.join(["tar", "czf", archive, *(["-C", parent] if parent else []), name])
+                hint = (
+                    f"{directory_error}. Archive it on the pod, then download the archive: "
+                    f"lium exec {targets} {shlex.quote(tar)} && lium scp {targets} {shlex.quote(archive)} -d"
+                )
         raise CliFailure(
             "scp_failed",
             f"Failed to {action_name}: {', '.join(failed_huids)}",
