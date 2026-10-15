@@ -207,9 +207,10 @@ def test_rent_pod_action_passes_the_build_context_to_up():
     assert calls["build_context_sha256"] == "ab" * 32
 
 
-@pytest.mark.parametrize("answer", ["--yes", "declined"])
+@pytest.mark.parametrize("answer", ["--yes", "declined", "expired", "slow-upload"])
 def test_up_command_uploads_the_dockerfiles_directory_when_the_backend_takes_it(monkeypatch, tmp_path, answer):
-    # Arrange: a declined confirmation must send nothing
+    # Arrange: a declined confirmation or a spent --timeout must send nothing; an upload that
+    # spends the rest of the budget must not reach the rent
     _tree(tmp_path, {"app.py": "print('hi')\n", "secrets.env": "x", ".dockerignore": "*.env\n"})
     dockerfile = tmp_path / "Dockerfile"
     dockerfile.write_text("FROM python:3.12-slim\nCOPY app.py /app/app.py\n")
@@ -240,15 +241,24 @@ def test_up_command_uploads_the_dockerfiles_directory_when_the_backend_takes_it(
     monkeypatch.setattr(up_command, "RentPodAction", _FakeRentPod)
     prompts: list[str] = []
     monkeypatch.setattr(up_command.ui, "confirm", lambda msg, *a, **k: prompts.append(msg) or False)
-    args = ["brave-fox-3a", "--dockerfile", str(dockerfile)] + (["--yes"] if answer == "--yes" else [])
+    args = ["brave-fox-3a", "--dockerfile", str(dockerfile)] + (["--yes"] if answer != "declined" else [])
+    if answer in ("expired", "slow-upload"):
+        # deadline = 0 + 1; the clock then reads 2 before the upload, or 0 before and 2 after it
+        clock = iter([0, 2] if answer == "expired" else [0, 0])
+        monkeypatch.setattr(up_command.time, "monotonic", lambda: next(clock, 2))
+        args += ["--timeout", "1"]
 
     # Act
-    CliRunner().invoke(up_command.up_command, args)
+    result = CliRunner().invoke(up_command.up_command, args)
 
     # Assert
     if answer == "declined":
         assert uploads == [] and "ctx" not in captured
         assert f"Uploads {tmp_path.resolve()} as the build context" in prompts[0]
+        return
+    if answer in ("expired", "slow-upload"):
+        assert len(uploads) == (0 if answer == "expired" else 1) and "ctx" not in captured
+        assert result.exit_code == 1 and "ran out before renting" in result.output
         return
     assert captured["ctx"]["build_context_sha256"] == "ab" * 32
     assert len(uploads) == 1

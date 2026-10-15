@@ -615,14 +615,6 @@ def up_command(
     # (what `--volume id:<HUID>` and `lium volumes` show), so a program can rent again with the
     # same volume or remove it without parsing the message. Empty when no volume was created:
     # the envelope then has no ``data``.
-    # Uploaded after the confirmation, so a declined prompt sends nothing, and before the deadline
-    # check below, which then counts the upload. The API keeps it for a limited time only.
-    build_context_sha256 = None
-    if archive is not None:
-        build_context_sha256 = ui.load(
-            f"Uploading build context ({len(archive) // 1024} KiB)", lambda: lium.upload_build_context(archive)
-        )
-
     created_volume: dict = {}
     kept = ""
     if volume_create_params:
@@ -639,18 +631,31 @@ def up_command(
         created_volume = {"volume_id": volume_id, "volume_huid": result.data["volume"].huid}
         kept = f" The volume {volume_create_params['name']} was created and is kept."
 
-    # --timeout is the whole command's budget. Everything before this line (finding the node and
-    # the template, creating the volume — not the answer at the prompt) counts against it; a budget
-    # that is already spent must not reach the rent, or the pod would be created and then
-    # reported as timed out one second later. The rent is the first thing that bills.
-    if time.monotonic() >= deadline:
-        raise CliFailure(
-            "timeout_before_rent",
-            f"The --timeout budget of {timeout}s ran out before renting {executor.huid}; no pod was created.{kept} "
-            "Run again with a larger --timeout.",
-            EXIT_GENERAL_ERROR,
-            data=created_volume,
+    # --timeout is the whole command's budget. Everything before the rent (finding the node and
+    # the template, creating the volume, uploading the build context — not the answer at the
+    # prompt) counts against it; a budget that is already spent must not reach the rent, or the
+    # pod would be created and then reported as timed out one second later. The rent is the
+    # first thing that bills.
+    def _check_deadline() -> None:
+        if time.monotonic() >= deadline:
+            raise CliFailure(
+                "timeout_before_rent",
+                f"The --timeout budget of {timeout}s ran out before renting {executor.huid}; no pod was created.{kept} "
+                "Run again with a larger --timeout.",
+                EXIT_GENERAL_ERROR,
+                data=created_volume,
+            )
+
+    # Uploaded after the confirmation, so a declined prompt sends nothing, and only while the
+    # budget lasts: a spent budget sends nothing either. The check after it counts the upload.
+    # The API keeps the context for a limited time only.
+    build_context_sha256 = None
+    if archive is not None:
+        _check_deadline()
+        build_context_sha256 = ui.load(
+            f"Uploading build context ({len(archive) // 1024} KiB)", lambda: lium.upload_build_context(archive)
         )
+    _check_deadline()
 
     ui.dim(f"renting {executor.huid}…")
     action = RentPodAction()
