@@ -133,12 +133,23 @@ class ControlMaster:
         return check.returncode == 0
 
     def start(self) -> None:
-        """Connect and leave the master in the background. Raises when ssh cannot connect."""
-        from .client import _SSH_INSECURE_ENV, ssh_insecure
+        """Connect and leave the master in the background, unless another process just did. Raises when ssh cannot connect."""
+        import fcntl   # POSIX only, like the master itself (available() is False on Windows)
 
         ensure_socket_dir(self.path.parent)
+        # Two `lium exec` processes reaching a pod at once must not both start a master: the loser's ssh would find
+        # the socket taken, drop multiplexing and stay up as a plain connection nothing ever closes. One starter at a
+        # time per pod; the next one finds the master up and uses it.
+        with open(f"{self.path}.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if not self.alive():
+                self._start_locked()
+
+    def _start_locked(self) -> None:
+        from .client import _SSH_INSECURE_ENV, ssh_insecure
+
         try:
-            self.path.unlink()   # a dead master's socket, or one that is not ours: ssh -M would refuse the path
+            self.path.unlink()   # not alive: a dead master's socket, or one that is not ours; ssh -M would refuse it
         except FileNotFoundError:
             pass  # no socket left behind: nothing stands in ssh -M's way
         # stderr goes to a file: the backgrounded master keeps it open, and a pipe would never see EOF
@@ -156,10 +167,10 @@ class ControlMaster:
         # the pin notice is reported whether or not the connection then succeeded: a failed login still pinned the key
         notices = [line for line in message.splitlines() if "Permanently added" in line]
         for line in notices:
-            warnings.warn(line, stacklevel=2)   # first-use pin, or the unverified accept under LIUM_SSH_INSECURE
+            warnings.warn(line, stacklevel=3)   # first-use pin, or the unverified accept under LIUM_SSH_INSECURE
         if started.returncode == 0:
             if ssh_insecure() and not notices:   # LogLevel QUIET hides ssh's own line; the opt-out is never silent
-                warnings.warn(f"{self.destination}: {_SSH_INSECURE_ENV}=1 disabled host key verification", stacklevel=2)
+                warnings.warn(f"{self.destination}: {_SSH_INSECURE_ENV}=1 disabled host key verification", stacklevel=3)
             return
         name = self.pod.name or self.pod.huid
         if any(marker in message for marker in _HOST_KEY_CHANGED):

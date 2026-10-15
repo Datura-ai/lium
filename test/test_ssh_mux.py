@@ -259,7 +259,9 @@ def test_starting_a_master_replaces_a_socket_left_at_its_path(home, monkeypatch)
 
     assert path.read_text() == ""                 # the fake master made a new one
     assert oct(path.parent.stat().st_mode & 0o777) == "0o700"
-    assert [argv for argv, _ in ssh.calls if "check" in argv] == []   # the open directory was never trusted
+    checks = [i for i, (argv, _) in enumerate(ssh.calls) if "check" in argv]
+    starts = [i for i, (argv, _) in enumerate(ssh.calls) if "ControlMaster=yes" in argv]
+    assert checks == [0] and starts == [1]   # the open directory was never trusted; checked only once closed
 
 
 @pytest.mark.parametrize("operation", ["down", "reboot"])
@@ -440,6 +442,20 @@ def test_lium_exec_with_persist_off_connects_and_lists_pods_per_run(bench):
 def test_repeated_sdk_exec_opens_one_ssh_connection(bench):
     result = bench_warm_exec.bench_sdk(bench, sys.executable, 3, {})
     assert result["ssh_connections"] == 1
+
+
+@pytest.mark.skipif(_no_sshd, reason="needs sshd, ssh and ssh-keygen")
+def test_parallel_lium_exec_on_a_pod_without_a_master_starts_exactly_one(bench):
+    env = bench.env()
+    runs = [subprocess.Popen([sys.executable, "-c", bench_warm_exec.CLI_MAIN, "exec", bench_warm_exec.POD_ID, "true"],
+                             env=env, cwd=bench.workdir, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.PIPE) for _ in range(4)]
+    errors = [run.communicate(timeout=120)[1] for run in runs]
+    assert [run.returncode for run in runs] == [0] * 4, errors
+    assert bench.proxy.connections == 1
+    # the one master is the only ssh process left: no plain connection that nothing would ever close
+    masters = subprocess.run(["pgrep", "-f", f"^ssh .*{bench.home}"], capture_output=True, text=True).stdout.split()
+    assert len(masters) == 1
 
 
 def test_a_symlinked_socket_dir_is_refused_and_its_target_left_alone(tmp_path):
