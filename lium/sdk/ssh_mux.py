@@ -114,7 +114,8 @@ class ControlMaster:
         self.pod = pod
         self.path = control_path(pod)
         self.destination = f"{user}@{host}"
-        self.base = ["ssh", "-p", str(port), "-o", f'ControlPath="{self.path}"', "-o", "BatchMode=yes",
+        # -F /dev/null: the renter's ~/.ssh/config (SendEnv, SetEnv, ...) must not reach a pod; every option is set here
+        self.base = ["ssh", "-F", "/dev/null", "-p", str(port), "-o", f'ControlPath="{self.path}"', "-o", "BatchMode=yes",
                      "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ClearAllForwardings=yes"]
         key_path = getattr(lium.config, "ssh_key_path", None)
         if key_path:

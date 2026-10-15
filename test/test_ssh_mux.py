@@ -131,6 +131,19 @@ def test_the_renters_ssh_config_cannot_forward_anything_to_the_pod(home, option,
     assert f"{option} {expected}" in evaluated.splitlines()
 
 
+@pytest.mark.skipif(shutil.which("ssh") is None, reason="needs the OpenSSH client")
+def test_the_renters_ssh_config_cannot_send_environment_values_to_the_pod(home):
+    config = home / "ssh_config"
+    config.write_text("Host *\n  SendEnv AWS_* SECRET\n  SetEnv TOKEN=local-secret\n")
+    master = ssh_mux.ControlMaster(_lium(home), _pod())
+
+    # the renter's config comes first, as ssh's own default would; the master's argv must override it
+    evaluated = subprocess.run(["ssh", "-F", str(config), "-G", *master.base[1:], "--", master.destination],
+                               capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL).stdout.lower()
+
+    assert "sendenv" not in evaluated and "setenv" not in evaluated
+
+
 def test_a_pin_notice_is_reported_when_the_login_then_fails(home, monkeypatch):
     ssh = _Ssh(live=False, start_code=255, start_stderr=b"Warning: Permanently added '[203.0.113.10]:20299' (ED25519) to the list of known hosts.\nroot@203.0.113.10: Permission denied (publickey).\n")
     monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
