@@ -60,7 +60,9 @@ class WorkspacesClient:
     # ------------------------------------------------------------------ capability
     def _me_payload(self) -> Dict[str, Any]:
         if self._me is None:
-            self._me = self._lium._request("GET", "/users/me").json()
+            # with no API key (a session-only CLI) the session reads its own account
+            headers = None if self._lium.config.api_key else self._session_headers()
+            self._me = self._lium._request("GET", "/users/me", headers=headers).json()
         return self._me
 
     def enabled(self) -> bool:
