@@ -1190,6 +1190,46 @@ def test_a_rental_tracked_while_the_background_reconciler_exits_is_still_reconci
     assert fake.removed == ["p1"]
 
 
+def test_a_failed_lock_release_neither_fails_the_cleanup_nor_stops_the_worker(tools, fake, monkeypatch, rental_state_dir):
+    """On Windows another server that just opened a released lock file makes its unlink fail. The journal is
+    still forgotten, and the background worker goes on to remove a pod cancelled after that pass."""
+    unlink = tools_module.Path.unlink
+
+    def lock_in_use(path, missing_ok=False):
+        if path.suffix == ".lock":
+            raise PermissionError(13, "The process cannot access the file because it is being used by another process")
+        unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(tools_module.Path, "unlink", lock_in_use)
+    rental = tools_module._Rental()
+    rental.idempotency_key, rental.replay = "key-1", type("E", (), {"endpoint": "/x", "executor_id": None, "payload": {}})()
+    tools._store.save(rental)
+    tools._store.forget(rental)
+    assert not (rental_state_dir / "key-1.json").exists() and tools._store._held == {}
+
+    tools.BACKGROUND_CLEANUP, tools.CLEANUP_RETRY_SECONDS = True, 0.01
+    original, calls = tools._reconcile, []
+
+    def reconcile():
+        calls.append(1)
+        if len(calls) == 1:
+            late = tools_module._Rental()
+            late.submitted, late.cancelled, late.outcome, late.pod_ids = True, True, "created", {"p1"}
+            tools._track(late)  # the worker is running, so this starts none
+            raise PermissionError(13, "lock file in use")
+        return original()
+
+    monkeypatch.setattr(tools, "_reconcile", reconcile)
+    first = tools_module._Rental()
+    first.submitted, first.cancelled, first.outcome = True, True, "rejected"
+    tools._track(first)
+
+    deadline = time.monotonic() + 5
+    while "p1" not in fake.removed and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert fake.removed == ["p1"]
+
+
 def test_a_rental_cancelled_before_its_worker_starts_never_rents_and_never_waits(tools, fake):
     from lium.cli.mcp.tools import _Rental
 

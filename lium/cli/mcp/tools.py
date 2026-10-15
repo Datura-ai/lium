@@ -198,8 +198,12 @@ class _RentalStore:
         fd = self._held.pop(key, None)
         if fd is not None:
             os.close(fd)  # drops the lock on either OS; Windows cannot unlink a file still open
-            # a server that locked the path meanwhile finds no journal and releases it; this unlink is then harmless
-            (self.directory / f"{key}.lock").unlink(missing_ok=True)
+            # a server that locked the path meanwhile finds no journal and releases it; this unlink is then harmless,
+            # and on Windows it fails while that server has the file open: the lock file is left, never the journal
+            try:
+                (self.directory / f"{key}.lock").unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def path(self, rental: _Rental) -> Optional[Path]:
         return self.directory / f"{rental.idempotency_key}.json" if self.directory and rental.idempotency_key else None
@@ -647,7 +651,10 @@ class LiumTools:
         """Retry removals and replays until nothing is unresolved."""
         delay = self.CLEANUP_RETRY_SECONDS
         while True:
-            self._reconcile()
+            try:
+                self._reconcile()
+            except Exception:  # noqa: BLE001 - this thread is the only one that retries; it must outlive any one pass
+                pass
             with self._cleanup:
                 # read under the lock _track takes: a rental tracked after _reconcile's snapshot is seen here, or
                 # _track sees this thread still running and starts none, and it would wait for the next rent_pod
