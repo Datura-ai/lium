@@ -16,7 +16,7 @@ import pytest
 from lium.sdk import (
     Cluster, ClusterNotListedError, ClusterOffer, Config, Lium, LiumError, LiumNotFoundError, LiumPermissionError, Template,
 )
-from lium.sdk.exceptions import LiumServerError
+from lium.sdk.exceptions import LiumAuthError, LiumServerError
 
 FABRIC = "hot:infiniband:0x3:0x7fff:NVIDIA H100 80GB HBM3:8"
 
@@ -693,9 +693,18 @@ def test_up_cluster_resends_once_with_the_same_key_when_the_backend_honours_it(m
     assert len(post_keys) == 2 and post_keys[0] == post_keys[1]
 
 
-@pytest.mark.parametrize("code", ["idempotency_in_progress", "idempotency_outcome_unknown"])
-def test_up_cluster_looks_up_by_name_when_the_resend_cannot_replay(code):
-    answers = iter([LiumServerError("Server error: 504"), LiumError("conflict", code=code)])
+@pytest.mark.parametrize(
+    "resend_error",
+    [
+        LiumError("conflict", code="idempotency_in_progress"),
+        LiumError("conflict", code="idempotency_outcome_unknown"),
+        # lium#328 r4285561625: an auth or balance refusal refuses the resend only
+        LiumAuthError("Invalid API key"),
+        LiumPermissionError("Insufficient balance"),
+    ],
+)
+def test_up_cluster_looks_up_by_name_when_the_resend_cannot_replay(resend_error):
+    answers = iter([LiumServerError("Server error: 504"), resend_error])
 
     def order():
         raise next(answers)

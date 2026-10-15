@@ -390,7 +390,7 @@ def test_rent_sends_a_fresh_idempotency_key_and_still_posts_once(client, monkeyp
 
 
 @pytest.mark.parametrize(
-    "resend", ["replay", "timeout", 502, 429, "idempotency_in_progress", "idempotency_outcome_unknown"]
+    "resend", ["replay", "timeout", 502, 429, 401, 403, "idempotency_in_progress", "idempotency_outcome_unknown"]
 )
 @responses.activate
 def test_a_lost_rent_response_is_resent_once_with_the_same_key_when_the_backend_honours_it(
@@ -422,6 +422,27 @@ def test_a_lost_rent_response_is_resent_once_with_the_same_key_when_the_backend_
     assert posts[0].headers["Idempotency-Key"] == posts[1].headers["Idempotency-Key"]
     assert posts[0].body == posts[1].body
     assert result.pod["id"] == "pod-uuid-1"
+
+
+@pytest.mark.parametrize("status", [401, 403])
+@responses.activate
+def test_an_auth_refusal_of_the_resend_keeps_the_first_rent_unknown(client, monkeypatch, status):
+    # lium#328 r4285561625: the resend's refusal says nothing about the first rent, which may
+    # have spent the balance, so an unlisted pod is reported as possibly rented
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
+    _version(["rent_by_spec", "rent_idempotency"])
+    responses.add(responses.GET, f"{BASE}/pods", json=[])
+    url = f"{BASE}/executors/rent-by-spec"
+    responses.add(responses.POST, url, status=502)
+    responses.add(responses.POST, url, status=status, json={"error": {"code": "refused", "message": "no"}})
+
+    with pytest.raises(LiumError) as raised:
+        client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY])
+
+    assert raised.value.code == "rent_outcome_unknown" and "may be rented" in str(raised.value)
+    urls = [c.request.url for c in responses.calls]
+    assert urls.count(url) == 2
+    assert urls.count(f"{BASE}/pods") == 1 + 3 + 3  # the snapshot, the look before and after the resend
 
 
 @responses.activate

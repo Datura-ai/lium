@@ -1555,6 +1555,9 @@ class Lium:
                 error propagates and the pod may still exist — check :meth:`ps`.
             LiumError: the resend answered ``idempotency_in_progress`` or
                 ``idempotency_outcome_unknown`` and the pod was still not listed (same advice).
+            LiumError: code ``rent_outcome_unknown``: the resend was refused for authentication,
+                permission or balance and the pod was not listed; the first rent may still have
+                rented it (same advice).
         """
         if template_id is not None and dockerfile_content is not None:
             raise ValueError("Provide either template_id or dockerfile_content, not both")
@@ -1654,13 +1657,26 @@ class Lium:
                 ).json()
             except (requests.RequestException, LiumError) as exc:
                 # Either POST may have rented: an ambiguous resend is answered by looking again,
-                # never by a third POST. A definite refusal propagates as it is.
+                # never by a third POST. A definite refusal propagates as it is. An auth or balance
+                # refusal only refuses the resend (the first rent may have spent the balance), so
+                # it says nothing about the first request's outcome (review).
                 transient = isinstance(exc, (requests.RequestException, LiumServerError, LiumRateLimitError))
-                if not transient and exc.code not in ("idempotency_in_progress", "idempotency_outcome_unknown"):
+                refused_resend_only = isinstance(exc, (LiumAuthError, LiumPermissionError))
+                if (
+                    not transient
+                    and not refused_resend_only
+                    and exc.code not in ("idempotency_in_progress", "idempotency_outcome_unknown")
+                ):
                     raise
                 found = self._rented_pod_result(rental, gpu_count, known_pod_ids)
                 if found is not None:
                     return found
+                if refused_resend_only:
+                    raise LiumError(
+                        f"The rent got no answer and its resend was refused ({exc}); the pod may be "
+                        "rented: check ps() before renting again",
+                        code="rent_outcome_unknown",
+                    ) from exc
                 raise
         executor = self._dict_to_executor_info(data.get("selected_executor") or {})
         if executor is None:
@@ -2191,6 +2207,10 @@ class Lium:
                     ).json()
                 except (requests.RequestException, LiumServerError, LiumRateLimitError):
                     pass  # the resend was lost too: the lookup by name below finds what was rented
+                except (LiumAuthError, LiumPermissionError):
+                    # refuses the resend only (the first order may have spent the balance): the
+                    # first order's outcome is still found by name below (review)
+                    pass
                 except LiumError as exc:
                     # the first order is still running, or its answer was not recorded: either way it
                     # may have rented, so its outcome is found by name below
