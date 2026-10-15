@@ -491,6 +491,34 @@ def test_build_context_lines_lists_local_copy_and_add():
     ]
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "# escape=\\\nFROM alpine\nCOPY \\\n  app /app\n",
+        "# escape=`\nFROM alpine\nCOPY `\n  app /app\n",
+        "FROM alpine\nCOPY \\\n# a comment inside the continuation\n\n  app /app\n",
+    ],
+    ids=["escape-backslash", "escape-backtick", "comment-in-continuation"],
+)
+def test_build_context_lines_follows_the_escape_directive(content):
+    # Act
+    lines = up_validation.build_context_lines(content)
+
+    # Assert
+    assert [line.split() for line in lines] == [["COPY", "app", "/app"]]
+
+
+def test_build_context_lines_backtick_escape_leaves_a_trailing_backslash_alone():
+    # Arrange: with `# escape=``, a trailing backslash is not a continuation (Windows paths)
+    content = "# escape=`\nFROM alpine\nRUN echo C:\\\nCOPY app /app\n"
+
+    # Act
+    lines = up_validation.build_context_lines(content)
+
+    # Assert
+    assert lines == ["COPY app /app"]
+
+
 def test_build_context_lines_ignores_lines_that_need_no_local_files():
     # Arrange
     content = (

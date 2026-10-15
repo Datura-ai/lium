@@ -392,7 +392,7 @@ def up_command(
     lium = Lium(source="cli")
     # COPY/ADD of local files: upload the Dockerfile's directory as the build context when the
     # backend takes one, else refuse before renting (the node would fail them with 'not found').
-    build_context_sha256 = None
+    archive = None
     if dockerfile_mode and local_lines:
         if not lium.supports(BUILD_CONTEXT):
             raise CliFailure(
@@ -406,16 +406,16 @@ def up_command(
                 "or build and push the image yourself and run it with --image.",
             )
         context_dir = Path(dockerfile).resolve().parent
+        # packed here (local only) so a bad context fails early; uploaded only after the confirmation
         try:
             archive = ui.load(
                 f"Packing build context {context_dir}",
-                lambda: build_context.pack(context_dir, max_bytes=BUILD_CONTEXT_MAX_BYTES),
+                lambda: build_context.pack(
+                    context_dir, max_bytes=BUILD_CONTEXT_MAX_BYTES, dockerfile=Path(dockerfile).resolve()
+                ),
             )
         except (OSError, ValueError) as exc:
             raise CliFailure("build_context_invalid", f"Could not pack the build context: {exc}", EXIT_CONFIGURATION_ERROR)
-        build_context_sha256 = ui.load(
-            f"Uploading build context ({len(archive) // 1024} KiB)", lambda: lium.upload_build_context(archive)
-        )
     # the billing owner of this workspace pays for the pod (lium-platform DAH-2986)
     show_workspace(lium, acting=True)
     if restore_backup_id:
@@ -600,6 +600,8 @@ def up_command(
         )
         if restore_backup_id:
             confirm_msg += f" Restore backup {restore_backup_id} to {restore_path} after startup."
+        if archive is not None:
+            confirm_msg += f" Uploads {context_dir} as the build context ({len(archive) // 1024} KiB)."
         asked_at = time.monotonic()
         if not ui.confirm(confirm_msg):
             return
@@ -613,6 +615,14 @@ def up_command(
     # (what `--volume id:<HUID>` and `lium volumes` show), so a program can rent again with the
     # same volume or remove it without parsing the message. Empty when no volume was created:
     # the envelope then has no ``data``.
+    # Uploaded after the confirmation, so a declined prompt sends nothing, and before the deadline
+    # check below, which then counts the upload. The API keeps it for a limited time only.
+    build_context_sha256 = None
+    if archive is not None:
+        build_context_sha256 = ui.load(
+            f"Uploading build context ({len(archive) // 1024} KiB)", lambda: lium.upload_build_context(archive)
+        )
+
     created_volume: dict = {}
     kept = ""
     if volume_create_params:

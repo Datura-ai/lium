@@ -64,6 +64,28 @@ def test_pack_leaves_out_what_dockerignore_names(tmp_path):
     ]
 
 
+def test_pack_prefers_the_dockerfiles_own_ignore_file(tmp_path):
+    # Arrange: as with BuildKit, Dockerfile.prod.dockerignore replaces .dockerignore for that Dockerfile
+    _tree(
+        tmp_path,
+        {
+            "app.py": "x",
+            "secrets.env": "x",
+            "notes.md": "x",
+            ".dockerignore": "*.md\n",
+            "Dockerfile.prod.dockerignore": "*.env\n",
+        },
+    )
+
+    # Act
+    plain = _names(build_context.pack(tmp_path, dockerfile=tmp_path / "Dockerfile"))
+    prod = _names(build_context.pack(tmp_path, dockerfile=tmp_path / "Dockerfile.prod"))
+
+    # Assert
+    assert "secrets.env" in plain and "notes.md" not in plain
+    assert "secrets.env" not in prod and "notes.md" in prod
+
+
 def test_pack_drops_local_owners(tmp_path):
     # Arrange
     _tree(tmp_path, {"app.py": "x"})
@@ -185,8 +207,9 @@ def test_rent_pod_action_passes_the_build_context_to_up():
     assert calls["build_context_sha256"] == "ab" * 32
 
 
-def test_up_command_uploads_the_dockerfiles_directory_when_the_backend_takes_it(monkeypatch, tmp_path):
-    # Arrange
+@pytest.mark.parametrize("answer", ["--yes", "declined"])
+def test_up_command_uploads_the_dockerfiles_directory_when_the_backend_takes_it(monkeypatch, tmp_path, answer):
+    # Arrange: a declined confirmation must send nothing
     _tree(tmp_path, {"app.py": "print('hi')\n", "secrets.env": "x", ".dockerignore": "*.env\n"})
     dockerfile = tmp_path / "Dockerfile"
     dockerfile.write_text("FROM python:3.12-slim\nCOPY app.py /app/app.py\n")
@@ -215,11 +238,18 @@ def test_up_command_uploads_the_dockerfiles_directory_when_the_backend_takes_it(
     monkeypatch.setattr(up_command, "Lium", lambda **kwargs: lium)
     monkeypatch.setattr(up_command, "ResolveExecutorAction", _FakeResolveExecutor)
     monkeypatch.setattr(up_command, "RentPodAction", _FakeRentPod)
+    prompts: list[str] = []
+    monkeypatch.setattr(up_command.ui, "confirm", lambda msg, *a, **k: prompts.append(msg) or False)
+    args = ["brave-fox-3a", "--dockerfile", str(dockerfile)] + (["--yes"] if answer == "--yes" else [])
 
     # Act
-    CliRunner().invoke(up_command.up_command, ["brave-fox-3a", "--dockerfile", str(dockerfile), "--yes"])
+    CliRunner().invoke(up_command.up_command, args)
 
     # Assert
+    if answer == "declined":
+        assert uploads == [] and "ctx" not in captured
+        assert f"Uploads {tmp_path.resolve()} as the build context" in prompts[0]
+        return
     assert captured["ctx"]["build_context_sha256"] == "ab" * 32
     assert len(uploads) == 1
     assert _names(uploads[0]) == [".dockerignore", "Dockerfile", "app.py"]

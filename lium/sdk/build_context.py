@@ -53,9 +53,17 @@ def _pattern_regex(pattern: str) -> re.Pattern:
     return re.compile(out)
 
 
-def read_dockerignore(context_dir: Path) -> List[Tuple[bool, re.Pattern]]:
-    """The ``.dockerignore`` patterns of ``context_dir`` as (re-include, regex), in file order."""
+def read_dockerignore(context_dir: Path, dockerfile: Optional[Path] = None) -> List[Tuple[bool, re.Pattern]]:
+    """The ignore patterns of ``context_dir`` as (re-include, regex), in file order.
+
+    As with BuildKit, ``<dockerfile>.dockerignore`` next to the Dockerfile (``Dockerfile.prod.dockerignore``)
+    is used when it exists, instead of ``context_dir/.dockerignore``.
+    """
     path = context_dir / ".dockerignore"
+    if dockerfile is not None:
+        specific = Path(f"{dockerfile}.dockerignore")
+        if specific.is_file():
+            path = specific
     if not path.is_file():
         return []
     rules = []
@@ -84,15 +92,15 @@ def is_ignored(rel_path: str, rules: List[Tuple[bool, re.Pattern]]) -> bool:
     return ignored
 
 
-def pack(context_dir: Path, max_bytes: Optional[int] = None) -> bytes:
-    """A gzipped tar of ``context_dir`` without what its ``.dockerignore`` leaves out.
+def pack(context_dir: Path, max_bytes: Optional[int] = None, dockerfile: Optional[Path] = None) -> bytes:
+    """A gzipped tar of ``context_dir`` without what its ignore file leaves out (see :func:`read_dockerignore`).
 
     Raises ValueError for a symlink that points outside the context (the build could not
     follow it either) or an archive past ``max_bytes``. Owners are dropped: the build
     sees root-owned files, as with ``docker build``.
     """
     context_dir = Path(context_dir).resolve()
-    rules = read_dockerignore(context_dir)
+    rules = read_dockerignore(context_dir, dockerfile)
     # a directory whose contents a later `!` line may re-include is still walked
     has_includes = any(include for include, _ in rules)
 
