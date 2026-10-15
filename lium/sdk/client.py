@@ -1055,19 +1055,21 @@ class Lium:
             except OSError as exc:
                 warnings.warn(f"lium: could not write ssh-keys cache ({exc})", stacklevel=2)
 
-    def upload_build_context(self, archive: bytes) -> str:
+    def upload_build_context(self, archive: bytes, timeout: float = 30) -> str:
         """Upload a gzipped tar of a custom build's context (see :func:`lium.sdk.build_context.pack`).
 
         Returns the archive's sha256, which :meth:`up` and :meth:`rent` take as
         ``build_context_sha256``. Needs a backend that advertises ``build_context``
         (:meth:`supports`); the archive is kept for a limited time, so upload it right
-        before the rent. Uploading the same archive again is harmless.
+        before the rent. Uploading the same archive again is harmless. ``timeout`` is the
+        requests timeout in seconds (each connect/send/read, not the whole upload).
         """
         data = self._request(
             "POST",
             "/build-contexts",
             data=archive,
             headers={**self.headers, "Content-Type": "application/gzip"},
+            timeout=timeout,
         ).json()
         return data["sha256"]
 

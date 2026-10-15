@@ -636,8 +636,9 @@ def up_command(
     # prompt) counts against it; a budget that is already spent must not reach the rent, or the
     # pod would be created and then reported as timed out one second later. The rent is the
     # first thing that bills.
-    def _check_deadline() -> None:
-        if time.monotonic() >= deadline:
+    def _check_deadline() -> float:
+        left = deadline - time.monotonic()
+        if left <= 0:
             raise CliFailure(
                 "timeout_before_rent",
                 f"The --timeout budget of {timeout}s ran out before renting {executor.huid}; no pod was created.{kept} "
@@ -645,17 +646,32 @@ def up_command(
                 EXIT_GENERAL_ERROR,
                 data=created_volume,
             )
+        return left
 
     # Uploaded after the confirmation, so a declined prompt sends nothing, and only while the
-    # budget lasts: a spent budget sends nothing either. A finished upload always goes on to the
-    # rent, so an upload that crossed the deadline never leaves source behind with no pod (review).
+    # budget lasts: a spent budget sends nothing either. The upload's requests timeout is the
+    # budget left, so a stalled upload fails as a timeout instead of renting late; a finished
+    # upload always goes on to the rent, so it never leaves source behind with no pod (review).
+    # shortcut: requests bounds each send/read, not the whole upload, so a steady slow upload can
+    # still overrun; a hard bound needs an API DELETE/consume for the context before BUILD_CONTEXT goes on.
     # The API keeps the context for a limited time only.
     build_context_sha256 = None
-    _check_deadline()
+    left = _check_deadline()
     if archive is not None:
-        build_context_sha256 = ui.load(
-            f"Uploading build context ({len(archive) // 1024} KiB)", lambda: lium.upload_build_context(archive)
-        )
+        try:
+            build_context_sha256 = ui.load(
+                f"Uploading build context ({len(archive) // 1024} KiB)",
+                lambda: lium.upload_build_context(archive, timeout=left),
+            )
+        except requests.exceptions.Timeout:
+            raise CliFailure(
+                "timeout_before_rent",
+                f"The build context upload did not finish within the --timeout budget of {timeout}s; "
+                f"no pod was created.{kept} The API drops an unused context after a limited time. "
+                "Run again with a larger --timeout.",
+                EXIT_GENERAL_ERROR,
+                data=created_volume,
+            )
 
     ui.dim(f"renting {executor.huid}…")
     action = RentPodAction()

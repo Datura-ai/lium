@@ -457,7 +457,7 @@ def test_up_command_refuses_copy_of_local_files_before_renting(monkeypatch, tmp_
     monkeypatch.setattr(up_command, "ensure_config", lambda: None)
     lium = SimpleNamespace(
         supports=lambda feature: False,
-        upload_build_context=lambda archive: pytest.fail("uploaded"),
+        upload_build_context=lambda archive, timeout: pytest.fail("uploaded"),
     )
     monkeypatch.setattr(up_command, "Lium", lambda **kwargs: lium)
     monkeypatch.setattr(up_command, "ResolveExecutorAction", lambda: pytest.fail("rent path reached"))

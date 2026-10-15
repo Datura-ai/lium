@@ -9,6 +9,7 @@ import tarfile
 from types import SimpleNamespace
 
 import pytest
+import requests
 from click.testing import CliRunner
 
 from lium.cli.actions import ActionResult
@@ -226,10 +227,11 @@ def test_rent_pod_action_passes_the_build_context_to_up():
     assert calls["build_context_sha256"] == "ab" * 32
 
 
-@pytest.mark.parametrize("answer", ["--yes", "declined", "expired", "slow-upload"])
+@pytest.mark.parametrize("answer", ["--yes", "declined", "expired", "slow-upload", "stalled-upload"])
 def test_up_command_uploads_the_dockerfiles_directory_when_the_backend_takes_it(monkeypatch, tmp_path, answer):
     # Arrange: a declined confirmation or a spent --timeout must send nothing; an upload that
-    # spends the rest of the budget still goes on to the rent, so its source is not orphaned
+    # spends the rest of the budget still goes on to the rent, so its source is not orphaned; the
+    # upload is bounded by the budget left, and one that times out fails before the rent
     _tree(tmp_path, {"app.py": "print('hi')\n", "secrets.env": "x", ".dockerignore": "*.env\n"})
     dockerfile = tmp_path / "Dockerfile"
     dockerfile.write_text("FROM python:3.12-slim\nCOPY app.py /app/app.py\n")
@@ -237,9 +239,17 @@ def test_up_command_uploads_the_dockerfiles_directory_when_the_backend_takes_it(
     captured: dict = {}
     lium = SimpleNamespace(
         supports=lambda feature: feature == BUILD_CONTEXT,
-        upload_build_context=lambda archive: uploads.append(archive) or "ab" * 32,
+        upload_build_context=lambda archive, timeout: _upload(archive, timeout),
         workspaces=SimpleNamespace(current=lambda: None),
     )
+
+    def _upload(archive, timeout):
+        uploads.append(archive)
+        captured["upload_timeout"] = timeout
+        if answer == "stalled-upload":
+            raise requests.exceptions.ReadTimeout()
+        return "ab" * 32
+
     executor = SimpleNamespace(
         id="exec-1", huid="brave-fox-3a", gpu_count=1, gpu_type="A6000", price_per_hour=0.24,
         available_port_count=10, download_speed=1000,
@@ -261,7 +271,7 @@ def test_up_command_uploads_the_dockerfiles_directory_when_the_backend_takes_it(
     prompts: list[str] = []
     monkeypatch.setattr(up_command.ui, "confirm", lambda msg, *a, **k: prompts.append(msg) or False)
     args = ["brave-fox-3a", "--dockerfile", str(dockerfile)] + (["--yes"] if answer != "declined" else [])
-    if answer in ("expired", "slow-upload"):
+    if answer in ("expired", "slow-upload", "stalled-upload"):
         # deadline = 0 + 1; the clock then reads 2 before the upload, or 0 before and 2 after it
         clock = iter([0, 2] if answer == "expired" else [0, 0])
         monkeypatch.setattr(up_command.time, "monotonic", lambda: next(clock, 2))
@@ -279,6 +289,12 @@ def test_up_command_uploads_the_dockerfiles_directory_when_the_backend_takes_it(
         assert uploads == [] and "ctx" not in captured
         assert result.exit_code == 1 and "ran out before renting" in result.output
         return
+    if answer != "--yes":
+        assert captured["upload_timeout"] == 1  # the budget left when the upload starts
+    if answer == "stalled-upload":
+        assert len(uploads) == 1 and "ctx" not in captured
+        assert result.exit_code == 1 and "did not finish within the --timeout budget" in result.output
+        return
     assert captured["ctx"]["build_context_sha256"] == "ab" * 32
     assert len(uploads) == 1
     assert _names(uploads[0]) == [".dockerignore", "Dockerfile", "app.py"]
@@ -292,7 +308,7 @@ def test_up_command_uploads_nothing_for_a_dockerfile_without_local_files(monkeyp
     captured: dict = {}
     lium = SimpleNamespace(
         supports=lambda feature: True,
-        upload_build_context=lambda archive: pytest.fail("uploaded"),
+        upload_build_context=lambda archive, timeout: pytest.fail("uploaded"),
         workspaces=SimpleNamespace(current=lambda: None),
     )
     executor = SimpleNamespace(
