@@ -263,3 +263,20 @@ def test_request_without_retry_fails_on_the_first_server_error(monkeypatch):
     with pytest.raises(LiumServerError):
         client._request("GET", "/pods")
     assert len(attempts) == 1 + 3  # idempotent calls keep their three attempts
+
+
+@pytest.mark.parametrize("refusal", [
+    "LiumError", "LiumServerError", "LiumRateLimitError", "LiumPermissionError", "LiumAuthError",
+])
+def test_a_failed_repeat_of_an_unanswered_rent_is_an_unknown_outcome(client, monkeypatch, refusal):
+    """The repeat fails while the first POST may still run: whatever the status, the caller must look at ps."""
+    import lium.sdk as sdk
+    _rent.outcomes = [requests.ConnectionError("timeout"), getattr(sdk, refusal)("repeat failed")]
+    monkeypatch.setattr(client_module.requests, "request", _rent(client, pods_after_failure=[]))
+    monkeypatch.setattr(client, "_request", lambda *a, **k: (_ for _ in ()).throw(_rent.outcomes.pop(0)))
+    with pytest.raises(sdk.LiumRentOutcomeUnknownError) as info:
+        client.up(executor_id=EXECUTOR_ID, name=POD_NAME, template_id="tpl-1", ssh_keys=["k"])
+    # the code and hint never advertise "pick another node", whatever the repeat failed with
+    assert info.value.code == "rent_outcome_unknown"
+    assert "Do not rent again" in info.value.hint
+    assert isinstance(info.value.__cause__, sdk.LiumError)
