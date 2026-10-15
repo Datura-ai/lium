@@ -1453,23 +1453,29 @@ class Lium:
         output_reserve_s: float = 120,
         **rent_kwargs: Any,
     ) -> JobResult:
-        """Run one bounded job on a rented GPU and always remove the pod; never raises for the job's outcome.
+        """Run one bounded job on a rented GPU and remove the pod; never raises for the job's outcome.
 
         Rents the cheapest node that fits (:meth:`rent`), schedules the pod's removal server-side
-        for the earlier of ``deadline_s`` from this call and the moment the rental has cost
-        ``max_cost_usd`` at its hourly price, waits for it, uploads ``inputs``, runs ``command``
-        under ``bash -c`` bounded by the time left, downloads ``outputs`` (after a failure or a
-        timeout too), then deletes the pod and reads its billed cost.
+        for the earlier of ``deadline_s`` and the moment the rental has cost ``max_cost_usd`` at
+        its initial hourly price (both counted from just before the rent request), waits for it,
+        uploads ``inputs``, runs ``command`` under ``bash -c`` bounded by the time left, downloads
+        ``outputs`` (after a failure or a timeout too; each transfer bounded by the time left),
+        then deletes the pod, waits until it is gone and reads its billed cost.
+
+        After server-side scheduling succeeds, removal survives caller exit. A crash during rent
+        or scheduling can leave a billable pod without a removal bound. The limits are best
+        effort: scheduled removal is processed periodically, so charges can exceed the budget.
 
         Args:
             command: Shell command to run on the pod.
             gpu_type, gpu_count: What to rent, as in :meth:`rent`.
-            max_cost_usd: Spend ceiling for the rental, boot and copying included.
+            max_cost_usd: Approximate compute budget in USD, boot and copying included.
             deadline_s: Wall-clock ceiling in seconds from this call, boot and copying included.
             inputs: ``{local path: remote path}`` uploaded before the command runs.
             outputs: ``{remote path: local path}`` downloaded after it ends.
             env: Environment for the command, sent as :meth:`exec` sends it.
-            name: Pod name; default ``job-<8 hex>``, unique so a lost rent response can be found.
+            name: Pod name prefix (default ``job``); ``-<8 hex>`` is always appended so only this
+                call's pod matches it when a lost rent response is looked up.
             boot_timeout: Seconds to wait for the pod to become ready (never past the limits).
             output_reserve_s: Seconds kept back from the command for copying outputs.
             **rent_kwargs: Any other :meth:`rent` constraint (``max_price_per_gpu_hour``,
@@ -1478,8 +1484,9 @@ class Lium:
         Returns:
             A :class:`JobResult`: ``status`` is one of ``succeeded``, ``failed``, ``timed_out``,
             ``budget_exhausted``, ``rent_failed``, ``boot_failed`` or ``error``; ``cleanup`` says
-            whether the pod was removed; ``cost_usd`` is the billed cost, ``estimated_cost_usd``
-            the price times the rented time.
+            whether the pod's removal was confirmed (``removed``), left to the acknowledged schedule
+            (``scheduled``) or neither (``unknown``); ``cost_usd`` is the billed cost, read only
+            after a confirmed removal, ``estimated_cost_usd`` the price times the rented time.
 
         Example:
             >>> r = lium.run_job(command="python train.py", gpu_type="H100", max_cost_usd=5,

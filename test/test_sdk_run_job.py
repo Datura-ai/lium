@@ -1,6 +1,9 @@
 """`Lium.run_job`: one bounded job that always ends with the pod removed and a terminal status."""
 
-from datetime import datetime, timezone
+import subprocess
+import threading
+from datetime import datetime, timedelta, timezone
+from unittest.mock import Mock
 
 import pytest
 
@@ -17,9 +20,9 @@ def _executor():
     )
 
 
-def _pod(name):
+def _pod(name, id="pod-1", status="RUNNING"):
     return PodInfo(
-        id="pod-1", name=name, status="RUNNING", huid="pod-huid", ssh_cmd="ssh root@1.2.3.4 -p 22",
+        id=id, name=name, status=status, huid="pod-huid", ssh_cmd="ssh root@1.2.3.4 -p 22",
         ports={}, created_at="", updated_at="", executor=_executor(), template={},
         removal_scheduled_at=None, jupyter_installation_status=None, jupyter_url=None,
     )
@@ -92,7 +95,7 @@ def test_run_job_schedules_removal_at_the_deadline_when_the_budget_lasts_longer(
 
 
 def test_run_job_schedules_removal_when_the_budget_is_spent_and_reports_budget_exhausted(lium, monkeypatch):
-    monkeypatch.setattr(lium, "exec", lambda pod, command, env=None, timeout=None: {"exit_code": 124, "stdout": "", "stderr": ""})
+    monkeypatch.setattr(lium, "exec", _exec_raises(TimeoutError("exec timed out")))
     before = datetime.now(timezone.utc)
 
     # $1 at $2/h lasts 30 minutes, before the 2-hour deadline
@@ -102,12 +105,25 @@ def test_run_job_schedules_removal_when_the_budget_is_spent_and_reports_budget_e
     assert result.status == "budget_exhausted" and result.cleanup == "removed"
 
 
-def test_run_job_reports_timed_out_when_the_deadline_stops_the_command(lium, monkeypatch):
-    monkeypatch.setattr(lium, "exec", lambda pod, command, env=None, timeout=None: {"exit_code": 137, "stdout": "", "stderr": ""})
+def _exec_locally(pod, command, env=None, timeout=None):
+    """The generated `timeout … bash -c …` wrapper, run for real on this machine."""
+    run = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=timeout)
+    return {"exit_code": run.returncode, "stdout": run.stdout, "stderr": run.stderr}
 
-    result = lium.run_job(command="sleep 9999", gpu_type="H100", max_cost_usd=100, deadline_s=600)
 
-    assert result.status == "timed_out" and result.cleanup == "removed"
+@pytest.mark.parametrize(
+    "command, deadline_s, status, exit_code",
+    [("sleep 30", 3, "timed_out", 124), ("exit 124", 600, "failed", 124), ("exit 137", 600, "failed", 137)],
+    ids=["wrapper-stopped-it", "command-exits-124", "command-exits-137"],
+)
+def test_run_job_timeout_status_comes_from_the_wrapper_not_the_exit_code(lium, monkeypatch, command, deadline_s,
+                                                                         status, exit_code):
+    monkeypatch.setattr(lium, "exec", _exec_locally)
+
+    result = lium.run_job(command=command, gpu_type="H100", max_cost_usd=100, deadline_s=deadline_s,
+                          output_reserve_s=1)
+
+    assert (result.status, result.exit_code, result.cleanup) == (status, exit_code, "removed")
 
 
 def test_run_job_failed_command_still_copies_outputs_and_names_the_missing_one(lium, monkeypatch):
@@ -135,12 +151,23 @@ def test_run_job_rent_failure_removes_a_pod_the_lost_response_created(lium, monk
         raise LiumError("read timed out")
 
     monkeypatch.setattr(lium, "rent", rent)
-    monkeypatch.setattr(lium, "ps", lambda: [_pod(lium.calls["rent"]["name"]), _pod("someone-elses-pod")])
+    pods = lambda: [_pod(lium.calls["rent"]["name"]), _pod("someone-elses-pod", id="pod-2")]  # noqa: E731
+    monkeypatch.setattr(lium, "ps", lambda: [p for p in pods() if f"/pods/{p.id}" not in lium.calls["deletes"]])
 
     result = lium.run_job(command="true", gpu_type="H100", max_cost_usd=5, deadline_s=600)
 
     assert result.status == "rent_failed" and "read timed out" in result.error
     assert lium.calls["deletes"] == ["/pods/pod-1"] and result.cleanup == "removed"
+
+
+def test_run_job_rent_failure_leaves_a_pre_existing_pod_with_the_same_name(lium, monkeypatch):
+    monkeypatch.setattr(lium, "rent", Mock(side_effect=LiumError("no node matches")))
+    monkeypatch.setattr(lium, "ps", lambda: [_pod("train")])
+
+    result = lium.run_job(command="true", gpu_type="H100", max_cost_usd=5, deadline_s=600, name="train")
+
+    assert lium.calls["deletes"] == [] and result.cleanup == "not_rented"
+    assert result.name.startswith("train-") and result.name != "train"
 
 
 def test_run_job_rent_refused_with_no_pod_left_reports_not_rented(lium, monkeypatch):
@@ -196,11 +223,11 @@ def _exec_raises(exc):
     [
         (_exec_exits(0), "succeeded"),
         (_exec_exits(2), "failed"),
-        (_exec_exits(124), "timed_out"),
+        (_exec_exits(124), "failed"),
         (_exec_raises(TimeoutError("exec timed out")), "timed_out"),
         (_exec_raises(_OutputLimitExceeded("output over 64 MiB")), "error"),
     ],
-    ids=["success", "non-zero-exit", "timeout-exit", "exec-timeout", "output-limit"],
+    ids=["success", "non-zero-exit", "fast-124-exit", "exec-timeout", "output-limit"],
 )
 def test_run_job_copies_the_outputs_before_it_removes_the_pod(lium, monkeypatch, exec_, status):
     events = []
@@ -226,6 +253,25 @@ def test_run_job_does_not_run_without_the_server_side_removal(lium, monkeypatch)
 
     assert result.status == "error" and lium.calls["execs"] == []
     assert lium.calls["deletes"] == ["/pods/pod-1"]
+    assert result.cleanup == "removed" and result.removal_scheduled_at is None
+
+
+def test_run_job_failed_schedule_and_failed_delete_promise_no_cleanup(lium, monkeypatch):
+    lium.calls["delete_fails"] = 99
+    monkeypatch.setattr(lium, "schedule_termination", Mock(side_effect=LiumError("503")))
+
+    r = lium.run_job(command="true", gpu_type="H100", max_cost_usd=5, deadline_s=600)
+
+    assert (r.status, r.cleanup, r.removal_scheduled_at, r.cost_usd) == ("error", "unknown", None, None)
+
+
+def test_run_job_accepted_delete_of_a_pod_still_listed_is_not_removed(lium, monkeypatch):
+    monkeypatch.setattr(lium, "ps", lambda: [_pod("x", status="DELETING")])
+
+    r = lium.run_job(command="true", gpu_type="H100", max_cost_usd=5, deadline_s=600)
+
+    assert lium.calls["deletes"] == ["/pods/pod-1"]
+    assert r.cleanup == "scheduled" and r.removal_scheduled_at is not None and r.cost_usd is None
 
 
 def test_run_job_retries_a_refused_delete(lium):
@@ -244,6 +290,50 @@ def test_run_job_delete_that_keeps_failing_leaves_the_scheduled_removal_and_esti
     assert result.cleanup == "scheduled"
     # billed until the scheduled removal: about an hour at $2/h
     assert result.estimated_cost_usd == pytest.approx(2.0, abs=0.01)
+    assert result.cost_usd is None  # the statement's 0.0421 is still accruing, not the final cost
+
+
+def test_run_job_counts_a_slow_rent_response_in_the_budget_and_the_statement(lium, monkeypatch):
+    clock = {"now": datetime(2026, 10, 15, 23, 59, 30, tzinfo=timezone.utc)}
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock["now"]
+
+    rent = lium.rent
+
+    def slow_rent(**kwargs):
+        clock["now"] += timedelta(seconds=60)  # the response arrives a minute after the request, past midnight
+        return rent(**kwargs)
+
+    statements = []
+    monkeypatch.setattr(bounded_job, "datetime", _Clock)
+    monkeypatch.setattr(lium, "rent", slow_rent)
+    monkeypatch.setattr(lium, "billing_statement", lambda **kw: statements.append(kw) or {"pods": []})
+
+    # $1 at $2/h: 30 minutes from the request, not from the response
+    r = lium.run_job(command="true", gpu_type="H100", max_cost_usd=1, deadline_s=7200)
+
+    assert _scheduled_at(lium) == datetime(2026, 10, 16, 0, 29, 30, tzinfo=timezone.utc)
+    assert r.estimated_cost_usd == pytest.approx(2.0 * 60 / 3600, abs=1e-6)
+    assert statements[0]["start_day"] == "2026-10-15"
+
+
+@pytest.mark.parametrize("phase", ["upload", "download"])
+def test_run_job_stalled_transfer_is_cut_at_the_deadline_and_the_pod_removed(lium, monkeypatch, phase):
+    stall = threading.Event()
+    monkeypatch.setattr(lium, phase, lambda pod, **kw: stall.wait(30))
+
+    r = lium.run_job(command="true", gpu_type="H100", max_cost_usd=100, deadline_s=2, output_reserve_s=0.5,
+                     inputs={"a": "/root/a"}, outputs={"/root/b": "b"})
+    stall.set()
+
+    assert r.seconds < 10 and lium.calls["deletes"] == ["/pods/pod-1"] and r.cleanup == "removed"
+    if phase == "upload":
+        assert r.status == "error" and "did not finish" in r.error and lium.calls["execs"] == []
+    else:
+        assert "/root/b" in r.missing_outputs
 
 
 def test_run_job_no_time_left_after_boot_does_not_run(lium, monkeypatch):

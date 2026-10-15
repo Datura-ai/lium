@@ -44,14 +44,14 @@ def exit_code_for(result) -> int:
 
 @click.group("job")
 def job_command():
-    """Run bounded GPU jobs: rent, run, copy back, always remove the pod."""
+    """Run bounded GPU jobs: rent, run, copy back, remove the pod."""
 
 
 @job_command.command("run", epilog="Use --format json for machine-readable output.")
 @click.argument("command")
 @click.option("--gpu", "gpu_type", required=True, help="GPU type, as in `lium ls` (e.g. H100).")
 @click.option("--count", "gpu_count", type=int, default=1, show_default=True, help="GPUs on the pod.")
-@click.option("--budget", "max_cost_usd", type=float, required=True, help="Spend ceiling in USD, boot and copying included.")
+@click.option("--budget", "max_cost_usd", type=float, required=True, help="Approximate compute budget in USD, boot and copying included.")
 @click.option("--deadline", required=True, help="Wall-clock ceiling: seconds, or 30m / 2h. Boot and copying included.")
 @click.option("--input", "inputs", multiple=True, metavar="LOCAL:REMOTE", help="Upload before the command. Repeatable.")
 @click.option("--output", "outputs", multiple=True, metavar="REMOTE:LOCAL", help="Download after it ends, failed or not. Repeatable.")
@@ -67,8 +67,10 @@ def run_command(command, gpu_type, gpu_count, max_cost_usd, deadline, inputs, ou
                 max_price_per_gpu_hour, output_format, json_output):
     """Run COMMAND on a rented GPU within a budget and a deadline, then remove the pod.
 
-    The pod's removal is scheduled server-side at the earlier limit right after the rent, so it
-    goes away even if this process dies. Outputs are copied back after a failure or a timeout too.
+    The pod's removal is scheduled server-side at the earlier limit right after the rent; once
+    that is acknowledged it survives this process exiting (a crash during the rent can still leave
+    a pod without it). The budget is approximate: removal is processed periodically, so charges can
+    exceed it. Outputs are copied back after a failure or a timeout too.
     Exits 0 on success, the command's exit code when it failed, 124 when the budget or deadline
     stopped it, and 1 otherwise.
 

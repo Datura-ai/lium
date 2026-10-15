@@ -227,9 +227,9 @@ lium exec "$POD" --json "tar czf /root/out.tgz -C /root/project out" >/dev/null
 lium scp "$POD" /root/out.tgz ./out.tgz -d
 ```
 
-The same run in one SDK call, bounded by a budget and a deadline. `run_job` schedules the pod's removal server-side
-for the earlier of the two right after the rent, deletes the pod before it returns whatever happened, and never
-raises for the job's outcome:
+The same run in one SDK call, bounded by an approximate budget and a deadline. `run_job` schedules the pod's removal
+server-side for the earlier of the two right after the rent, deletes the pod and waits until it is gone before it
+returns, and never raises for the job's outcome:
 
 ```python
 from lium.sdk import Lium
@@ -243,7 +243,13 @@ print(r.to_dict())  # status, exit_code, outputs, missing_outputs, cleanup, cost
 ```
 
 `status` is `succeeded`, `failed`, `timed_out`, `budget_exhausted`, `rent_failed`, `boot_failed` or `error`;
-`cleanup` is `removed`, or `scheduled` when the delete failed and the server-side removal stands.
+`cleanup` is `removed` once the pod is confirmed gone from the pod list, `scheduled` when that was not confirmed and the
+acknowledged server-side removal at `removal_scheduled_at` stands, or `unknown` when neither was confirmed (check
+`lium ps`). `cost_usd` is read from the billing statement only after a confirmed removal; otherwise use
+`estimated_cost_usd`.
+
+After server-side scheduling succeeds, removal survives caller exit. A crash during rent or scheduling can leave a
+billable pod without a removal bound.
 
 From the shell, `lium job run` makes the same call. Its exit code follows the job: 0 on success, the command's own
 code when it failed, 124 when the budget or deadline stopped it, and 1 otherwise:
@@ -253,10 +259,11 @@ lium job run "cd /root && python train.py --epochs 1" --gpu H100 --budget 5 --de
   --input train.py:/root/train.py --output /root/out.tgz:out.tgz --format json
 ```
 
-The budget above is enforced by the removal `run_job` schedules at rent time. Pod prices are frozen at rent, so it
-holds unless someone moves that removal later. For a cap the server enforces whatever the client does, run the job
-under its own API key with a lifetime budget. At the budget the server deletes the key's pods (on its next billing
-pass, every 5 minutes) and refuses further rents through the key:
+The budget estimates compute spend from the initial hourly price. Scheduled removal is processed periodically, so
+actual charges can exceed it. A budgeted API key also requests removal on a billing pass; neither mechanism provides
+an exact dollar ceiling. To bound spend server-side even when the client dies, run the job under its own API key with
+a lifetime budget: past the budget the server deletes the key's pods (on its next billing pass, every 5 minutes) and
+refuses further rents through the key:
 
 ```bash
 lium keys create job-train --scope read --scope rent --max-budget 5   # prints the key once

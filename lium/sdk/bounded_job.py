@@ -1,9 +1,12 @@
-"""One bounded GPU job: rent by spec, run a command, copy the outputs back, always remove the pod.
+"""One bounded GPU job: rent by spec, run a command, copy the outputs back, remove the pod.
 
 The caller states the job (a command, files in, files out), the hardware (a GPU type and count,
-plus any :meth:`Lium.rent` constraint), a budget in USD and a deadline in seconds. The pod's
-removal is scheduled server-side right after the rent for the earlier of the two limits, so the
-pod goes away even when this process dies; the ``finally`` block removes it at once otherwise.
+plus any :meth:`Lium.rent` constraint), an approximate budget in USD and a deadline in seconds.
+Right after the rent the pod's removal is scheduled server-side for the earlier of the two limits;
+once that schedule is acknowledged, removal survives this process exiting. A crash during the rent
+or the scheduling call can leave a billable pod without a removal bound. The ``finally`` block
+deletes the pod and waits until it is gone from the pod list. Limits are best effort: the server
+processes scheduled removals periodically, so charges can exceed the budget.
 The result names a terminal status, the exit code, the outputs copied, how the pod was cleaned
 up and what it cost.
 """
@@ -12,6 +15,7 @@ from __future__ import annotations
 
 import math
 import shlex
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -32,21 +36,26 @@ RENT_FAILED = "rent_failed"        # nothing matched the spec, the balance or a 
 BOOT_FAILED = "boot_failed"        # the pod was rented but never became ready
 ERROR = "error"                    # anything else after the rent (SSH, an input upload, …)
 
-# `timeout` exits 124 when its TERM stopped the command, 137 when the KILL after `-k` had to
+# `timeout` exits 124 when its TERM stopped the command, 137 when the KILL after `-k` had to;
+# the command can exit with these itself, so they only count as a timeout once the limit has passed
 _TIMEOUT_EXITS = (124, 137)
 _DELETE_ATTEMPTS = 3
+_CONFIRM_S = 60  # how long cleanup waits for a deleted pod to leave the pod list
+_POLL_S = 5
 
 
 @dataclass
 class JobResult:
     """What :meth:`Lium.run_job` did. ``to_dict()`` is JSON-ready.
 
-    ``cleanup`` is ``"removed"`` (the pod was deleted before returning), ``"scheduled"`` (the
-    delete failed; the server removes the pod at ``removal_scheduled_at``), ``"not_rented"``, or
-    ``"unknown"`` (the rent call failed and the pod list could not be read to check for a pod it
-    may have created). ``cost_usd`` is what the billing statement shows for the pod once it was
-    removed, ``None`` when the statement could not be read or does not list it yet;
-    ``estimated_cost_usd`` is the rent's hourly price times the seconds from rent to removal.
+    ``cleanup`` is ``"removed"`` (the pod was deleted and is gone from the pod list),
+    ``"scheduled"`` (its absence was not confirmed; the acknowledged server-side removal at
+    ``removal_scheduled_at`` stands), ``"not_rented"``, or ``"unknown"`` (neither removal nor a
+    schedule was confirmed: check :meth:`Lium.ps`). ``removal_scheduled_at`` is set only once the
+    server acknowledged the schedule. ``cost_usd`` is what the billing statement shows for the pod,
+    read only after a confirmed removal (``None`` otherwise, or when the statement does not list it
+    yet); ``estimated_cost_usd`` is the rent's hourly price times the seconds from just before the
+    rent request to removal (to ``removal_scheduled_at`` when removal is unconfirmed).
     """
 
     status: str
@@ -103,9 +112,12 @@ def run_job(
         raise TypeError(f"run_job() does not take {sorted(refused)}")
 
     started = time.monotonic()
-    deadline_at = datetime.now(timezone.utc) + timedelta(seconds=deadline_s)
-    result = JobResult(status=ERROR, name=name or f"job-{uuid.uuid4().hex[:8]}")
-    rented_at: Optional[datetime] = None
+    # billing starts when the server creates the pod, before the response arrives: every limit,
+    # estimate and statement range is anchored to this moment, taken before the rent request
+    rented_at = datetime.now(timezone.utc)
+    deadline_at = rented_at + timedelta(seconds=deadline_s)
+    # a per-call suffix even on a caller's name, so only this call's pod can ever match it
+    result = JobResult(status=ERROR, name=f"{name or 'job'}-{uuid.uuid4().hex[:8]}")
     stop_at = deadline_at
     try:
         try:
@@ -116,16 +128,15 @@ def run_job(
             result.cleanup = _remove_by_name(lium, result.name)
             return result
 
-        rented_at = datetime.now(timezone.utc)
         result.pod_id = rented.pod["id"]
         result.price_per_hour = rented.price_per_hour
         if rented.price_per_hour and rented.price_per_hour > 0:
             budget_at = rented_at + timedelta(hours=max_cost_usd / rented.price_per_hour)
             stop_at = min(deadline_at, budget_at)
         stopped_by = BUDGET_EXHAUSTED if stop_at < deadline_at else TIMED_OUT
-        result.removal_scheduled_at = _iso(stop_at)
         # the safety net: the pod goes at the earlier limit even when this process does not get to remove it
-        lium.schedule_termination(result.pod_id, termination_time=result.removal_scheduled_at)
+        lium.schedule_termination(result.pod_id, termination_time=_iso(stop_at))
+        result.removal_scheduled_at = _iso(stop_at)  # only once acknowledged
 
         def left() -> float:
             return (stop_at - datetime.now(timezone.utc)).total_seconds()
@@ -141,13 +152,15 @@ def run_job(
             return result
 
         for local, remote in (inputs or {}).items():
-            lium.upload(pod, local=local, remote=remote)
+            _bounded(lambda local=local, remote=remote: lium.upload(pod, local=local, remote=remote), left(), f"upload of {local}")
 
         run_s = left() - output_reserve_s
         if run_s < 1:
             result.status, result.error = stopped_by, "no time left to run the command"
             return result
-        remote = f"timeout -k 10 {math.floor(run_s)} bash -c {shlex.quote(command)}"
+        limit_s = math.floor(run_s)
+        remote = f"timeout -k 10 {limit_s} bash -c {shlex.quote(command)}"
+        exec_started = time.monotonic()
         try:
             run = lium.exec(pod, command=remote, env=env, timeout=run_s + 30)
         except TimeoutError as exc:
@@ -159,7 +172,7 @@ def run_job(
             result.stdout, result.stderr = run.get("stdout", ""), run.get("stderr", "")
             if result.exit_code == 0:
                 result.status = SUCCEEDED
-            elif result.exit_code in _TIMEOUT_EXITS:
+            elif result.exit_code in _TIMEOUT_EXITS and time.monotonic() - exec_started >= limit_s:
                 result.status = stopped_by
             else:
                 result.status = FAILED
@@ -167,7 +180,7 @@ def run_job(
         # copied after a failure, an exec error or a timeout too: a partial log or checkpoint is what the caller needs
         for remote_path, local in (outputs or {}).items():
             try:
-                lium.download(pod, remote=remote_path, local=local)
+                _bounded(lambda remote_path=remote_path, local=local: lium.download(pod, remote=remote_path, local=local), left(), f"download of {remote_path}")
                 result.outputs[remote_path] = local
             except Exception as exc:  # noqa: BLE001 - one missing output must not lose the others
                 result.missing_outputs[remote_path] = str(exc)
@@ -177,27 +190,69 @@ def run_job(
         return result
     finally:
         if result.pod_id:
-            result.cleanup = _remove(lium, result.pod_id)
+            if _remove(lium, result.pod_id):
+                result.cleanup = "removed"
+            else:
+                if result.removal_scheduled_at is None:
+                    try:  # idempotent; the job may have failed before the first schedule was acknowledged
+                        lium.schedule_termination(result.pod_id, termination_time=_iso(stop_at))
+                        result.removal_scheduled_at = _iso(stop_at)
+                    except Exception:  # noqa: BLE001 - reported as cleanup "unknown"
+                        pass
+                result.cleanup = "scheduled" if result.removal_scheduled_at else "unknown"
             ended = datetime.now(timezone.utc)
             if result.cleanup == "scheduled":
                 ended = max(ended, stop_at)
             result.estimated_cost_usd = round(
                 (result.price_per_hour or 0.0) * (ended - rented_at).total_seconds() / 3600, 6
             )
-            result.cost_usd = _billed(lium, result.pod_id, rented_at)
+            if result.cleanup == "removed":  # before that the statement holds charges still accruing
+                result.cost_usd = _billed(lium, result.pod_id, rented_at)
         result.seconds = round(time.monotonic() - started, 3)
 
 
-def _remove(lium: "Lium", pod_id: str) -> str:
-    """Delete the pod, retrying a refusal (a pod still deploying cannot be deleted yet)."""
+def _bounded(transfer, seconds: float, what: str) -> None:
+    """Run ``transfer`` with a total deadline. SFTP has no transfer deadline of its own, so a stalled
+    transfer is left on a daemon thread; the pod's removal right after closes its connection."""
+    if seconds <= 0:
+        raise TimeoutError(f"no time left for the {what}")
+    box: Dict[str, BaseException] = {}
+
+    def target() -> None:
+        try:
+            transfer()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+            box["exc"] = exc
+
+    worker = threading.Thread(target=target, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        raise TimeoutError(f"the {what} did not finish within {seconds:.0f}s")
+    if "exc" in box:
+        raise box["exc"]
+
+
+def _remove(lium: "Lium", pod_id: str) -> bool:
+    """Delete the pod, retrying a refusal (a pod still deploying cannot be deleted yet), then wait
+    until it is gone from the pod list: a successful DELETE only starts the removal."""
     for attempt in range(_DELETE_ATTEMPTS):
         try:
             lium._request("DELETE", f"/pods/{pod_id}")
-            return "removed"
+            break
         except Exception:  # noqa: BLE001 - the scheduled removal is the fallback
             if attempt + 1 < _DELETE_ATTEMPTS:
                 time.sleep(5 * (attempt + 1))
-    return "scheduled"
+    else:
+        return False
+    for _ in range(_CONFIRM_S // _POLL_S):
+        try:
+            if all(pod.id != pod_id for pod in lium.ps()):
+                return True
+        except Exception:  # noqa: BLE001 - not confirmed yet
+            pass
+        time.sleep(_POLL_S)
+    return False
 
 
 def _remove_by_name(lium: "Lium", name: str) -> str:
@@ -205,10 +260,10 @@ def _remove_by_name(lium: "Lium", name: str) -> str:
         pods = lium.ps()
     except Exception:  # noqa: BLE001 - cannot tell whether a pod exists
         return "unknown"
-    states: List[str] = [_remove(lium, pod.id) for pod in pods if pod.name == name]
-    if not states:
+    removed: List[bool] = [_remove(lium, pod.id) for pod in pods if pod.name == name]
+    if not removed:
         return "not_rented"
-    return "removed" if all(s == "removed" for s in states) else "unknown"
+    return "removed" if all(removed) else "unknown"
 
 
 def _billed(lium: "Lium", pod_id: str, rented_at: datetime) -> Optional[float]:

@@ -64,3 +64,9 @@ def test_job_run_refuses_bad_arguments_before_renting(fake, args):
     out = _run("true", "--gpu", "H100", "--budget", "1", *(["--deadline", "60"] if args[0] != "--deadline" else []), *args)
 
     assert out.exit_code == 2 and fake.calls == []
+
+
+def test_job_run_budget_help_says_approximate():
+    help_text = CliRunner().invoke(cli, ["job", "run", "--help"]).output
+
+    assert "Approximate compute budget in USD" in help_text
