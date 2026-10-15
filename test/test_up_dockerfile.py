@@ -531,6 +531,7 @@ def test_build_context_lines_ignores_lines_that_need_no_local_files():
         "COPY not-a-real-line /x\n"
         "EOF\n"
         "ADD https://example.com/x.tar.gz /x/\n"
+        "ADD ssh://git@github.com/moby/buildkit.git#v0.14.1:docs /buildkit-docs\n"
     )
 
     # Act

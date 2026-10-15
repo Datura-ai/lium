@@ -5,7 +5,7 @@ import re
 from typing import Optional, Tuple
 
 _HEREDOC_RE = re.compile(r"<<-?[\"']?(\w+)[\"']?")
-_REMOTE_SOURCE_RE = re.compile(r"^(https?://|git://|git@)", re.IGNORECASE)
+_REMOTE_SOURCE_RE = re.compile(r"^(https?://|git://|ssh://|git@)", re.IGNORECASE)
 _DIRECTIVE_RE = re.compile(r"^#\s*([a-zA-Z][a-zA-Z0-9]*)\s*=\s*(.+?)\s*$")
 
 
