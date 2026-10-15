@@ -2143,10 +2143,10 @@ class Lium:
             ClusterNotListedError: the nodes are, or may be, rented, but the listing did not show a
                 whole cluster: the API confirmed the order and named the member pods but the listing
                 did not show every one of them (or failed); or the order got no answer and the
-                by-name lookup found fewer members than requested (or could not list). Do not rent again.
-            LiumError: the API refused the group (mixed fabrics, split hosts, wrong image); the pod
-                listing before the order failed (nothing was rented); or the order got no answer and
-                no member appeared.
+                by-name lookup found fewer members than requested, none at all, or could not list.
+                Do not rent again.
+            LiumError: the API refused the group (mixed fabrics, split hosts, wrong image), or the pod
+                listing before the order failed (nothing was rented).
         """
         ids = [str(i) for i in executor_ids]
         if len(ids) < 2:
@@ -2236,7 +2236,13 @@ class Lium:
                     "rent again, list the pods to find the cluster",
                     listed=listed, confirmed=False,
                 )
-            raise LiumError(f"Cluster rental of {len(ids)} nodes did not produce pods named {name!r}")
+            # No member listed, but the order was never refused: it may still land (an in-progress
+            # resend, a late commit), so a blind retry could rent a second cluster.
+            raise ClusterNotListedError(
+                f"Cluster rental of {len(ids)} nodes was not confirmed and the pod listing shows no new pods named "
+                f"{name!r}; the nodes may be rented: do not rent again before the pod list shows whether they are",
+                listed=[], confirmed=False,
+            )
         if wait:
             cluster = self.wait_cluster_ready(cluster, timeout=timeout)
         return cluster

@@ -77,7 +77,7 @@ class ClusterNotListedError(LiumError):
     Two ways in. ``confirmed`` is True when the rent route confirmed the order and named the
     member pods (``pod_ids``) but the listing did not show every one of them, or failed: the
     nodes are rented and billing. ``confirmed`` is False when the rent route gave no answer
-    (timeout, 5xx) and the by-name lookup then found fewer members than requested, or could not
+    (timeout, 5xx) and the by-name lookup then found fewer members than requested (none included), or could not
     list at all: the nodes may be rented. Either way a second ``up_cluster`` may rent a second
     cluster.
 
