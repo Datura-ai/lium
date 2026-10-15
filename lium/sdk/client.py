@@ -1551,13 +1551,12 @@ class Lium:
                 (``rent_idempotency``) gets the rent once more with the same key, which replays
                 the first answer instead of renting again; after an ambiguous resend the pod is
                 looked up once more, and no third request is sent. A backend without the key
-                gets no resend, since a repeat could rent a second node. If no pod is found, the
-                error propagates and the pod may still exist — check :meth:`ps`.
-            LiumError: the resend answered ``idempotency_in_progress`` or
-                ``idempotency_outcome_unknown`` and the pod was still not listed (same advice).
-            LiumError: code ``rent_outcome_unknown``: the resend was refused for authentication,
-                permission or balance and the pod was not listed; the first rent may still have
-                rented it (same advice).
+                gets no resend, since a repeat could rent a second node; if no pod is found there,
+                the error propagates and the pod may still exist — check :meth:`ps`.
+            LiumError: code ``rent_outcome_unknown``: the resend got no usable answer (lost,
+                5xx, 429, ``idempotency_in_progress``/``idempotency_outcome_unknown``, or refused for
+                authentication, permission or balance) and the pod was not listed; either request may
+                have rented it — check :meth:`ps` before renting again.
         """
         if template_id is not None and dockerfile_content is not None:
             raise ValueError("Provide either template_id or dockerfile_content, not both")
@@ -1671,13 +1670,13 @@ class Lium:
                 found = self._rented_pod_result(rental, gpu_count, known_pod_ids)
                 if found is not None:
                     return found
-                if refused_resend_only:
-                    raise LiumError(
-                        f"The rent got no answer and its resend was refused ({exc}); the pod may be "
-                        "rented: check ps() before renting again",
-                        code="rent_outcome_unknown",
-                    ) from exc
-                raise
+                # Every unresolved resend keeps the warning: a plain 502/429 would get the CLI's
+                # "Retry", and a re-run sends a fresh key that can rent a second node (review).
+                raise LiumError(
+                    f"The rent got no answer and its resend did not settle it ({exc}); the pod may be "
+                    "rented: check ps() before renting again",
+                    code="rent_outcome_unknown",
+                ) from exc
         executor = self._dict_to_executor_info(data.get("selected_executor") or {})
         if executor is None:
             raise LiumError("rent-by-spec returned no node")

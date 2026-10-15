@@ -424,25 +424,36 @@ def test_a_lost_rent_response_is_resent_once_with_the_same_key_when_the_backend_
     assert result.pod["id"] == "pod-uuid-1"
 
 
-@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.parametrize("listing", ["empty", "failed"])
+@pytest.mark.parametrize(
+    "resend", ["timeout", 502, 429, 401, 403, "idempotency_in_progress", "idempotency_outcome_unknown"]
+)
 @responses.activate
-def test_an_auth_refusal_of_the_resend_keeps_the_first_rent_unknown(client, monkeypatch, status):
-    # lium#328 r4285561625: the resend's refusal says nothing about the first rent, which may
-    # have spent the balance, so an unlisted pod is reported as possibly rented
+def test_an_unresolved_resend_keeps_the_rent_outcome_unknown(client, monkeypatch, resend, listing):
+    # lium#328 r4285561625, r4286119800: when the resend does not settle the first rent and no pod
+    # is listed, either POST may have rented, so the error must keep the warning against a fresh
+    # rent (a bare 502/429 would get the CLI's "Retry", and a re-run sends a new key)
+    import requests
+
     monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
     _version(["rent_by_spec", "rent_idempotency"])
-    responses.add(responses.GET, f"{BASE}/pods", json=[])
+    responses.add(responses.GET, f"{BASE}/pods", json=[])  # the snapshot before the rent
+    if listing == "failed":
+        responses.add(responses.GET, f"{BASE}/pods", status=503)
     url = f"{BASE}/executors/rent-by-spec"
-    responses.add(responses.POST, url, status=502)
-    responses.add(responses.POST, url, status=status, json={"error": {"code": "refused", "message": "no"}})
+    responses.add(responses.POST, url, body=requests.Timeout("first attempt"))
+    if resend == "timeout":
+        responses.add(responses.POST, url, body=requests.Timeout("resend"))
+    elif isinstance(resend, int):
+        responses.add(responses.POST, url, status=resend, json={"error": {"code": "refused", "message": "no"}})
+    else:
+        responses.add(responses.POST, url, status=409, json={"error": {"code": resend, "message": "pending"}})
 
     with pytest.raises(LiumError) as raised:
         client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY])
 
     assert raised.value.code == "rent_outcome_unknown" and "may be rented" in str(raised.value)
-    urls = [c.request.url for c in responses.calls]
-    assert urls.count(url) == 2
-    assert urls.count(f"{BASE}/pods") == 1 + 3 + 3  # the snapshot, the look before and after the resend
+    assert [c.request.url for c in responses.calls].count(url) == 2  # never a third POST
 
 
 @responses.activate
