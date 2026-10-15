@@ -22,7 +22,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from .exceptions import PodStartError
+import requests
+
+from .exceptions import LiumRateLimitError, LiumServerError, PodStartError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .client import Lium
@@ -36,11 +38,14 @@ RENT_FAILED = "rent_failed"        # nothing matched the spec, the balance or a 
 BOOT_FAILED = "boot_failed"        # the pod was rented but never became ready
 ERROR = "error"                    # anything else after the rent (SSH, an input upload, …)
 
-# `timeout` exits 124 when its TERM stopped the command, 137 when the KILL after `-k` had to;
-# the command can exit with these itself, so they only count as a timeout once the limit has passed
+# `timeout` exits 124 when its TERM stopped the command, 137 when the KILL after `-k` had to; the
+# command can exit with these itself, so the pod prints this marker only when the limit had passed there
 _TIMEOUT_EXITS = (124, 137)
+_TIMED_OUT_MARK = "lium-run-job: the time limit stopped the command"
+# the rent errors after which the server may still have created the pod (see Lium.rent)
+_UNANSWERED = (requests.RequestException, LiumServerError, LiumRateLimitError, TimeoutError)
 _DELETE_ATTEMPTS = 3
-_CONFIRM_S = 60  # how long cleanup waits for a deleted pod to leave the pod list
+_CONFIRM_S = 60  # wall-clock budget for one pod's cleanup: the DELETE, its retries and the pod-list checks
 _POLL_S = 5
 
 
@@ -50,8 +55,9 @@ class JobResult:
 
     ``cleanup`` is ``"removed"`` (the pod was deleted and is gone from the pod list),
     ``"scheduled"`` (its absence was not confirmed; the acknowledged server-side removal at
-    ``removal_scheduled_at`` stands), ``"not_rented"``, or ``"unknown"`` (neither removal nor a
-    schedule was confirmed: check :meth:`Lium.ps`). ``removal_scheduled_at`` is set only once the
+    ``removal_scheduled_at`` stands), ``"not_rented"`` (the rent was refused), or ``"unknown"``
+    (neither removal nor a schedule was confirmed, or a rent whose answer was lost may still have
+    created a pod named ``name``: check :meth:`Lium.ps`). ``removal_scheduled_at`` is set only once the
     server acknowledged the schedule. ``cost_usd`` is what the billing statement shows for the pod,
     read only after a confirmed removal (``None`` otherwise, or when the statement does not list it
     yet); ``estimated_cost_usd`` is the rent's hourly price times the seconds from just before the
@@ -125,7 +131,9 @@ def run_job(
         except Exception as exc:  # noqa: BLE001 - every rent failure is this job's terminal state
             result.status, result.error = RENT_FAILED, str(exc)
             # the server may have created the pod before the response was lost; the name is this call's own
-            result.cleanup = _remove_by_name(lium, result.name)
+            result.cleanup = _remove_by_name(lium, result.name, unanswered=isinstance(exc, _UNANSWERED))
+            if result.cleanup == "unknown":
+                result.error += f"; the rent may still have created a pod named {result.name}: check Lium.ps()"
             return result
 
         result.pod_id = rented.pod["id"]
@@ -159,8 +167,11 @@ def run_job(
             result.status, result.error = stopped_by, "no time left to run the command"
             return result
         limit_s = math.floor(run_s)
-        remote = f"timeout -k 10 {limit_s} bash -c {shlex.quote(command)}"
-        exec_started = time.monotonic()
+        remote = (
+            f"{{ s=$(date +%s%N); timeout -k 10 {limit_s} bash -c {shlex.quote(command)}; rc=$?; "
+            f"if [ $rc -eq 124 -o $rc -eq 137 ] && [ $(( $(date +%s%N) - s )) -ge {limit_s}000000000 ]; "
+            f"then echo {shlex.quote(_TIMED_OUT_MARK)} >&2; fi; exit $rc; }}"
+        )
         try:
             run = lium.exec(pod, command=remote, env=env, timeout=run_s + 30)
         except TimeoutError as exc:
@@ -169,10 +180,14 @@ def run_job(
             result.status, result.error = ERROR, str(exc)
         else:
             result.exit_code = run.get("exit_code")
-            result.stdout, result.stderr = run.get("stdout", ""), run.get("stderr", "")
+            result.stdout, result.stderr = run.get("stdout", ""), run.get("stderr", "") or ""
+            mark = _TIMED_OUT_MARK + "\n"
+            timed_out = result.exit_code in _TIMEOUT_EXITS and result.stderr.endswith(mark)
+            if timed_out:
+                result.stderr = result.stderr[: -len(mark)]
             if result.exit_code == 0:
                 result.status = SUCCEEDED
-            elif result.exit_code in _TIMEOUT_EXITS and time.monotonic() - exec_started >= limit_s:
+            elif timed_out:
                 result.status = stopped_by
             else:
                 result.status = FAILED
@@ -235,34 +250,43 @@ def _bounded(transfer, seconds: float, what: str) -> None:
 
 def _remove(lium: "Lium", pod_id: str) -> bool:
     """Delete the pod, retrying a refusal (a pod still deploying cannot be deleted yet), then wait
-    until it is gone from the pod list: a successful DELETE only starts the removal."""
+    until it is gone from the pod list: a successful DELETE only starts the removal. Every request,
+    retry and sleep is cut to what is left of ``_CONFIRM_S``, so a slow API cannot stretch it."""
+    end = time.monotonic() + _CONFIRM_S
+
+    def left() -> float:
+        return end - time.monotonic()
+
     for attempt in range(_DELETE_ATTEMPTS):
         try:
-            lium._request("DELETE", f"/pods/{pod_id}")
+            _bounded(lambda: lium._request("DELETE", f"/pods/{pod_id}"), left(), "pod deletion")
             break
         except Exception:  # noqa: BLE001 - the scheduled removal is the fallback
             if attempt + 1 < _DELETE_ATTEMPTS:
-                time.sleep(5 * (attempt + 1))
+                time.sleep(max(0.0, min(5 * (attempt + 1), left())))
     else:
         return False
-    for _ in range(_CONFIRM_S // _POLL_S):
+    while left() > 0:
+        box: List[Any] = []
         try:
-            if all(pod.id != pod_id for pod in lium.ps()):
+            _bounded(lambda: box.append(lium.ps()), left(), "pod listing")
+            if all(pod.id != pod_id for pod in box[0]):
                 return True
         except Exception:  # noqa: BLE001 - not confirmed yet
             pass
-        time.sleep(_POLL_S)
+        time.sleep(max(0.0, min(_POLL_S, left())))
     return False
 
 
-def _remove_by_name(lium: "Lium", name: str) -> str:
+def _remove_by_name(lium: "Lium", name: str, *, unanswered: bool) -> str:
     try:
         pods = lium.ps()
     except Exception:  # noqa: BLE001 - cannot tell whether a pod exists
         return "unknown"
     removed: List[bool] = [_remove(lium, pod.id) for pod in pods if pod.name == name]
     if not removed:
-        return "not_rented"
+        # an unanswered rent can still create the pod after this listing; only a refusal settles it
+        return "unknown" if unanswered else "not_rented"
     return "removed" if all(removed) else "unknown"
 
 

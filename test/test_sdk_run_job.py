@@ -6,9 +6,11 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 import pytest
+import requests
 
 from lium.sdk import Config, Lium, LiumError, PodStartError, RentResult
 from lium.sdk import bounded_job
+from lium.sdk.exceptions import LiumServerError
 from lium.sdk.models import ExecutorInfo, PodInfo
 
 
@@ -78,8 +80,8 @@ def test_run_job_success_runs_copies_removes_and_reports_billed_cost(lium):
     assert lium.calls["rent"]["max_price_per_gpu_hour"] == 3 and lium.calls["rent"]["name"] == result.name
     assert lium.calls["uploads"] == [("train.py", "/root/train.py")]
     (command, timeout), = lium.calls["execs"]
-    assert command.startswith("timeout -k 10 ") and command.endswith("bash -c 'python train.py --epochs 1'")
-    assert int(command.split()[3]) <= 1800 - 120 and timeout <= 1800 - 120 + 30
+    assert "timeout -k 10 " in command and "bash -c 'python train.py --epochs 1';" in command
+    assert int(command.split("timeout -k 10 ")[1].split()[0]) <= 1800 - 120 and timeout <= 1800 - 120 + 30
     assert result.outputs == {"/root/model.pt": "model.pt"}
     assert lium.calls["deletes"] == ["/pods/pod-1"] and result.cleanup == "removed"
     assert result.cost_usd == 0.0421 and result.estimated_cost_usd is not None
@@ -124,6 +126,22 @@ def test_run_job_timeout_status_comes_from_the_wrapper_not_the_exit_code(lium, m
                           output_reserve_s=1)
 
     assert (result.status, result.exit_code, result.cleanup) == (status, exit_code, "removed")
+    assert result.stderr == ""  # the pod's timeout marker is not handed to the caller
+
+
+def test_run_job_slow_ssh_does_not_turn_a_fast_124_exit_into_a_timeout(lium, monkeypatch):
+    real, offset = bounded_job.time.monotonic, [0.0]
+    monkeypatch.setattr(bounded_job.time, "monotonic", lambda: real() + offset[0])
+
+    def slow_ssh_exec(pod, command, env=None, timeout=None):
+        offset[0] += 5  # connecting took longer than the whole command limit
+        return _exec_locally(pod, command, env, timeout)
+
+    monkeypatch.setattr(lium, "exec", slow_ssh_exec)
+
+    result = lium.run_job(command="exit 124", gpu_type="H100", max_cost_usd=100, deadline_s=3, output_reserve_s=1)
+
+    assert (result.status, result.exit_code) == ("failed", 124)
 
 
 def test_run_job_failed_command_still_copies_outputs_and_names_the_missing_one(lium, monkeypatch):
@@ -170,13 +188,25 @@ def test_run_job_rent_failure_leaves_a_pre_existing_pod_with_the_same_name(lium,
     assert result.name.startswith("train-") and result.name != "train"
 
 
-def test_run_job_rent_refused_with_no_pod_left_reports_not_rented(lium, monkeypatch):
-    monkeypatch.setattr(lium, "rent", lambda **kw: (_ for _ in ()).throw(LiumError("no node matches")))
+@pytest.mark.parametrize(
+    "exc, cleanup",
+    [
+        (LiumError("no node matches"), "not_rented"),
+        (requests.ReadTimeout("response lost"), "unknown"),
+        (requests.ConnectionError("connection reset"), "unknown"),
+        (LiumServerError("502"), "unknown"),
+    ],
+    ids=["refused", "read-timeout", "connection-lost", "server-error"],
+)
+def test_run_job_rent_failure_with_no_pod_listed(lium, monkeypatch, exc, cleanup):
+    monkeypatch.setattr(lium, "rent", Mock(side_effect=exc))
 
     result = lium.run_job(command="true", gpu_type="H100", max_cost_usd=5, deadline_s=600)
 
-    assert result.status == "rent_failed" and result.cleanup == "not_rented" and result.pod_id is None
+    # an unanswered rent can still create the pod after the listing, so only a refusal is not_rented
+    assert result.status == "rent_failed" and result.cleanup == cleanup and result.pod_id is None
     assert lium.calls["deletes"] == [] and result.cost_usd is None
+    assert (result.name in result.error) == (cleanup == "unknown")
 
 
 def test_run_job_boot_failure_removes_the_pod(lium, monkeypatch):
@@ -267,11 +297,26 @@ def test_run_job_failed_schedule_and_failed_delete_promise_no_cleanup(lium, monk
 
 def test_run_job_accepted_delete_of_a_pod_still_listed_is_not_removed(lium, monkeypatch):
     monkeypatch.setattr(lium, "ps", lambda: [_pod("x", status="DELETING")])
+    monkeypatch.setattr(bounded_job, "_CONFIRM_S", 0.2)  # sleeps are no-ops here: the wait is a real-clock spin
 
     r = lium.run_job(command="true", gpu_type="H100", max_cost_usd=5, deadline_s=600)
 
     assert lium.calls["deletes"] == ["/pods/pod-1"]
     assert r.cleanup == "scheduled" and r.removal_scheduled_at is not None and r.cost_usd is None
+
+
+def test_run_job_cleanup_wait_is_bounded_by_wall_clock_on_a_slow_api(lium, monkeypatch):
+    elapsed = [0.0]
+    monkeypatch.setattr(bounded_job.time, "monotonic", lambda: elapsed[0])
+
+    def slow_ps():
+        elapsed[0] += 30
+        return [_pod("x", status="DELETING")]
+
+    monkeypatch.setattr(lium, "ps", slow_ps)
+
+    assert bounded_job._remove(lium, "pod-1") is False
+    assert elapsed[0] <= bounded_job._CONFIRM_S
 
 
 def test_run_job_retries_a_refused_delete(lium):

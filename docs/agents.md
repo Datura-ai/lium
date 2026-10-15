@@ -244,8 +244,8 @@ print(r.to_dict())  # status, exit_code, outputs, missing_outputs, cleanup, cost
 
 `status` is `succeeded`, `failed`, `timed_out`, `budget_exhausted`, `rent_failed`, `boot_failed` or `error`;
 `cleanup` is `removed` once the pod is confirmed gone from the pod list, `scheduled` when that was not confirmed and the
-acknowledged server-side removal at `removal_scheduled_at` stands, or `unknown` when neither was confirmed (check
-`lium ps`). `cost_usd` is read from the billing statement only after a confirmed removal; otherwise use
+acknowledged server-side removal at `removal_scheduled_at` stands, or `unknown` when neither was confirmed, or when a rent
+whose answer was lost may still have created a pod named `name` (check `lium ps`). `cost_usd` is read from the billing statement only after a confirmed removal; otherwise use
 `estimated_cost_usd`.
 
 After server-side scheduling succeeds, removal survives caller exit. A crash during rent or scheduling can leave a
