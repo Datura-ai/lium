@@ -1,6 +1,6 @@
 {
   "name": "lium-zapier",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Zapier integration for Lium, the GPU cloud: find, rent and terminate GPU servers billed by the hour.",
   "main": "index.js",
   "private": true,
