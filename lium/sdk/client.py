@@ -1163,8 +1163,12 @@ class Lium:
         backup_id: Optional[str],
         restore_path: Optional[str],
         gpu_count: Optional[int] = None,
+        posted: Optional[List[bool]] = None,
     ) -> Dict[str, Any]:
-        """The rent call itself; :meth:`up` adds the optional wait on top."""
+        """The rent call itself; :meth:`up` adds the optional wait on top.
+
+        ``posted`` gets an entry once the rent request is about to be sent, so a caller can
+        tell a failure that may have created a pod from one that cannot have."""
         if sum(x is not None for x in (template_id, image, dockerfile_content)) > 1:
             raise ValueError(
                 "Provide only one of template_id, image or dockerfile_content"
@@ -1225,6 +1229,8 @@ class Lium:
         # is the node huid, so a stale same-name pod on the same node would
         # otherwise be handed back for a rent the server never received.
         known_pod_ids = self._pod_ids_before_rent()
+        if posted is not None:
+            posted.append(True)
         try:
             response = self._request(
                 "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
@@ -1428,8 +1434,9 @@ class Lium:
         # happens to carry the same name.
         pods_before = self._pod_ids_or_none()
         created: Optional[Dict[str, Any]] = None
+        posted: List[bool] = []
         try:
-            created = self._rent(executor_id=executor_id, **rent_args)
+            created = self._rent(executor_id=executor_id, posted=posted, **rent_args)
             ready = self.wait_ready(created, timeout=timeout)
             if ready is None:
                 raise LiumError(
@@ -1439,7 +1446,8 @@ class Lium:
         finally:
             if created is not None:
                 self._remove_quietly(created)
-            elif pods_before is not None:
+            elif posted and pods_before is not None:
+                # before the POST nothing of ours exists; a new same-name pod is another caller's
                 self._remove_strays(rent_args["name"], executor_id, exclude=pods_before)
 
     def _pod_ids_or_none(self) -> Optional[frozenset]:
