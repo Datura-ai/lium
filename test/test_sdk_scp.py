@@ -158,7 +158,7 @@ def test_cli_scp_download_of_a_directory_hints_tar_and_leaves_no_file(monkeypatc
 
     output = " ".join(result.output.split())  # Rich wraps long lines
     assert result.exit_code != 0
-    assert "lium exec swift-fox-c8 'tar czf /root/some_dir.tar.gz -C /root some_dir'" in output
+    assert "lium exec swift-fox-c8 'tar czf /root/some_dir.tar.gz -C /root some_dir/.'" in output
     assert "lium scp swift-fox-c8 /root/some_dir.tar.gz -d" in output
     assert list((tmp_path / "local").iterdir()) == []
 
@@ -198,7 +198,7 @@ def _directory_hint(monkeypatch, tmp_path, remote):
 
 def test_cli_scp_directory_hint_for_a_relative_path_archives_from_home(monkeypatch, tmp_path):
     output = _directory_hint(monkeypatch, tmp_path, "out")
-    assert "lium exec swift-fox-c8 'tar czf out.tar.gz out'" in output
+    assert "lium exec swift-fox-c8 'tar czf out.tar.gz out/.'" in output
 
 
 def test_cli_scp_directory_hint_for_dot_or_root_gives_no_command(monkeypatch, tmp_path):
@@ -206,3 +206,21 @@ def test_cli_scp_directory_hint_for_dot_or_root_gives_no_command(monkeypatch, tm
         output = _directory_hint(monkeypatch, tmp_path, remote)
         assert "tar czf" not in output
         assert "Archive it on the pod with tar" in output
+
+
+def test_failed_download_keeps_an_existing_dangling_symlink(monkeypatch, tmp_path):
+    sftp = FakeSFTP(dirs={"/root"}, files={"/root/data.csv"})
+
+    def refuse(remote, local):
+        raise FileNotFoundError(local)  # the link target's parent is missing
+
+    sftp.get = refuse
+    local = tmp_path / "latest.bin"
+    local.symlink_to(tmp_path / "missing" / "model.bin")
+    try:
+        _client_with(sftp, monkeypatch).download(_pod(), remote="/root/data.csv", local=str(local))
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("expected FileNotFoundError")
+    assert local.is_symlink()

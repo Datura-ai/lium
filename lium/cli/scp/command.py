@@ -99,9 +99,10 @@ def scp_command(
             if name in ("", ".", ".."):
                 hint = f"{directory_error}. Archive it on the pod with tar, then download the archive with lium scp -d"
             else:
-                # a relative path is relative to the SSH home, which is also where lium exec runs
+                # a relative path is relative to the SSH home, which is also where lium exec runs;
+                # "name/." makes tar follow a symlinked directory instead of archiving the link
                 archive = f"{remote}.tar.gz"
-                tar = shlex.join(["tar", "czf", archive, *(["-C", parent] if parent else []), name])
+                tar = shlex.join(["tar", "czf", archive, *(["-C", parent] if parent else []), f"{name}/."])
                 hint = (
                     f"{directory_error}. Archive it on the pod, then download the archive: "
                     f"lium exec {targets} {shlex.quote(tar)} && lium scp {targets} {shlex.quote(archive)} -d"
