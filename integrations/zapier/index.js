@@ -4,9 +4,13 @@
 // This app wraps Lium's REST API (https://lium.io/api), the same API the `lium` CLI and SDK use.
 const { version } = require('./package.json');
 const { version: platformVersion } = require('zapier-platform-core');
+const { createHash } = require('node:crypto');
 
 const API = 'https://lium.io/api';
 const NODES_FEED = `${API}/public/v1/nodes`; // public, no API key needed
+
+// Only undefined, null and '' mean "not set": a numeric 0 is a real (zero) cap.
+const present = (v) => v !== undefined && v !== null && v !== '';
 
 const addApiKey = (request, z, bundle) => {
   if (bundle.authData && bundle.authData.api_key && request.url.startsWith(API)) {
@@ -61,7 +65,7 @@ const offerFields = [
 const fetchOffers = async (z, bundle) => {
   const res = await z.request({ url: NODES_FEED });
   const model = (bundle.inputData.gpu_model || '').trim().toLowerCase();
-  const maxPrice = bundle.inputData.max_price ? Number(bundle.inputData.max_price) : null;
+  const maxPrice = present(bundle.inputData.max_price) ? Number(bundle.inputData.max_price) : null;
   const minGpus = Number(bundle.inputData.min_gpus || 1);
   return (res.data.nodes || [])
     .filter((n) => !model || String(n.gpu_model).toLowerCase().includes(model))
@@ -76,7 +80,7 @@ const newOffer = {
   display: {
     label: 'New GPU Offer',
     description:
-      'Triggers when a GPU server matching your filters (GPU model, max hourly price) becomes available to rent on Lium.',
+      'Triggers when a matching GPU server is first observed after the Zap is enabled. Servers present at activation are not emitted, and previously seen servers do not trigger again.',
   },
   operation: { inputFields: offerFields, perform: fetchOffers, sample: offerSample },
 };
@@ -95,7 +99,7 @@ const findOffers = {
 // ---- Pods (your rented GPU servers) ----
 
 const podSample = {
-  id: 'f3b1c2d4-0000-4000-8000-000000000001:RUNNING',
+  id: 'f3b1c2d4-0000-4000-8000-000000000001',
   pod_id: 'f3b1c2d4-0000-4000-8000-000000000001',
   pod_name: 'my-training-run',
   status: 'RUNNING',
@@ -108,15 +112,14 @@ const podStatusChanged = {
   key: 'pod_status_changed',
   noun: 'Pod',
   display: {
-    label: 'New Pod or Pod Status Change',
-    description:
-      'Triggers when you rent a new GPU pod on Lium or one of your pods changes status (e.g. PENDING to RUNNING).',
+    label: 'New Pod',
+    description: 'Triggers when you rent a new GPU pod on Lium. Status changes of an existing pod do not trigger.',
   },
   operation: {
     perform: async (z) => {
       const res = await z.request({ url: `${API}/pods` });
-      // Zapier dedupes on `id`, so pod id + status makes every status change a new item.
-      return (res.data || []).map((p) => ({ ...p, pod_id: p.id, id: `${p.id}:${p.status}` }));
+      // Zapier dedupes on `id`, so each pod triggers once; pod_id backs the Terminate Pod dropdown.
+      return (res.data || []).map((p) => ({ ...p, id: p.id, pod_id: p.id }));
     },
     sample: podSample,
   },
@@ -139,6 +142,13 @@ const rentPod = {
       { key: 'max_price_per_gpu_hour', label: 'Max Price per GPU-Hour (USD)', type: 'number', required: false, helpText: 'Do not rent above this hourly price per GPU.' },
       { key: 'ssh_public_key', label: 'SSH Public Key', required: true, helpText: 'Your SSH public key (the line starting `ssh-ed25519` or `ssh-rsa`). It is installed on the pod so you can log in.' },
       { key: 'pod_name', label: 'Pod Name', required: false, helpText: 'A name for the pod. Default `zapier-pod`.' },
+      {
+        key: 'idempotency_key',
+        label: 'Idempotency Key',
+        required: true,
+        helpText:
+          'A value that stays the same if Zapier replays this step, so a retry returns the first pod instead of renting a second one. Map a stable value from the trigger step, e.g. the trigger item\'s ID; do not use a timestamp or a random value. Lium remembers a key for 24 hours: a replay within 24 hours returns the first pod, a replay after that rents again.',
+      },
       { key: 'template_id', label: 'Template ID', required: false, helpText: 'Optional Lium template (docker image) ID. Empty: the server\'s recommended PyTorch image.' },
     ],
     perform: async (z, bundle) => {
@@ -149,9 +159,19 @@ const rentPod = {
         pod_name: d.pod_name || 'zapier-pod',
         user_public_key: [d.ssh_public_key.trim()],
       };
-      if (d.max_price_per_gpu_hour) body.max_price_per_gpu_hour = Number(d.max_price_per_gpu_hour);
+      if (present(d.max_price_per_gpu_hour)) {
+        const cap = Number(d.max_price_per_gpu_hour);
+        if (!Number.isFinite(cap) || cap <= 0) throw new Error('Max Price per GPU-Hour must be a number above 0.');
+        body.max_price_per_gpu_hour = cap;
+      }
       if (d.template_id) body.template_id = d.template_id;
-      const res = await z.request({ method: 'POST', url: `${API}/executors/rent-by-spec`, body });
+      const key = String(d.idempotency_key || '').trim();
+      if (!key) throw new Error('Idempotency Key is required: map a stable value from the trigger step.');
+      // The backend accepts 1-255 of [A-Za-z0-9-_.:]; any other value is hashed, which is just as replay-stable.
+      const headers = {
+        'Idempotency-Key': /^[A-Za-z0-9._:-]{1,255}$/.test(key) ? key : createHash('sha256').update(key).digest('hex'),
+      };
+      const res = await z.request({ method: 'POST', url: `${API}/executors/rent-by-spec`, headers, body });
       const r = res.data;
       return { id: r.pod_id, pod_id: r.pod_id, pod_name: body.pod_name, status: 'PENDING', price_per_hour: r.price_per_hour, template_id: r.template_id, node: r.selected_executor };
     },
@@ -164,7 +184,8 @@ const terminatePod = {
   noun: 'Pod',
   display: {
     label: 'Terminate Pod',
-    description: 'Terminates (deletes) one of your Lium GPU pods and stops its billing. Data on the pod is lost.',
+    description:
+      'Requests deletion of a Lium GPU pod. Teardown may complete asynchronously; data on the pod is lost when deletion completes.',
   },
   operation: {
     inputFields: [
@@ -173,9 +194,10 @@ const terminatePod = {
     perform: async (z, bundle) => {
       const id = encodeURIComponent(bundle.inputData.pod_id);
       const res = await z.request({ method: 'DELETE', url: `${API}/pods/${id}` });
-      return { id: bundle.inputData.pod_id, terminated: true, response: res.data };
+      // HTTP 200 means deletion was accepted ("started" / "in progress"), not that teardown finished.
+      return { id: bundle.inputData.pod_id, deletion_requested: true, response: res.data };
     },
-    sample: { id: podSample.pod_id, terminated: true },
+    sample: { id: podSample.pod_id, deletion_requested: true },
   },
 };
 
