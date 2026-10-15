@@ -168,6 +168,35 @@ class _RentalStore:
     def __init__(self, directory: Optional[Path]):
         self.directory = directory
         self._lock = threading.Lock()
+        # open fds of the "<key>.lock" files this server holds an flock on: every `lium mcp` process shares the
+        # directory (one per Claude Code session, Desktop, Cursor), and each owns only the journals it locked
+        self._held: Dict[str, int] = {}
+
+    def _claim(self, key: str) -> bool:
+        """Take the journal of ``key`` for this server; False while another live server holds it. The OS drops
+        the lock when its holder exits, so a crashed server's journals are adopted by the next one to start."""
+        if key in self._held:
+            return True
+        try:
+            import fcntl
+        except ImportError:  # shortcut: Windows has no fcntl, so servers there still share journals; add msvcrt locking if reported
+            return True
+        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(self.directory / f"{key}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return False
+        self._held[key] = fd
+        return True
+
+    def _release(self, key: str) -> None:
+        fd = self._held.pop(key, None)
+        if fd is not None:
+            # unlinked while still locked: a server that opens the path now gets a new file and finds no journal
+            (self.directory / f"{key}.lock").unlink(missing_ok=True)
+            os.close(fd)
 
     def path(self, rental: _Rental) -> Optional[Path]:
         return self.directory / f"{rental.idempotency_key}.json" if self.directory and rental.idempotency_key else None
@@ -177,10 +206,13 @@ class _RentalStore:
             return []
         rentals = []
         for path in sorted(self.directory.glob("*.json")):
-            try:
-                rentals.append(_Rental.from_state(json.loads(path.read_text())))
-            except (OSError, ValueError, KeyError, TypeError):
-                continue  # unreadable: left in place for the user, never deleted
+            with self._lock:
+                if not self._claim(path.stem):
+                    continue  # another running server's rental: settled and reported by that server, not here
+                try:
+                    rentals.append(_Rental.from_state(json.loads(path.read_text())))
+                except (OSError, ValueError, KeyError, TypeError):
+                    self._release(path.stem)  # gone meanwhile, or unreadable: left in place for the user, never deleted
         return rentals
 
     def save(self, rental: _Rental) -> None:
@@ -192,6 +224,7 @@ class _RentalStore:
             if path is None or not state["endpoint"]:
                 return
             self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self._claim(path.stem)  # a fresh key: no other server has it
             fd, tmp = tempfile.mkstemp(dir=self.directory, prefix=f"{path.stem}.", suffix=".tmp")  # 0600, its own
             try:
                 with os.fdopen(fd, "w") as f:
@@ -208,12 +241,17 @@ class _RentalStore:
         if path is not None:
             with self._lock:
                 path.unlink(missing_ok=True)
+                self._release(path.stem)
 
 
 DEFAULT_RENTAL_STATE_DIR = Path.home() / ".lium" / "mcp-pending-rentals"
 # The API keeps a completed idempotency record for 24 hours; after that the same key is a new rent. Replays stop an
 # hour before, and the rental stays unresolved for the user to settle by hand.
 REPLAY_WINDOW_SECONDS = 23 * 3600
+# The background reconciler replays a wanted rental only this soon after it was sent (past the API's 300 s in-flight
+# lock). Later, a replay that rents is a pod nobody is told of, so it happens only in rent_pod/list_pods, whose
+# result names the pod at once.
+BACKGROUND_REPLAY_SECONDS = 600
 
 
 def _unlisted_pod(pod_id: str, name: str) -> PodInfo:
@@ -318,7 +356,7 @@ class LiumTools:
         def call():
             deadline = time.monotonic() + self.CLEANUP_WAIT_SECONDS
             while True:
-                self._reconcile()
+                self._reconcile(reports=True)
                 # a pod already returned whose result the host may have dropped (a timeout, a lost response) is
                 # returned again rather than rented again, until the host names it
                 self._forget_delivered(lambda pod_ids: bool(pod_ids & set(known_pod_ids or [])))
@@ -604,8 +642,9 @@ class LiumTools:
             time.sleep(delay)
             delay = min(delay * 2, self.CLEANUP_RETRY_MAX_SECONDS)
 
-    def _reconcile(self) -> List[_Rental]:
-        """Try once to settle every unresolved rental; returns those still unresolved."""
+    def _reconcile(self, reports: bool = False) -> List[_Rental]:
+        """Try once to settle every unresolved rental; returns those still unresolved. ``reports``: the caller's
+        result hands recovered pods to the host, so a wanted rental may be replayed however old it is."""
         with self._cleanup:
             if not self._unresolved:
                 return []
@@ -619,7 +658,7 @@ class LiumTools:
                     with rental.lock:
                         rental.last_error = f"listing pods failed: {type(e).__name__}: {e}"
                 return pending
-            settled = {rental: self._settle_cleanup(rental, live) for rental in pending}
+            settled = {rental: self._settle_cleanup(rental, live, reports) for rental in pending}
             with self._cleanup:
                 for rental, disposition in settled.items():
                     if disposition == "pending" or rental not in self._unresolved:
@@ -638,7 +677,7 @@ class LiumTools:
                 self._cleanup.notify_all()
                 return list(self._unresolved)
 
-    def _settle_cleanup(self, rental: _Rental, live: Dict[str, PodInfo]) -> str:
+    def _settle_cleanup(self, rental: _Rental, live: Dict[str, PodInfo], reports: bool = False) -> str:
         """How far this rental is settled: "done" once nothing it made can still bill (the SDK established that it
         rented nothing, or the API acknowledged the removal of every pod it named for a cancelled rental, or answered
         that the pod does not exist); "keep" once a replay named the pod of a rental the host still wants; else
@@ -660,8 +699,16 @@ class LiumTools:
         with rental.lock:
             if outcome == "unknown":
                 rental.candidates = sorted(p.id for p in live.values() if p.name == rental.name and p.id not in rental.before)
-        if outcome == "unknown" and not self._replay(rental):
-            return "pending"
+        if outcome == "unknown":
+            with rental.lock:
+                late = not rental.cancelled and (
+                    rental.submitted_at is None or time.time() - rental.submitted_at > BACKGROUND_REPLAY_SECONDS)
+                if late and not reports:
+                    rental.last_error = ("not replayed in the background: the rent was sent too long ago for a pod "
+                                         "it makes to be noticed; the next rent_pod or list_pods replays it and "
+                                         "reports the pod")
+            if (late and not reports) or not self._replay(rental):
+                return "pending"
         with rental.lock:
             if rental.outcome == "rejected":
                 return "done"
@@ -807,7 +854,7 @@ class LiumTools:
             pods = self.client.ps()
             self._forget_gone({p.id for p in pods}, listing_started)
             result = {"ok": True, "pods": [_pod(p) for p in pods]}
-            unresolved = self._reconcile()
+            unresolved = self._reconcile(reports=True)
             if unresolved:
                 result["unresolved_rentals"] = [rental.report() for rental in unresolved]
             recovered = self._hand_off_recovered(receiver)

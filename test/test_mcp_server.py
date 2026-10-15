@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -90,11 +91,28 @@ class FakeLium:
         raise LiumInsufficientBalanceError("Balance too low", code="insufficient_balance", hint="lium fund")
 
 
+_SERVERS_STAY_LIVE = []  # non-empty: every server made stays running beside the others
+
+
 @pytest.fixture(autouse=True)
 def rental_state_dir(tmp_path, monkeypatch):
     """Unknown rentals are kept on disk; never in the real home directory."""
     monkeypatch.setattr(tools_module, "DEFAULT_RENTAL_STATE_DIR", tmp_path / "pending-rentals")
     monkeypatch.setattr(LiumTools, "BACKGROUND_CLEANUP", False)  # tests that want the background thread turn it on
+    # Tests restart the server in this process. A new store stands for the next process: the earlier server has
+    # exited, and the OS has dropped its journal locks (tests of two live servers set _SERVERS_STAY_LIVE).
+    stores, init = [], tools_module._RentalStore.__init__
+
+    def exit_earlier_servers(self, directory):
+        if not _SERVERS_STAY_LIVE:
+            for store in stores:
+                for fd in store._held.values():
+                    os.close(fd)
+                store._held.clear()
+        stores.append(self)
+        init(self, directory)
+
+    monkeypatch.setattr(tools_module._RentalStore, "__init__", exit_earlier_servers)
     return tmp_path / "pending-rentals"
 
 
@@ -628,7 +646,7 @@ def test_two_saves_of_one_rental_at_once_leave_the_newer_record_whole(monkeypatc
     tools._save(rental)
     overlapped[0].join(5)
 
-    assert [p.suffix for p in rental_state_dir.iterdir()] == [".json"]
+    assert [p.suffix for p in rental_state_dir.iterdir() if p.suffix != ".lock"] == [".json"]
     assert [r.pod_ids for r in tools._store.load()] == [{"pod-1"}]  # readable after a restart, and names the pod
 
 
@@ -670,7 +688,7 @@ def test_a_restarted_server_replays_the_lost_rent_with_the_same_key(monkeypatch,
     assert before.rent_pod("node-a", "job", template_id="tpl-1", rental=rental)["error"]["code"] == "rent_outcome_unknown"
     if cancelled:
         before.cancel_rental(rental)
-    assert [p.name for p in rental_state_dir.iterdir()] == [f"{sdk.posts[0]}.json"]
+    assert [p.name for p in rental_state_dir.glob("*.json")] == [f"{sdk.posts[0]}.json"]
     assert oct(rental_state_dir.stat().st_mode & 0o777) == "0o700"
 
     outcomes.append(_Answer(201, {"id": "pod-1"}))
@@ -749,6 +767,43 @@ def test_a_rental_is_not_replayed_where_its_key_would_be_a_new_rent(monkeypatch,
     assert list(rental_state_dir.glob("*.json"))
 
 
+def test_a_running_server_never_adopts_another_running_servers_rental(monkeypatch, rental_state_dir):
+    """One `lium mcp` per Claude Code session, Desktop and Cursor share the journal directory: a second server
+    neither replays nor reports the first one's rental, nor refuses to rent because of it."""
+    monkeypatch.setattr(sys.modules[__name__], "_SERVERS_STAY_LIVE", [True])
+    sdk = _real_sdk(monkeypatch, [_no_answer(), _no_answer()])
+    first = _real_tools(sdk)
+    first.rent_pod("node-a", "job", template_id="tpl-1")
+    journal = rental_state_dir / f"{sdk.posts[0]}.json"
+
+    other = _real_sdk(monkeypatch, [_Answer(201, {"id": "pod-2"})])
+    second = _real_tools(other)
+    listed = second.list_pods()
+
+    assert second._unresolved == [] and "unresolved_rentals" not in listed and "recovered_rentals" not in listed
+    assert other.posts == []
+    assert second.rent_pod("node-b", "other-job", template_id="tpl-1")["pod_id"] == "pod-2"
+    assert journal.exists() and first._unresolved  # still the first server's to settle
+
+
+def test_the_background_replays_a_wanted_rental_only_soon_after_it_was_sent(monkeypatch, rental_state_dir):
+    """Hours later a replay that rents makes a pod nobody hears of; it waits for a call whose result reports it."""
+    outcomes = [_no_answer(), _no_answer()]
+    sdk = _real_sdk(monkeypatch, outcomes)
+    submitted = time.time()
+    _real_tools(sdk).rent_pod("node-a", "job", template_id="tpl-1")
+    outcomes.append(_Answer(201, {"id": "pod-1"}))
+    monkeypatch.setattr(time, "time", lambda: submitted + tools_module.BACKGROUND_REPLAY_SECONDS + 1)
+
+    after = _real_tools(sdk)  # restarted the next morning
+    after._reconcile()  # what the background thread runs
+
+    assert len(sdk.posts) == 2 and after._recovered == []
+    assert "not replayed in the background" in after._unresolved[0].last_error
+    listed = after.list_pods()
+    assert len(sdk.posts) == 3 and listed["recovered_rentals"][0]["pod_ids"] == ["pod-1"]
+
+
 def test_a_cancel_that_lands_while_a_replay_keeps_the_pod_still_removes_it(monkeypatch, rental_state_dir):
     outcomes = [_no_answer(), _no_answer()]
     sdk = _real_sdk(monkeypatch, outcomes)
@@ -759,8 +814,8 @@ def test_a_cancel_that_lands_while_a_replay_keeps_the_pod_still_removes_it(monke
     outcomes.append(_Answer(201, {"id": "pod-1"}))
     settle = tools._settle_cleanup
 
-    def cancel_after_resolution(r, live):
-        disposition = settle(r, live)
+    def cancel_after_resolution(r, live, reports=False):
+        disposition = settle(r, live, reports)
         tools.cancel_rental(r)
         return disposition
 
