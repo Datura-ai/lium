@@ -3466,11 +3466,22 @@ class Lium:
 
         Raises:
             ValueError: If SSH is not configured for the pod.
+            IsADirectoryError: If ``remote`` is a directory (SFTP copies one file);
+                nothing is written locally.
         """
         with self.ssh_connection(pod) as client:
             sftp = client.open_sftp()
-            sftp.get(remote, local)
-            sftp.close()
+            try:
+                # sftp.get creates the local file before it reads the remote one, so check first.
+                if stat.S_ISDIR(sftp.stat(remote).st_mode):
+                    raise IsADirectoryError(f"{remote} is a directory on the pod; download copies one file")
+                try:
+                    sftp.get(remote, local)
+                except BaseException:
+                    Path(local).unlink(missing_ok=True)  # never leave a partial or 0-byte file behind
+                    raise
+            finally:
+                sftp.close()
 
     def upload(self, pod: PodInfo, *, local: str, remote: str) -> None:
         """Upload a file to a pod via SFTP.
