@@ -359,7 +359,8 @@ def exec_command(
     \b
     The SSH connection stays open for 10 minutes after the last command
     (LIUM_SSH_PERSIST=<seconds>; 0 connects per command), so the next
-    'lium exec' to the same pod starts without a new connection or pod lookup.
+    'lium exec' to the same pod reuses it; a pod named by huid or ID also
+    skips the pod lookup. --script connects anew each time.
     """
     command_to_run = resolve_command_to_run(command, script)
     env_dict = parse_environment_variables(env)
