@@ -77,7 +77,7 @@ test('rent posts a rent-by-spec request and returns the pod id', async () => {
   nock('https://lium.io').get('/api/pods').reply(200, [{ id: 'old', pod_name: 'zap-other' }]);
   nock('https://lium.io', { reqheaders: { 'Idempotency-Key': 'evt-1' } })
     .post('/api/executors/rent-by-spec', (b) => ((sent = b), true))
-    .reply(200, { pod_id: 'p9', price_per_hour: 2.5, template_id: 't1', selected_executor: { id: 'n1', machine_name: 'm1', gpu_count: 8, price_per_gpu: 2.5, available_gpu_count: 3 } });
+    .reply(200, { pod_id: 'p9', price_per_hour: 2.5, template_id: 't1', selected_executor: { id: 'n1', machine_name: 'm1', gpu_count: 8, price_per_gpu: 2.0, available_gpu_count: 3 } });
   const out = await appTester(App.creates.rent_gpu_pod.operation.perform, {
     authData,
     inputData: { gpu_type: 'H100', ssh_public_key: ' ssh-ed25519 AAAA me ', max_price_per_gpu_hour: '3', idempotency_key: 'evt-1' },
@@ -87,6 +87,7 @@ test('rent posts a rent-by-spec request and returns the pod id', async () => {
   });
   assert.strictEqual(out.id, 'p9');
   assert.strictEqual(out.replayed, false);
+  // the charged price, not the catalogue's 2.0, as a replay of this rental reports
   assert.deepStrictEqual(out.node, { id: 'n1', machine_name: 'm1', gpu_count: 8, price_per_gpu: 2.5 });
 });
 

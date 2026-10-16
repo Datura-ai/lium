@@ -127,8 +127,10 @@ const podStatusChanged = {
 
 // ---- Actions ----
 
-// The node fields both rent paths can fill: a fresh rental's catalogue node and a replayed pod's executor.
-const nodeOut = (e, pricePerGpu) => ({ id: e.id, machine_name: e.machine_name, gpu_count: e.gpu_count, price_per_gpu: pricePerGpu ?? null });
+// The node fields both rent paths can fill: a fresh rental's catalogue node and a replayed pod's executor. The per-GPU
+// price is the charged $/h over the rented GPUs on both, not the catalogue's (which can differ from the charge).
+const nodeOut = (e, pricePerHour, gpus) => ({ id: e.id, machine_name: e.machine_name, gpu_count: e.gpu_count,
+  price_per_gpu: pricePerHour == null ? null : pricePerHour / gpus });
 
 const rentPod = {
   key: 'rent_gpu_pod',
@@ -179,11 +181,11 @@ const rentPod = {
       if (d.template_id) body.template_id = d.template_id;
       const existing = ((await z.request({ url: `${API}/pods` })).data || []).find((p) => p.pod_name === body.pod_name);
       if (existing) {
-        // same output fields as a fresh rental; /pods carries the total $/h as `price` and no per-GPU price
+        // same output fields as a fresh rental; /pods carries the charged total $/h as `price`
         const e = existing.executor || {};
         return { ...existing, id: existing.id, pod_id: existing.id, replayed: true, price_per_hour: existing.price,
           template_id: (existing.template || {}).id,
-          node: nodeOut(e, e.price_per_gpu ?? (existing.price == null ? null : existing.price / gpuCount)) };
+          node: nodeOut(e, existing.price, gpuCount) };
       }
       // The backend accepts 1-255 of [A-Za-z0-9-_.:]; any other value is hashed, which is just as replay-stable.
       const headers = { 'Idempotency-Key': /^[A-Za-z0-9._:-]{1,255}$/.test(key) ? key : keyHash };
@@ -197,7 +199,7 @@ const rentPod = {
       }
       if (res.throwForStatus) res.throwForStatus();
       const r = res.data;
-      return { id: r.pod_id, pod_id: r.pod_id, pod_name: body.pod_name, replayed: false, status: 'PENDING', price_per_hour: r.price_per_hour, template_id: r.template_id, node: nodeOut(r.selected_executor || {}, (r.selected_executor || {}).price_per_gpu) };
+      return { id: r.pod_id, pod_id: r.pod_id, pod_name: body.pod_name, replayed: false, status: 'PENDING', price_per_hour: r.price_per_hour, template_id: r.template_id, node: nodeOut(r.selected_executor || {}, r.price_per_hour, gpuCount) };
     },
     sample: { id: podSample.pod_id, pod_id: podSample.pod_id, pod_name: 'zap-1a2b3c4d5e6f', replayed: false, status: 'PENDING', price_per_hour: 2.0 },
   },
