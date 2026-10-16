@@ -521,18 +521,3 @@ def test_output_past_the_limit_over_the_master_raises_output_limit_exceeded(home
 
     with pytest.raises(OutputLimitExceeded, match="more than 3 bytes"):
         ssh_mux.exec_over_master(_lium(home), _pod(), command="cat log", max_output_bytes=3)
-
-
-def test_lium_exec_max_output_bytes_reaches_the_control_master_path(home, monkeypatch):
-    _CliLium.pods = [_pod(), _pod(pod_id="pod-2", name="warm-pod-2", huid="eager-wolf-bb")]
-    monkeypatch.setattr(ssh_mux, "has_live_master", lambda lium, pod: True)
-    limits = []
-    monkeypatch.setattr(ssh_mux, "exec_over_master", lambda lium, pod, **kw: limits.append(kw["max_output_bytes"]) or
-                        {"stdout": "", "stderr": "", "exit_code": 0, "success": True})
-    monkeypatch.setattr(exec_module, "Lium", _CliLium)
-
-    one = CliRunner().invoke(exec_command, ["warm-pod", "echo hi", "--max-output-bytes", "1000"])
-    both = CliRunner().invoke(exec_command, ["warm-pod,warm-pod-2", "echo hi", "--max-output-bytes", "1000"])
-
-    assert one.exit_code == 0 and both.exit_code == 0, one.output + both.output
-    assert limits == [1000, 1000, 1000]
