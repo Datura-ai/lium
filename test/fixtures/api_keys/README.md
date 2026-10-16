@@ -1,4 +1,4 @@
-# Fixtures — API-key scopes, budgets and per-key filters (server support pending)
+# Fixtures — API-key scopes, budgets and per-key filters
 
 Bodies in the shape the platform's per-key-budgets branch answers (`core/api_key_scopes.py scopes_payload`, `dtos/api_key.py ApiKeyResponse`,
 `dtos/billing_history.py PodStatement`): `GET /keys/scopes` as `{"scopes": [{scope, title, description, can[],

@@ -98,6 +98,11 @@ class LiumHostKeyError(LiumError):
     """A pod presented an SSH host key that differs from the pinned one."""
 
 
+class OutputLimitExceeded(LiumError):
+    """A command run with ``Lium.exec`` produced more than ``max_output_bytes`` bytes of output
+    (stdout and stderr together). The limit bounds output bytes, not memory."""
+
+
 class RemoteExecutionError(LiumError):
     """A function offloaded with ``@lium.machine`` did not return a result from the pod,
     or a command streamed with ``Lium.stream_exec(check=True)`` exited non-zero.
@@ -173,8 +178,8 @@ class LiumBudgetExceededError(LiumPermissionError):
     A per-key daily, monthly or lifetime budget (``lium keys create --daily-budget / --monthly-budget /
     --max-budget``, ``lium keys budget``) is reached: the billing tick deletes the key's pods (data outside
     a volume is lost), and a rent, a pod extend / schedule change or a key-initiated top-up (``lium fund``,
-    ``lium topup``, ``lium topup card``) through that key is refused with this one error (server support
-    pending). The message names the window hit.
+    ``lium topup``, ``lium topup card``) through that key is refused with this one error. The message
+    names the window hit.
     ``budget_usd``, ``spent_usd``, ``window`` (``daily``, ``monthly`` or ``max``) and ``api_key_id`` are filled when the
     server's error body carried them, else ``None``. A :class:`LiumPermissionError` handler keeps working; this
     class is for callers that want the numbers.

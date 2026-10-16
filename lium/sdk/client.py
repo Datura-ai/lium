@@ -12,6 +12,7 @@ import shlex
 import socket
 import stat
 import subprocess
+import threading
 import time
 import uuid
 import warnings
@@ -43,6 +44,7 @@ from .exceptions import (
     LiumHostKeyError,
     LiumNotFoundError,
     LiumInsufficientBalanceError,
+    OutputLimitExceeded,
     LiumPermissionError,
     LiumRateLimitError,
     LiumScopeError,
@@ -100,6 +102,9 @@ load_dotenv()
 # A POSIX shell identifier: what ``export`` accepts on the pod.
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # checked with fullmatch: `$` would let a trailing newline through
 # HTTP methods that are safe to repeat after a lost response; see ``Lium._request``.
+# Default limit on the output bytes (stdout and stderr together) exec keeps; see Lium.exec.
+DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+
 IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # `request_same_origin` in `.utils` follows redirects for the credential-bearing HTTP paths of this package — renter SDK,
 # provider portal, signup (DAH-3543); `_MAX_REDIRECTS` stays as the name the tests read.
@@ -1182,6 +1187,11 @@ class Lium:
         if not executor_info:
             raise ValueError(self.executor_not_found_message(executor_id))
 
+        # before the one-time template is created: a refusal here must leave nothing on the account
+        ssh_material = ssh_keys or self.config.ssh_public_keys
+        if not ssh_material:
+            raise ValueError("No SSH keys found")
+
         if image is not None:
             template_id = self.create_template(
                 name=f"ephemeral-{hashlib.md5(image.encode()).hexdigest()[:8]}",
@@ -1195,10 +1205,6 @@ class Lium:
         if template_id is None and dockerfile_content is None:
             selected_template = self.default_docker_template(executor_info.id)
             template_id = selected_template.id
-
-        ssh_material = ssh_keys or self.config.ssh_public_keys
-        if not ssh_material:
-            raise ValueError("No SSH keys found")
 
         self._ensure_ssh_keys_registered(ssh_material, name=ssh_name)
 
@@ -1851,7 +1857,7 @@ class Lium:
 
         Args:
             gpu_type: Optional GPU filter such as ``"A100"`` or ``"H200"``.
-            gpu_count: Exact GPU count to match (defaults to 8, pass ``None`` to disable).
+            gpu_count: Exact GPU count to match (default ``None``: any count).
             lat: Optional latitude for geospatial filtering. Must be used together with ``lon`` and ``max_distance_miles``.
             lon: Optional longitude for geospatial filtering. Must be used together with ``lat`` and ``max_distance_miles``.
             max_distance_miles: Optional radius (in miles) for geospatial filtering. Must be used together with ``lat`` and ``lon``.
@@ -1928,9 +1934,8 @@ class Lium:
         """List active pods.
 
         Args:
-            api_key_id: Only the pods rented through this API key (``GET /pods?api_key_id=…``,
-                server support pending). A server without the filter ignores the parameter and lists
-                every pod the caller can see.
+            api_key_id: Only the pods rented through this API key (``GET /pods?api_key_id=…``).
+                A server without the filter ignores the parameter and lists every pod the caller can see.
 
         Returns:
             List of :class:`PodInfo` objects representing the caller's running pods.
@@ -2646,24 +2651,60 @@ class Lium:
         """Fetch a template by ID/HUID/name.
 
         Args:
-            template_id: Template ID, HUID, or name to match.
+            template_id: Template ID, HUID, or name to match. A HUID or name picks only the
+                caller's own templates; someone else's public template is chosen by its ID.
 
         Returns:
             Matching :class:`Template` or ``None`` if not found.
+
+        Raises:
+            LiumError: the HUID or name matches several of the caller's templates, or matches only
+                public templates of other users (the message names their IDs and images).
         """
         try:
-            d = self._request("GET", f"/templates/{template_id}").json()
-            return Template(
-                id=d.get("id", ""),
-                huid=generate_huid(d.get("id", "")),
-                name=d.get("name", ""),
-                docker_image=d.get("docker_image", ""),
-                docker_image_tag=d.get("docker_image_tag", "latest"),
-                category=d.get("category", "general"),
-                status=d.get("status", "unknown"),
+            uuid.UUID(str(template_id))
+        except ValueError:  # GET /templates/{id} takes only a UUID (422 otherwise)
+            return self._template_by_huid_or_name(template_id, name_public=True)
+        try:
+            d = self._request("GET", f"/templates/{quote(str(template_id), safe='')}").json()
+        except LiumNotFoundError:  # a name may itself be a UUID; only the caller's own templates, never a public one that borrows the ID
+            return self._template_by_huid_or_name(template_id)
+        return Template(
+            id=d.get("id", ""),
+            huid=generate_huid(d.get("id", "")),
+            name=d.get("name", ""),
+            docker_image=d.get("docker_image", ""),
+            docker_image_tag=d.get("docker_image_tag", "latest"),
+            category=d.get("category", "general"),
+            status=d.get("status", "unknown"),
+        )
+
+    def _own_templates(self) -> List[Template]:
+        try:
+            return self.templates(only_my=True)
+        except LiumAuthError:
+            if self.config.api_key:  # a configured client's refused key (revoked meanwhile) is an error, not "not found"
+                raise
+            return []  # an anonymous caller has no templates of its own
+
+    def _template_by_huid_or_name(self, selector: str, name_public: bool = False) -> Optional[Template]:
+        # Only the caller's own templates are picked by HUID or name. Whoever publishes a template picks its name, and
+        # a HUID has only 25,600 values, so a publisher could pick or grind a public look-alike of either: someone
+        # else's template is never chosen silently. Names are not unique either: never pick one of several.
+        matches = [t for t in self._own_templates() if selector in (t.huid, t.name)]
+        if len(matches) > 1:
+            raise LiumError(f"Template {selector!r} is ambiguous ({len(matches)} templates match); use its ID")
+        if matches:
+            return matches[0]
+        public = [t for t in self.templates() if selector in (t.huid, t.name)] if name_public else []
+        if public:
+            # listed but someone else's: name each match's ID and image, so the caller chooses one knowingly
+            found = "; ".join(f"{t.id} ({t.docker_image}:{t.docker_image_tag})" for t in public[:5])
+            raise LiumError(
+                f"Template {selector!r} is not one of yours; a public template is chosen by its ID. "
+                f"Matching public template{'s' if len(public) > 1 else ''}: {found}"
             )
-        except Exception:
-            return None
+        return None
 
     def get_template_by_image_name(self, image_name: Optional[str] = None, image_tag: Optional[str] = None) -> Optional[Template]:
         """Fetch a template by its Docker image + tag.
@@ -2831,6 +2872,7 @@ class Lium:
         timeout: Optional[float] = None,
         detach: bool = False,
         log_path: Optional[str] = None,
+        max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
     ) -> Dict[str, Any]:
         """Execute a shell command on a pod over SSH.
 
@@ -2855,11 +2897,20 @@ class Lium:
                 ``/workspace/logs/exec-<UTC timestamp>-<id>.log``, the ``<id>`` a
                 6-hex tail that keeps two launches in the same second apart).
 
+            max_output_bytes: Limit on the output bytes, stdout and stderr
+                together (default 64 MiB). It bounds output bytes, not memory:
+                the raw bytes and the text decoded from them are both held, so
+                peak memory is about twice the limit for ASCII or Latin-1 output,
+                and more when a wider character such as an emoji makes the text
+                take up to 4 bytes per character. Past the limit the channel is
+                closed and :class:`OutputLimitExceeded` is raised.
+
         Returns:
             Dict containing stdout, stderr, exit_code, and success flag; with
             ``detach`` a dict with ``pid``, ``log_path`` and ``command``.
 
         Raises:
+            OutputLimitExceeded: stdout and stderr together are more than ``max_output_bytes``.
             ValueError: an ``env`` name is not a shell identifier. Raised before
                 the connection is opened, so nothing reaches the pod.
         """
@@ -2882,19 +2933,58 @@ class Lium:
             # and this call has no stdin to give it.
             stdin.close()
             channel = stdout.channel
+            # Drain both streams while waiting: output past the SSH channel window (2 MiB) blocks the
+            # remote command, which then never sends the exit status waited for below.
+            total, over, lock = [0], threading.Event(), threading.Lock()
+
+            def drain(read) -> bytearray:
+                # ``read`` returns as soon as any bytes arrive (paramiko's ``stream.read(n)`` waits for
+                # n of them), so the limit is checked per chunk and a slow trickle cannot outrun it.
+                # One bytearray per stream, returned as is: no list of parts, no join or bytes() copy.
+                buf = bytearray()
+                while True:
+                    chunk = read(65536)
+                    if not chunk:
+                        return buf
+                    # count before appending: the chunk that would cross the limit is never added
+                    with lock:
+                        total[0] += len(chunk)
+                        if total[0] > max_output_bytes:
+                            over.set()
+                            channel.close()
+                            return b""
+                    buf += chunk
+
+            raw = hasattr(channel, "recv_stderr")
+            read_out = channel.recv if raw else stdout.read
+            read_err = channel.recv_stderr if raw else stderr.read
+            readers = ThreadPoolExecutor(max_workers=2)
+            out, err = readers.submit(drain, read_out), readers.submit(drain, read_err)
+            readers.shutdown(wait=False)
             if timeout is not None:
                 deadline = time.monotonic() + timeout
-                while not channel.exit_status_ready():
+                while not channel.exit_status_ready() and not over.is_set():
                     if time.monotonic() >= deadline:
                         channel.close()
                         raise TimeoutError(
                             f"Command did not finish within {timeout}s on pod {pod.name or pod.huid}: {command}"
                         )
                     time.sleep(0.1)
+            out_bytes, err_bytes = out.result(), err.result()
+            del out, err  # the futures keep their results alive
+            if over.is_set():
+                # a held session (ssh_session) outlives this call: close the channel, or a command that sent EOF
+                # without closing it keeps a remote session slot; the shared SSH connection stays open
+                channel.close()
+                raise OutputLimitExceeded(
+                    f"Output of the command on pod {pod.name or pod.huid} is more than {max_output_bytes} bytes"
+                )
+            out_text = out_bytes.decode("utf-8", errors="replace")
+            err_text = err_bytes.decode("utf-8", errors="replace")
             exit_code = channel.recv_exit_status()
             return {
-                "stdout": stdout.read().decode("utf-8", errors="replace"),
-                "stderr": stderr.read().decode("utf-8", errors="replace"),
+                "stdout": out_text,
+                "stderr": err_text,
                 "exit_code": exit_code,
                 "success": exit_code == 0
             }
@@ -3234,6 +3324,7 @@ class Lium:
         command: str,
         env: Optional[Dict[str, str]] = None,
         max_workers: int = 10,
+        max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
     ) -> List[Dict]:
         """Execute a shell command on multiple pods in parallel.
 
@@ -3242,6 +3333,7 @@ class Lium:
             command: Shell command to run on each pod.
             env: Optional environment variables exported before each command.
             max_workers: Maximum number of SSH workers to spawn.
+            max_output_bytes: Output byte limit for each pod, as in :meth:`exec`.
 
         Returns:
             List of result dictionaries mirroring :meth:`exec`, each with the pod
@@ -3260,7 +3352,7 @@ class Lium:
 
         def exec_single(pod: PodInfo):
             try:
-                result = self.exec(pod, command=command, env=env)
+                result = self.exec(pod, command=command, env=env, max_output_bytes=max_output_bytes)
                 result["pod"] = pod.id
                 return result
             except Exception as e:
@@ -4042,7 +4134,8 @@ class Lium:
             timeout: Maximum seconds to wait.
 
         Returns:
-            Template when verification succeeds, otherwise ``None`` if the timeout expires.
+            Template once it is verified (a public one at once: the server does not verify user
+            templates), otherwise ``None`` if the timeout expires.
 
         Raises:
             LiumError: If template verification fails.
@@ -4055,7 +4148,8 @@ class Lium:
 
             if current:
                 status = current.status.upper()
-                if status == "VERIFY_SUCCESS":
+                # A public template stays CREATED/UPDATED: the server verifies only its own templates.
+                if status in ("VERIFY_SUCCESS", "CREATED", "UPDATED"):
                     return current
                 elif status == "VERIFY_FAILED":
                     raise LiumError(f"Template verification failed: {current.name}")
@@ -4169,7 +4263,7 @@ class Lium:
 
         Like every pay call here it goes to the main Lium API with the caller's own
         key; the pay API's calls go through the backend's ``/tao/pay`` proxy, which
-        holds the pay API's key (sec-audit-1012-4).
+        holds the pay API's key.
         """
         create_transfer_response = self._request(
             "POST", "/tao/create-transfer", json={"amount": 10}
@@ -4413,19 +4507,25 @@ class Lium:
             List of :class:`BackupLog` entries (possibly empty).
         """
         try:
-            response = self._request("GET", f"/backup-logs/pod/{pod.id}").json()
-            
-            # Handle paginated response - extract items from the response
-            if isinstance(response, dict) and 'items' in response:
-                logs = response['items']
-            else:
-                # Fallback for non-paginated response
-                logs = response if isinstance(response, list) else []
-            
-            return [self._dict_to_backup_log(log) for log in logs]
+            return [self._dict_to_backup_log(log) for log in self._all_pages(f"/backup-logs/pod/{pod.id}")]
         except LiumNotFoundError:
             # No backup logs exist for this pod, return empty list
             return []
+
+    def _all_pages(self, endpoint: str) -> List[Dict[str, Any]]:
+        """Every item of a paginated GET (the server's default page is 20 rows)."""
+        items: List[Dict[str, Any]] = []
+        page = 1
+        while True:
+            response = self._request("GET", endpoint, params={"page": page, "limit": 100}).json()
+            if isinstance(response, list):  # an unpaginated answer
+                return response
+            if not isinstance(response, dict):
+                return items
+            items.extend(response.get("items", []))
+            if not response.get("has_next"):
+                return items
+            page += 1
 
     def backup_logs_all(self) -> List[BackupLog]:
         """Get all backup logs available to the current user."""
@@ -4516,14 +4616,7 @@ class Lium:
             List of :class:`RestoreLog` entries (possibly empty).
         """
         try:
-            response = self._request("GET", f"/pods/{pod.id}/restore-logs").json()
-
-            if isinstance(response, dict) and "items" in response:
-                logs = response["items"]
-            else:
-                logs = response if isinstance(response, list) else []
-
-            return [self._dict_to_restore_log(log) for log in logs]
+            return [self._dict_to_restore_log(log) for log in self._all_pages(f"/pods/{pod.id}/restore-logs")]
         except LiumNotFoundError:
             return []
 
