@@ -827,3 +827,60 @@ def test_node_list_generic_provider_error_returns_1(patched_build_client) -> Non
         ["--hotkey", "hk1", "node", "list"],
     )
     assert result.exit_code == 1, result.output
+
+
+class _Resp:
+    def __init__(self, status: int, body: dict) -> None:
+        self.status_code, self._body, self.text = status, body, json.dumps(body)
+
+    def json(self) -> dict:
+        return self._body
+
+
+def _portal_error(status: int, body: dict) -> ProviderError:
+    from lium.provider.portal_http import _parse_response
+
+    with pytest.raises(ProviderError) as exc:
+        _parse_response(_Resp(status, body), method="POST", url="https://p/x")  # type: ignore[arg-type]
+    return exc.value
+
+
+def _address(*extra: str):
+    return CliRunner().invoke(
+        provider_command,
+        ["-y", "--hotkey", "hk1", *extra, "node", "address", "e-1", "203.0.113.7", "9000"],
+    )
+
+
+def test_node_address_posts_new_ip_and_port(patched_build_client) -> None:
+    portal = patched_build_client(_Portal(post_body={"id": "e-1", "ip_address": "203.0.113.7", "port": 9000}))
+    result = _address()
+    assert result.exit_code == 0, result.output
+    assert portal.posts[0][:2] == ("/executors/e-1/update-address", {"ip_address": "203.0.113.7", "port": 9000})
+    assert "203.0.113.7:9000" in result.output
+
+
+def test_node_address_shows_the_portals_refusal(patched_build_client) -> None:
+    err = _portal_error(400, {"detail": {"code": "NODE_ADDRESS_RENTED", "message": "Node is rented; wait until it is free."}})
+    patched_build_client(_Portal(post_raises=err))
+    result = _address()
+    assert result.exit_code == 1, result.output
+    assert "Node is rented; wait until it is free." in result.output
+
+
+@pytest.mark.parametrize("status", [404, 405])
+def test_node_address_on_a_portal_without_the_endpoint(patched_build_client, status) -> None:
+    detail = "Not Found" if status == 404 else "Method Not Allowed"
+    patched_build_client(_Portal(post_raises=_portal_error(status, {"detail": detail})))
+    result = _address()
+    assert result.exit_code != 0
+    assert "this portal does not support address edits yet" in result.output
+    assert "wrong UUID" not in result.output
+    assert "node id is fine" not in result.output and "add it again" not in result.output
+
+
+def test_node_address_unknown_node_is_not_reported_as_unsupported(patched_build_client) -> None:
+    patched_build_client(_Portal(post_raises=_portal_error(404, {"detail": "Executor not found"})))
+    result = _address()
+    assert result.exit_code == 3, result.output
+    assert "does not support" not in result.output

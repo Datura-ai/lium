@@ -15,7 +15,7 @@ import click
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from lium.sdk import Lium, PodInfo, ssh_mux
-from lium.sdk.client import ENV_NAME
+from lium.sdk.client import DEFAULT_MAX_OUTPUT_BYTES, ENV_NAME
 from lium.sdk.detach import (
     DEFAULT_DETACH_LOG_DIR,
     build_detached_command,
@@ -315,6 +315,10 @@ def report_executions(executions: list[PodExecution], json_output: bool) -> None
     help=f"Log file for --detach on the pod (default: {DEFAULT_DETACH_LOG_DIR}/exec-<timestamp>-<id>.log)",
 )
 @click.option(
+    "--max-output-bytes", type=click.IntRange(min=1), default=DEFAULT_MAX_OUTPUT_BYTES, show_default=True,
+    help="Fail once a pod's stdout and stderr together pass this many bytes (a limit on output bytes, not memory)",
+)
+@click.option(
     "--json", "json_output", is_flag=True,
     help="Print machine-readable JSON (stdout, stderr, exit_code) instead of raw output",
 )
@@ -326,6 +330,7 @@ def exec_command(
     env: Tuple[str],
     detach: bool,
     log_path: Optional[str],
+    max_output_bytes: int,
     json_output: bool,
 ):
     """Execute commands on GPU pods.
@@ -409,9 +414,9 @@ def exec_command(
         else:
             results = ssh_mux.exec_all_over_masters(lium, selected_pods, command=command_to_run, env=env_dict)
     elif len(selected_pods) == 1:
-        results = [lium.exec(selected_pods[0], command=command_to_run, env=env_dict)]
+        results = [lium.exec(selected_pods[0], command=command_to_run, env=env_dict, max_output_bytes=max_output_bytes)]
     else:
-        results = lium.exec_all(selected_pods, command=command_to_run, env=env_dict)
+        results = lium.exec_all(selected_pods, command=command_to_run, env=env_dict, max_output_bytes=max_output_bytes)
 
     if detach:
         detached = [

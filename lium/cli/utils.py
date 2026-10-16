@@ -356,6 +356,10 @@ _HINTS_BY_CODE: Dict[str, str] = {
                      "mint a key that holds it with 'lium keys create <name> --scope <scope>'",
     "pod_not_found": "Run 'lium ps' to list pods; a name, huid, id or 1-based index is accepted",
     "not_found": "The resource is gone or the id is wrong; list it again and retry",
+    # the rent got no answer and its resend was refused: the first rent may have gone through,
+    # so the exit-3 "Retry" would rent a second pod (lium#328)
+    "rent_outcome_unknown": "Do not re-run the rent yet: the pod may be rented and billing. "
+                            "'lium ps' shows whether it exists; 'lium rm <pod>' removes it",
     "rate_limited": "Wait a few seconds and retry; back off if it repeats",
     "server_error": "Retry; if it persists, re-run with LIUM_DEBUG=1 and report the request",
     # Raised by the non-interactive guard (lium/cli/ui.py confirm/prompt, DAH-2883).

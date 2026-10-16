@@ -33,8 +33,10 @@ class _Out:
     def __init__(self, channel, data):
         self.channel, self._data = channel, data
 
-    def read(self):
-        return self._data
+    def read(self, size=-1):
+        # exec reads in chunks until an empty read
+        data, self._data = (self._data, self._data[:0]) if size < 0 else (self._data[:size], self._data[size:])
+        return data
 
 
 class _In:
