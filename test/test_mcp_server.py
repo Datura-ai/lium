@@ -924,9 +924,11 @@ def test_another_live_sessions_rental_blocks_a_rent_here(monkeypatch, rental_sta
     assert refused["ok"] is False and other.posts == []
     assert journal.exists() and second._unresolved == []  # still the first session's to settle
     if case == "pod_handed_to_the_transport":
-        first._acknowledged(_pod("pod-1", "job"))  # the first host names the pod in a call: its journal goes
-        assert not journal.exists()
-        assert second.rent_pod("node-b", "other-job", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-2"
+        assert "known_pod_ids" in refused["error"]["hint"] and "do not remove_pod" in refused["error"]["hint"]
+        # the second host knows pod-1 and asks for another pod beside it: rented, the first session's journal kept
+        rented = second.rent_pod("node-b", "other-job", template_id="tpl-1", timeout_seconds=0,
+                                 known_pod_ids=["pod-1"])
+        assert rented["pod_id"] == "pod-2" and journal.exists()
 
 
 def test_a_rent_another_server_sends_after_this_ones_reconcile_still_blocks_it(monkeypatch, rental_state_dir):

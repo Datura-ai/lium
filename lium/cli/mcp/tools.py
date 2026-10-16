@@ -117,6 +117,7 @@ class _Rental:
         self.reported = False  # this call's own result names its pod
         self.delivered = False  # a result naming the pod was handed to the transport; the host may not have it
         self.delivered_at: Optional[float] = None  # time.monotonic() of that hand-over
+        self.held_elsewhere = False  # read from another live session's journal: never settled here
         # time.monotonic() at which a listing started after the hand-over last showed the pod
         self.listed_at: Optional[float] = None
 
@@ -289,9 +290,11 @@ class _RentalStore:
                 continue  # gone meanwhile (settled), or unreadable
             other.last_error = (
                 f"another running Lium MCP session rented pod(s) {', '.join(sorted(other.pod_ids))} and has not yet "
-                "confirmed that its host received them" if other.pod_ids else
+                "confirmed that its host received them (if you know them, pass them in known_pod_ids to rent another "
+                "pod; do not remove_pod them, they are that session's)" if other.pod_ids else
                 "another running Lium MCP session sent this rent and is settling it"
             ) + "; rent_pod is refused here until it does or that session ends (this server then takes it over)"
+            other.held_elsewhere = True
             found.append(other)
         return found
 
@@ -476,7 +479,9 @@ class LiumTools:
                     recovered = self._hand_off_recovered(rental)
                     recovered += self._unacknowledged(exclude=rental.handed)
                     # read now, not at the last reconcile: another server may have sent a rent since
-                    unresolved = list(self._unresolved) + self._journals_elsewhere()
+                    # another session's pod the host names here is known: renting beside it is what the host asks
+                    unresolved = list(self._unresolved) + [
+                        r for r in self._journals_elsewhere() if not r.pod_ids & set(known_pod_ids or [])]
                     renting = [r for r in self._in_flight if r is not rental]
                     if not (recovered or unresolved or renting or self._recovered or rental.cancelled):
                         self._in_flight.append(rental)
@@ -977,6 +982,9 @@ class LiumTools:
             "account's key is unexpired; then rent_pod returns that pod instead of renting. Retry in a minute; if "
             "last_error says it cannot be replayed, follow it."
             if unknown
+            else "Another Lium MCP session holds these pods: if you know them, call rent_pod again with known_pod_ids "
+            "set to their ids; do not remove_pod them."
+            if all(rental.held_elsewhere for rental in unresolved)
             else "Retry rent_pod in a minute, or call list_pods and remove_pod the pod ids listed under unresolved.",
         )
         failed["unresolved"] = [rental.report() for rental in unresolved]
