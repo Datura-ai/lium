@@ -828,11 +828,11 @@ class LiumTools:
             return False
 
         # nothing can establish what an unanswered, unreplayable rent did, so no second rent is allowed beside it
+        # (any other client sends a new key, so pointing there would bypass this guard)
         manual = ("; this server cannot settle it, so rent_pod stays refused while it is listed here (deleting its "
-                  "journal does not lift that). Check list_pods and same_name_pods_to_check and remove_pod what you "
-                  "do not want; rent any other pod at https://lium.io or with the lium CLI")
-        if not self._store.journaled(rental):
-            manual += " (nothing of this rental is kept on disk, so a restart of this server forgets it)"
+                  "journal does not lift that). Do not rent through any client (this server, the lium CLI or the "
+                  "website) until this rental is resolved: if the unanswered request completes, a second rental "
+                  "would bill too. Check list_pods and same_name_pods_to_check and remove_pod what you do not want")
         blocker = self._replay_blocker(rental)
         if blocker:
             return unresolved(blocker + manual)

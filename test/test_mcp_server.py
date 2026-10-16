@@ -823,7 +823,10 @@ def test_deleting_the_journal_never_lifts_the_rent_block(monkeypatch, rental_sta
 
     (unresolved,) = tools.list_pods()["unresolved_rentals"]
     if not replayable:
-        assert "deleting its journal does not lift" in unresolved["last_error"]
+        hint = unresolved["last_error"]
+        assert "deleting its journal does not lift" in hint and "Do not rent through any client" in hint
+        # never points to another way to rent, nor to a restart, while the first rental is unknown
+        assert "restart" not in hint and "https://" not in hint and "rent any" not in hint
     (journal,) = rental_state_dir.glob("*.json")
     journal.unlink()
     posts = len(sdk.posts)
