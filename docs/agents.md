@@ -186,6 +186,14 @@ Do this in a trap so it runs on any exit path:
 trap 'lium rm "$POD" --yes >/dev/null 2>&1 || true' EXIT
 ```
 
+Tell us how the node went in the same call, when it was bad or good — it reaches Lium support and the provider's rating, and never blocks the removal:
+
+```bash
+lium rm "$POD" --yes --rating 2 --feedback "disk throughput ~50 MB/s, training stalled"
+```
+
+From Python: `Lium().down(pod, rating=2, feedback="...")`. Over the API: send the feedback object (`{"rating": 1-5, "feedback_text": "...", "reason": "..."}`) as the body of `DELETE /pods/{id}`. Use `POST /pods/{id}/feedback` to leave feedback without removing the pod.
+
 `lium rm --all --yes` removes every pod on the account; do not use it from a shared account.
 
 ## 4. Pod gotchas
