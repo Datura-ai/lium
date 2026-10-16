@@ -760,10 +760,12 @@ class LiumTools:
                 return "done"
             scope = rental.scope
         if self._store.journaled(rental) and not self._store.path(rental).exists():
-            if time.time() >= _settle_by_hand_from(rental):
-                # the user deleted its journal, as last_error says, once they had checked its pods by hand
+            # the user deleted its journal, as last_error says, once they had checked its pods by hand; only for a
+            # rental nothing else can settle: while a replay can still get the API's answer, that answer decides
+            if time.time() >= _settle_by_hand_from(rental) and self._replay_blocker(rental):
                 return "by_hand"
-            # deleted while the first request may still create a pod: keep blocking, and on disk for a restart
+            # deleted while the first request may still create a pod, or a replay can still settle it: keep
+            # blocking, and on disk for a restart
             try:
                 self._store.save(rental)
             except Exception:  # noqa: BLE001 - still blocked in memory; the next pass writes it again
@@ -814,6 +816,22 @@ class LiumTools:
         with rental.lock:
             return "pending" if rental.pod_ids else "done"
 
+    def _replay_blocker(self, rental: _Rental) -> Optional[str]:
+        """Why ``rental`` cannot be replayed with its key, or None when a replay can still get the API's answer."""
+        with rental.lock:
+            error, scope, submitted_at = rental.replay, rental.scope, rental.submitted_at
+        if error is None or not error.endpoint:
+            return "the rent call's request was not kept, so it cannot be replayed"
+        if scope != self._scope():
+            return ("this rental was sent for another API or account than this server uses now; it is not replayed "
+                    "here (the same key would be a new rent there)")
+        if submitted_at is None or time.time() - submitted_at > REPLAY_WINDOW_SECONDS:
+            return "this rental is older than the API keeps idempotency keys, so a replay could rent a second pod"
+        if not self.client.supports("rent_idempotency"):
+            return ("the API does not advertise idempotent rents (rent_idempotency), so a replay could rent a "
+                    "second pod")
+        return None
+
     def _replay(self, rental: _Rental) -> bool:
         """Send an unknown rental's request again with its key; True once the API answered it (rental settled).
 
@@ -839,17 +857,9 @@ class LiumTools:
         # no deadline is a guarantee for a request the API never answered: a pod it creates later is still reported
         manual += ("; a rent that never got an answer can rarely create its pod even later: list_pods then reports "
                    "it under pods_from_settled_rentals")
-        if error is None or not error.endpoint:
-            return unresolved("the rent call's request was not kept, so it cannot be replayed" + manual)
-        if scope != self._scope():
-            return unresolved("this rental was sent for another API or account than this server uses now; it is "
-                              "not replayed here (the same key would be a new rent there)" + manual)
-        if submitted_at is None or time.time() - submitted_at > REPLAY_WINDOW_SECONDS:
-            return unresolved("this rental is older than the API keeps idempotency keys, so a replay could rent a "
-                              "second pod" + manual)
-        if not self.client.supports("rent_idempotency"):
-            return unresolved("the API does not advertise idempotent rents (rent_idempotency), so a replay could "
-                              "rent a second pod" + manual)
+        blocker = self._replay_blocker(rental)
+        if blocker:
+            return unresolved(blocker + manual)
         try:
             created = self.client.replay_rent(error)
         except LiumRentOutcomeUnknownError as e:

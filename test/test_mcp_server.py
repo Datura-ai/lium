@@ -858,6 +858,30 @@ def test_a_journal_deleted_while_the_first_request_may_still_rent_keeps_blocking
     assert late["name"] == "job" and late["pod_ids"] == ["pod-late"]
 
 
+def test_a_journal_deleted_while_a_replay_can_still_answer_keeps_blocking(monkeypatch, rental_state_dir):
+    """The API's answer to a replay, not the user's deletion, settles a rental while its key is kept."""
+    unknown = _stored(409, {"error": {"code": "idempotency_outcome_unknown", "message": "outcome unknown"}})
+    outcomes = [_no_answer(), _no_answer()] + [unknown] * 8
+    sdk = _real_sdk(monkeypatch, outcomes)
+    submitted = time.time()
+    tools = _real_tools(sdk)
+    tools.rent_pod("node-a", "job", template_id="tpl-1")
+
+    monkeypatch.setattr(time, "time", lambda: submitted + tools_module.SETTLE_BY_HAND_AFTER_SECONDS + 1)
+    (journal,) = rental_state_dir.glob("*.json")
+    journal.unlink()
+    posts = len(sdk.posts)
+
+    assert tools.rent_pod("node-b", "job-2", template_id="tpl-1")["ok"] is False
+    assert journal.exists() and all(p == sdk.posts[0] for p in sdk.posts[posts:])  # only replays, no new rent
+
+    # once the key is gone nothing can answer: the user's deletion settles it
+    monkeypatch.setattr(time, "time", lambda: submitted + tools_module.REPLAY_WINDOW_SECONDS + 1)
+    journal.unlink()
+    outcomes[:] = [_Answer(201, {"id": "pod-2"})]
+    assert tools.rent_pod("node-b", "job-2", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-2"
+
+
 def _windows_locking(monkeypatch):
     """Run the store as on Windows: no fcntl, msvcrt.locking instead (emulated here with an flock of the same
     non-blocking semantics, since CI runs on Linux)."""
