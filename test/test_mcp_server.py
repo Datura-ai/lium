@@ -854,7 +854,7 @@ def _windows_locking(monkeypatch):
 @pytest.mark.parametrize("backend", ["posix", "windows"])
 def test_a_running_server_never_adopts_another_running_servers_rental(monkeypatch, rental_state_dir, backend):
     """One `lium mcp` per Claude Code session, Desktop and Cursor share the journal directory: a second server
-    neither replays nor reports the first one's rental, nor refuses to rent because of it."""
+    neither replays nor adopts the first one's unanswered rental, but rents nothing beside it until it settles."""
     monkeypatch.setattr(sys.modules[__name__], "_SERVERS_STAY_LIVE", [True])
     if backend == "windows":
         _windows_locking(monkeypatch)
@@ -869,8 +869,15 @@ def test_a_running_server_never_adopts_another_running_servers_rental(monkeypatc
 
     assert second._unresolved == [] and "unresolved_rentals" not in listed and "recovered_rentals" not in listed
     assert other.posts == []
+    second.CLEANUP_WAIT_SECONDS = 0.05
+    refused = second.rent_pod("node-b", "other-job", template_id="tpl-1", timeout_seconds=0)
+    assert refused["error"]["code"] == "cleanup_pending" and "another running" in refused["unresolved"][0]["last_error"]
+    assert other.posts == []  # the first may still rent a pod: no second rent is sent
+    assert journal.exists() and first._unresolved and second._unresolved == []  # still the first server's to settle
+
+    # once the first server settles it (here: its journal goes), the second rents again
+    first._store.forget(first._unresolved[0])
     assert second.rent_pod("node-b", "other-job", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-2"
-    assert journal.exists() and first._unresolved  # still the first server's to settle
 
 
 def test_a_server_started_while_its_predecessor_finished_a_rent_adopts_the_journal_once_it_exits(
