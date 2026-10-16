@@ -160,6 +160,16 @@ def test_pack_refuses_more_than_max_bytes(tmp_path):
         build_context.pack(tmp_path, max_bytes=1024)
 
 
+def test_pack_refuses_a_sparse_file_whose_unpacked_size_is_past_max_bytes(tmp_path):
+    # Arrange: zeros compress to almost nothing, but the node would unpack all of them
+    with open(tmp_path / "zeros.bin", "wb") as f:
+        f.truncate(1024 * 1024 * 1024)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="larger than 10485760 bytes"):
+        build_context.pack(tmp_path, max_bytes=10 * 1024 * 1024)
+
+
 def test_upload_build_context_posts_the_archive_and_returns_its_sha256(monkeypatch):
     # Arrange
     client = Lium(Config(api_key="test"))

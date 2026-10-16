@@ -96,7 +96,8 @@ def pack(context_dir: Path, max_bytes: Optional[int] = None, dockerfile: Optiona
     """A gzipped tar of ``context_dir`` without what its ignore file leaves out (see :func:`read_dockerignore`).
 
     Raises ValueError for a symlink that points outside the context (the build could not
-    follow it either) or an archive past ``max_bytes``. Owners are dropped: the build
+    follow it either) or a context past ``max_bytes``, counted both as the files' unpacked size
+    (so a sparse or zero-filled file cannot unpack to gigabytes on the node) and as the archive. Owners are dropped: the build
     sees root-owned files, as with ``docker build``.
     """
     context_dir = Path(context_dir).resolve()
@@ -110,6 +111,10 @@ def pack(context_dir: Path, max_bytes: Optional[int] = None, dockerfile: Optiona
         info.mtime = 0  # same tree, same bytes and sha256, whatever the files' timestamps
         return info
 
+    too_large = ValueError(
+        f"the build context is larger than {max_bytes} bytes; list what the build does not need in .dockerignore"
+    )
+    unpacked = 0
     buffer = io.BytesIO()
     with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) as gz, tarfile.open(fileobj=gz, mode="w") as tar:
         for root, dirs, files in os.walk(context_dir):
@@ -138,17 +143,16 @@ def pack(context_dir: Path, max_bytes: Optional[int] = None, dockerfile: Optiona
                     _check_link(context_dir, root, name, rel)
                 elif not os.path.isfile(full):
                     continue  # sockets, fifos and devices are not build inputs
+                else:
+                    unpacked += os.stat(full).st_size  # before reading it: st_size is what the node unpacks
+                    if max_bytes is not None and unpacked > max_bytes:
+                        raise too_large
                 tar.add(full, arcname=rel, recursive=False, filter=_reset_owner)
                 if max_bytes is not None and buffer.tell() > max_bytes:
-                    raise ValueError(
-                        f"the build context is larger than {max_bytes} bytes; "
-                        "list what the build does not need in .dockerignore"
-                    )
+                    raise too_large
     data = buffer.getvalue()
     if max_bytes is not None and len(data) > max_bytes:
-        raise ValueError(
-            f"the build context is larger than {max_bytes} bytes; list what the build does not need in .dockerignore"
-        )
+        raise too_large
     return data
 
 
