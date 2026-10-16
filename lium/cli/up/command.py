@@ -559,6 +559,22 @@ def up_command(
             )
         rent_price = executor.price_per_gpu * rent_count if rent_count != executor.gpu_count else price_per_hour
 
+    # renters wrote "I didn't even know it was a spot" and "throttled to 410 W, not shown before rental":
+    # say both before renting, with or without --yes (on stderr, so --json stdout stays one document)
+    if getattr(executor, "tier", None) == "spot":
+        ui.notice_warning(f"{executor.huid} is a Spot node: the provider can reclaim it at any time, with no refund.")
+    if getattr(executor, "gpu_power_limited", None) and executor.gpu_power_limit_w:
+        ui.notice_warning(
+            f"{executor.huid} runs its GPUs at a reduced power limit "
+            f"({executor.gpu_power_limit_w} W of {executor.gpu_power_limit_default_w or '?'} W)."
+        )
+    if spec:
+        # a --gpu rental selects again at rent time, so the node checked above may not be the one rented
+        ui.notice_warning(
+            "Selection is repeated when renting. The rented node may be Spot, reclaimable at any time "
+            "with no refund, or run its GPUs at a reduced power limit."
+        )
+
     if not yes:
         confirm_msg = (
             f"Acquire pod on {executor.huid} "
@@ -659,7 +675,8 @@ def up_command(
         # generic rent_rejected, the hint replaces the default one, the id is printed under it.
         raise CliFailure(
             exc.code or "rent_rejected",
-            f"Node {executor.huid} could not be rented: {exc}. Run 'lium ps' to check whether a pod was created. "
+            f"Node {executor.huid} {'may or may not be rented' if exc.code == 'rent_outcome_unknown' else 'could not be rented'}: "
+            f"{exc}. Run 'lium ps' to check whether a pod was created. "
             f"Run 'lium ls --format json' for the nodes rentable now.{kept}",
             EXIT_API_ERROR,
             # the server's request_id (DAH-3057) next to the volume the rent leaves behind

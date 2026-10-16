@@ -10,13 +10,14 @@ Subcommands:
 - ``rm <id>``                 -- delete a node.
 - ``update-price <id>``       -- set price-per-GPU.
 - ``update-gpu <id>``         -- change GPU type/count.
+- ``address <id> <ip> <port>`` -- move a node to a new ip:port, keeping its id.
 - ``min-gpu set/unset <id>``  -- min GPU count for rental.
 - ``pods <id>``               -- rented pods on the node.
 - ``machine-requests <id>``   -- pending tenant requests on this node.
 - ``notice-period set/unset`` -- create/delete a notice period.
 - ``notify-added <id>``       -- post /machine-added for a request.
 
-Mutating commands (add/rm/update-*/min-gpu set-unset/notice-period
+Mutating commands (add/rm/update-*/address/min-gpu set-unset/notice-period
 set-unset/notify-added) call the persona gate. ``--yes`` and
 ``LIUM_PROVIDER_ACK=1`` short-circuit the prompt.
 
@@ -49,7 +50,12 @@ from lium.cli.provider._render import (
 )
 from lium.cli.provider._verification import render_text
 from lium.provider._shared_config import default_price_for_gpu, fetch_shared_config
-from lium.provider.errors import ARG_INVALID, INPUT_INTERRUPTED, ProviderError
+from lium.provider.errors import (
+    ARG_INVALID,
+    INPUT_INTERRUPTED,
+    PORTAL_NOT_FOUND,
+    ProviderError,
+)
 from lium.provider.models import NOTICE_PERIOD_MAX_MINUTES
 
 
@@ -418,6 +424,35 @@ def update_gpu(
         body,
         summary=f"gpu updated: {node_id} -> {gpu_count}x{gpu_type}",
     )
+
+
+@node_command.command("address", short_help="Change a node's IP and port.")
+@click.argument("node_id", required=True)
+@click.argument("ip_address", required=True)
+@click.argument("port", type=int, required=True)
+@with_provider_overrides
+@click.pass_context
+def update_address(ctx: click.Context, node_id: str, ip_address: str, port: int) -> None:
+    """Move a node to a new IP and port in place, keeping its id and history."""
+    require_hotkey(ctx, group="node")
+    require_persona_ack(ctx)
+    client = build_client(ctx)
+    try:
+        body = client.update_node_address(node_id, ip_address=ip_address, port=port)
+    except ProviderError as e:
+        status, err_body = e.context.get("status"), e.context.get("body")
+        detail = err_body.get("detail") if isinstance(err_body, dict) else None
+        # A route miss (405, or FastAPI's bare 404 "Not Found") means an older portal; a missing node 404s with its own detail.
+        if status == 405 or (status == 404 and detail == "Not Found"):
+            e = ProviderError(
+                "this portal does not support address edits yet",
+                code=PORTAL_NOT_FOUND,
+                hint="the portal answered with a missing route, so the node id was not checked; try again once the portal supports it",
+                context=e.context,
+            )
+        ctx.exit(handle_provider_error(ctx, e))
+        return
+    render(ctx, body, summary=f"address updated: {node_id} -> {ip_address}:{port}")
 
 
 @node_command.group("min-gpu")

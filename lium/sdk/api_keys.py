@@ -1,9 +1,8 @@
-"""API keys: scopes, budgets and pod visibility (budgets, the ``billing`` scope, pod visibility and the refusal
-ledger need a newer Lium server than lium.io runs on 21 Sep 2026 — server support pending).
+"""API keys: scopes, budgets, pod visibility and the refusal ledger.
 
-Every ``/keys`` route is session-only on the server (``utils/auth.py``: ``authenticate``, a browser JWT): a key
-cannot list, mint or reshape keys, so these calls need ``Lium.workspaces.login`` or LIUM_SESSION_TOKEN and raise
-:class:`LiumSessionError` without one. ``GET /keys/scopes`` is static text and needs no credential at all.
+Every ``/keys`` route but ``GET /keys/{id}/refusals`` is session-only on the server (``utils/auth.py``:
+``authenticate``, a browser JWT): a key cannot list, mint or reshape keys, so these calls need
+``Lium.workspaces.login`` or LIUM_SESSION_TOKEN and raise :class:`LiumSessionError` without one. ``GET /keys/scopes`` is static text and needs no credential at all.
 
 ``scopes()`` is the single source of the "what this key can do" words: the CLI prints the server's sentences
 and never its own copy.
@@ -28,7 +27,7 @@ DEFAULT_SCOPES = ("read", "rent", "manage")
 BILLING_SCOPE = "billing"
 # Ruling of 21 Sep 2026: `billing` is "and nothing else" — a key that moves money holds no other scope. Checked
 # here, before any request, so the refusal reads the same from the CLI and the SDK; a server that enforces the
-# rule answers 422 to the same body (server support pending — today's servers accept the mix).
+# rule answers 422 to the same body.
 BILLING_ALONE = (
     "The 'billing' scope stands alone: a key that moves money holds no other scope — make it a key of its own "
     "(billing with read, rent or manage is refused)"
@@ -133,7 +132,7 @@ def _scope(d: Dict[str, Any]) -> ApiKeyScope:
 
 def _refusal(d: Dict[str, Any]) -> ApiKeyRefusal:
     """A refusal row as the ledger names it (`api_key_budget_refused`: key id, window hit, amount asked, route) with
-    the timestamp under `created_at` / `at` / `refused_at` (server support pending; names read tolerantly)."""
+    the timestamp under `created_at` / `at` / `refused_at` (names read tolerantly)."""
     at = d.get("created_at") or d.get("at") or d.get("refused_at")
     window = d.get("window")
     route = d.get("route")
@@ -244,10 +243,14 @@ class ApiKeysClient:
 
     def refusals(self, key_id: str, workspace_id: Optional[str] = None) -> List[ApiKeyRefusal]:
         """The requests this key's budget refused, newest first (``GET /keys/{id}/refusals`` — the ledger's
-        ``api_key_budget_refused`` rows; server support pending). A server without the route answers 404
-        (:class:`LiumNotFoundError`); a body of ``{"refusals": [...]}`` or a bare list is read alike. Rows are
+        ``api_key_budget_refused`` rows). Without a browser session the API key asks about itself. A server
+        without the route answers 404 (:class:`LiumNotFoundError`); a body of ``{"refusals": [...]}`` or a bare list is read alike. Rows are
         ordered on the parsed stamp, so ``Z``, offset and naive stamps sort together; unreadable ones go last."""
-        data = self._lium.workspaces._session_request("GET", REFUSALS_ROUTE.format(id=key_id), workspace_id).json()
+        route = REFUSALS_ROUTE.format(id=key_id)
+        if self._lium.workspaces.session_token:
+            data = self._lium.workspaces._session_request("GET", route, workspace_id).json()
+        else:  # the route also answers an API key asking about itself
+            data = self._lium._request("GET", route).json()
         rows = data.get("refusals") if isinstance(data, dict) else data
         refusals = [_refusal(row) for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
         floor = datetime.min.replace(tzinfo=timezone.utc)
@@ -339,7 +342,7 @@ class ApiKeysClient:
         max_budget_usd: Optional[float] = UNSET,
         workspace_id: Optional[str] = None,
     ) -> ApiKeyInfo:
-        """Set or clear a key's budgets (``PATCH /keys/{id}``; server support pending).
+        """Set or clear a key's budgets (``PATCH /keys/{id}``).
 
         A budget given as a number is set, as ``None`` is cleared, left out (:data:`UNSET`) is kept as it is;
         naming none is a ``ValueError`` here (the server would answer 400). The budgets named here must keep
