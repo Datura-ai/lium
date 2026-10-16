@@ -14,7 +14,7 @@ from click.testing import CliRunner
 from lium.cli.commands import exec as exec_module
 from lium.cli.commands.exec import exec_command, pods_with_live_masters
 from lium.cli.utils import POD_CACHE_TTL_SECONDS, remember_pods, remembered_pods
-from lium.sdk import Config, Lium, LiumError, LiumHostKeyError, PodInfo, ssh_mux
+from lium.sdk import Config, Lium, LiumError, LiumHostKeyError, OutputLimitExceeded, PodInfo, ssh_mux
 
 
 def _pod(pod_id="pod-1", name="warm-pod", huid="eager-wolf-aa", ssh_cmd="ssh root@203.0.113.10 -p 20299"):
@@ -32,8 +32,15 @@ def home(monkeypatch):
     monkeypatch.setenv(ssh_mux.PERSIST_ENV, "")
     monkeypatch.delenv("LIUM_SSH_INSECURE", raising=False)
     monkeypatch.setattr(ssh_mux.shutil, "which", lambda name: "/usr/bin/ssh")
+    # commands go through the (faked) subprocess.run, so the fakes below see argv and input; _capture has its own tests
+    monkeypatch.setattr(ssh_mux, "_capture", _capture_via_run)
     yield short
     shutil.rmtree(short, ignore_errors=True)
+
+
+def _capture_via_run(argv, stdin, max_output_bytes):
+    done = ssh_mux.subprocess.run(argv, input=stdin, capture_output=True)
+    return done.returncode, done.stdout, done.stderr, len(done.stdout) + len(done.stderr) > max_output_bytes
 
 
 def _lium(tmp_path):
@@ -232,7 +239,7 @@ def test_an_unreachable_pod_names_sshs_reason(home, monkeypatch):
 def test_exec_all_over_masters_reports_one_unreachable_pod_as_one_failed_entry(home, monkeypatch):
     good, bad = _pod(), _pod(pod_id="pod-2", name="gone", ssh_cmd="ssh root@203.0.113.99 -p 22")
 
-    def one(lium, pod, *, command, env=None):
+    def one(lium, pod, *, command, env=None, max_output_bytes=None):
         if pod is bad:
             raise LiumError("SSH to pod gone failed")
         return {"stdout": "", "stderr": "", "exit_code": 0, "success": True}
@@ -365,7 +372,7 @@ class _CliLium:
 def _run_cli(monkeypatch, *args):
     sent = []
 
-    def over_master(lium, pod, *, command, env=None):
+    def over_master(lium, pod, *, command, env=None, max_output_bytes=None):
         sent.append((pod.id, command, env))
         return {"stdout": "hi\n", "stderr": "", "exit_code": 0, "success": True}
 
@@ -482,3 +489,50 @@ def test_a_symlinked_socket_dir_is_refused_and_its_target_left_alone(tmp_path):
         ssh_mux.ensure_socket_dir(link)
 
     assert (victim.stat().st_mode & 0o777) == 0o755
+
+
+_OUTPUT_600_OUT_401_ERR = [sys.executable, "-c", "import os; os.write(1, b'o' * 600); os.write(2, b'e' * 401)"]
+
+
+def test_capture_stops_a_command_whose_stdout_and_stderr_together_pass_the_limit():
+    code, out, err, over = ssh_mux._capture(_OUTPUT_600_OUT_401_ERR, b"", 1000)
+
+    assert over and len(out) + len(err) <= 1000
+
+
+def test_capture_returns_everything_under_the_limit():
+    code, out, err, over = ssh_mux._capture(_OUTPUT_600_OUT_401_ERR, b"", 1001)
+
+    assert (code, out, err, over) == (0, b"o" * 600, b"e" * 401, False)
+
+
+def test_capture_kills_a_command_that_never_stops_printing():
+    endless = [sys.executable, "-c", "import os\nwhile True: os.write(1, b'x' * 4096)"]
+
+    code, out, err, over = ssh_mux._capture(endless, b"", 100_000)
+
+    assert over and code != 0 and len(out) <= 100_000
+
+
+def test_output_past_the_limit_over_the_master_raises_output_limit_exceeded(home, monkeypatch):
+    ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
+    ssh_mux.control_path(_pod()).touch()
+    monkeypatch.setattr(ssh_mux.subprocess, "run", _Ssh())   # its command answers b"out\n", 4 bytes
+
+    with pytest.raises(OutputLimitExceeded, match="more than 3 bytes"):
+        ssh_mux.exec_over_master(_lium(home), _pod(), command="cat log", max_output_bytes=3)
+
+
+def test_lium_exec_max_output_bytes_reaches_the_control_master_path(home, monkeypatch):
+    _CliLium.pods = [_pod(), _pod(pod_id="pod-2", name="warm-pod-2", huid="eager-wolf-bb")]
+    monkeypatch.setattr(ssh_mux, "has_live_master", lambda lium, pod: True)
+    limits = []
+    monkeypatch.setattr(ssh_mux, "exec_over_master", lambda lium, pod, **kw: limits.append(kw["max_output_bytes"]) or
+                        {"stdout": "", "stderr": "", "exit_code": 0, "success": True})
+    monkeypatch.setattr(exec_module, "Lium", _CliLium)
+
+    one = CliRunner().invoke(exec_command, ["warm-pod", "echo hi", "--max-output-bytes", "1000"])
+    both = CliRunner().invoke(exec_command, ["warm-pod,warm-pod-2", "echo hi", "--max-output-bytes", "1000"])
+
+    assert one.exit_code == 0 and both.exit_code == 0, one.output + both.output
+    assert limits == [1000, 1000, 1000]

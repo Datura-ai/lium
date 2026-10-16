@@ -410,9 +410,11 @@ def exec_command(
 
     if use_master:
         if len(selected_pods) == 1:
-            results = [ssh_mux.exec_over_master(lium, selected_pods[0], command=command_to_run, env=env_dict)]
+            results = [ssh_mux.exec_over_master(lium, selected_pods[0], command=command_to_run, env=env_dict,
+                                                max_output_bytes=max_output_bytes)]
         else:
-            results = ssh_mux.exec_all_over_masters(lium, selected_pods, command=command_to_run, env=env_dict)
+            results = ssh_mux.exec_all_over_masters(lium, selected_pods, command=command_to_run, env=env_dict,
+                                                    max_output_bytes=max_output_bytes)
     elif len(selected_pods) == 1:
         results = [lium.exec(selected_pods[0], command=command_to_run, env=env_dict, max_output_bytes=max_output_bytes)]
     else:

@@ -21,12 +21,14 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from .exceptions import LiumError, LiumHostKeyError, LiumSSHError
+from .client import DEFAULT_MAX_OUTPUT_BYTES
+from .exceptions import LiumError, LiumHostKeyError, LiumSSHError, OutputLimitExceeded
 from .models import PodInfo
 
 PERSIST_ENV = "LIUM_SSH_PERSIST"
@@ -187,21 +189,57 @@ class ControlMaster:
         if not self.alive():
             self.start()
 
-    def run(self, command: str, stdin: bytes = b"") -> Dict[str, Any]:
-        """Run ``command`` on the pod over the master; the same dict as :meth:`Lium.exec`."""
-        done = subprocess.run(self._argv("-o", "ControlMaster=no", "-o", "LogLevel=ERROR", "-T", command=command),
-                              input=stdin, capture_output=True)
+    def run(self, command: str, stdin: bytes = b"", max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES) -> Dict[str, Any]:
+        """Run ``command`` on the pod over the master; the same dict and output limit as :meth:`Lium.exec`."""
+        argv = self._argv("-o", "ControlMaster=no", "-o", "LogLevel=ERROR", "-T", command=command)
+        code, out, err, over = _capture(argv, stdin, max_output_bytes)
+        if over:
+            raise OutputLimitExceeded(
+                f"Output of the command on pod {self.pod.name or self.pod.huid} is more than {max_output_bytes} bytes"
+            )
         return {
-            "stdout": done.stdout.decode("utf-8", errors="replace"),
-            "stderr": done.stderr.decode("utf-8", errors="replace"),
-            "exit_code": done.returncode,
-            "success": done.returncode == 0,
+            "stdout": out.decode("utf-8", errors="replace"),
+            "stderr": err.decode("utf-8", errors="replace"),
+            "exit_code": code,
+            "success": code == 0,
         }
 
     def stop(self) -> None:
         if socket_is_ours(self.path):
             subprocess.run(self._argv("-O", "exit"), stdin=subprocess.DEVNULL,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+
+
+def _capture(argv: List[str], stdin: bytes, max_output_bytes: int) -> Tuple[int, bytes, bytes, bool]:
+    """Run ``argv`` and read stdout and stderr as they arrive; once both together pass ``max_output_bytes`` the
+    ssh client is killed (closing the command's channel; the master stays up) and ``over`` is True."""
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    total, over, lock = [0], threading.Event(), threading.Lock()
+
+    def drain(pipe) -> bytearray:
+        buf = bytearray()
+        while chunk := pipe.read1(65536):  # read1 returns what has arrived, so a slow trickle is counted too
+            with lock:
+                total[0] += len(chunk)
+                if total[0] > max_output_bytes:
+                    over.set()
+                    proc.kill()
+                    return buf
+            buf += chunk
+        return buf
+
+    with ThreadPoolExecutor(max_workers=2) as readers:
+        out, err = readers.submit(drain, proc.stdout), readers.submit(drain, proc.stderr)
+        try:
+            proc.stdin.write(stdin)
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass  # the command exited, or was killed at the limit, before reading its stdin
+        out_bytes, err_bytes = bytes(out.result()), bytes(err.result())
+    code = proc.wait()
+    proc.stdout.close()
+    proc.stderr.close()
+    return code, out_bytes, err_bytes, over.is_set()
 
 
 def has_live_master(lium: Any, pod: PodInfo) -> bool:
@@ -212,19 +250,20 @@ def has_live_master(lium: Any, pod: PodInfo) -> bool:
         return False
 
 
-def exec_over_master(lium: Any, pod: PodInfo, *, command: str, env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+def exec_over_master(lium: Any, pod: PodInfo, *, command: str, env: Optional[Dict[str, str]] = None,
+                     max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES) -> Dict[str, Any]:
     """:meth:`Lium.exec` over the pod's control master (started when there is none).
 
     ``env`` travels over stdin exactly as :meth:`Lium.exec` sends it, so no value reaches
     the pod's argv. Raises ``ValueError`` for a bad ``env`` name before anything is sent,
-    ``LiumHostKeyError``/``LiumError`` when ssh cannot connect.
+    ``LiumHostKeyError``/``LiumError`` when ssh cannot connect, ``OutputLimitExceeded`` past ``max_output_bytes``.
     """
     exports = lium._env_exports(env) if env else ""
     if exports:
         command = f"{lium._ENV_FROM_STDIN} && {command}"
     master = ControlMaster(lium, pod)
     master.ensure()
-    result = master.run(command, stdin=exports.encode("utf-8"))
+    result = master.run(command, stdin=exports.encode("utf-8"), max_output_bytes=max_output_bytes)
     if result["exit_code"] == 255 and not master.alive():
         # 255 is also a command's own status; with the master gone it is ssh's: the connection dropped
         lines = result["stderr"].strip().splitlines()
@@ -234,14 +273,14 @@ def exec_over_master(lium: Any, pod: PodInfo, *, command: str, env: Optional[Dic
 
 
 def exec_all_over_masters(lium: Any, pods: List[PodInfo], *, command: str, env: Optional[Dict[str, str]] = None,
-                          max_workers: int = 10) -> List[Dict[str, Any]]:
+                          max_workers: int = 10, max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES) -> List[Dict[str, Any]]:
     """:meth:`Lium.exec_all` over control masters: one result per pod, ``{"pod", "error", "success": False}`` on failure."""
     if env:
         lium._env_exports(env)
 
     def one(pod: PodInfo) -> Dict[str, Any]:
         try:
-            result = exec_over_master(lium, pod, command=command, env=env)
+            result = exec_over_master(lium, pod, command=command, env=env, max_output_bytes=max_output_bytes)
             result["pod"] = pod.id
             return result
         except Exception as e:  # noqa: BLE001 — one unreachable pod is one failed entry, as in Lium.exec_all
