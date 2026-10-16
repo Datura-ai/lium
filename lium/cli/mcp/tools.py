@@ -331,6 +331,9 @@ class LiumTools:
         self._unresolved: List[_Rental] = []
         self._adopting = threading.Lock()
         self._recovered: List[_Rental] = []  # known pods the host has not been told of
+        # rentals the user settled by hand (deleted the journal): a rent the API never answered can still land
+        # later, so list_pods keeps reporting a new pod of the same name for as long as this server runs
+        self._settled_by_hand: List[_Rental] = []
         # pods a result named that the host has not yet shown it knows (it names the pod in a call, or the pod is
         # gone): a returned callback is not a written response, so their journals stay until then
         self._delivered: List[_Rental] = []
@@ -721,6 +724,8 @@ class LiumTools:
                     if disposition == "keep":
                         self._recovered.append(rental)
                     else:
+                        if disposition == "by_hand":
+                            self._settled_by_hand.append(rental)
                         self._store.forget(rental)
                 self._cleanup.notify_all()
                 return list(self._unresolved)
@@ -757,7 +762,7 @@ class LiumTools:
         if self._store.journaled(rental) and not self._store.path(rental).exists():
             if time.time() >= _settle_by_hand_from(rental):
                 # the user deleted its journal, as last_error says, once they had checked its pods by hand
-                return "done"
+                return "by_hand"
             # deleted while the first request may still create a pod: keep blocking, and on disk for a restart
             try:
                 self._store.save(rental)
@@ -829,8 +834,11 @@ class LiumTools:
         wait_until = _settle_by_hand_from(rental)
         if time.time() < wait_until:
             # until then the first request may still create a pod that no listing shows yet
-            manual = (f"; the first request may still create a pod until "
-                      f"{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(wait_until))}: wait until then{manual}")
+            manual = (f"; the API holds an unanswered rent for up to 300 s, so wait until "
+                      f"{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(wait_until))}{manual}")
+        # no deadline is a guarantee for a request the API never answered: a pod it creates later is still reported
+        manual += ("; a rent that never got an answer can rarely create its pod even later: list_pods then reports "
+                   "it under pods_from_settled_rentals")
         if error is None or not error.endpoint:
             return unresolved("the rent call's request was not kept, so it cannot be replayed" + manual)
         if scope != self._scope():
@@ -936,6 +944,9 @@ class LiumTools:
             unresolved = self._reconcile(reports=True)
             if unresolved:
                 result["unresolved_rentals"] = [rental.report() for rental in unresolved]
+            late = self._late_pods(pods)
+            if late:
+                result["pods_from_settled_rentals"] = late
             recovered = self._hand_off_recovered(receiver)
             if recovered:
                 result["recovered_rentals"] = recovered
@@ -945,6 +956,22 @@ class LiumTools:
         if direct:
             self.deliver(receiver)
         return result
+
+    def _late_pods(self, pods: List[PodInfo]) -> List[Dict[str, Any]]:
+        """Pods named like a rental the user settled by hand that were not there before that rental was sent."""
+        with self._cleanup:
+            settled = list(self._settled_by_hand)
+        late = []
+        for rental in settled:
+            with rental.lock:
+                name, before = rental.name, set(rental.before)
+            ids = [p.id for p in pods if p.name == name and p.id not in before]
+            if ids:
+                late.append({
+                    "name": name, "pod_ids": ids,
+                    "hint": "A rent you settled by hand may have created this pod late; it bills until remove_pod.",
+                })
+        return late
 
     def run_command(self, pod: str, command: str, timeout_seconds: int = 300) -> Dict[str, Any]:
         def call():

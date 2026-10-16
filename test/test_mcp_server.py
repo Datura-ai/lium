@@ -852,6 +852,11 @@ def test_a_journal_deleted_while_the_first_request_may_still_rent_keeps_blocking
 
     assert tools.rent_pod("node-b", "job-2", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-2"
 
+    # the first rent lands even later after all: its pod is still reported, never silently billing
+    monkeypatch.setattr(sdk, "ps", lambda: [_pod("pod-late", "job"), _pod("pod-2", "job-2")])
+    (late,) = tools.list_pods()["pods_from_settled_rentals"]
+    assert late["name"] == "job" and late["pod_ids"] == ["pod-late"]
+
 
 def _windows_locking(monkeypatch):
     """Run the store as on Windows: no fcntl, msvcrt.locking instead (emulated here with an flock of the same
