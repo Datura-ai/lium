@@ -82,7 +82,7 @@ def billing_command():
 @click.option(
     "--key", "api_key", metavar="NAME|ID",
     help="Only the pods rented through this API key (GET /billing/statement?api_key_id=…; needs a server that stamps "
-         "charges with their key — not on lium.io yet; an older server answers for every pod and the CLI says so). "
+         "charges with their key; an older server answers for every pod and the CLI says so). "
          "A name needs `lium workspaces login`; an id does not",
 )
 @click.option(

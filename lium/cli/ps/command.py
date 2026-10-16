@@ -142,7 +142,7 @@ def _render(
 @click.option(
     "--key", "api_key", metavar="NAME|ID",
     help="Only the pods rented through this API key (GET /pods?api_key_id=…; needs a server that stamps pods with "
-         "their key — not on lium.io yet; an older server cannot filter and the CLI says so). A name needs "
+         "their key; an older server cannot filter and the CLI says so). A name needs "
          "`lium workspaces login`; an id does not",
 )
 @handle_errors

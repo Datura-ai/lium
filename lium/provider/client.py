@@ -47,6 +47,7 @@ from lium.provider._routes import (
     SET_PASSWORD,
     SYNC_EXECUTOR_CENTRAL_MINER,
     SYNC_EXECUTOR_MINER_PORTAL,
+    UPDATE_ADDRESS,
     UPDATE_GPU,
     UPDATE_PRICE,
 )
@@ -73,6 +74,7 @@ from lium.provider.models import (
     SetMinGpuCountForRentalPayload,
     SetOptInRequest,
     SetPasswordPayload,
+    UpdateAddressPayload,
     UpdateGpuPayload,
     UpdatePricePayload,
     ValidatorWeight,
@@ -560,6 +562,16 @@ class ProviderClient:
         )
         return self._http.post(
             UPDATE_GPU.format(id=_safe_id(node_id, label="node_id")),
+            json_body=payload,
+        )
+
+    def update_node_address(
+        self, node_id: str, *, ip_address: str, port: int
+    ) -> dict[str, Any]:
+        """``POST /executors/{id}/update-address`` -- move a node to a new ip:port, keeping its id."""
+        payload = _build_payload(UpdateAddressPayload, ip_address=ip_address, port=port)
+        return self._http.post(
+            UPDATE_ADDRESS.format(id=_safe_id(node_id, label="node_id")),
             json_body=payload,
         )
 
