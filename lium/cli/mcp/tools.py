@@ -17,11 +17,19 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from lium.sdk import Lium
-from lium.sdk.exceptions import LiumError, LiumNotFoundError, LiumRentOutcomeUnknownError, PodStartError
+from lium.sdk.exceptions import (
+    LiumError,
+    LiumNotFoundError,
+    LiumRentOutcomeUnknownError,
+    OutputLimitExceeded,
+    PodStartError,
+)
 from lium.sdk.models import ExecutorInfo, PodInfo
 
 # exec output is cut to its tail: a training log of megabytes would fill the model's context
 OUTPUT_TAIL_CHARS = 20_000
+# a command that floods output (yes, a runaway print) fails at this many bytes instead of filling the server's memory
+MAX_OUTPUT_BYTES = 1024 * 1024
 
 
 def _error(code: str, message: str, hint: Optional[str] = None) -> Dict[str, Any]:
@@ -909,13 +917,21 @@ class LiumTools:
         def call():
             target = self._find_pod(pod)
             try:
-                result = self.client.exec(target, command=command, timeout=timeout_seconds)
+                result = self.client.exec(
+                    target, command=command, timeout=timeout_seconds, max_output_bytes=MAX_OUTPUT_BYTES
+                )
             except TimeoutError:
                 # the SDK's message repeats the command, which may hold a secret: say it without the command
                 return _error(
                     "command_timeout",
                     f"The command did not finish within {timeout_seconds}s on pod {target.id}.",
                     "Raise timeout_seconds, or start long jobs in the background (nohup ... > log 2>&1 &) and read the log.",
+                )
+            except OutputLimitExceeded:
+                return _error(
+                    "output_too_large",
+                    f"The command printed more than {MAX_OUTPUT_BYTES} bytes on pod {target.id}; it was stopped.",
+                    "Redirect the output to a file on the pod (cmd > out.log 2>&1) and read part of it, e.g. tail -n 200 out.log.",
                 )
             except LiumError as e:
                 return _error(e.code or type(e).__name__, _redact(str(e), command), _redact(e.hint, command))

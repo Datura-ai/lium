@@ -14,7 +14,7 @@ from click.testing import CliRunner
 from lium.cli.cli import cli
 from lium.cli.mcp import tools as tools_module
 from lium.cli.mcp.tools import OUTPUT_TAIL_CHARS, LiumTools
-from lium.sdk import ExecutorInfo, PodInfo
+from lium.sdk import ExecutorInfo, Lium, PodInfo
 from lium.sdk.exceptions import (
     LiumError,
     LiumInsufficientBalanceError,
@@ -77,8 +77,9 @@ class FakeLium:
 
     exec_error = None
 
-    def exec(self, pod, command, timeout):
+    def exec(self, pod, command, timeout, max_output_bytes):
         self.exec_calls.append((pod.id, command, timeout))
+        self.max_output_bytes = max_output_bytes
         if self.exec_error:
             raise self.exec_error
         return {"exit_code": 0, "stdout": "x" * (OUTPUT_TAIL_CHARS + 10), "stderr": ""}
@@ -169,9 +170,39 @@ def test_run_command_finds_the_pod_by_name_and_keeps_only_the_output_tail(tools,
     result = tools.run_command("job", "nvidia-smi")
 
     assert fake.exec_calls == [("p1", "nvidia-smi", 300)]
+    assert fake.max_output_bytes == tools_module.MAX_OUTPUT_BYTES
     assert result["exit_code"] == 0
     assert result["stdout"].startswith("…[cut to the last")
     assert len(result["stdout"]) < OUTPUT_TAIL_CHARS + 100
+
+
+def test_a_command_that_floods_output_stops_at_the_limit_instead_of_buffering_it(tools, fake):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    read = [0]
+
+    def recv(size):  # `yes`: output never ends
+        read[0] += size
+        return b"y\n" * (size // 2)
+
+    channel = SimpleNamespace(
+        recv=recv, recv_stderr=lambda size: b"", recv_ready=lambda: True, recv_stderr_ready=lambda: False,
+        exit_status_ready=lambda: False, close=lambda: None, recv_exit_status=lambda: 0,
+    )
+    ssh = SimpleNamespace(
+        exec_command=lambda command: (SimpleNamespace(close=lambda: None), SimpleNamespace(channel=channel), None),
+    )
+    client = SimpleNamespace(ssh_connection=lambda pod: nullcontext(ssh))
+    fake.exec = lambda pod, command, timeout, max_output_bytes: Lium.exec(
+        client, pod, command=command, timeout=timeout, max_output_bytes=max_output_bytes
+    )
+
+    result = tools.run_command("job", "yes")
+
+    assert result["ok"] is False and result["error"]["code"] == "output_too_large"
+    assert "out.log" in result["error"]["hint"]
+    assert read[0] < tools_module.MAX_OUTPUT_BYTES + 1024 * 1024  # stopped near the limit, not after gigabytes
 
 
 def test_a_command_timeout_does_not_echo_the_command(tools, fake):
@@ -517,7 +548,7 @@ def _host_uses_the_pod(tools, sdk, monkeypatch, rental_state_dir, pod_id):
     """A returned result is not proof the host read it: the journal stays until the host names the pod."""
     assert list(rental_state_dir.glob("*.json"))
     monkeypatch.setattr(sdk, "ps", lambda: [_pod(pod_id, "job")])
-    monkeypatch.setattr(sdk, "exec", lambda pod, command, timeout: {"exit_code": 0, "stdout": "", "stderr": ""})
+    monkeypatch.setattr(sdk, "exec", lambda pod, command, timeout, max_output_bytes: {"exit_code": 0, "stdout": "", "stderr": ""})
     assert tools.run_command(pod_id, "nvidia-smi")["ok"] is True
     assert list(rental_state_dir.glob("*.json")) == []
 
