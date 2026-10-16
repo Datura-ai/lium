@@ -121,7 +121,11 @@ def _probe(wire_bytes, tail, limit):
         exec_command=lambda command: (SimpleNamespace(close=lambda: None), SimpleNamespace(channel=channel), None),
         close=lambda: closed.append("connection"),
     )
-    client = SimpleNamespace(ssh_connection=lambda pod: nullcontext(ssh))  # a held session: exec must not close it
+    # a held session: exec must not close it
+    client = SimpleNamespace(
+        ssh_connection=lambda pod: nullcontext(ssh),
+        _remote_command=lambda pod, command, **kwargs: nullcontext(ssh.exec_command(command)),
+    )
     run = lambda: Lium.exec(client, SimpleNamespace(name="p", huid="p"), command="probe", max_output_bytes=limit)
     return run, closed
 

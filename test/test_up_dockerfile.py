@@ -521,6 +521,99 @@ def test_up_command_reports_non_utf8_dockerfile(monkeypatch, tmp_path):
     assert "Could not read Dockerfile" in result.output
 
 
+def test_up_command_refuses_copy_of_local_files_before_renting(monkeypatch, tmp_path):
+    # Arrange: a backend without build-context uploads builds with the Dockerfile as the
+    # only file, so COPY of a file next to it would fail there after the rent.
+    (tmp_path / "app.py").write_text("print('hi')\n")
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM python:3.12-slim\nCOPY app.py /app/app.py\nCMD [\"python\", \"/app/app.py\"]\n")
+    monkeypatch.setattr(up_command, "ensure_config", lambda: None)
+    lium = SimpleNamespace(
+        supports=lambda feature: False,
+        upload_build_context=lambda archive, timeout: pytest.fail("uploaded"),
+    )
+    monkeypatch.setattr(up_command, "Lium", lambda **kwargs: lium)
+    monkeypatch.setattr(up_command, "ResolveExecutorAction", lambda: pytest.fail("rent path reached"))
+
+    # Act
+    result = CliRunner().invoke(up_command.up_command, ["brave-fox-3a", "--dockerfile", str(dockerfile)])
+
+    # Assert
+    assert result.exit_code == 2
+    assert "COPY app.py /app/app.py" in result.output
+    assert "--image" in result.output
+
+
+def test_build_context_lines_lists_local_copy_and_add():
+    # Arrange
+    content = (
+        "FROM alpine\n"
+        "COPY --chown=1000:1000 src/ /src/\n"
+        "ADD [\"data.tar.gz\", \"/data/\"]\n"
+        "copy \\\n  requirements.txt /r.txt\n"
+    )
+
+    # Act
+    lines = up_validation.build_context_lines(content)
+
+    # Assert
+    assert lines == [
+        "COPY --chown=1000:1000 src/ /src/",
+        'ADD ["data.tar.gz", "/data/"]',
+        "copy    requirements.txt /r.txt",
+    ]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "# escape=\\\nFROM alpine\nCOPY \\\n  app /app\n",
+        "# escape=`\nFROM alpine\nCOPY `\n  app /app\n",
+        "FROM alpine\nCOPY \\\n# a comment inside the continuation\n\n  app /app\n",
+    ],
+    ids=["escape-backslash", "escape-backtick", "comment-in-continuation"],
+)
+def test_build_context_lines_follows_the_escape_directive(content):
+    # Act
+    lines = up_validation.build_context_lines(content)
+
+    # Assert
+    assert [line.split() for line in lines] == [["COPY", "app", "/app"]]
+
+
+def test_build_context_lines_backtick_escape_leaves_a_trailing_backslash_alone():
+    # Arrange: with `# escape=``, a trailing backslash is not a continuation (Windows paths)
+    content = "# escape=`\nFROM alpine\nRUN echo C:\\\nCOPY app /app\n"
+
+    # Act
+    lines = up_validation.build_context_lines(content)
+
+    # Assert
+    assert lines == ["COPY app /app"]
+
+
+def test_build_context_lines_ignores_lines_that_need_no_local_files():
+    # Arrange
+    content = (
+        "FROM golang:1.22 AS build\n"
+        "RUN go build -o /out/app ./...\n"
+        "FROM alpine\n"
+        "# COPY app.py /app.py\n"
+        "COPY --from=build /out/app /usr/local/bin/app\n"
+        "COPY <<EOF /etc/motd\n"
+        "COPY not-a-real-line /x\n"
+        "EOF\n"
+        "ADD https://example.com/x.tar.gz /x/\n"
+        "ADD ssh://git@github.com/moby/buildkit.git#v0.14.1:docs /buildkit-docs\n"
+    )
+
+    # Act
+    lines = up_validation.build_context_lines(content)
+
+    # Assert
+    assert lines == []
+
+
 # --------------------------------------------------------------------------- #
 # SDK: Lium.up(image=...) — docker image only, defaults for the rest (DAH-2103)
 # --------------------------------------------------------------------------- #
