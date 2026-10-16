@@ -679,6 +679,7 @@ class _Channel:
 def _exec_over(monkeypatch, lium, channel):
     stdout = Mock(channel=channel)
     client = Mock(exec_command=lambda command: (Mock(), stdout, Mock()))
+    monkeypatch.setenv("LIUM_SSH_REUSE", "0")  # the stand-in is a per-call connection, not a kept one
     _ssh_with(monkeypatch, lium, Mock(wraps=client, exec_command=client.exec_command, close=lambda: None))
 
 
