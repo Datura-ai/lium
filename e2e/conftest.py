@@ -65,7 +65,7 @@ ARTIFACTS = Path(os.environ.get("E2E_ARTIFACTS", Path(__file__).parent / "artifa
 
 MAX_UP_TRIES = 3   # `up` calls per journey, each on a different executor, before the rent step fails
 OUTPUT_HEAD_CHARS = 1500   # of a command's stdout/stderr kept in commands.json and in a Result's repr (the failure line)
-EXIT_API_ERROR = 3   # lium/cli/utils.py: "the API refused or failed the call"
+EXIT_API_ERROR = 3   # lium/cli/utils.py: "the API refused or failed the call" (test_e2e_rentable.py pins the value)
 REFUSED_TEXT = "could not be rented"   # lium/cli/up/command.py's rent_rejected message: the API answered the rent and said no
 
 FAILED_STEPS: list[str] = []   # node ids of the steps that failed so far in this process (setup, call or teardown)
