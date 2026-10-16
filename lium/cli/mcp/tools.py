@@ -264,6 +264,12 @@ class _RentalStore:
                 Path(tmp).unlink(missing_ok=True)
                 raise
 
+    def journaled(self, rental: _Rental) -> bool:
+        """Whether ``rental`` has a journal on disk at all (save() writes none for a request it cannot replay)."""
+        with rental.lock:
+            replay = rental.replay
+        return self.path(rental) is not None and replay is not None and bool(replay.endpoint)
+
     def forget(self, rental: _Rental) -> None:
         path = self.path(rental)
         if path is not None:
@@ -738,6 +744,9 @@ class LiumTools:
             if outcome == "rejected":
                 return "done"
             scope = rental.scope
+        if self._store.journaled(rental) and not self._store.path(rental).exists():
+            # the user deleted its journal, as last_error says, once they had checked its pods by hand
+            return "done"
         if scope is not None and scope != self._scope():
             # restored from another API or account: neither replayed, removed nor handed over here
             with rental.lock:
@@ -798,8 +807,9 @@ class LiumTools:
                 rental.last_error = reason
             return False
 
-        manual = (f"; check list_pods and same_name_pods_to_check, remove_pod what you do not want, then delete "
-                  f"{self._store.path(rental)} to lift the rent block")
+        lift = (f"delete {self._store.path(rental)} to lift the rent block" if self._store.journaled(rental) else
+                "restart the Lium MCP server to lift the rent block (nothing of this rental is kept on disk)")
+        manual = f"; check list_pods and same_name_pods_to_check, remove_pod what you do not want, then {lift}"
         if error is None or not error.endpoint:
             return unresolved("the rent call's request was not kept, so it cannot be replayed" + manual)
         if scope != self._scope():

@@ -810,6 +810,25 @@ def test_a_rental_is_not_replayed_where_its_key_would_be_a_new_rent(monkeypatch,
     assert list(rental_state_dir.glob("*.json"))
 
 
+def test_deleting_the_journal_as_last_error_says_lifts_the_rent_block_on_a_running_server(monkeypatch, rental_state_dir):
+    sdk = _real_sdk(monkeypatch, [_no_answer(), _no_answer()])
+    submitted = time.time()
+    _real_tools(sdk).rent_pod("node-a", "job", template_id="tpl-1")
+    other = _real_sdk(monkeypatch, [_Answer(201, {"id": "pod-2"})])
+    monkeypatch.setattr(time, "time", lambda: submitted + 86_401)  # too old to replay: the user settles it by hand
+    tools = _real_tools(other)
+
+    blocked = tools.rent_pod("node-b", "job-2", template_id="tpl-1")
+    (unresolved,) = tools.list_pods()["unresolved_rentals"]
+    (journal,) = rental_state_dir.glob("*.json")
+    assert blocked["ok"] is False and str(journal) in unresolved["last_error"]
+
+    journal.unlink()  # what last_error tells the agent to do once it has checked the pods
+
+    assert tools.rent_pod("node-b", "job-2", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-2"
+    assert tools._unresolved == [] and other.posts  # no restart needed
+
+
 def _windows_locking(monkeypatch):
     """Run the store as on Windows: no fcntl, msvcrt.locking instead (emulated here with an flock of the same
     non-blocking semantics, since CI runs on Linux)."""
