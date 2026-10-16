@@ -93,6 +93,9 @@ from .workspaces import WorkspacesClient
 
 # The backend feature `Lium.rent` looks for on GET /version before using POST /executors/rent-by-spec.
 RENT_BY_SPEC = "rent_by_spec"
+# Advertised by a backend whose rent, rent-by-spec and cluster rent honour Idempotency-Key, so a rent
+# whose response was lost can be resent with the same key without renting twice.
+RENT_IDEMPOTENCY = "rent_idempotency"
 # Node specs report RAM and disk in KiB and GPU memory in MiB.
 _KIB_PER_GB = 1024 * 1024
 _MIB_PER_GB = 1024
@@ -1567,10 +1570,18 @@ class Lium:
                 satisfies it; the best on offer is 48``.
             LiumError: ``interconnect`` was given and the backend rents by spec (nothing is
                 registered or rented).
-            LiumServerError, requests.RequestException: the rent-by-spec response was lost. The
-                rent is posted once (a repeat could rent a second node); the pod is looked up
-                by name for ~9 s and returned when it appears, otherwise the error propagates
-                and the pod may still exist — check :meth:`ps`.
+            LiumServerError, LiumRateLimitError, requests.RequestException: the rent-by-spec
+                response was lost. The pod is looked up by name for ~9 s and returned when it
+                appears. If it does not appear, a backend that honours the Idempotency-Key
+                (``rent_idempotency``) gets the rent once more with the same key, which replays
+                the first answer instead of renting again; after an ambiguous resend the pod is
+                looked up once more, and no third request is sent. A backend without the key
+                gets no resend, since a repeat could rent a second node; if no pod is found there,
+                the error propagates and the pod may still exist — check :meth:`ps`.
+            LiumError: code ``rent_outcome_unknown``: the resend got no usable answer (lost,
+                5xx, 429, ``idempotency_in_progress``/``idempotency_outcome_unknown``, or refused for
+                authentication, permission or balance) and the pod was not listed; either request may
+                have rented it — check :meth:`ps` before renting again.
         """
         if template_id is not None and dockerfile_content is not None:
             raise ValueError("Provide either template_id or dockerfile_content, not both")
@@ -1639,34 +1650,58 @@ class Lium:
             "dry_run": dry_run,
         }
         gpu_count = int(spec.get("gpu_count") or 1)
-        # A rent is billable and a lost response may have succeeded server-side, so it is sent
-        # once, as in `up`; a dry run rents nothing and keeps the retries. Pods that exist before
+        # A rent is billable and a lost response may have succeeded server-side, so it is never
+        # retried blindly; a dry run rents nothing and keeps the retries. Pods that exist before
         # the rent can never be the one it created (see `up`).
         known_pod_ids = frozenset() if dry_run else self._pod_ids_before_rent()
+        # No key on a dry run: the backend keeps a key whose request failed as pending, so its
+        # transient retry would get a permanent 409 idempotency_outcome_unknown for a rent of nothing.
+        rent_headers = self.headers if dry_run else {**self.headers, "Idempotency-Key": str(uuid.uuid4())}
         try:
-            data = self._request("POST", "/executors/rent-by-spec", json=payload, retry=dry_run).json()
+            data = self._request(
+                "POST", "/executors/rent-by-spec", json=payload, headers=rent_headers, retry=dry_run
+            ).json()
         except (requests.RequestException, LiumServerError, LiumRateLimitError):
             if dry_run:
                 raise
             # The server may have rented before the response was lost: hand back the pod it
-            # created rather than an error next to a billing pod. Nothing is posted again — a
-            # second rent-by-spec could pick another node — so when no pod appears the error
+            # created rather than an error next to a billing pod. When no pod appears, the rent is
+            # resent once with the same key only on a backend that honours it (it replays the first
+            # answer); elsewhere a second rent-by-spec could pick another node, so the error
             # propagates and the docstring tells the caller to check `ps`.
-            pod = self._find_pod_info_by_name(
-                rental["name"], None, attempts=3, interval=3, exclude=known_pod_ids
-            )
-            if pod is None or pod.executor is None:
+            found = self._rented_pod_result(rental, gpu_count, known_pod_ids)
+            if found is not None:
+                return found
+            if not self.supports(RENT_IDEMPOTENCY):
                 raise
-            return RentResult(
-                executor=pod.executor,
-                price_per_hour=pod.executor.price_per_hour,  # ps() anchors it on the pod's billed price
-                gpu_count=gpu_count,
-                pod=self._created_pod_record(pod, pod.executor.id),
-                template_id=rental["template_id"],
-                candidates=1,
-                attempts=1,
-                server_side=True,
-            )
+            time.sleep(1)
+            try:
+                data = self._request(
+                    "POST", "/executors/rent-by-spec", json=payload, headers=rent_headers, retry=False
+                ).json()
+            except (requests.RequestException, LiumError) as exc:
+                # Either POST may have rented: an ambiguous resend is answered by looking again,
+                # never by a third POST. A definite refusal propagates as it is. An auth or balance
+                # refusal only refuses the resend (the first rent may have spent the balance), so
+                # it says nothing about the first request's outcome (review).
+                transient = isinstance(exc, (requests.RequestException, LiumServerError, LiumRateLimitError))
+                refused_resend_only = isinstance(exc, (LiumAuthError, LiumPermissionError))
+                if (
+                    not transient
+                    and not refused_resend_only
+                    and exc.code not in ("idempotency_in_progress", "idempotency_outcome_unknown")
+                ):
+                    raise
+                found = self._rented_pod_result(rental, gpu_count, known_pod_ids)
+                if found is not None:
+                    return found
+                # Every unresolved resend keeps the warning: a plain 502/429 would get the CLI's
+                # "Retry", and a re-run sends a fresh key that can rent a second node (review).
+                raise LiumError(
+                    f"The rent got no answer and its resend did not settle it ({exc}); the pod may be "
+                    "rented: check ps() before renting again",
+                    code="rent_outcome_unknown",
+                ) from exc
         executor = self._dict_to_executor_info(data.get("selected_executor") or {})
         if executor is None:
             raise LiumError("rent-by-spec returned no node")
@@ -1683,6 +1718,24 @@ class Lium:
             alternatives=list(data.get("alternatives_considered") or []),
             attempts=int(data.get("attempts") or 0),
             dry_run=bool(data.get("dry_run", dry_run)),
+            server_side=True,
+        )
+
+    def _rented_pod_result(
+        self, rental: Dict[str, Any], gpu_count: int, known_pod_ids: frozenset
+    ) -> Optional[RentResult]:
+        """The pod a rent-by-spec with a lost answer created, if it is listed."""
+        pod = self._find_pod_info_by_name(rental["name"], None, attempts=3, interval=3, exclude=known_pod_ids)
+        if pod is None or pod.executor is None:
+            return None
+        return RentResult(
+            executor=pod.executor,
+            price_per_hour=pod.executor.price_per_hour,  # ps() anchors it on the pod's billed price
+            gpu_count=gpu_count,
+            pod=self._created_pod_record(pod, pod.executor.id),
+            template_id=rental["template_id"],
+            candidates=1,
+            attempts=1,
             server_side=True,
         )
 
@@ -2141,10 +2194,10 @@ class Lium:
             ClusterNotListedError: the nodes are, or may be, rented, but the listing did not show a
                 whole cluster: the API confirmed the order and named the member pods but the listing
                 did not show every one of them (or failed); or the order got no answer and the
-                by-name lookup found fewer members than requested (or could not list). Do not rent again.
-            LiumError: the API refused the group (mixed fabrics, split hosts, wrong image); the pod
-                listing before the order failed (nothing was rented); or the order got no answer and
-                no member appeared.
+                by-name lookup found fewer members than requested, none at all, or could not list.
+                Do not rent again.
+            LiumError: the API refused the group (mixed fabrics, split hosts, wrong image), or the pod
+                listing before the order failed (nothing was rented).
         """
         ids = [str(i) for i in executor_ids]
         if len(ids) < 2:
@@ -2166,18 +2219,38 @@ class Lium:
             "initial_port_count": ports,
             "enable_volume_encryption": enable_volume_encryption,
         }
-        # Not idempotent and not retried: a timeout may have rented the group anyway, so look
-        # for it by name before reporting failure rather than sending the order twice. The
+        # Not retried blindly: a timeout may have rented the group anyway. A backend that honours
+        # the Idempotency-Key (RENT_IDEMPOTENCY) gets the order once more with the same key and
+        # replays the first answer; elsewhere a second order would rent a second group. Either
+        # way, without an answer the group is looked for by name before reporting failure. The
         # by-name lookup only accepts a cluster that did not exist before this call: an older
         # cluster reusing the pod name must not be handed back (and then, say, --ttl'd). That is
         # why the snapshot is taken before the order and a failure to take it aborts the order:
         # nothing is rented yet, so failing here costs nothing, while an empty snapshot would let
         # the lookup hand back the older cluster.
         known_clusters = self._cluster_ids_now()
+        rent_headers = {**self.headers, "Idempotency-Key": str(uuid.uuid4())}
         try:
-            response = self._request("POST", "/executors/cluster/rent", json=payload).json()
+            response = self._request("POST", "/executors/cluster/rent", json=payload, headers=rent_headers).json()
         except (requests.RequestException, LiumServerError, LiumRateLimitError):
             response = None
+            if self.supports(RENT_IDEMPOTENCY):
+                time.sleep(1)
+                try:
+                    response = self._request(
+                        "POST", "/executors/cluster/rent", json=payload, headers=rent_headers, retry=False
+                    ).json()
+                except (requests.RequestException, LiumServerError, LiumRateLimitError):
+                    pass  # the resend was lost too: the lookup by name below finds what was rented
+                except (LiumAuthError, LiumPermissionError):
+                    # refuses the resend only (the first order may have spent the balance): the
+                    # first order's outcome is still found by name below (review)
+                    pass
+                except LiumError as exc:
+                    # the first order is still running, or its answer was not recorded: either way it
+                    # may have rented, so its outcome is found by name below
+                    if exc.code not in ("idempotency_in_progress", "idempotency_outcome_unknown"):
+                        raise
         if response is not None and not response.get("success", True):
             # a definite refusal: nothing was rented, so there is nothing to look for
             raise LiumError(f"Cluster rental refused: {response.get('message') or response}")
@@ -2218,7 +2291,13 @@ class Lium:
                     "rent again, list the pods to find the cluster",
                     listed=listed, confirmed=False,
                 )
-            raise LiumError(f"Cluster rental of {len(ids)} nodes did not produce pods named {name!r}")
+            # No member listed, but the order was never refused: it may still land (an in-progress
+            # resend, a late commit), so a blind retry could rent a second cluster.
+            raise ClusterNotListedError(
+                f"Cluster rental of {len(ids)} nodes was not confirmed and the pod listing shows no new pods named "
+                f"{name!r}; the nodes may be rented: do not rent again before the pod list shows whether they are",
+                listed=[], confirmed=False,
+            )
         if wait:
             cluster = self.wait_cluster_ready(cluster, timeout=timeout)
         return cluster
