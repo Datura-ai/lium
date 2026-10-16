@@ -233,6 +233,8 @@ class _RentalStore:
                         continue
                 except (OSError, ValueError, AttributeError):
                     continue  # gone meanwhile, or unreadable: left in place for the user, never deleted
+                if path.stem in self._held:
+                    continue  # already this server's: tracked in one of its lists, never loaded twice
                 if not self._claim(path.stem):
                     continue  # another running server's rental: settled and reported by that server, not here
                 try:  # read again under the lock: the holder may have rewritten or settled it meanwhile
@@ -312,7 +314,6 @@ class LiumTools:
         # client, so `lium mcp` still starts without a key
         self._unresolved: List[_Rental] = []
         self._adopting = threading.Lock()
-        self._adopted = False
         self._recovered: List[_Rental] = []  # known pods the host has not been told of
         # pods a result named that the host has not yet shown it knows (it names the pod in a call, or the pod is
         # gone): a returned callback is not a written response, so their journals stay until then
@@ -709,11 +710,11 @@ class LiumTools:
                 return list(self._unresolved)
 
     def _adopt(self) -> None:
-        """Take this account's journals from earlier sessions, once, before any rental is admitted (rent_pod
-        reconciles first)."""
+        """Take this account's journals that no live server holds, before any rental is admitted (rent_pod
+        reconciles first). Runs on every reconcile, not once: a predecessor still finishing its last rent holds its
+        journal when this server starts, and a long-lived server must adopt another session's orphan when that
+        session exits."""
         with self._adopting:
-            if self._adopted:
-                return
             try:
                 scope = self._scope()
             except Exception:  # noqa: BLE001 - no client yet (e.g. no API key): nothing can be rented; try at the next call
@@ -721,7 +722,8 @@ class LiumTools:
             loaded = self._store.load(scope)
             with self._cleanup:
                 self._unresolved.extend(r for r in loaded if r not in self._unresolved)
-                self._adopted = True
+        if loaded:
+            self._start_reconciler()  # an orphan adopted by a tool call keeps being retried, not only at the next call
 
     def _settle_cleanup(self, rental: _Rental, live: Dict[str, PodInfo], reports: bool = False) -> str:
         """How far this rental is settled: "done" once nothing it made can still bill (the SDK established that it

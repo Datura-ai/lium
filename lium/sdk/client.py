@@ -1385,9 +1385,9 @@ class Lium:
             ``{"id", "name", "executor_id"}`` of the pod the rent created.
 
         Raises:
-            LiumRentOutcomeUnknownError: no answer, the first request is still running (a 409 without
-                ``Idempotent-Replayed``), or a refusal
-                that is not the stored answer to the first request.
+            LiumRentOutcomeUnknownError: no answer, the first request is still running or its outcome is
+                unknown (``idempotency_in_progress``/``idempotency_outcome_unknown``, replayed or not), or a
+                refusal that is not the stored answer to the first request.
             LiumError: the API's stored refusal of the first request: it rented nothing.
         """
         if not (error.endpoint and error.payload is not None):
@@ -1413,9 +1413,14 @@ class Lium:
         try:
             self._raise_for_status(resp, key=self.config.api_key_description)
         except LiumError as e:
-            # the API's in-progress and outcome-unknown 409s never carry Idempotent-Replayed; a stored 409 (price
-            # changed, rentals paused, no ports) is a refusal like any other
-            if replayed and not isinstance(e, (LiumServerError, LiumRateLimitError)):
+            # a stored 409 (price changed, rentals paused, no ports) is a refusal like any other. The in-progress and
+            # outcome-unknown 409s say nothing about the first request, even replayed: a backend release older than
+            # pending rows replays the stored pending answer (idempotency_outcome_unknown) for a rent that did rent
+            if (
+                replayed
+                and not isinstance(e, (LiumServerError, LiumRateLimitError))
+                and e.code not in ("idempotency_in_progress", "idempotency_outcome_unknown")
+            ):
                 raise
             raise still_unknown(e) from e
         try:

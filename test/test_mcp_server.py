@@ -679,7 +679,8 @@ def test_two_saves_of_one_rental_at_once_leave_the_newer_record_whole(monkeypatc
     overlapped[0].join(5)
 
     assert [p.suffix for p in rental_state_dir.iterdir() if p.suffix != ".lock"] == [".json"]
-    assert [r.pod_ids for r in tools._store.load(tools._scope())] == [{"pod-1"}]  # readable after a restart, and names the pod
+    (journal,) = rental_state_dir.glob("*.json")
+    assert tools_module._Rental.from_state(json.loads(journal.read_text())).pod_ids == {"pod-1"}  # readable after a restart
 
 
 def test_a_rent_whose_journal_cannot_be_written_is_never_sent(monkeypatch):
@@ -756,8 +757,11 @@ def test_a_restored_cancelled_rental_is_removed_without_waiting_for_a_tool_call(
 @pytest.mark.parametrize("refusal", [
     _Answer(403, {"detail": "insufficient balance"}),
     _Answer(400, {"detail": "node is not available"}),
-], ids=["fresh-403", "fresh-400"])
-def test_a_fresh_refusal_of_a_replay_settles_nothing(monkeypatch, rental_state_dir, refusal):
+    # a backend release older than pending rows replays the stored pending answer for a rent that did rent
+    _stored(409, {"error": {"code": "idempotency_outcome_unknown", "message": "outcome unknown"}}),
+    _stored(409, {"error": {"code": "idempotency_in_progress", "message": "in progress"}}),
+], ids=["fresh-403", "fresh-400", "replayed-outcome-unknown", "replayed-in-progress"])
+def test_a_replay_answer_that_is_not_a_stored_refusal_settles_nothing(monkeypatch, rental_state_dir, refusal):
     outcomes = [_no_answer(), _no_answer(), refusal]
     sdk = _real_sdk(monkeypatch, outcomes)
     tools = _real_tools(sdk)
@@ -841,6 +845,29 @@ def test_a_running_server_never_adopts_another_running_servers_rental(monkeypatc
     assert other.posts == []
     assert second.rent_pod("node-b", "other-job", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-2"
     assert journal.exists() and first._unresolved  # still the first server's to settle
+
+
+def test_a_server_started_while_its_predecessor_finished_a_rent_adopts_the_journal_once_it_exits(
+    monkeypatch, rental_state_dir
+):
+    """The relaunched host starts the new server while the old one still holds its last rent's journal; the new
+    one must not have looked once and given up, or it rents a second pod while the first may be billing."""
+    monkeypatch.setattr(sys.modules[__name__], "_SERVERS_STAY_LIVE", [True])
+    sdk = _real_sdk(monkeypatch, [_no_answer(), _no_answer()])
+    first = _real_tools(sdk)
+    first.rent_pod("node-a", "job", template_id="tpl-1")
+
+    second = _real_tools(sdk)
+    second._reconcile()  # its startup pass: the journal is still held
+    assert second._unresolved == []
+
+    for fd in first._store._held.values():  # the old server exits; the OS drops its locks
+        os.close(fd)
+    first._store._held.clear()
+    refused = second.rent_pod("node-b", "job", template_id="tpl-1")
+
+    assert len(second._unresolved) == 1 and refused["ok"] is False, refused
+    assert len(set(sdk.posts)) == 1  # no second pod
 
 
 def test_a_server_for_another_account_leaves_an_orphaned_journal_to_its_own_account(monkeypatch, rental_state_dir):
