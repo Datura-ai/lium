@@ -77,7 +77,7 @@ test('rent posts a rent-by-spec request and returns the pod id', async () => {
   nock('https://lium.io').get('/api/pods').reply(200, [{ id: 'old', pod_name: 'zap-other' }]);
   nock('https://lium.io', { reqheaders: { 'Idempotency-Key': 'evt-1' } })
     .post('/api/executors/rent-by-spec', (b) => ((sent = b), true))
-    .reply(200, { pod_id: 'p9', price_per_hour: 2.5, template_id: 't1', selected_executor: { id: 'n1' } });
+    .reply(200, { pod_id: 'p9', price_per_hour: 2.5, template_id: 't1', selected_executor: { id: 'n1', machine_name: 'm1', gpu_count: 8, price_per_gpu: 2.5, available_gpu_count: 3 } });
   const out = await appTester(App.creates.rent_gpu_pod.operation.perform, {
     authData,
     inputData: { gpu_type: 'H100', ssh_public_key: ' ssh-ed25519 AAAA me ', max_price_per_gpu_hour: '3', idempotency_key: 'evt-1' },
@@ -87,6 +87,7 @@ test('rent posts a rent-by-spec request and returns the pod id', async () => {
   });
   assert.strictEqual(out.id, 'p9');
   assert.strictEqual(out.replayed, false);
+  assert.deepStrictEqual(out.node, { id: 'n1', machine_name: 'm1', gpu_count: 8, price_per_gpu: 2.5 });
 });
 
 const rent = App.creates.rent_gpu_pod.operation.perform;
@@ -160,13 +161,15 @@ test('terminate: accepted, pending and repeated deletion report deletion_request
 test('rent: a replay after the 24 h key window returns the pod already named for this key, without renting', async () => {
   let posts = 0;
   const pods = [{ id: 'p1', pod_name: `zap-${code(rentInput.idempotency_key)}`, status: 'RUNNING', price: 2.5,
-    template: { id: 't1' }, executor: { id: 'n1' } }];
+    template: { id: 't1' }, executor: { id: 'n1', machine_name: 'm1', gpu_count: 8, price_per_gpu: null } }];
   const out = await rent(fakeZ(async () => (posts++, { data: { pod_id: 'p2' } }), pods), { inputData: rentInput });
   assert.strictEqual(posts, 0);
   assert.strictEqual(out.pod_id, 'p1');
   assert.strictEqual(out.replayed, true);
   // the same output fields as a fresh rental
-  assert.deepStrictEqual([out.price_per_hour, out.template_id, out.node], [2.5, 't1', { id: 'n1' }]);
+  // /pods has no per-GPU price: it comes from the pod's total over the rented GPU count
+  assert.deepStrictEqual([out.price_per_hour, out.template_id, out.node],
+    [2.5, 't1', { id: 'n1', machine_name: 'm1', gpu_count: 8, price_per_gpu: 2.5 }]);
   // a custom prefix is kept in front of the key code
   const named = await rent(fakeZ(async () => (posts++, { data: { pod_id: 'p3' } }), [{ id: 'p4', pod_name: `train-${code('k')}` }]),
     { inputData: { ...rentInput, idempotency_key: 'k', pod_name: 'train' } });
