@@ -141,13 +141,13 @@ const rentPod = {
       { key: 'gpu_count', label: 'GPU Count', type: 'integer', required: false, default: '1', helpText: 'Number of GPUs. Default 1.' },
       { key: 'max_price_per_gpu_hour', label: 'Max Price per GPU-Hour (USD)', type: 'number', required: false, helpText: 'Do not rent above this hourly price per GPU.' },
       { key: 'ssh_public_key', label: 'SSH Public Key', required: true, helpText: 'Your SSH public key (the line starting `ssh-ed25519` or `ssh-rsa`). It is installed on the pod so you can log in.' },
-      { key: 'pod_name', label: 'Pod Name', required: false, helpText: 'A name prefix for the pod. Default `zap`. The action appends a code derived from the Idempotency Key (e.g. `zap-1a2b3c4d5e6f`) so a late replay can find the pod it already rented.' },
+      { key: 'pod_name', label: 'Pod Name', required: false, helpText: 'A name prefix for the pod. Default `zap`. The action appends a code derived from the Idempotency Key and the rental (e.g. `zap-1a2b3c4d5e6f`) so a late replay can find the pod it already rented.' },
       {
         key: 'idempotency_key',
         label: 'Idempotency Key',
         required: true,
         helpText:
-          'A value that stays the same if Zapier replays this step, so a retry returns the first pod instead of renting a second one. Map a stable value from the trigger step, e.g. the trigger item\'s ID; do not use a timestamp or a random value. Lium remembers a key for 24 hours; after that, a replay still finds and returns the pod this key rented as long as that pod exists under the same name, marked `replayed: true`. Replaying a rent by hand more than 24 hours later, after renaming or deleting its pod, rents a new pod.',
+          'A value that stays the same if Zapier replays this step, so a retry returns the first pod instead of renting a second one. Map a stable value from the trigger step, e.g. the trigger item\'s ID; do not use a timestamp or a random value. Use a different key for each pod, e.g. `{{id}}-2` for a second Rent step. Lium remembers a key for 24 hours; after that, a replay still finds and returns the pod this key rented as long as that pod exists under the same name, marked `replayed: true`. Replaying a rent by hand more than 24 hours later, after renaming or deleting its pod, rents a new pod.',
       },
       { key: 'template_id', label: 'Template ID', required: false, helpText: 'Optional Lium template (docker image) ID. Empty: the server\'s recommended PyTorch image.' },
     ],
@@ -156,12 +156,17 @@ const rentPod = {
       const key = String(d.idempotency_key || '').trim();
       if (!key) throw new errors.Error('Idempotency Key is required: map a stable value from the trigger step.');
       const keyHash = createHash('sha256').update(key).digest('hex');
+      const gpuCount = Number(d.gpu_count || 1);
+      const sshKey = d.ssh_public_key.trim();
+      // The name carries the key and the rental, so a replay after the backend's 24 h key window still finds the pod
+      // and the same key on another rental does not (the max price is left out: editing the cap keeps replays matching).
+      const nameCode = createHash('sha256')
+        .update(JSON.stringify([key, d.gpu_type, gpuCount, sshKey, d.template_id || null])).digest('hex').slice(0, 12);
       const body = {
         gpu_type: d.gpu_type,
-        gpu_count: Number(d.gpu_count || 1),
-        // The name carries the key, so a replay after the backend's 24 h key window still finds the pod.
-        pod_name: `${d.pod_name || 'zap'}-${keyHash.slice(0, 12)}`,
-        user_public_key: [d.ssh_public_key.trim()],
+        gpu_count: gpuCount,
+        pod_name: `${d.pod_name || 'zap'}-${nameCode}`,
+        user_public_key: [sshKey],
       };
       if (present(d.max_price_per_gpu_hour)) {
         const cap = Number(d.max_price_per_gpu_hour);
@@ -171,7 +176,9 @@ const rentPod = {
       if (d.template_id) body.template_id = d.template_id;
       const existing = ((await z.request({ url: `${API}/pods` })).data || []).find((p) => p.pod_name === body.pod_name);
       if (existing) {
-        return { ...existing, id: existing.id, pod_id: existing.id, replayed: true };
+        // same output fields as a fresh rental; /pods carries the total $/h as `price`
+        return { ...existing, id: existing.id, pod_id: existing.id, replayed: true, price_per_hour: existing.price,
+          template_id: (existing.template || {}).id, node: existing.executor };
       }
       // The backend accepts 1-255 of [A-Za-z0-9-_.:]; any other value is hashed, which is just as replay-stable.
       const headers = { 'Idempotency-Key': /^[A-Za-z0-9._:-]{1,255}$/.test(key) ? key : keyHash };

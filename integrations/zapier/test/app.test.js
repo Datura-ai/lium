@@ -8,7 +8,9 @@ const nodes = require('./fixtures/nodes.json');
 
 const { createHash } = require('node:crypto');
 const appTester = zapier.createAppTester(App);
-const sha12 = (k) => createHash('sha256').update(k).digest('hex').slice(0, 12);
+// the pod-name code for a rental: key, GPU model, GPU count, SSH key, template
+const code = (key, gpu = 'H100', count = 1, ssh = 'ssh-ed25519 AAAA test', template = null) =>
+  createHash('sha256').update(JSON.stringify([key, gpu, count, ssh, template])).digest('hex').slice(0, 12);
 const authData = { api_key: 'test-key' };
 
 test.afterEach(() => nock.cleanAll());
@@ -81,7 +83,7 @@ test('rent posts a rent-by-spec request and returns the pod id', async () => {
     inputData: { gpu_type: 'H100', ssh_public_key: ' ssh-ed25519 AAAA me ', max_price_per_gpu_hour: '3', idempotency_key: 'evt-1' },
   });
   assert.deepStrictEqual(sent, {
-    gpu_type: 'H100', gpu_count: 1, pod_name: `zap-${sha12('evt-1')}`, user_public_key: ['ssh-ed25519 AAAA me'], max_price_per_gpu_hour: 3,
+    gpu_type: 'H100', gpu_count: 1, pod_name: `zap-${code('evt-1', 'H100', 1, 'ssh-ed25519 AAAA me')}`, user_public_key: ['ssh-ed25519 AAAA me'], max_price_per_gpu_hour: 3,
   });
   assert.strictEqual(out.id, 'p9');
   assert.strictEqual(out.replayed, false);
@@ -157,16 +159,24 @@ test('terminate: accepted, pending and repeated deletion report deletion_request
 
 test('rent: a replay after the 24 h key window returns the pod already named for this key, without renting', async () => {
   let posts = 0;
-  const pods = [{ id: 'p1', pod_name: `zap-${sha12(rentInput.idempotency_key)}`, status: 'RUNNING' }];
+  const pods = [{ id: 'p1', pod_name: `zap-${code(rentInput.idempotency_key)}`, status: 'RUNNING', price: 2.5,
+    template: { id: 't1' }, executor: { id: 'n1' } }];
   const out = await rent(fakeZ(async () => (posts++, { data: { pod_id: 'p2' } }), pods), { inputData: rentInput });
   assert.strictEqual(posts, 0);
   assert.strictEqual(out.pod_id, 'p1');
   assert.strictEqual(out.replayed, true);
+  // the same output fields as a fresh rental
+  assert.deepStrictEqual([out.price_per_hour, out.template_id, out.node], [2.5, 't1', { id: 'n1' }]);
   // a custom prefix is kept in front of the key code
-  const named = await rent(fakeZ(async () => (posts++, { data: { pod_id: 'p3' } }), [{ id: 'p4', pod_name: `train-${sha12('k')}` }]),
+  const named = await rent(fakeZ(async () => (posts++, { data: { pod_id: 'p3' } }), [{ id: 'p4', pod_name: `train-${code('k')}` }]),
     { inputData: { ...rentInput, idempotency_key: 'k', pod_name: 'train' } });
   assert.strictEqual(named.pod_id, 'p4');
   assert.strictEqual(posts, 0);
+  // the same key on another rental (other GPU, other SSH key) is not handed the first pod
+  const other = await rent(fakeZ(async () => (posts++, { data: { pod_id: 'p5' } }), pods),
+    { inputData: { ...rentInput, gpu_type: 'RTX4090', ssh_public_key: 'ssh-ed25519 BBBB other' } });
+  assert.strictEqual(other.pod_id, 'p5');
+  assert.strictEqual(posts, 1);
 });
 
 test('rent: a 409 for an in-flight or unrecorded earlier call is a clear error telling the user to check their pods', async () => {

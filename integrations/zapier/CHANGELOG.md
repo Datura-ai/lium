@@ -1,3 +1,7 @@
+## 1.0.4
+
+- Rent GPU Pod: the pod-name code comes from the Idempotency Key and the rental (GPU model, GPU count, SSH key, template), so the same key on a different rental is no longer handed the first pod; it reaches Lium, which refuses a reused key. A replay that finds its pod returns the same fields as a fresh rental (`price_per_hour`, `template_id`, `node`).
+
 ## 1.0.2
 
 - Rent GPU Pod: the pod name carries a code from the Idempotency Key (`zap-<12 hex>`, or your Pod Name as prefix); a replay finds that pod and returns it with `replayed: true` instead of renting, also after the 24-hour key window.
