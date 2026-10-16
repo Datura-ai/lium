@@ -196,7 +196,7 @@ def test_up_sends_the_build_context_sha256(monkeypatch):
     captured: dict = {}
     monkeypatch.setattr(client, "get_executor", lambda executor_id: SimpleNamespace(id="exec-1"))
     monkeypatch.setattr(client, "_ensure_ssh_keys_registered", lambda *a, **k: None)
-    monkeypatch.setattr(client, "_pod_ids_before_rent", lambda: frozenset())
+    monkeypatch.setattr(client, "_pod_ids_before_rent", frozenset)
 
     def fake_request(method, endpoint, json=None, **kwargs):
         captured["payload"] = json
