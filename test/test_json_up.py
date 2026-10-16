@@ -21,7 +21,7 @@ from lium.cli.actions import ActionResult
 from lium.cli.cli import cli
 from lium.cli.up import command as up_module
 from lium.cli.utils import EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, EXIT_GENERAL_ERROR
-from lium.sdk import LiumError, LiumServerError, PodInfo, PodStartError, VolumeInfo
+from lium.sdk import LiumError, LiumRentOutcomeUnknownError, LiumServerError, PodInfo, PodStartError, VolumeInfo
 
 
 def _pod(pod_id="pod-1", huid="eager-wolf-aa", name="train") -> PodInfo:
@@ -331,19 +331,37 @@ def test_up_json_failure_at_the_rent_names_the_volume_it_created(monkeypatch, re
     assert envelope["data"] == {"volume_id": "vol-1", "volume_huid": "calm-lake-01"}
 
 
-def test_up_json_refusal_at_the_rent_keeps_the_servers_request_id_next_to_the_volume(monkeypatch):
+@pytest.mark.parametrize("with_volume", [False, True])
+@pytest.mark.parametrize("rent_error, code", [
+    (LiumError("insufficient balance", code="insufficient_balance", hint="Run 'lium fund'.",
+               request_id="req-abc"), "insufficient_balance"),
+    (LiumRentOutcomeUnknownError("first rent unresolved, repeat refused", code="idempotency_in_progress",
+                                 hint="Retry with the same key", request_id="req-abc"), "api_timeout"),
+    # a proxy-made 502 carries no code, hint or request_id: the answer must still be the unknown-outcome one
+    (LiumRentOutcomeUnknownError("first rent unresolved, repeat got a 502"), "api_timeout"),
+])
+def test_up_json_refusal_at_the_rent_keeps_the_servers_request_id_next_to_the_volume(
+    monkeypatch, with_volume, rent_error, code,
+):
     """After lium#190 the API's code, hint and request_id ride on the error; the volume the rent leaves
-    behind must not push them out of the envelope (nor the other way round)."""
-    refusal = LiumError("insufficient balance", code="insufficient_balance", hint="Run 'lium fund'.",
-                        request_id="req-abc")
-    result, _ = _run_up(monkeypatch, ["--volume", "new:name=my-data"], rent_error=refusal)
+    behind must not push them out of the envelope (nor the other way round). An unresolved rent keeps its
+    request_id but never carries a hint that tells the caller to rent again."""
+    args = ["--volume", "new:name=my-data"] if with_volume else []
+    result, _ = _run_up(monkeypatch, args, rent_error=rent_error)
 
     assert result.exit_code == EXIT_API_ERROR
     envelope = json.loads(result.stderr.strip().splitlines()[-1])
-    assert envelope["error"]["code"] == "insufficient_balance"
-    assert envelope["error"]["hint"] == "Run 'lium fund'."
-    assert envelope["error"]["message"].endswith(" The volume my-data was created and is kept.")
-    assert envelope["data"] == {"volume_id": "vol-1", "volume_huid": "calm-lake-01", "request_id": "req-abc"}
+    assert envelope["error"]["code"] == code
+    expected = {"request_id": rent_error.request_id} if rent_error.request_id else {}
+    if with_volume:
+        assert envelope["error"]["message"].endswith(" The volume my-data was created and is kept.")
+        expected.update(volume_id="vol-1", volume_huid="calm-lake-01")
+    assert (envelope.get("data") or {}) == expected
+    if isinstance(rent_error, LiumRentOutcomeUnknownError):
+        assert "Retry" not in envelope["error"]["hint"]
+        assert "lium ps" in envelope["error"]["hint"]
+    else:
+        assert envelope["error"]["hint"] == "Run 'lium fund'."
 
 
 def test_up_json_ttl_retry_refused_by_the_api_still_says_the_ttl_is_not_set(monkeypatch):

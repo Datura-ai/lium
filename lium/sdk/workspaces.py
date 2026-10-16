@@ -3,8 +3,9 @@
 An API key acts in exactly one workspace and the server tells which on ``GET /users/me`` — that field
 is also how this client knows the server has workspaces at all. Reads of the workspace the key acts
 in work with the key; anything that reshapes a team (create, invite, remove, transfer billing,
-delete) and anything on ``/keys`` is session-only on the server, so those calls need a browser-session
-token (``Lium.workspaces.login`` or LIUM_SESSION_TOKEN) and raise :class:`LiumSessionError` without one.
+delete) and anything on ``/keys`` but a key's own ``GET /keys/{id}/refusals`` is session-only on the
+server, so those calls need a browser-session token (``Lium.workspaces.login`` or LIUM_SESSION_TOKEN) and
+raise :class:`LiumSessionError` without one.
 
 Workspaces and members come back as :class:`WorkspaceInfo` / :class:`WorkspaceMember`; the write
 acknowledgements (``{"message": …}``), the invitation and the API-key rows are returned as the server's
@@ -60,7 +61,9 @@ class WorkspacesClient:
     # ------------------------------------------------------------------ capability
     def _me_payload(self) -> Dict[str, Any]:
         if self._me is None:
-            self._me = self._lium._request("GET", "/users/me").json()
+            # with no API key (a session-only CLI) the session reads its own account
+            headers = None if self._lium.config.api_key else self._session_headers()
+            self._me = self._lium._request("GET", "/users/me", headers=headers).json()
         return self._me
 
     def enabled(self) -> bool:

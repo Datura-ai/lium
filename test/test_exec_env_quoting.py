@@ -125,7 +125,7 @@ def test_exec_all_failure_entries_carry_the_pod_id_like_successes(monkeypatch):
     good = SimpleNamespace(id="pod-good")
     bad = SimpleNamespace(id="pod-bad")
 
-    def fake_exec(pod, *, command, env=None):
+    def fake_exec(pod, *, command, env=None, max_output_bytes=None):
         if pod is bad:
             raise OSError("ssh: connect to host: Connection refused")
         return {"stdout": "ok\n", "stderr": "", "exit_code": 0, "success": True}
@@ -188,7 +188,7 @@ def test_cli_passes_values_with_shell_characters_through_untouched(monkeypatch):
         def ps(self):
             return [SimpleNamespace(id="pod-uuid-1", huid="eager-wolf-aa", name="my-pod")]
 
-        def exec(self, pod, command=None, env=None):
+        def exec(self, pod, command=None, env=None, max_output_bytes=None):
             seen.update(env)
             return {"stdout": "", "stderr": "", "exit_code": 0, "success": True}
 

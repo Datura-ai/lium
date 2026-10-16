@@ -35,6 +35,7 @@ SYNC_EXECUTOR_CENTRAL_PROVIDER = "/executors/sync-executor-central-provider"
 EXECUTOR_BY_ID = "/executors/{id}"
 UPDATE_PRICE = "/executors/{id}/update-price"
 UPDATE_GPU = "/executors/{id}/update-gpu"
+UPDATE_ADDRESS = "/executors/{id}/update-address"
 EXECUTOR_PODS = "/executors/{id}/pods"
 EXECUTOR_NOTICE_PERIOD = "/executors/{id}/notice-period"
 EXECUTOR_MACHINE_ADDED = "/executors/{id}/machine-added"
@@ -85,5 +86,6 @@ __all__ = [
     "SYNC_EXECUTOR_CENTRAL_PROVIDER",
     "SYNC_EXECUTOR_MINER_PORTAL",
     "UPDATE_GPU",
+    "UPDATE_ADDRESS",
     "UPDATE_PRICE",
 ]
