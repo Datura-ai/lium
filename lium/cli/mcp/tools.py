@@ -179,9 +179,6 @@ class _RentalStore:
         # open fds of the "<key>.lock" files this server holds an flock on: every `lium mcp` process shares the
         # directory (one per Claude Code session, Desktop, Cursor), and each owns only the journals it locked
         self._held: Dict[str, int] = {}
-        # this account's rentals without a known pod that another running server holds, as of the last load():
-        # never adopted or replayed here, but rent_pod is refused beside them (the first may still rent a pod)
-        self.held_elsewhere: List[_Rental] = []
 
     def _claim(self, key: str) -> bool:
         """Take the journal of ``key`` for this server; False while another live server holds it. The OS drops
@@ -227,9 +224,8 @@ class _RentalStore:
         untouched and unlocked: the same key is a new rent under another account, so only its own server settles
         it."""
         if self.directory is None or not self.directory.is_dir():
-            self.held_elsewhere = []
             return []
-        rentals, elsewhere = [], []
+        rentals = []
         for path in sorted(self.directory.glob("*.json")):
             with self._lock:
                 try:
@@ -241,22 +237,35 @@ class _RentalStore:
                 if path.stem in self._held:
                     continue  # already this server's: tracked in one of its lists, never loaded twice
                 if not self._claim(path.stem):
-                    # another running server's rental: settled and reported by that server, not here
-                    if not state.get("pod_ids"):
-                        try:
-                            other = _Rental.from_state(state)
-                        except (KeyError, TypeError):
-                            continue
-                        other.last_error = ("another running Lium MCP server (another session) sent this rent and "
-                                            "is settling it; rent_pod is refused here until it does")
-                        elsewhere.append(other)
-                    continue
+                    continue  # another running server's rental: settled and reported by that server, not here
                 try:  # read again under the lock: the holder may have rewritten or settled it meanwhile
                     rentals.append(_Rental.from_state(json.loads(path.read_text())))
                 except (OSError, ValueError, KeyError, TypeError):
                     self._release(path.stem)
-        self.held_elsewhere = elsewhere
         return rentals
+
+    def unanswered_elsewhere(self, scope: Dict[str, str]) -> List[_Rental]:
+        """This account's journals, read now, that this server does not hold and that name no pod: another running
+        server's rent whose outcome is unknown (or an orphan not adopted yet). Never claimed, adopted or replayed
+        here, but rent_pod is refused beside them: the first may still rent a pod."""
+        if self.directory is None or not self.directory.is_dir():
+            return []
+        found = []
+        for path in sorted(self.directory.glob("*.json")):
+            with self._lock:
+                if path.stem in self._held:
+                    continue
+            try:
+                state = json.loads(path.read_text())
+                if state.get("scope") != scope or state.get("pod_ids"):
+                    continue
+                other = _Rental.from_state(state)
+            except (OSError, ValueError, AttributeError, KeyError, TypeError):
+                continue  # gone meanwhile (settled), or unreadable
+            other.last_error = ("another running Lium MCP server (another session) sent this rent and is settling "
+                                "it; rent_pod is refused here until it does")
+            found.append(other)
+        return found
 
     def save(self, rental: _Rental) -> None:
         """Raises if the record cannot be written."""
@@ -414,7 +423,8 @@ class LiumTools:
                     # calls cannot both find nothing and both rent
                     recovered = self._hand_off_recovered(rental)
                     recovered += self._unacknowledged(exclude=rental.handed)
-                    unresolved = list(self._unresolved) + list(self._store.held_elsewhere)
+                    # read now, not at the last reconcile: another server may have sent a rent since
+                    unresolved = list(self._unresolved) + self._unanswered_elsewhere()
                     renting = [r for r in self._in_flight if r is not rental]
                     if not (recovered or unresolved or renting or self._recovered or rental.cancelled):
                         self._in_flight.append(rental)
@@ -729,6 +739,13 @@ class LiumTools:
                         self._store.forget(rental)
                 self._cleanup.notify_all()
                 return list(self._unresolved)
+
+    def _unanswered_elsewhere(self) -> List[_Rental]:
+        try:
+            scope = self._scope()
+        except Exception:  # noqa: BLE001 - no client yet (e.g. no API key): nothing can be rented anyway
+            return []
+        return self._store.unanswered_elsewhere(scope)
 
     def _adopt(self) -> None:
         """Take this account's journals that no live server holds, before any rental is admitted (rent_pod

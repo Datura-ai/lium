@@ -880,6 +880,31 @@ def test_a_running_server_never_adopts_another_running_servers_rental(monkeypatc
     assert second.rent_pod("node-b", "other-job", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-2"
 
 
+def test_a_rent_another_server_sends_after_this_ones_reconcile_still_blocks_it(monkeypatch, rental_state_dir):
+    """Admission reads the journals at that moment, not as of the reconcile just before it."""
+    monkeypatch.setattr(sys.modules[__name__], "_SERVERS_STAY_LIVE", [True])
+    sdk = _real_sdk(monkeypatch, [_no_answer(), _no_answer()])
+    _real_tools(sdk).rent_pod("node-a", "job", template_id="tpl-1")
+    journal = rental_state_dir / f"{sdk.posts[0]}.json"
+    written = journal.read_bytes()
+    journal.unlink()  # not there yet when the second server reconciles
+
+    other = _real_sdk(monkeypatch, [_Answer(201, {"id": "pod-2"})])
+    second = _real_tools(other)
+    second.CLEANUP_WAIT_SECONDS = 0.05
+    reconcile = second._reconcile
+
+    def reconcile_then_the_other_server_sends(*args, **kwargs):
+        unresolved = reconcile(*args, **kwargs)
+        journal.write_bytes(written)  # the other server journals its rent right after
+        return unresolved
+
+    monkeypatch.setattr(second, "_reconcile", reconcile_then_the_other_server_sends)
+    refused = second.rent_pod("node-b", "other-job", template_id="tpl-1", timeout_seconds=0)
+
+    assert refused["error"]["code"] == "cleanup_pending" and other.posts == []
+
+
 def test_a_server_started_while_its_predecessor_finished_a_rent_adopts_the_journal_once_it_exits(
     monkeypatch, rental_state_dir
 ):
