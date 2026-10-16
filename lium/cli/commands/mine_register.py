@@ -44,6 +44,7 @@ OFFLINE_CONFIRM_S = 60.0
 """How long OFFLINE has to persist before it is reported as the fix (one refresh of the backend's ping flag)."""
 
 _SS58 = re.compile(r"[1-9A-HJ-NP-Za-km-z]{40,60}")
+_NODE_CLAIM = re.compile(r"[0-9a-f]{16,128}")
 _IPV4 = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
 
 # what the portal answers on the two 400s a first-time provider can hit (apps/portal/backend executor_service.py)
@@ -67,6 +68,9 @@ class RegisterToken:
     the claim."""
     exp: int | None
     opt_in_status: bool | None
+    node_claim: str | None = None
+    """``MINER_ACCOUNT_CLAIM`` for the executor's ``.env``: the token's ``node_claim``. Every custodied node reports the
+    same pool hotkey, so the portal adds a pool-hotkey node only to the account whose claim it reports."""
 
     def seconds_left(self, now: int | None = None) -> int | None:
         if self.exp is None:
@@ -117,12 +121,17 @@ def parse_register_token(token: str, *, now: int | None = None) -> RegisterToken
             "and copy the new command."
         )
     opt_in = subject.get("opt_in_status")
+    # it goes into .env verbatim, so only a plain hex value; anything else is left out and Add Node says why
+    node_claim = subject.get("node_claim")
+    if not isinstance(node_claim, str) or not _NODE_CLAIM.fullmatch(node_claim):
+        node_claim = None
     return RegisterToken(
         token=token,
         miner_hotkey=account,
         node_hotkey=node_hotkey,
         exp=exp,
         opt_in_status=opt_in if isinstance(opt_in, bool) else None,
+        node_claim=node_claim,
     )
 
 

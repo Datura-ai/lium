@@ -498,7 +498,7 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180):
 
 def _apply_env_overrides(
     executor_dir: Path,
-    internal: str, external: str, ssh: str, ssh_pub: str, rng: str
+    internal: str, external: str, ssh: str, ssh_pub: str, rng: str, account_claim: str | None = None
 ):
     env_f = executor_dir / ".env"
     content = env_f.read_text().splitlines()
@@ -519,6 +519,8 @@ def _apply_env_overrides(
     set_or_append("SSH_PUBLIC_PORT", ssh_pub or ssh)
     if rng:
         set_or_append("RENTING_PORT_RANGE", rng)
+    if account_claim:
+        set_or_append("MINER_ACCOUNT_CLAIM", account_claim)
     env_f.write_text("\n".join(content) + "\n")
 
 def _gather_inputs(
@@ -915,6 +917,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 ssh=answers["ssh_port"],
                 ssh_pub=answers["ssh_public_port"],
                 rng=answers["port_range"],
+                account_claim=token.node_claim if token else None,
             )
 
             # A taken host port makes `docker compose up` loop on
