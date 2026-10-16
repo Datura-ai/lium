@@ -104,6 +104,29 @@ WALLET_NOT_SUPPORTED = _error_body(
         "dashboard_url": BILLING,
     },
 )
+# lium-platform#912: a risk step-up (or a bank asking for authentication) leaves the payment open and answers
+# the URL the cardholder confirms at, and the row id; the body does not echo the idempotency key
+STEP_UP_URL = "https://hooks.stripe.com/3d_secure_2/hosted?merchant=acct_1&payment_intent=pi_3StepUp"
+STEP_UP_TRANSACTION = "5d0c2a8e-7b1f-5c3e-9a4d-2e6f8b1c0d3a"
+STEP_UP = _error_body(
+    402,
+    {
+        "code": "CARD_AUTHENTICATION_REQUIRED",
+        "message": "This payment needs the cardholder to confirm it with their bank (3-D Secure). Open "
+        "next_action_url, or hand it to the cardholder; the balance is credited seconds after they confirm, with "
+        "no further call. A repeat with the same idempotency_key answers this URL again and cannot charge twice.",
+        "hint": "Hand next_action_url to the cardholder and wait for the balance; do not retry with a new "
+        "idempotency_key (that opens a second payment). The same key answers this URL again.",
+        "status": "requires_action",
+        "payment_intent_id": "pi_3StepUp",
+        "transaction_id": STEP_UP_TRANSACTION,
+        "next_action_url": STEP_UP_URL,
+        "step_up_reasons": ["velocity_count"],
+        "dashboard_url": BILLING,
+    },
+    hint="Hand next_action_url to the cardholder and wait for the balance; do not retry with a new "
+    "idempotency_key (that opens a second payment). The same key answers this URL again.",
+)
 # the platform's 403 for a key without the scope: `require_api_key_scope` (utils/auth.py), which
 # errors/codes.py classifies as `forbidden`
 SCOPE_MISSING_MESSAGE = "API key 'agent' does not have the 'billing' scope"
@@ -295,20 +318,64 @@ def test_a_server_error_is_sent_once_and_is_an_unknown_outcome_carrying_the_key(
     assert "may have gone through" in str(raised.value)
 
 
+@pytest.mark.parametrize(
+    ("prior", "status", "code", "expected"),
+    [
+        (None, 502, "STRIPE_UNAVAILABLE", LiumServerError),
+        (None, 503, "TOP_UP_BUSY", LiumChargeOutcomeUnknownError),
+        ("step_up", 503, "TOP_UP_BUSY", LiumChargeOutcomeUnknownError),
+        ("timeout", 503, "TOP_UP_BUSY", LiumChargeOutcomeUnknownError),
+    ],
+)
 @responses.activate
-def test_a_502_before_the_card_is_touched_is_a_server_error_not_an_unknown_outcome(client):
-    """`STRIPE_UNAVAILABLE` is a retrieve/list failure: nothing was charged, so this is not exit 6."""
+def test_a_5xx_before_the_card_is_touched_is_a_server_error_not_an_unknown_outcome(
+    client, prior, status, code, expected
+):
+    """`STRIPE_UNAVAILABLE` is a retrieve/list failure: nothing was charged, so it is not exit 6. A busy
+    submission pool (`TOP_UP_BUSY`) only says this attempt submitted nothing: a same-key repeat after an
+    open step-up or a lost answer can still find the earlier payment going through, so it stays an
+    unknown outcome that carries the key."""
+    if prior:
+        if prior == "step_up":
+            responses.post(TOPUP, status=402, json=STEP_UP)
+        else:
+            responses.post(TOPUP, body=requests.exceptions.ReadTimeout())
+        with pytest.raises(LiumError):
+            client.topup_card(50, idempotency_key="nightly-1")
+
     responses.post(
         TOPUP,
-        status=502,
-        json=_error_body(502, {"code": "STRIPE_UNAVAILABLE", "message": "Stripe is unavailable; nothing was charged."}),
+        status=status,
+        json=_error_body(status, {"code": code, "message": "Busy"}),
     )
-
-    with pytest.raises(LiumServerError) as raised:
+    with pytest.raises(expected) as raised:
         client.topup_card(50, idempotency_key="nightly-1")
 
-    assert raised.value.code == "STRIPE_UNAVAILABLE"
-    assert len(responses.calls) == 1
+    if expected is LiumChargeOutcomeUnknownError:
+        assert raised.value.idempotency_key == "nightly-1"
+    else:
+        assert raised.value.code == code
+    assert len(responses.calls) == 1 + bool(prior)
+
+
+@pytest.mark.parametrize(
+    "amount",
+    [50.0, 10.5, 12.34, 10.0049999, 12.3449999, 999999.9849999, 0.1 + 0.2],
+)
+def test_the_printed_retry_amount_is_the_same_charge_in_cents(amount):
+    """The re-run printed after a step-up must send the amount the backend rounds to the same cents
+    (decimal half-up on str(float)); a shortened "10.005" for 10.0049999 would charge a cent more under
+    a different Stripe key, i.e. a second payment."""
+    from decimal import ROUND_HALF_UP, Decimal
+
+    def cents(value):
+        return int(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) * 100)
+
+    command = topup_module.card_retry_command(amount, None, "nightly-1")
+    printed = command.split(" -a ", 1)[1].split(" ", 1)[0]
+
+    assert float(printed) == amount
+    assert cents(float(printed)) == cents(amount)
 
 
 def test_a_nan_amount_is_refused_before_any_request(client):
@@ -333,6 +400,103 @@ def test_a_read_timeout_is_an_unknown_outcome_carrying_the_generated_key(client)
     sent = json.loads(responses.calls[0].request.body)["idempotency_key"]
     assert raised.value.idempotency_key == sent and len(sent) == 32
     assert raised.value.__cause__.__class__ is requests.exceptions.ReadTimeout
+
+
+@responses.activate
+def test_a_step_up_carries_the_url_the_transaction_and_the_generated_key(client):
+    """lium-platform#912: the step-up 402 leaves the payment open. The error keeps `next_action_url` and
+    `transaction_id` from the body, and the key the SDK made (the body does not echo it): a repeat must carry
+    that key, since a new one opens a second payment."""
+    responses.post(TOPUP, json=STEP_UP, status=402)
+
+    with pytest.raises(LiumCardTopUpError) as raised:
+        client.topup_card(50)
+
+    error = raised.value
+    sent = json.loads(responses.calls[0].request.body)["idempotency_key"]
+    assert error.code == "CARD_AUTHENTICATION_REQUIRED"
+    assert error.is_step_up
+    assert error.next_action_url == STEP_UP_URL
+    assert error.transaction_id == STEP_UP_TRANSACTION
+    assert error.idempotency_key == sent and len(sent) == 32
+    assert error.status == "requires_action"
+    assert error.payment_intent_id == "pi_3StepUp"
+    assert "3-D Secure" in str(error)
+
+
+@responses.activate
+def test_a_step_up_keeps_the_callers_key(client):
+    responses.post(TOPUP, json=STEP_UP, status=402)
+
+    with pytest.raises(LiumCardTopUpError) as raised:
+        client.topup_card(50, idempotency_key="nightly-1")
+
+    assert raised.value.idempotency_key == "nightly-1"
+    assert raised.value.is_step_up
+
+
+@responses.activate
+def test_a_decline_is_final_and_still_names_the_key_it_was_sent_with(client):
+    responses.post(TOPUP, json=DECLINED, status=402)
+
+    with pytest.raises(LiumCardTopUpError) as raised:
+        client.topup_card(50, idempotency_key="nightly-1")
+
+    error = raised.value
+    assert error.code == "CARD_DECLINED"
+    assert not error.is_step_up
+    assert error.next_action_url is None
+    assert error.transaction_id is None
+    assert error.idempotency_key == "nightly-1"
+
+
+@responses.activate
+def test_authentication_required_without_a_url_is_not_a_step_up(client):
+    """The older 402 (no `next_action_url`) is final: nothing is open, a new key is right."""
+    responses.post(TOPUP, json=AUTHENTICATION_REQUIRED, status=402)
+
+    with pytest.raises(LiumCardTopUpError) as raised:
+        client.topup_card(50)
+
+    assert raised.value.code == "CARD_AUTHENTICATION_REQUIRED"
+    assert not raised.value.is_step_up
+    assert raised.value.idempotency_key == json.loads(responses.calls[0].request.body)["idempotency_key"]
+
+
+@pytest.mark.parametrize(
+    "code", ["CARD_AUTHENTICATION_NOT_COMPLETED", "CARD_AUTHENTICATION_UNAVAILABLE", "CARD_AUTHENTICATION_EXPIRED"]
+)
+@responses.activate
+def test_the_final_3ds_codes_are_card_topup_errors(client, code):
+    responses.post(
+        TOPUP,
+        status=402,
+        json=_error_body(402, {"code": code, "message": "Nothing was charged.", "status": "failed",
+                               "payment_intent_id": "pi_3Auth", "dashboard_url": BILLING}),
+    )
+
+    with pytest.raises(LiumCardTopUpError) as raised:
+        client.topup_card(50, idempotency_key="nightly-1")
+
+    assert raised.value.code == code
+    assert not raised.value.is_step_up
+    assert raised.value.idempotency_key == "nightly-1"
+
+
+@responses.activate
+def test_a_step_up_then_the_same_key_returns_the_charge(client):
+    """The success path after the cardholder confirmed: the repeat with the error's key is the same payment."""
+    responses.post(TOPUP, json=STEP_UP, status=402)
+    responses.post(TOPUP, json={**CHARGED, "transaction_id": STEP_UP_TRANSACTION, "idempotency_key": None})
+
+    with pytest.raises(LiumCardTopUpError) as raised:
+        client.topup_card(50)
+    result = client.topup_card(50, idempotency_key=raised.value.idempotency_key)
+
+    first, second = (json.loads(call.request.body)["idempotency_key"] for call in responses.calls)
+    assert first == second == raised.value.idempotency_key
+    assert result["status"] == "succeeded"
+    assert result["transaction_id"] == STEP_UP_TRANSACTION
 
 
 # -- CLI
@@ -360,7 +524,7 @@ class _FakeLium:
         return self.balance_value
 
 
-def _card_error(body):
+def _card_error(body, idempotency_key=None):
     detail = body["message"]
     return LiumCardTopUpError(
         detail["message"],
@@ -371,6 +535,9 @@ def _card_error(body):
         decline_code=detail.get("decline_code"),
         dashboard_url=detail.get("dashboard_url"),
         payment_intent_id=detail.get("payment_intent_id"),
+        transaction_id=detail.get("transaction_id"),
+        next_action_url=detail.get("next_action_url"),
+        idempotency_key=idempotency_key,
     )
 
 
@@ -628,6 +795,70 @@ def test_authentication_required_json_envelope_carries_the_structured_fields(fak
         "payment_intent_id": "pi_3Auth",
         "request_id": "req-1",
     }
+
+
+def test_a_step_up_prints_the_url_and_the_retry_command_with_the_same_key(fake_lium):
+    """The step-up leaves the payment open: the text names the URL, the transaction and the exact repeat with
+    the key the charge went out under, and says not to use a new one. Exit 6, not 3 ("retry")."""
+    key = "run-2026-10-12"
+    fake_lium.charge = _card_error(STEP_UP, idempotency_key=key)
+
+    result = _run("-a", "50")
+
+    assert result.exit_code == EXIT_PERMISSION_DENIED, result.output
+    text = _text(result)
+    # Rich folds the long URL at the runner's 80 columns
+    assert f"Completeitat:{STEP_UP_URL}" in "".join(result.output.split())
+    assert f"Transaction: {STEP_UP_TRANSACTION}" in text
+    assert f"Idempotency key: {key}" in text
+    assert f"lium topup card -a 50 --idempotency-key {key} --yes" in text
+    assert "do not retry with a new --idempotency-key" in text
+    assert "Charged" not in result.output
+    assert fake_lium.calls == [(50.0, None, None)]
+
+
+def test_a_step_up_json_carries_the_url_the_transaction_and_the_same_key(fake_lium):
+    fake_lium.charge = _card_error(STEP_UP, idempotency_key="nightly-1")
+
+    result = _run("-a", "12.5", "--card", "pm_1Card", "--idempotency-key", "nightly-1", "--json")
+
+    assert result.exit_code == EXIT_PERMISSION_DENIED
+    assert result.stdout == ""
+    payload = json.loads(result.stderr)
+    assert payload["error"]["code"] == "CARD_AUTHENTICATION_REQUIRED"
+    assert payload["data"]["next_action_url"] == STEP_UP_URL
+    assert payload["data"]["transaction_id"] == STEP_UP_TRANSACTION
+    assert payload["data"]["idempotency_key"] == "nightly-1"
+    assert payload["data"]["amount_usd"] == 12.5
+    retry = "lium topup card -a 12.5 --card pm_1Card --idempotency-key nightly-1 --yes"
+    assert retry in payload["error"]["message"]
+    assert retry in payload["error"]["hint"]
+    assert "new --idempotency-key" in payload["error"]["hint"]
+    assert fake_lium.calls == [(12.5, "pm_1Card", "nightly-1")]
+
+
+def test_a_step_up_retry_command_quotes_a_key_for_the_shell(fake_lium):
+    fake_lium.charge = _card_error(STEP_UP, idempotency_key="run 1;rm")
+
+    payload = json.loads(_run("-a", "50", "--json").stderr)
+
+    assert "--idempotency-key 'run 1;rm' --yes" in payload["error"]["hint"]
+
+
+@pytest.mark.parametrize(
+    "code", ["CARD_AUTHENTICATION_NOT_COMPLETED", "CARD_AUTHENTICATION_UNAVAILABLE", "CARD_AUTHENTICATION_EXPIRED"]
+)
+def test_the_final_3ds_codes_exit_3_with_a_new_key_hint(fake_lium, code):
+    fake_lium.charge = LiumCardTopUpError("Nothing was charged.", code=code, status="failed", idempotency_key="k-1")
+
+    result = _run("-a", "50", "--json")
+
+    assert result.exit_code == EXIT_API_ERROR
+    payload = json.loads(result.stderr)
+    assert payload["error"]["code"] == code
+    assert payload["error"]["hint"] == topup_module._CARD_HINTS[code]
+    assert "new --idempotency-key" in payload["error"]["hint"]
+    assert "next_action_url" not in payload["data"]
 
 
 def test_a_decline_prints_the_banks_reason(fake_lium):

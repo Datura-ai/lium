@@ -82,7 +82,7 @@ def billing_command():
 @click.option(
     "--key", "api_key", metavar="NAME|ID",
     help="Only the pods rented through this API key (GET /billing/statement?api_key_id=…; needs a server that stamps "
-         "charges with their key — not on lium.io yet; an older server answers for every pod and the CLI says so). "
+         "charges with their key; an older server answers for every pod and the CLI says so). "
          "A name needs `lium workspaces login`; an id does not",
 )
 @click.option(
@@ -99,10 +99,10 @@ def billing_history_command(
     """What each pod was charged, from the ledger (`GET /billing/statement`), most recently billed first.
 
     Every pod the account paid for in the period, removed pods included; a pod's Total is the sum of its
-    per-day ledger rows — the figure the balance was debited, unlike `lium spend`'s estimate. The key needs
-    the `read` scope. `--format json` prints the server's statement: `total` and `pods`, each with its `days`;
-    with `--key` also `api_key_filter` (`applied: false` when the server could not filter and the figures are
-    the whole account's).
+    ledger rows (a UTC day can have more than one) — the figure the balance was debited, unlike `lium spend`'s
+    estimate. The key needs the `read` scope. `--format json` prints the server's statement: `total` and
+    `pods`, each with its `days`; with `--key` also `api_key_filter` (`applied: false` when the server could
+    not filter and the figures are the whole account's).
 
     \b
     Examples:

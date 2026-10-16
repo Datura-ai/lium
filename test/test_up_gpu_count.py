@@ -619,3 +619,45 @@ def test_rent_pod_action_threads_gpu_count():
 
     assert result.ok
     assert captured["gpu_count"] == 1
+
+
+@pytest.mark.parametrize("initial,actual", [
+    (a, b) for a in range(4) for b in range(4)
+])
+@pytest.mark.parametrize("yes", [False, True])
+def test_up_warns_before_renting_a_spot_node_with_a_reduced_power_limit(
+    monkeypatch, initial, actual, yes
+):
+    # risk bits: 1 = Spot, 2 = reduced power; a --gpu rent reselects, so the rented node may differ
+    first, rented = _executor(8), _executor(8)
+    for node, risk in ((first, initial), (rented, actual)):
+        vars(node).update(
+            tier="spot" if risk & 1 else "secure",
+            gpu_power_limited=bool(risk & 2),
+            gpu_power_limit_w=410 if risk & 2 else 450,
+            gpu_power_limit_default_w=450,
+        )
+
+    warnings = []
+    monkeypatch.setattr(up_module.ui, "notice_warning", warnings.append)
+    monkeypatch.setattr(up_module.ui, "confirm", lambda *a, **k: True)
+    monkeypatch.setattr(_FakeLium, "supports", lambda *a: True)
+
+    def rent(self, **kwargs):
+        dry = kwargs.get("dry_run", False)
+        if not dry:
+            text = " ".join(warnings)
+            if actual & 1:
+                assert "Spot" in text
+            if actual & 2:
+                assert "reduced power limit" in text
+        return SimpleNamespace(
+            executor=first if dry else rented,
+            price_per_hour=64.0, gpu_count=8,
+            candidates=2, template_id=None,
+            pod=None if dry else {"id": "pod-uuid-1234"},
+        )
+
+    monkeypatch.setattr(_FakeLium, "rent", rent, raising=False)
+    result = _run_up(monkeypatch, "-c", "8", yes=yes)
+    assert result.exit_code == 0, result.output

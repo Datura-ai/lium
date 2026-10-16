@@ -227,7 +227,7 @@ def test_rental_that_failed_before_the_rent_post_leaves_a_concurrent_same_name_p
     client = _LookupFails(ps_sequence=[[], [other]])
 
     with pytest.raises(LiumError, match="Could not look up template"):
-        with client.rental(executor_id="exec-1", template_id="tpl-x"):
+        with client.rental(executor_id="exec-1", template_id="tpl-x", ssh_keys=["ssh-ed25519 AAA"]):
             pass
 
     assert not [c for c in client.calls if c[0] == "DELETE"]
@@ -282,8 +282,9 @@ class _Stream:
         self.channel = channel
         self.written = b""
 
-    def read(self):
-        return self._text.encode()
+    def read(self, size=-1):
+        data, self._text = self._text.encode(), ""
+        return data
 
     def write(self, data):
         self.written += data
