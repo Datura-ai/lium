@@ -810,76 +810,27 @@ def test_a_rental_is_not_replayed_where_its_key_would_be_a_new_rent(monkeypatch,
     assert list(rental_state_dir.glob("*.json"))
 
 
-def test_deleting_the_journal_as_last_error_says_lifts_the_rent_block_on_a_running_server(monkeypatch, rental_state_dir):
-    sdk = _real_sdk(monkeypatch, [_no_answer(), _no_answer()])
-    submitted = time.time()
-    _real_tools(sdk).rent_pod("node-a", "job", template_id="tpl-1")
-    other = _real_sdk(monkeypatch, [_Answer(201, {"id": "pod-2"})])
-    monkeypatch.setattr(time, "time", lambda: submitted + 86_401)  # too old to replay: the user settles it by hand
-    tools = _real_tools(other)
-
-    blocked = tools.rent_pod("node-b", "job-2", template_id="tpl-1")
-    (unresolved,) = tools.list_pods()["unresolved_rentals"]
-    (journal,) = rental_state_dir.glob("*.json")
-    assert blocked["ok"] is False and str(journal) in unresolved["last_error"]
-
-    journal.unlink()  # what last_error tells the agent to do once it has checked the pods
-
-    assert tools.rent_pod("node-b", "job-2", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-2"
-    assert tools._unresolved == [] and other.posts  # no restart needed
-
-
-def test_a_journal_deleted_while_the_first_request_may_still_rent_keeps_blocking(monkeypatch, rental_state_dir):
-    """Without idempotent rents nothing replays; the hand settlement waits until the first request cannot create a
-    pod any more, or an empty listing taken too early would let a second pod be rented."""
-    sdk = _real_sdk(monkeypatch, [_no_answer(), _no_answer(), _Answer(201, {"id": "pod-2"})], features=())
-    submitted = time.time()
-    tools = _real_tools(sdk)
-    tools.rent_pod("node-a", "job", template_id="tpl-1")
-
-    (unresolved,) = tools.list_pods()["unresolved_rentals"]
-    assert "wait until" in unresolved["last_error"]
-    (journal,) = rental_state_dir.glob("*.json")
-    journal.unlink()  # too early
-
-    assert tools.rent_pod("node-b", "job-2", template_id="tpl-1")["ok"] is False
-    assert journal.exists() and len(sdk.posts) == 2  # written back for a restart; nothing new sent
-
-    monkeypatch.setattr(time, "time", lambda: submitted + tools_module.SETTLE_BY_HAND_AFTER_SECONDS + 1)
-    (unresolved,) = tools.list_pods()["unresolved_rentals"]
-    assert "wait until" not in unresolved["last_error"]
-    journal.unlink()
-
-    assert tools.rent_pod("node-b", "job-2", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-2"
-
-    # the first rent lands even later after all: its pod is still reported, never silently billing
-    monkeypatch.setattr(sdk, "ps", lambda: [_pod("pod-late", "job"), _pod("pod-2", "job-2")])
-    (late,) = tools.list_pods()["pods_from_settled_rentals"]
-    assert late["name"] == "job" and late["pod_ids"] == ["pod-late"]
-
-
-def test_a_journal_deleted_while_a_replay_can_still_answer_keeps_blocking(monkeypatch, rental_state_dir):
-    """The API's answer to a replay, not the user's deletion, settles a rental while its key is kept."""
+@pytest.mark.parametrize("replayable", [True, False], ids=["replay-answers-unknown", "too-old-to-replay"])
+def test_deleting_the_journal_never_lifts_the_rent_block(monkeypatch, rental_state_dir, replayable):
+    """Only the API's answer settles an unanswered rent; while nothing can, no second rent is sent beside it."""
     unknown = _stored(409, {"error": {"code": "idempotency_outcome_unknown", "message": "outcome unknown"}})
-    outcomes = [_no_answer(), _no_answer()] + [unknown] * 8
-    sdk = _real_sdk(monkeypatch, outcomes)
+    sdk = _real_sdk(monkeypatch, [_no_answer(), _no_answer()] + [unknown] * 8)
     submitted = time.time()
     tools = _real_tools(sdk)
     tools.rent_pod("node-a", "job", template_id="tpl-1")
+    if not replayable:
+        monkeypatch.setattr(time, "time", lambda: submitted + tools_module.REPLAY_WINDOW_SECONDS + 1)
 
-    monkeypatch.setattr(time, "time", lambda: submitted + tools_module.SETTLE_BY_HAND_AFTER_SECONDS + 1)
+    (unresolved,) = tools.list_pods()["unresolved_rentals"]
+    if not replayable:
+        assert "deleting its journal does not lift" in unresolved["last_error"]
     (journal,) = rental_state_dir.glob("*.json")
     journal.unlink()
     posts = len(sdk.posts)
 
     assert tools.rent_pod("node-b", "job-2", template_id="tpl-1")["ok"] is False
-    assert journal.exists() and all(p == sdk.posts[0] for p in sdk.posts[posts:])  # only replays, no new rent
-
-    # once the key is gone nothing can answer: the user's deletion settles it
-    monkeypatch.setattr(time, "time", lambda: submitted + tools_module.REPLAY_WINDOW_SECONDS + 1)
-    journal.unlink()
-    outcomes[:] = [_Answer(201, {"id": "pod-2"})]
-    assert tools.rent_pod("node-b", "job-2", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-2"
+    assert journal.exists() and all(p == sdk.posts[0] for p in sdk.posts[posts:])  # written back; no new rent sent
+    assert tools.list_pods()["unresolved_rentals"]
 
 
 def _windows_locking(monkeypatch):
