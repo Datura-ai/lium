@@ -668,6 +668,23 @@ def test_login_and_keys_work_on_a_server_without_workspaces(home):
 
 
 @responses.activate
+def test_login_and_keys_need_no_saved_api_key(home):
+    """DAH-4483: `POST /users/login` takes no key, and once signed in `lium keys` reads the account with the session."""
+    write_config(home, "")
+    me("users_me_off")
+    responses.add(responses.POST, f"{API}/users/login", json=fixture("login"))
+    responses.add(responses.GET, f"{API}/keys", json=[])
+
+    login = run("workspaces", "login", "--email", "ana@example.com", "--password-stdin", input="pw\n")
+    keys = run("keys", "list", "--json")
+
+    assert login.exit_code == 0, login.output
+    assert keys.exit_code == 0, keys.output
+    sent = [c.request.headers for c in responses.calls if not c.request.url.endswith("/users/login")]
+    assert sent and all(h["Authorization"] == "Bearer eyJ.fixture.session" and "X-API-KEY" not in h for h in sent)
+
+
+@responses.activate
 def test_login_without_a_terminal_asks_nothing_and_names_the_flags(home):
     """DAH-2883: a piped `lium workspaces login` never waits on the e-mail or password prompt."""
     me()

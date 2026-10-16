@@ -585,7 +585,7 @@ class ApiKeyInfo:
 
 @dataclass
 class ApiKeyRefusal:
-    """One row of ``GET /keys/{id}/refusals`` (server support pending): a request the key's budget
+    """One row of ``GET /keys/{id}/refusals``: a request the key's budget
     refused — when, which window was hit (``daily`` / ``monthly`` / ``max``), the route asked, the USD asked
     for, and the budget and spend at the time. ``raw`` is the server's row."""
 

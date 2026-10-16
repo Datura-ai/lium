@@ -45,6 +45,7 @@ class _FakeLium:
     exit_code: int = 0
     sent: list[tuple[str, str]] = []
     envs: list = []  # the env= each exec() call received, in order
+    limits: list = []  # the max_output_bytes= each exec() call received, in order
 
     def __init__(self, *args, **kwargs):
         pass
@@ -54,9 +55,10 @@ class _FakeLium:
 
     login_shell_env = Lium.login_shell_env
 
-    def exec(self, pod, command=None, env=None):
+    def exec(self, pod, command=None, env=None, max_output_bytes=None):
         _FakeLium.sent.append((pod.huid, command))
         _FakeLium.envs.append(env)
+        _FakeLium.limits.append(max_output_bytes)
         return {
             "success": self.exit_code == 0,
             "exit_code": self.exit_code,
@@ -64,8 +66,8 @@ class _FakeLium:
             "stderr": self.stderr,
         }
 
-    def exec_all(self, pods, command=None, env=None):
-        return [self.exec(pod, command=command, env=env) for pod in pods]
+    def exec_all(self, pods, command=None, env=None, max_output_bytes=None):
+        return [self.exec(pod, command=command, env=env, max_output_bytes=max_output_bytes) for pod in pods]
 
 
 @pytest.fixture
@@ -76,6 +78,7 @@ def fake_lium(monkeypatch):
     _FakeLium.exit_code = 0
     _FakeLium.sent = []
     _FakeLium.envs = []
+    _FakeLium.limits = []
     monkeypatch.setattr(exec_module, "Lium", _FakeLium)
     monkeypatch.setattr(exec_module, "detach_token", lambda now=None: TOKEN)
     return _FakeLium
@@ -302,3 +305,15 @@ def test_detached_execution_uses_stderr_as_the_error_when_there_is_no_pid():
 
     assert execution.succeeded is False
     assert execution.error == "boom"
+
+
+@pytest.mark.parametrize("targets", ["my-pod", "my-pod,other-pod"])
+def test_max_output_bytes_reaches_exec_and_exec_all(fake_lium, targets):
+    """``--max-output-bytes`` is forwarded on the single-pod and the multi-pod path; without it, the SDK default."""
+    from lium.sdk.client import DEFAULT_MAX_OUTPUT_BYTES
+
+    fake_lium.pods = [_pod(), _pod("calm-fox-bb", "other-pod")]
+    assert _run([targets, "--max-output-bytes", "1000", "true"]).exit_code == 0
+    assert _run([targets, "true"]).exit_code == 0
+    count = len(targets.split(","))
+    assert fake_lium.limits == [1000] * count + [DEFAULT_MAX_OUTPUT_BYTES] * count

@@ -134,7 +134,9 @@ class Config:
     ssh_key_source: Optional[str] = None
 
     @classmethod
-    def load(cls, workspace: Optional[str] = None, *, key_for_workspace: bool = True) -> "Config":
+    def load(
+        cls, workspace: Optional[str] = None, *, key_for_workspace: bool = True, require_key: bool = True
+    ) -> "Config":
         """Load config from env/file with smart defaults.
 
         An explicitly requested workspace (``workspace=`` or LIUM_WORKSPACE) means the key saved for
@@ -150,6 +152,9 @@ class Config:
         default, else ``[api] api_key`` — so ``lium keys create … --save`` and
         ``LIUM_API_KEY=… lium workspaces use …``, the remedies for a missing key, work with LIUM_WORKSPACE
         exported, and ``lium -w W workspaces members`` reads with W's key when one is saved.
+
+        ``require_key=False`` leaves ``api_key`` None instead of raising: a password login, and the
+        session-only commands once signed in, need no API key.
         """
         file_config = _read_config_file()
         requested = workspace or os.getenv("LIUM_WORKSPACE") or None
@@ -183,7 +188,7 @@ class Config:
                 api_key = file_config.get("api", "api_key", fallback=None)
                 source = f"config:{config_file_path()} [api] api_key"
 
-        if not api_key:
+        if not api_key and require_key:
             raise ValueError(f"No API key found. Set {API_KEY_ENV_VAR} or {config_file_path()}")
 
         ssh_key, ssh_source = resolve_ssh_key_path()

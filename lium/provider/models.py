@@ -95,6 +95,11 @@ class UpdatePricePayload(BaseModel):
     price_per_gpu: float = Field(ge=0)
 
 
+class UpdateAddressPayload(BaseModel):
+    ip_address: str = Field(min_length=1, max_length=64)
+    port: int = Field(ge=1, le=65535)
+
+
 class UpdateGpuPayload(BaseModel):
     gpu_type: str = Field(min_length=1, max_length=64)
     gpu_count: int = Field(ge=1, le=64)
@@ -357,6 +362,7 @@ __all__ = [
     "SetMachineRequestSubscriptionPayload",
     "SetMinGpuCountForRentalPayload",
     "SetOptInRequest",
+    "UpdateAddressPayload",
     "UpdateGpuPayload",
     "UpdatePricePayload",
     "ValidatorWeight",
