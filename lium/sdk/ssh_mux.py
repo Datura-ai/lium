@@ -106,11 +106,15 @@ def _key_path(lium: Any) -> Optional[str]:
     return str(Path(key_path).expanduser()) if key_path else None
 
 
+def _pod_prefix(pod: PodInfo) -> str:
+    return hashlib.sha256(f"{pod.id}\0{pod.ssh_cmd}".encode()).hexdigest()[:12]
+
+
 def control_path(lium: Any, pod: PodInfo) -> Path:
     # the host-key policy and key are part of the name: a master opened under LIUM_SSH_INSECURE (or another key)
-    # is never reused once they change
-    digest = hashlib.sha256(f"{pod.id}\0{pod.ssh_cmd}\0{_key_path(lium)}\0{ssh_insecure()}".encode()).hexdigest()[:24]
-    return socket_dir() / digest
+    # is never reused once they change; the pod part comes first so stop() finds every variant
+    variant = hashlib.sha256(f"{_key_path(lium)}\0{ssh_insecure()}".encode()).hexdigest()[:12]
+    return socket_dir() / f"{_pod_prefix(pod)}{variant}"
 
 
 class ControlMaster:
@@ -212,9 +216,14 @@ class ControlMaster:
         }
 
     def stop(self) -> None:
-        if socket_is_ours(self.path):
-            subprocess.run(self._argv("-O", "exit"), stdin=subprocess.DEVNULL,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        """Close the pod's masters under every key and host-key policy, not only this client's: an API-only client
+        (no saved key) must still close the one ``lium exec`` opened with the saved key."""
+        own = f'ControlPath="{self.path}"'
+        for path in socket_dir().glob(_pod_prefix(self.pod) + "?" * 12):
+            if socket_is_ours(path):
+                argv = [f'ControlPath="{path}"' if a == own else a for a in self._argv("-O", "exit")]
+                subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=10)
 
 
 def _capture(argv: List[str], stdin: bytes, max_output_bytes: int) -> Tuple[int, bytes, bytes, bool]:

@@ -336,6 +336,23 @@ def test_editing_a_pod_closes_its_master(home, monkeypatch):
     assert any("exit" in argv for argv, _ in ssh.calls) and not ssh.live
 
 
+def test_an_api_only_client_editing_a_pod_closes_the_master_lium_exec_opened(home, monkeypatch):
+    ssh = _Ssh(live=True)
+    ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
+    opened = ssh_mux.control_path(_lium(home), _pod())
+    opened.touch()
+    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
+    api_only = Lium(Config(api_key="test-key"))
+    rows = {"/pods/pod-1": {"id": "pod-1", "ssh_connect_cmd": _pod().ssh_cmd, "template": {"id": "t1"}},
+            "/templates/t1": {"id": "t1"}}
+    monkeypatch.setattr(api_only, "_request", lambda method, endpoint, **k: SimpleNamespace(json=lambda: rows.get(endpoint, {})))
+
+    api_only.edit("pod-1", startup_commands="python main.py")
+
+    exits = [argv for argv, _ in ssh.calls if "exit" in argv]
+    assert [f'ControlPath="{opened}"' in argv for argv in exits] == [True]
+
+
 # -- lium exec ------------------------------------------------------------------------------------
 
 
