@@ -829,6 +829,30 @@ def test_deleting_the_journal_as_last_error_says_lifts_the_rent_block_on_a_runni
     assert tools._unresolved == [] and other.posts  # no restart needed
 
 
+def test_a_journal_deleted_while_the_first_request_may_still_rent_keeps_blocking(monkeypatch, rental_state_dir):
+    """Without idempotent rents nothing replays; the hand settlement waits until the first request cannot create a
+    pod any more, or an empty listing taken too early would let a second pod be rented."""
+    sdk = _real_sdk(monkeypatch, [_no_answer(), _no_answer(), _Answer(201, {"id": "pod-2"})], features=())
+    submitted = time.time()
+    tools = _real_tools(sdk)
+    tools.rent_pod("node-a", "job", template_id="tpl-1")
+
+    (unresolved,) = tools.list_pods()["unresolved_rentals"]
+    assert "wait until" in unresolved["last_error"]
+    (journal,) = rental_state_dir.glob("*.json")
+    journal.unlink()  # too early
+
+    assert tools.rent_pod("node-b", "job-2", template_id="tpl-1")["ok"] is False
+    assert journal.exists() and len(sdk.posts) == 2  # written back for a restart; nothing new sent
+
+    monkeypatch.setattr(time, "time", lambda: submitted + tools_module.SETTLE_BY_HAND_AFTER_SECONDS + 1)
+    (unresolved,) = tools.list_pods()["unresolved_rentals"]
+    assert "wait until" not in unresolved["last_error"]
+    journal.unlink()
+
+    assert tools.rent_pod("node-b", "job-2", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-2"
+
+
 def _windows_locking(monkeypatch):
     """Run the store as on Windows: no fcntl, msvcrt.locking instead (emulated here with an flock of the same
     non-blocking semantics, since CI runs on Linux)."""

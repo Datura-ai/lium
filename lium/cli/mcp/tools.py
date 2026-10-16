@@ -286,6 +286,16 @@ REPLAY_WINDOW_SECONDS = 23 * 3600
 # lock). Later, a replay that rents is a pod nobody is told of, so it happens only in rent_pod/list_pods, whose
 # result names the pod at once.
 BACKGROUND_REPLAY_SECONDS = 600
+# A rental that cannot be replayed is settled by hand, but only once its first request can no longer create a pod
+# (twice the API's 300 s in-flight lock): a pod listing taken before that may simply not show it yet.
+SETTLE_BY_HAND_AFTER_SECONDS = 600
+
+
+def _settle_by_hand_from(rental: "_Rental") -> float:
+    """When the user may settle ``rental`` by hand (an epoch time; 0 when its send time is not known)."""
+    with rental.lock:
+        submitted_at = rental.submitted_at
+    return submitted_at + SETTLE_BY_HAND_AFTER_SECONDS if submitted_at is not None else 0.0
 
 
 def _unlisted_pod(pod_id: str, name: str) -> PodInfo:
@@ -745,8 +755,14 @@ class LiumTools:
                 return "done"
             scope = rental.scope
         if self._store.journaled(rental) and not self._store.path(rental).exists():
-            # the user deleted its journal, as last_error says, once they had checked its pods by hand
-            return "done"
+            if time.time() >= _settle_by_hand_from(rental):
+                # the user deleted its journal, as last_error says, once they had checked its pods by hand
+                return "done"
+            # deleted while the first request may still create a pod: keep blocking, and on disk for a restart
+            try:
+                self._store.save(rental)
+            except Exception:  # noqa: BLE001 - still blocked in memory; the next pass writes it again
+                pass
         if scope is not None and scope != self._scope():
             # restored from another API or account: neither replayed, removed nor handed over here
             with rental.lock:
@@ -810,6 +826,11 @@ class LiumTools:
         lift = (f"delete {self._store.path(rental)} to lift the rent block" if self._store.journaled(rental) else
                 "restart the Lium MCP server to lift the rent block (nothing of this rental is kept on disk)")
         manual = f"; check list_pods and same_name_pods_to_check, remove_pod what you do not want, then {lift}"
+        wait_until = _settle_by_hand_from(rental)
+        if time.time() < wait_until:
+            # until then the first request may still create a pod that no listing shows yet
+            manual = (f"; the first request may still create a pod until "
+                      f"{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(wait_until))}: wait until then{manual}")
         if error is None or not error.endpoint:
             return unresolved("the rent call's request was not kept, so it cannot be replayed" + manual)
         if scope != self._scope():
