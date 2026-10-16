@@ -271,9 +271,8 @@ class _RentalStore:
 
     def journals_elsewhere(self, scope: Dict[str, str]) -> List[_Rental]:
         """This account's journals, read now, that this server does not hold: another running server's rent whose
-        outcome is unknown, whose pod it has not handed to its host yet, or whose cancelled pod is not removed yet
-        (or an orphan not adopted yet). Never claimed, adopted or replayed here, but rent_pod is refused beside
-        them: a retry here would be a second pod. A pod already handed to the other host is that session's."""
+        outcome is unknown or whose pod its host has not acknowledged (or an orphan not adopted yet). Never claimed,
+        adopted or replayed here, but rent_pod is refused beside them: a retry here would be a second pod."""
         if self.directory is None or not self.directory.is_dir():
             return []
         found = []
@@ -285,14 +284,12 @@ class _RentalStore:
                 state = json.loads(path.read_text())
                 if state.get("scope") != scope:
                     continue
-                if state.get("pod_ids") and state.get("delivered") and not state.get("cancelled"):
-                    continue  # its host has the pod: only that session's own retries are answered with it
                 other = _Rental.from_state(state)
             except (OSError, ValueError, AttributeError, KeyError, TypeError):
                 continue  # gone meanwhile (settled), or unreadable
             other.last_error = (
                 f"another running Lium MCP session rented pod(s) {', '.join(sorted(other.pod_ids))} and has not yet "
-                "handed them to its host or removed them" if other.pod_ids else
+                "confirmed that its host received them" if other.pod_ids else
                 "another running Lium MCP session sent this rent and is settling it"
             ) + "; rent_pod is refused here until it does or that session ends (this server then takes it over)"
             found.append(other)
