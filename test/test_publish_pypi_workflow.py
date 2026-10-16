@@ -198,7 +198,7 @@ GUARD_CASES = [
     (environment([]), "no required reviewer"),
     ({"can_admins_bypass": False, "protection_rules": []}, "no required reviewer"),
     (environment([{"type": "Team", "reviewer": {"slug": "maintainers", "id": 7}}]), "a team is a required reviewer"),
-    (environment([user("alice", 1001)], prevent_self_review=False), "prevent_self_review is not true"),
+    (environment([user("alice", 1001)], prevent_self_review=False), None),  # DAH-4384: self-approval allowed
     (environment([user("alice", 1001)], can_admins_bypass=True), "can_admins_bypass is not false"),
     ({"protection_rules": environment([user("alice", 1001)])["protection_rules"]}, "can_admins_bypass is not false"),
     (None, "could not be read"),

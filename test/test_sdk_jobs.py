@@ -57,8 +57,9 @@ class _Stream:
         self.written = b""
         self.channel = SimpleNamespace(exit_status_ready=lambda: True, recv_exit_status=lambda: exit_code, close=lambda: None)
 
-    def read(self):
-        return self._text.encode()
+    def read(self, size=-1):
+        data, self._text = self._text.encode(), ""
+        return data
 
     def write(self, data):
         self.written += data

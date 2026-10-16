@@ -70,7 +70,7 @@ def test_explicit_public_ssh_port_is_kept(tmp_path: Path):
 
 
 def test_a_failed_step_exits_non_zero(monkeypatch):
-    monkeypatch.setattr(mine, "_gather_inputs", lambda hotkey, auto: {
+    monkeypatch.setattr(mine, "_gather_inputs", lambda hotkey, auto, *ports: {
         "hotkey": "5F" + "x" * 46, "internal_port": "8080", "external_port": "8080", "ssh_port": "2200",
         "ssh_public_port": "", "port_range": ""})
 
@@ -86,7 +86,7 @@ def test_a_failed_step_exits_non_zero(monkeypatch):
 def test_a_failed_step_prints_bracketed_tool_output_as_text(monkeypatch):
     """The failure text carries tool output verbatim (compose `ps -a`, log tails): a `[type=…]` token from a
     pydantic error or a `[/x]` is Rich markup and used to be eaten — or to raise MarkupError in place of the diagnosis."""
-    monkeypatch.setattr(mine, "_gather_inputs", lambda hotkey, auto: {
+    monkeypatch.setattr(mine, "_gather_inputs", lambda hotkey, auto, *ports: {
         "hotkey": "5F" + "x" * 46, "internal_port": "8080", "external_port": "8080", "ssh_port": "2200",
         "ssh_public_port": "", "port_range": ""})
 
@@ -100,3 +100,29 @@ def test_a_failed_step_prints_bracketed_tool_output_as_text(monkeypatch):
     assert result.exit_code == 1, result.output
     flat = " ".join(result.output.split())   # Rich wraps the panel at 80 columns
     assert "[type=int_parsing, input_value='', input_type=str]" in flat and "[/x]" in flat, result.output
+
+
+def _prereq_host(monkeypatch, runtimes: str):
+    monkeypatch.setattr(mine, "_exists", lambda cmd: True)
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: (runtimes if "Runtimes" in cmd else "", ""))
+
+
+@pytest.mark.parametrize(
+    "runtimes",
+    [
+        '{"runc":{"path":"runc"}}',
+        '{"custom-sysbox-runc":{"path":"/usr/bin/sysbox-runc"}}',
+        "not json",
+        '["sysbox-runc"]',
+    ],
+)
+def test_prereqs_fail_without_a_sysbox_runc_runtime_and_print_the_official_installer(monkeypatch, runtimes):
+    _prereq_host(monkeypatch, runtimes)
+    with pytest.raises(Exception) as err:
+        mine._check_prereqs()
+    assert mine._SYSBOX_SETUP_COMMAND in str(err.value)
+
+
+def test_prereqs_pass_with_sysbox(monkeypatch):
+    _prereq_host(monkeypatch, '{"runc":{"path":"runc"},"sysbox-runc":{"path":"/usr/bin/sysbox-runc"}}')
+    mine._check_prereqs()

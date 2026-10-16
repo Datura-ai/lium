@@ -63,11 +63,15 @@ def _is_expired(expires_at) -> bool:
 
 
 def _select_minted_key(api_keys: list) -> str | None:
-    # GET /keys lists dead keys too — a restored account can carry several rows named "Default"
+    # GET /keys lists dead keys too — a restored account can carry several rows named "Default". Since
+    # lium-platform#765 a billing key is listed as a prefix plus a mask (key_retrievable false): saving that
+    # string would 401 every call, and a key without the rent scope cannot rent anyway, so neither is taken.
     usable = [
         k for k in api_keys
         if isinstance(k, dict)
         and k.get("key")
+        and k.get("key_retrievable", True) is not False
+        and (not isinstance(k.get("scopes"), list) or "rent" in k["scopes"])
         and k.get("is_active", True)
         and not _is_expired(k.get("expires_at"))
     ]

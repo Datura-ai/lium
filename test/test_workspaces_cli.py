@@ -465,7 +465,6 @@ def test_workspaces_use_saves_the_key_it_runs_with_when_that_key_acts_there(home
 def test_the_remedies_for_a_missing_key_work_with_lium_workspace_exported(home, monkeypatch):
     monkeypatch.setenv("LIUM_WORKSPACE", "ops")  # no key saved for it: `ps` is refused, the team commands still run
     monkeypatch.setenv("LIUM_SESSION_TOKEN", "eyJ.fixture.session")
-    me()
     responses.add(responses.POST, f"{API}/users/login", json=fixture("login"))
     me()
     responses.add(responses.GET, f"{API}/workspaces", json=fixture("workspaces_session"))
@@ -482,7 +481,8 @@ def test_the_remedies_for_a_missing_key_work_with_lium_workspace_exported(home, 
     assert login.exit_code == 0, login.output
     assert created.exit_code == 0, created.output
     assert used.exit_code == 0, used.output
-    assert responses.calls[0].request.headers["X-API-KEY"] == "sk_test_default"  # the account's key, not one for 'ops'
+    first_me = next(c for c in responses.calls if c.request.url.endswith("/users/me"))
+    assert first_me.request.headers["X-API-KEY"] == "sk_test_default"  # the account's key, not one for 'ops'
 
 
 @responses.activate
@@ -640,14 +640,48 @@ def test_a_named_workspace_on_a_server_without_them_says_so_without_reading_work
 
 @responses.activate
 def test_login_keeps_the_session_token_in_config(home):
-    me()
     responses.add(responses.POST, f"{API}/users/login", json=fixture("login"))
 
     result = run("workspaces", "login", "--email", "ana@example.com", "--password-stdin", input="pw\n")
 
     assert result.exit_code == 0, result.output
     assert "[session]\ntoken = eyJ.fixture.session" in config_text(home)
-    assert json.loads(responses.calls[1].request.body) == {"email": "ana@example.com", "password": "pw"}
+    assert json.loads(responses.calls[0].request.body) == {"email": "ana@example.com", "password": "pw"}
+
+
+@responses.activate
+def test_login_and_keys_work_on_a_server_without_workspaces(home):
+    """lium.io has no workspaces yet, but `lium keys` is session-only there too: the login must not need them."""
+    me("users_me_off")
+    responses.add(responses.POST, f"{API}/users/login", json=fixture("login"))
+    responses.add(responses.GET, f"{API}/keys", json=[])
+
+    login = run("workspaces", "login", "--email", "ana@example.com", "--password-stdin", input="pw\n")
+    keys = run("keys", "list", "--json")
+
+    assert login.exit_code == 0, login.output
+    assert "[session]\ntoken = eyJ.fixture.session" in config_text(home)
+    assert keys.exit_code == 0, keys.output
+    listed = next(c for c in responses.calls if c.request.url.endswith("/keys"))
+    assert listed.request.headers["Authorization"] == "Bearer eyJ.fixture.session"
+    assert "X-Lium-Workspace-Id" not in listed.request.headers
+
+
+@responses.activate
+def test_login_and_keys_need_no_saved_api_key(home):
+    """DAH-4483: `POST /users/login` takes no key, and once signed in `lium keys` reads the account with the session."""
+    write_config(home, "")
+    me("users_me_off")
+    responses.add(responses.POST, f"{API}/users/login", json=fixture("login"))
+    responses.add(responses.GET, f"{API}/keys", json=[])
+
+    login = run("workspaces", "login", "--email", "ana@example.com", "--password-stdin", input="pw\n")
+    keys = run("keys", "list", "--json")
+
+    assert login.exit_code == 0, login.output
+    assert keys.exit_code == 0, keys.output
+    sent = [c.request.headers for c in responses.calls if not c.request.url.endswith("/users/login")]
+    assert sent and all(h["Authorization"] == "Bearer eyJ.fixture.session" and "X-API-KEY" not in h for h in sent)
 
 
 @responses.activate
@@ -663,16 +697,6 @@ def test_login_without_a_terminal_asks_nothing_and_names_the_flags(home):
     assert no_password.exit_code == 2 and "Input required: Password" in no_password_text
     assert "--password-stdin" in no_password_text
     assert not any(c.request.url.endswith("/users/login") for c in responses.calls)  # nothing was sent
-
-
-@responses.activate
-def test_login_on_a_server_without_workspaces_says_so_and_sends_no_password(home):
-    me("users_me_off")
-
-    result = run("workspaces", "login", "--email", "ana@example.com", "--password-stdin", input="pw\n")
-
-    assert result.exit_code == EXIT_API_ERROR and NOT_ENABLED in result.output
-    assert not any(c.request.url.endswith("/login") for c in responses.calls)
 
 
 @responses.activate

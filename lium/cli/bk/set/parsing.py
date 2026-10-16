@@ -27,7 +27,7 @@ def parse(
 
     # Parse frequency
     if every:
-        match = re.match(r'(\d+)([hd])', every)
+        match = re.fullmatch(r'(\d+)([hd])', every)
         frequency_hours = int(match.group(1))
         if match.group(2) == 'd':
             frequency_hours *= 24
@@ -36,7 +36,7 @@ def parse(
 
     # Parse retention
     if keep:
-        match = re.match(r'(\d+)d', keep)
+        match = re.fullmatch(r'(\d+)d', keep)
         retention_days = int(match.group(1))
     else:
         retention_days = config.default_backup_retention
