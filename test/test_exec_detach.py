@@ -307,11 +307,18 @@ def test_detached_execution_uses_stderr_as_the_error_when_there_is_no_pid():
     assert execution.error == "boom"
 
 
+@pytest.mark.parametrize("master", [False, True])
 @pytest.mark.parametrize("targets", ["my-pod", "my-pod,other-pod"])
-def test_max_output_bytes_reaches_exec_and_exec_all(fake_lium, targets):
-    """``--max-output-bytes`` is forwarded on the single-pod and the multi-pod path; without it, the SDK default."""
+def test_max_output_bytes_reaches_exec_and_exec_all(fake_lium, monkeypatch, targets, master):
+    """``--max-output-bytes`` is forwarded on the single-pod and the multi-pod path, over the SDK and over a control
+    master; without it, the SDK default."""
     from lium.sdk.client import DEFAULT_MAX_OUTPUT_BYTES
 
+    monkeypatch.setattr(exec_module, "uses_control_master", lambda _: master)
+    monkeypatch.setattr(exec_module, "pods_with_live_masters", lambda *_: None)
+    monkeypatch.setattr(exec_module, "remember_pods", lambda *_: None)  # the master path caches pods under ~/.lium
+    monkeypatch.setattr(exec_module.ssh_mux, "exec_over_master", lambda lium, pod, **kw: lium.exec(pod, **kw))
+    monkeypatch.setattr(exec_module.ssh_mux, "exec_all_over_masters", lambda lium, pods, **kw: lium.exec_all(pods, **kw))
     fake_lium.pods = [_pod(), _pod("calm-fox-bb", "other-pod")]
     assert _run([targets, "--max-output-bytes", "1000", "true"]).exit_code == 0
     assert _run([targets, "true"]).exit_code == 0

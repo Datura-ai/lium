@@ -193,7 +193,7 @@ def test_a_command_that_floods_output_stops_at_the_limit_instead_of_buffering_it
     ssh = SimpleNamespace(
         exec_command=lambda command: (SimpleNamespace(close=lambda: None), SimpleNamespace(channel=channel), None),
     )
-    client = SimpleNamespace(ssh_connection=lambda pod: nullcontext(ssh))
+    client = SimpleNamespace(_remote_command=lambda pod, command, **kw: nullcontext(ssh.exec_command(command)))
     fake.exec = lambda pod, command, timeout, max_output_bytes: Lium.exec(
         client, pod, command=command, timeout=timeout, max_output_bytes=max_output_bytes
     )
