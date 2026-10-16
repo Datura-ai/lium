@@ -168,6 +168,22 @@ class _Rental:
             }
 
 
+def _try_lock(fd: int) -> bool:
+    """A non-blocking exclusive lock on ``fd``, held until it is closed; False while another holds it."""
+    try:
+        try:
+            import fcntl
+        except ImportError:  # Windows: a non-blocking lock on the file's first byte, held as long
+            import msvcrt
+
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
 class _RentalStore:
     """Rentals whose outcome the host has not received, on disk, one file per idempotency key. A request is
     written before it is sent, so a server that stops mid-request replays the same key after a restart instead
@@ -187,16 +203,7 @@ class _RentalStore:
             return True
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = os.open(self.directory / f"{key}.lock", os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            try:
-                import fcntl
-            except ImportError:  # Windows: a non-blocking lock on the file's first byte, held as long
-                import msvcrt
-
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-            else:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        if not _try_lock(fd):
             os.close(fd)
             return False
         self._held[key] = fd
@@ -244,10 +251,28 @@ class _RentalStore:
                     self._release(path.stem)
         return rentals
 
-    def unanswered_elsewhere(self, scope: Dict[str, str]) -> List[_Rental]:
-        """This account's journals, read now, that this server does not hold and that name no pod: another running
-        server's rent whose outcome is unknown (or an orphan not adopted yet). Never claimed, adopted or replayed
-        here, but rent_pod is refused beside them: the first may still rent a pod."""
+    def lock_admission(self, scope: Dict[str, str], timeout: float) -> Optional[int]:
+        """Take this account's rent-admission lock, shared by every server on this machine, within ``timeout``
+        seconds; its fd (close it to release), -1 with no journal directory, None while another server holds it.
+        Held from the admission check until the rent's journal is written: two servers starting a rent together
+        cannot both find no journal and both send."""
+        if self.directory is None:
+            return -1
+        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        tag = hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()[:16]
+        fd = os.open(self.directory / f"admit-{tag}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        stop = time.monotonic() + max(0.0, timeout)
+        while not _try_lock(fd):
+            if time.monotonic() >= stop:
+                os.close(fd)
+                return None
+            time.sleep(0.05)
+        return fd
+
+    def journals_elsewhere(self, scope: Dict[str, str]) -> List[_Rental]:
+        """This account's journals, read now, that this server does not hold: another running server's rent whose
+        outcome is unknown or whose pod its host has not acknowledged (or an orphan not adopted yet). Never claimed,
+        adopted or replayed here, but rent_pod is refused beside them: a retry here would be a second pod."""
         if self.directory is None or not self.directory.is_dir():
             return []
         found = []
@@ -257,13 +282,16 @@ class _RentalStore:
                     continue
             try:
                 state = json.loads(path.read_text())
-                if state.get("scope") != scope or state.get("pod_ids"):
+                if state.get("scope") != scope:
                     continue
                 other = _Rental.from_state(state)
             except (OSError, ValueError, AttributeError, KeyError, TypeError):
                 continue  # gone meanwhile (settled), or unreadable
-            other.last_error = ("another running Lium MCP server (another session) sent this rent and is settling "
-                                "it; rent_pod is refused here until it does")
+            other.last_error = (
+                f"another running Lium MCP session rented pod(s) {', '.join(sorted(other.pod_ids))} and has not yet "
+                "confirmed that its host received them" if other.pod_ids else
+                "another running Lium MCP session sent this rent and is settling it"
+            ) + "; rent_pod is refused here until it does or that session ends (this server then takes it over)"
             found.append(other)
         return found
 
@@ -411,24 +439,51 @@ class LiumTools:
         rental = rental or _Rental()
         not_rented = _error("cancelled", "The rental was cancelled before it was sent; nothing was rented.")
 
+        admission: List[int] = []  # the account's cross-server admission lock, held until the journal is written
+
+        def release_admission() -> None:
+            while admission:
+                fd = admission.pop()
+                if fd >= 0:
+                    os.close(fd)
+
         def call():
+            try:
+                return admit_and_rent()
+            finally:
+                release_admission()
+
+        def admit_and_rent():
             deadline = time.monotonic() + self.CLEANUP_WAIT_SECONDS
             while True:
                 self._reconcile(reports=True)
                 # a pod already returned whose result the host may have dropped (a timeout, a lost response) is
                 # returned again rather than rented again, until the host names it
                 self._forget_delivered(lambda pod_ids: bool(pod_ids & set(known_pod_ids or [])))
+                try:
+                    scope = self._scope()
+                except Exception:  # noqa: BLE001 - no client yet: the rent below fails the same way, sending nothing
+                    fd = -1
+                else:
+                    fd = self._store.lock_admission(scope, max(0.0, deadline - time.monotonic()))
+                if fd is None:
+                    return self._admission_busy_error()
+                admission.append(fd)
+                admitted = False
                 with self._cleanup:
                     # one look at every list, and the admission itself, under the lock the lists change under: two
                     # calls cannot both find nothing and both rent
                     recovered = self._hand_off_recovered(rental)
                     recovered += self._unacknowledged(exclude=rental.handed)
                     # read now, not at the last reconcile: another server may have sent a rent since
-                    unresolved = list(self._unresolved) + self._unanswered_elsewhere()
+                    unresolved = list(self._unresolved) + self._journals_elsewhere()
                     renting = [r for r in self._in_flight if r is not rental]
                     if not (recovered or unresolved or renting or self._recovered or rental.cancelled):
                         self._in_flight.append(rental)
-                        break
+                        admitted = True
+                if admitted:
+                    break  # the admission lock stays held until this rent's journal is written
+                release_admission()
                 if recovered:
                     # an earlier rent the host never heard back from did rent: that is the answer, not a new rent
                     return self._recovered_result(recovered)
@@ -473,6 +528,7 @@ class LiumTools:
                     )
                     rental.submitted_at, rental.scope = time.time(), self._scope()
                 self._store.save(rental)
+                release_admission()  # on disk now: another server's admission sees it
 
             # rent and wait separately: once the rent call returns the pod bills, so a slow start must hand back its id
             # rather than an error the model would answer by renting a second pod. confirmed_only: the SDK never
@@ -740,12 +796,12 @@ class LiumTools:
                 self._cleanup.notify_all()
                 return list(self._unresolved)
 
-    def _unanswered_elsewhere(self) -> List[_Rental]:
+    def _journals_elsewhere(self) -> List[_Rental]:
         try:
             scope = self._scope()
         except Exception:  # noqa: BLE001 - no client yet (e.g. no API key): nothing can be rented anyway
             return []
-        return self._store.unanswered_elsewhere(scope)
+        return self._store.journals_elsewhere(scope)
 
     def _adopt(self) -> None:
         """Take this account's journals that no live server holds, before any rental is admitted (rent_pod
@@ -925,6 +981,14 @@ class LiumTools:
         )
         failed["unresolved"] = [rental.report() for rental in unresolved]
         return failed
+
+    @staticmethod
+    def _admission_busy_error() -> Dict[str, Any]:
+        return _error(
+            "rent_in_progress",
+            "Another Lium MCP session on this machine is starting a rent for this account; nothing new was rented.",
+            "Retry rent_pod in a minute: it then sees that session's rental and does not rent beside it unasked.",
+        )
 
     @staticmethod
     def _rent_in_progress_error(renting: List[_Rental]) -> Dict[str, Any]:

@@ -731,7 +731,8 @@ def test_a_restarted_server_replays_the_lost_rent_with_the_same_key(monkeypatch,
     assert len(set(sdk.posts)) == 1
     if cancelled:
         assert sdk.removed == ["pod-1"] and "recovered_rentals" not in listed
-        assert list(rental_state_dir.iterdir()) == []
+        # nothing of the rental is left (the account's admission lock file stays: unlinking a lock file races)
+        assert [p.name for p in rental_state_dir.iterdir() if not p.name.startswith("admit-")] == []
     else:
         assert sdk.removed == [] and listed["recovered_rentals"][0]["pod_ids"] == ["pod-1"]
         _host_uses_the_pod(after, sdk, monkeypatch, rental_state_dir, "pod-1")
@@ -878,6 +879,46 @@ def test_a_running_server_never_adopts_another_running_servers_rental(monkeypatc
     # once the first server settles it (here: its journal goes), the second rents again
     first._store.forget(first._unresolved[0])
     assert second.rent_pod("node-b", "other-job", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-2"
+
+
+@pytest.mark.parametrize("case", ["simultaneous_first_calls", "pod_not_yet_delivered", "cancelled_pod_not_removed"])
+def test_another_live_sessions_rental_blocks_a_rent_here(monkeypatch, rental_state_dir, case):
+    """Two live sessions of one account: whatever the first session's rental is doing, the second sends no rent."""
+    from lium.cli.mcp.tools import _Rental
+
+    monkeypatch.setattr(sys.modules[__name__], "_SERVERS_STAY_LIVE", [True])
+    if case == "simultaneous_first_calls":
+        sdk = _real_sdk(monkeypatch, [_no_answer(), _no_answer()])
+    else:
+        sdk = _real_sdk(monkeypatch, [_Answer(201, {"id": "pod-1"})])
+    first, rental = _real_tools(sdk), _Rental()
+    first.rent_pod("node-a", "job", template_id="tpl-1", rental=rental, timeout_seconds=0)
+    (journal,) = rental_state_dir.glob("*.json")
+    if case == "cancelled_pod_not_removed":
+        monkeypatch.setattr(sdk, "rm", lambda pod: (_ for _ in ()).throw(LiumError("Cannot delete a PENDING pod")))
+        first.cancel_rental(rental)
+    holder = None
+    if case == "simultaneous_first_calls":
+        # the first session is mid-admission: it holds the account's lock and has not written its journal yet
+        written = journal.read_bytes()
+        journal.unlink()
+        holder = first._store.lock_admission(first._scope(), 0)
+        assert holder is not None and holder >= 0
+
+        def the_first_session_journals_then_sends():
+            time.sleep(0.2)
+            journal.write_bytes(written)
+            os.close(holder)
+
+        threading.Thread(target=the_first_session_journals_then_sends).start()
+
+    other = _real_sdk(monkeypatch, [_Answer(201, {"id": "pod-2"})])
+    second = _real_tools(other)
+    second.CLEANUP_WAIT_SECONDS = 0.5
+    refused = second.rent_pod("node-b", "other-job", template_id="tpl-1", timeout_seconds=0)
+
+    assert refused["ok"] is False and other.posts == []
+    assert journal.exists() and second._unresolved == []  # still the first session's to settle
 
 
 def test_a_rent_another_server_sends_after_this_ones_reconcile_still_blocks_it(monkeypatch, rental_state_dir):
