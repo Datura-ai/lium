@@ -6,7 +6,7 @@ command to a pod opens it (``ssh -M -N -f``, ``ControlPersist``), and every late
 runs as a new channel on it — no TCP handshake, key exchange or authentication. The master
 closes itself after ``LIUM_SSH_PERSIST`` seconds (default 600) without a command.
 
-The control socket lives in ``~/.lium/ssh-mux/`` (``0700``), one per pod id and ssh
+The control socket lives in ``~/.lium/ssh-mux/`` (``0700``), one per pod id, ssh key, host-key policy and ssh
 address, so a new pod on a recycled address never reaches an old pod's connection. Host
 keys are checked exactly as :meth:`Lium.ssh_argv` checks them (pinned per pod).
 
@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .client import DEFAULT_MAX_OUTPUT_BYTES
+from .client import DEFAULT_MAX_OUTPUT_BYTES, ssh_insecure
 from .exceptions import LiumError, LiumHostKeyError, LiumSSHError, OutputLimitExceeded
 from .models import PodInfo
 
@@ -101,8 +101,15 @@ def socket_is_ours(path: Path) -> bool:
     )
 
 
-def control_path(pod: PodInfo) -> Path:
-    digest = hashlib.sha256(f"{pod.id}\0{pod.ssh_cmd}".encode()).hexdigest()[:24]
+def _key_path(lium: Any) -> Optional[str]:
+    key_path = getattr(lium.config, "ssh_key_path", None)
+    return str(Path(key_path).expanduser()) if key_path else None
+
+
+def control_path(lium: Any, pod: PodInfo) -> Path:
+    # the host-key policy and key are part of the name: a master opened under LIUM_SSH_INSECURE (or another key)
+    # is never reused once they change
+    digest = hashlib.sha256(f"{pod.id}\0{pod.ssh_cmd}\0{_key_path(lium)}\0{ssh_insecure()}".encode()).hexdigest()[:24]
     return socket_dir() / digest
 
 
@@ -114,14 +121,14 @@ class ControlMaster:
 
         user, host, port = ssh_target(pod.ssh_cmd)
         self.pod = pod
-        self.path = control_path(pod)
+        self.path = control_path(lium, pod)
         self.destination = f"{user}@{host}"
         # -F /dev/null: the renter's ~/.ssh/config (SendEnv, SetEnv, ...) must not reach a pod; every option is set here
         self.base = ["ssh", "-F", "/dev/null", "-p", str(port), "-o", f'ControlPath="{self.path}"', "-o", "BatchMode=yes",
                      "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ClearAllForwardings=yes"]
-        key_path = getattr(lium.config, "ssh_key_path", None)
+        key_path = _key_path(lium)
         if key_path:
-            self.base += ["-i", str(Path(key_path).expanduser()), "-o", "IdentitiesOnly=yes"]
+            self.base += ["-i", key_path, "-o", "IdentitiesOnly=yes"]
         self.base += openssh_host_key_options(pod, create_pin_file=False)   # ssh writes the pin on first connect
 
     def _argv(self, *options: str, command: Optional[str] = None) -> List[str]:
@@ -149,7 +156,7 @@ class ControlMaster:
                 self._start_locked()
 
     def _start_locked(self) -> None:
-        from .client import _SSH_INSECURE_ENV, ssh_insecure
+        from .client import _SSH_INSECURE_ENV
 
         try:
             self.path.unlink()   # not alive: a dead master's socket, or one that is not ours; ssh -M would refuse it

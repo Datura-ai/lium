@@ -77,10 +77,33 @@ class _Ssh:
 
 
 def test_the_control_socket_is_per_pod_and_ssh_address(home):
-    first = ssh_mux.control_path(_pod())
+    first = ssh_mux.control_path(_lium(home), _pod())
     assert first.parent == home / ".lium" / "ssh-mux"
-    assert first != ssh_mux.control_path(_pod(ssh_cmd="ssh root@203.0.113.10 -p 20300"))
-    assert first != ssh_mux.control_path(_pod(pod_id="pod-2"))
+    assert first != ssh_mux.control_path(_lium(home), _pod(ssh_cmd="ssh root@203.0.113.10 -p 20300"))
+    assert first != ssh_mux.control_path(_lium(home), _pod(pod_id="pod-2"))
+
+
+def test_the_control_socket_changes_with_the_host_key_policy_and_the_key(home, monkeypatch):
+    secure = ssh_mux.control_path(_lium(home), _pod())
+    assert secure != ssh_mux.control_path(Lium(Config(api_key="test-key", ssh_key_path=home / "other")), _pod())
+    monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
+    insecure = ssh_mux.control_path(_lium(home), _pod())
+    assert insecure != secure and len(insecure.name) == len(secure.name) == 24
+
+
+def test_a_master_opened_without_host_key_checks_is_not_reused_once_they_are_back_on(home, monkeypatch):
+    ssh = _Ssh(live=False)
+    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
+    monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
+    with pytest.warns(UserWarning):
+        ssh_mux.exec_over_master(_lium(home), _pod(), command="true")
+    monkeypatch.delenv("LIUM_SSH_INSECURE")
+    ssh_mux.exec_over_master(_lium(home), _pod(), command="true")
+
+    starts = [argv for argv, _ in ssh.calls if "ControlMaster=yes" in argv]
+    paths = {next(a for a in argv if a.startswith("ControlPath=")) for argv in starts}
+    assert len(starts) == 2 and len(paths) == 2
+    assert "StrictHostKeyChecking=accept-new" in starts[1]
 
 
 def test_a_home_too_long_for_a_unix_socket_puts_the_socket_under_the_temp_dir(monkeypatch, tmp_path):
@@ -170,7 +193,7 @@ def test_insecure_accept_warns_even_when_ssh_prints_nothing(home, monkeypatch):
 def test_a_command_goes_over_the_live_master_and_env_values_travel_on_stdin(home, monkeypatch):
     ssh = _Ssh(live=True)
     ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
-    ssh_mux.control_path(_pod()).touch()
+    ssh_mux.control_path(_lium(home), _pod()).touch()
     monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
 
     ssh_mux.exec_over_master(_lium(home), _pod(), command="-v; python app.py", env={"TOKEN": "s3cret"})
@@ -194,7 +217,7 @@ def test_a_bad_env_name_is_refused_before_ssh_runs(home, monkeypatch):
 def test_exit_255_with_the_master_gone_is_a_lost_connection(home, monkeypatch):
     ssh = _Ssh(live=True, exit_code=255, stderr=b"Connection to 203.0.113.10 closed by remote host.\n")
     ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
-    ssh_mux.control_path(_pod()).touch()
+    ssh_mux.control_path(_lium(home), _pod()).touch()
     monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
     original = ssh.__call__
 
@@ -214,7 +237,7 @@ def test_exit_255_with_the_master_gone_is_a_lost_connection(home, monkeypatch):
 def test_exit_255_from_the_command_itself_is_its_exit_code(home, monkeypatch):
     ssh = _Ssh(live=True, exit_code=255)
     ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
-    ssh_mux.control_path(_pod()).touch()
+    ssh_mux.control_path(_lium(home), _pod()).touch()
     monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
 
     assert ssh_mux.exec_over_master(_lium(home), _pod(), command="exit 255")["exit_code"] == 255
@@ -255,7 +278,7 @@ def test_exec_all_over_masters_reports_one_unreachable_pod_as_one_failed_entry(h
 def test_a_socket_in_a_directory_open_to_others_is_never_used(home, monkeypatch):
     ssh = _Ssh(live=True)
     ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
-    path = ssh_mux.control_path(_pod())
+    path = ssh_mux.control_path(_lium(home), _pod())
     path.touch()
     assert ssh_mux.socket_is_ours(path)
     os.chmod(path.parent, 0o755)
@@ -270,7 +293,7 @@ def test_a_socket_in_a_directory_open_to_others_is_never_used(home, monkeypatch)
 def test_starting_a_master_replaces_a_socket_left_at_its_path(home, monkeypatch):
     ssh = _Ssh(live=False)
     ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
-    path = ssh_mux.control_path(_pod())
+    path = ssh_mux.control_path(_lium(home), _pod())
     path.write_text("planted")
     os.chmod(path.parent, 0o777)
     monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
@@ -288,12 +311,27 @@ def test_starting_a_master_replaces_a_socket_left_at_its_path(home, monkeypatch)
 def test_removing_or_rebooting_a_pod_closes_its_master(home, monkeypatch, operation):
     ssh = _Ssh(live=True)
     ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
-    ssh_mux.control_path(_pod()).touch()
+    ssh_mux.control_path(_lium(home), _pod()).touch()
     monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
     lium = _lium(home)
     monkeypatch.setattr(lium, "_request", lambda *a, **k: SimpleNamespace(json=lambda: {}))
 
     getattr(lium, operation)(_pod())
+
+    assert any("exit" in argv for argv, _ in ssh.calls) and not ssh.live
+
+
+def test_editing_a_pod_closes_its_master(home, monkeypatch):
+    ssh = _Ssh(live=True)
+    ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
+    ssh_mux.control_path(_lium(home), _pod()).touch()
+    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
+    lium = _lium(home)
+    rows = {"/pods/pod-1": {"id": "pod-1", "ssh_connect_cmd": _pod().ssh_cmd, "template": {"id": "t1"}},
+            "/templates/t1": {"id": "t1"}}
+    monkeypatch.setattr(lium, "_request", lambda method, endpoint, **k: SimpleNamespace(json=lambda: rows.get(endpoint, {})))
+
+    lium.edit("pod-1", startup_commands="python main.py")
 
     assert any("exit" in argv for argv, _ in ssh.calls) and not ssh.live
 
@@ -516,7 +554,7 @@ def test_capture_kills_a_command_that_never_stops_printing():
 
 def test_output_past_the_limit_over_the_master_raises_output_limit_exceeded(home, monkeypatch):
     ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
-    ssh_mux.control_path(_pod()).touch()
+    ssh_mux.control_path(_lium(home), _pod()).touch()
     monkeypatch.setattr(ssh_mux.subprocess, "run", _Ssh())   # its command answers b"out\n", 4 bytes
 
     with pytest.raises(OutputLimitExceeded, match="more than 3 bytes"):
