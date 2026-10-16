@@ -201,7 +201,8 @@ def test_a_command_that_floods_output_stops_at_the_limit_instead_of_buffering_it
     result = tools.run_command("job", "yes")
 
     assert result["ok"] is False and result["error"]["code"] == "output_too_large"
-    assert "out.log" in result["error"]["hint"]
+    assert "may still be running" in result["error"]["message"]  # closing the session does not end the process
+    assert "ps aux" in result["error"]["hint"] and "out.log" in result["error"]["hint"]
     assert read[0] < tools_module.MAX_OUTPUT_BYTES + 1024 * 1024  # stopped near the limit, not after gigabytes
 
 

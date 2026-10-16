@@ -930,8 +930,11 @@ class LiumTools:
             except OutputLimitExceeded:
                 return _error(
                     "output_too_large",
-                    f"The command printed more than {MAX_OUTPUT_BYTES} bytes on pod {target.id}; it was stopped.",
-                    "Redirect the output to a file on the pod (cmd > out.log 2>&1) and read part of it, e.g. tail -n 200 out.log.",
+                    f"The command printed more than {MAX_OUTPUT_BYTES} bytes on pod {target.id}, so its output was cut off"
+                    " and the session closed. The command may still be running on the pod.",
+                    "Before running it again, check whether it is still running (e.g. ps aux) and stop it if needed."
+                    " Then redirect its output to a file on the pod (cmd > out.log 2>&1) and read part of it,"
+                    " e.g. tail -n 200 out.log.",
                 )
             except LiumError as e:
                 return _error(e.code or type(e).__name__, _redact(str(e), command), _redact(e.hint, command))
