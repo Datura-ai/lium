@@ -1913,7 +1913,12 @@ class Lium:
         # The backend routes this PUT into a container reboot (pod_service.edit_pod ->
         # reboot_rental_container), so the pod's SSH host key changes with it.
         forget_host_key(pod_id)
-        self._release_ssh(pod_id)
+        # a PodInfo with the pod's ssh address, so the lium exec control master into the old container is closed too
+        self._release_ssh(PodInfo(
+            id=pod_id, name=pod.get("pod_name", ""), status=pod.get("status", ""), huid=generate_huid(pod_id),
+            ssh_cmd=pod.get("ssh_connect_cmd"), ports={}, created_at="", updated_at="", executor=None, template={},
+            removal_scheduled_at=None, jupyter_installation_status=None, jupyter_url=None,
+        ))
         return result
 
     def ls(
@@ -2514,6 +2519,7 @@ class Lium:
         if not isinstance(rows, list) or not rows:
             raise LiumError(f"Cluster {cluster.id}: the API answered without per-member results ({data!r})")
         results: List[Dict[str, Any]] = []
+        members = {p.id: p for p in cluster.pods}   # their ssh addresses, so each member's control master is closed too
         for row in rows:
             ok = bool(row.get("success"))
             message = row.get("message")
@@ -2529,7 +2535,7 @@ class Lium:
             })
             if ok and results[-1]["pod"]:
                 forget_host_key(results[-1]["pod"])
-                self._release_ssh(results[-1]["pod"])
+                self._release_ssh(members.get(results[-1]["pod"], results[-1]["pod"]))
         return results
 
     def get_default_images(self, gpu_model: Optional[str], driver_version: Optional[str]) -> list[dict]:
