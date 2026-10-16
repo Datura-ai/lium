@@ -881,9 +881,11 @@ def test_a_running_server_never_adopts_another_running_servers_rental(monkeypatc
     assert second.rent_pod("node-b", "other-job", template_id="tpl-1", timeout_seconds=0)["pod_id"] == "pod-2"
 
 
-@pytest.mark.parametrize("case", ["simultaneous_first_calls", "pod_not_yet_delivered", "cancelled_pod_not_removed"])
+@pytest.mark.parametrize("case", ["simultaneous_first_calls", "pod_not_yet_delivered", "cancelled_pod_not_removed",
+                                  "pod_delivered_to_its_host"])
 def test_another_live_sessions_rental_blocks_a_rent_here(monkeypatch, rental_state_dir, case):
-    """Two live sessions of one account: whatever the first session's rental is doing, the second sends no rent."""
+    """Two live sessions of one account: while the first session's rental may still become a second pod, the second
+    sends no rent; once its pod is handed to its own host, the second rents freely."""
     from lium.cli.mcp.tools import _Rental
 
     monkeypatch.setattr(sys.modules[__name__], "_SERVERS_STAY_LIVE", [True])
@@ -897,6 +899,8 @@ def test_another_live_sessions_rental_blocks_a_rent_here(monkeypatch, rental_sta
     if case == "cancelled_pod_not_removed":
         monkeypatch.setattr(sdk, "rm", lambda pod: (_ for _ in ()).throw(LiumError("Cannot delete a PENDING pod")))
         first.cancel_rental(rental)
+    if case == "pod_delivered_to_its_host":
+        first.deliver(rental)  # the result reached the first host; the journal stays until it names the pod
     holder = None
     if case == "simultaneous_first_calls":
         # the first session is mid-admission: it holds the account's lock and has not written its journal yet
@@ -915,10 +919,13 @@ def test_another_live_sessions_rental_blocks_a_rent_here(monkeypatch, rental_sta
     other = _real_sdk(monkeypatch, [_Answer(201, {"id": "pod-2"})])
     second = _real_tools(other)
     second.CLEANUP_WAIT_SECONDS = 0.5
-    refused = second.rent_pod("node-b", "other-job", template_id="tpl-1", timeout_seconds=0)
+    result = second.rent_pod("node-b", "other-job", template_id="tpl-1", timeout_seconds=0)
 
-    assert refused["ok"] is False and other.posts == []
     assert journal.exists() and second._unresolved == []  # still the first session's to settle
+    if case == "pod_delivered_to_its_host":
+        assert result["pod_id"] == "pod-2"
+    else:
+        assert result["ok"] is False and other.posts == []
 
 
 def test_a_rent_another_server_sends_after_this_ones_reconcile_still_blocks_it(monkeypatch, rental_state_dir):
