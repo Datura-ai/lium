@@ -1672,9 +1672,7 @@ class Lium:
         spec = {key: value for key, value in spec.items() if value is not None}
         if enable_volume_encryption is None and (template_id is not None or dockerfile_content is not None):
             enable_volume_encryption = self._template_offers_volume_encryption(template_id)
-        elif enable_volume_encryption is None:
-            # the server picks Lium's recommended template for the node, which supports it
-            enable_volume_encryption = True
+        # with no template, None stays: _rent_on_server defaults it, up() reads the default template
         rental = {
             "name": name,
             "template_id": template_id,
@@ -1717,7 +1715,10 @@ class Lium:
             "volume_id": rental["volume_id"],
             "user_public_key": ssh_material,
             "initial_port_count": rental["ports"],
-            "enable_volume_encryption": rental["enable_volume_encryption"],
+            # the server picks Lium's recommended template for the node, which supports it
+            "enable_volume_encryption": (
+                True if rental["enable_volume_encryption"] is None else rental["enable_volume_encryption"]
+            ),
             "backup_log_id": rental["backup_id"],
             "restore_path": rental["restore_path"],
             "dry_run": dry_run,

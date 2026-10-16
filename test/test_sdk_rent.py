@@ -11,7 +11,7 @@ import uuid
 import pytest
 import responses
 
-from lium.sdk import Config, Lium, LiumError, LiumServerError, RentResult
+from lium.sdk import Config, Lium, LiumError, LiumServerError, RentResult, Template
 from lium.sdk import client as client_module
 from lium.sdk import utils as sdk_utils
 
@@ -387,6 +387,42 @@ def test_rent_by_spec_with_a_dockerfile_does_not_request_encryption(client):
     client.rent(gpu_type="H100", name="train-1", dockerfile_content="FROM busybox", ssh_keys=[KEY])
 
     assert json.loads(responses.calls[-1].request.body)["enable_volume_encryption"] is False
+
+
+@pytest.mark.parametrize("server_side", [True, False])
+@pytest.mark.parametrize("template_supports", [True, False])
+@pytest.mark.parametrize("asked", [None, True, False])
+@responses.activate
+def test_rent_without_a_template_asks_for_encryption_only_where_it_can_get_it(
+    client, monkeypatch, server_side, template_supports, asked
+):
+    # The server picks Lium's recommended template, which supports it; the client-side path
+    # leaves the choice to up(), which reads the default template it picks for the node.
+    monkeypatch.setattr(
+        Lium, "default_docker_template",
+        lambda self, executor_id: Template(
+            id="tpl-default", name="default", huid="d", docker_image="img", docker_image_tag="t",
+            category="", status="READY", supports_volume_encryption=template_supports,
+        ),
+    )
+    if server_side:
+        _version(["rent_by_spec"])
+        responses.add(responses.GET, f"{BASE}/pods", json=[])
+        responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", json=RENTED)
+        expected = True if asked is None else asked
+    else:
+        _version(None)
+        _fleet()
+        responses.add(responses.POST, f"{BASE}/executors/cheap/rent", json={"id": "pod-uuid-9", "name": "train-1"})
+        expected = template_supports if asked is None else asked
+
+    client.rent(
+        gpu_type="H100", name="train-1", min_cpus=16, min_download_mbps=100, ssh_keys=[KEY],
+        enable_volume_encryption=asked,
+    )
+
+    assert responses.calls[-1].request.method == "POST"
+    assert json.loads(responses.calls[-1].request.body)["enable_volume_encryption"] is expected
 
 
 @responses.activate
