@@ -320,7 +320,7 @@ Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, 
 - `lium provider node notify-added <NODE_ID> --request-id <REQ>` - Mark a tenant machine request fulfilled
 - `lium provider config show|opt-in|opt-out|set-email|set-subscriptions` - Portal-account configuration (incl. lium.io central miner server toggle)
 - `lium provider sync from-miner-server|to-miner-server` - Batch node-state sync between portal and the central miner server
-- `lium provider billing list [--all | --miner-hotkey HK] [--page N] [--limit N]` - Paginated billing history (active hotkey by default; `--all` for every provider's)
+- `lium provider billing list [--page N] [--limit N]` - Your paginated billing history (the signed-in provider's own rows)
 - `lium provider machine-request list|get` - Pending tenant machine requests (per-request detail only once one of your nodes is verified by a validator; before that `list` returns counts per GPU class and hourly budget band, and `get` exits 2 with `PORTAL_FORBIDDEN`)
 - `lium provider machine list|estimate` - Machine catalogue + reward estimates
 

@@ -12,8 +12,8 @@ import click
 from lium.cli.provider._client import build_client
 from lium.cli.provider._guards import handle_provider_error, require_hotkey
 from lium.cli.provider._overrides import with_provider_overrides
-from lium.cli.provider._render import fatal, render
-from lium.provider.errors import ARG_INVALID, ProviderError
+from lium.cli.provider._render import render
+from lium.provider.errors import ProviderError
 
 
 # ---------------------------------------------------------------------------
@@ -25,46 +25,17 @@ def billing_command() -> None:
     """Billing history queries."""
 
 
-@billing_command.command("list", short_help="Paginated billing history.")
-@click.option(
-    "--miner-hotkey",
-    "miner_hotkey",
-    help="Show another provider's history (ss58). Defaults to the active hotkey.",
-)
-@click.option(
-    "--all",
-    "all_miners",
-    is_flag=True,
-    default=False,
-    help="Every provider's billing history (the portal's global view), not only yours.",
-)
+@billing_command.command("list", short_help="Your paginated billing history.")
 @click.option("--page", type=int, default=None, help="1-indexed page number.")
 @click.option("--limit", type=int, default=None, help="Page size.")
 @with_provider_overrides
 @click.pass_context
-def list_billing(
-    ctx: click.Context,
-    miner_hotkey: str | None,
-    all_miners: bool,
-    page: int | None,
-    limit: int | None,
-) -> None:
-    """Billing history, scoped to the active hotkey unless --all is given."""
+def list_billing(ctx: click.Context, page: int | None, limit: int | None) -> None:
+    """The signed-in provider's own billing history (DAH-4627: no other provider's rows)."""
     require_hotkey(ctx, group="billing")
-    if all_miners and miner_hotkey:
-        fatal(
-            ctx,
-            ProviderError(
-                "--all and --miner-hotkey are mutually exclusive",
-                code=ARG_INVALID,
-                hint="Use --all for every provider, or --miner-hotkey for one.",
-            ),
-        )
     client = build_client(ctx)
     try:
-        body = client.billing_history(
-            miner_hotkey=miner_hotkey, page=page, limit=limit, all_miners=all_miners
-        )
+        body = client.billing_history(page=page, limit=limit)
     except ProviderError as e:
         ctx.exit(handle_provider_error(ctx, e))
         return

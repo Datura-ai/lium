@@ -23,8 +23,6 @@ import time
 from typing import Any
 
 from lium.provider._routes import (
-    BILLING,
-    BILLING_BY_MINER,
     DISCORD_OAUTH_URL,
     ESTIMATED_REWARDS,
     EXECUTOR_BY_ID,
@@ -42,6 +40,7 @@ from lium.provider._routes import (
     ME,
     MINER_OPT_IN,
     MINERS_OVERVIEW,
+    PROVIDER_BILLING,
     SET_EMAIL,
     SET_MACHINE_REQUEST_SUBSCRIPTION,
     SET_PASSWORD,
@@ -292,8 +291,7 @@ class ProviderClient:
         # would otherwise report other providers' nodes as ours.
         if out.portal_session_active and not out.hotkey:
             # Without the ss58 the only listing available is the portal's global one, which
-            # would count every provider's nodes as ours (the same refusal `node list` and
-            # `billing list` make with ARG_INVALID).
+            # would count every provider's nodes as ours (the same refusal `node list` makes with ARG_INVALID).
             warnings.append(
                 f"nodes: the ss58 address of hotkey {self.hotkey!r} is not resolvable (no local wallet), "
                 "so the node count is skipped; `lium provider node list --miner-hotkey <ss58>` lists them"
@@ -681,35 +679,14 @@ class ProviderClient:
     # ------------------------------------------------------------------
     # Read-only queries
 
-    def billing_history(
-        self,
-        *,
-        miner_hotkey: str | None = None,
-        page: int | None = None,
-        limit: int | None = None,
-        all_miners: bool = False,
-    ) -> dict[str, Any]:
-        """``GET /billing`` (paginated) or ``/billing/{miner_hotkey}``.
+    def billing_history(self, *, page: int | None = None, limit: int | None = None) -> dict[str, Any]:
+        """``GET /provider-ledger/billing``: the signed-in provider's own billing rows, a page at a time.
 
-        Like ``list_nodes``, the paginated portal endpoint is global; the
-        default scopes it to this provider's hotkey. ``all_miners=True``
-        returns every provider's history, ``miner_hotkey`` one provider's
-        (unpaginated ``/billing/{hotkey}`` when no page/limit is given).
+        The account comes from the session, so there is no hotkey to pass (DAH-4627: the public ``/billing``
+        reads that took one are being retired).
         """
-        if miner_hotkey is not None and page is None and limit is None:
-            return self._http.get(
-                BILLING_BY_MINER.format(miner_hotkey=_safe_hotkey_segment(miner_hotkey))
-            )
-        params: dict[str, Any] = {}
-        if miner_hotkey is None and not all_miners:
-            miner_hotkey = self._own_hotkey_or_fail()
-        if miner_hotkey is not None:
-            params["miner_hotkey"] = _safe_hotkey_segment(miner_hotkey)
-        if page is not None:
-            params["page"] = page
-        if limit is not None:
-            params["limit"] = limit
-        return self._http.get(BILLING, params=params or None)
+        params = {key: value for key, value in (("page", page), ("limit", limit)) if value is not None}
+        return self._http.get(PROVIDER_BILLING, params=params or None)
 
     def list_machine_requests(self) -> dict[str, Any]:
         """``GET /machine-requests`` -- pending tenant capacity asks.
