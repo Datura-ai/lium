@@ -1,8 +1,10 @@
 """`lium exec` keeps one OpenSSH connection per pod across runs, and skips the pod list when it is up."""
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +13,7 @@ from click.testing import CliRunner
 
 from lium.cli.commands import exec as exec_module
 from lium.cli.commands.exec import exec_command
+from lium.cli.utils import POD_CACHE_TTL_SECONDS, remember_pods, remembered_pods
 from lium.sdk import Config, Lium, PodInfo, ssh_mux
 
 
@@ -106,6 +109,34 @@ def test_a_master_opened_without_host_key_checks_is_not_reused_once_they_are_bac
 
 
 
+@pytest.mark.skipif(shutil.which("ssh") is None, reason="needs the OpenSSH client")
+@pytest.mark.parametrize("option, expected", [
+    ("forwardagent", "no"),
+    ("forwardx11", "no"),
+    ("clearallforwardings", "yes"),
+])
+def test_the_renters_ssh_config_cannot_forward_anything_to_the_pod(home, option, expected):
+    config = home / "ssh_config"
+    config.write_text("Host *\n  ForwardAgent yes\n  ForwardX11 yes\n  ForwardX11Trusted yes\n  LocalForward 8888 localhost:8888\n")
+    master = ssh_mux.ControlMaster(_lium(home), _pod())
+
+    evaluated = subprocess.run(["ssh", "-F", str(config), "-G", *master.base[1:], "--", master.destination],
+                               capture_output=True, text=True, check=True).stdout
+
+    assert f"{option} {expected}" in evaluated.splitlines()
+
+
+@pytest.mark.skipif(shutil.which("ssh") is None, reason="needs the OpenSSH client")
+def test_the_renters_ssh_config_cannot_send_environment_values_to_the_pod(home):
+    config = home / "ssh_config"
+    config.write_text("Host *\n  SendEnv AWS_* SECRET\n  SetEnv TOKEN=local-secret\n")
+    master = ssh_mux.ControlMaster(_lium(home), _pod())
+
+    # the renter's config comes first, as ssh's own default would; the master's argv must override it
+    evaluated = subprocess.run(["ssh", "-F", str(config), "-G", *master.base[1:], "--", master.destination],
+                               capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL).stdout.lower()
+
+    assert "sendenv" not in evaluated and "setenv" not in evaluated
 
 
 
@@ -126,8 +157,19 @@ def test_a_master_opened_without_host_key_checks_is_not_reused_once_they_are_bac
 
 
 
+def test_a_socket_in_a_directory_open_to_others_is_never_used(home, monkeypatch):
+    ssh = _Ssh(live=True)
+    ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
+    path = ssh_mux.control_path(_lium(home), _pod())
+    path.touch()
+    assert ssh_mux.socket_is_ours(path)
+    os.chmod(path.parent, 0o755)
+    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
 
-
+    assert not ssh_mux.socket_is_ours(path)
+    assert not ssh_mux.has_live_master(_lium(home), _pod())
+    ssh_mux.stop(_lium(home), _pod())
+    assert ssh.calls == []                        # nothing was sent to that socket
 
 
 
@@ -141,6 +183,18 @@ def test_a_master_opened_without_host_key_checks_is_not_reused_once_they_are_bac
 # -- lium exec ------------------------------------------------------------------------------------
 
 
+def test_the_pod_cache_is_per_account_private_and_expires(home):
+    lium = _lium(home)
+    now = datetime.now(timezone.utc)
+    remember_pods(lium, [_pod()], now=now)
+
+    [pod] = remembered_pods(lium, now=now)
+    assert (pod.id, pod.name, pod.huid, pod.ssh_cmd) == ("pod-1", "warm-pod", "eager-wolf-aa", _pod().ssh_cmd)
+    other_account = Lium(Config(api_key="other-key", ssh_key_path=home / "id_ed25519"))
+    assert remembered_pods(other_account, now=now) is None
+    assert remembered_pods(lium, now=now + timedelta(seconds=POD_CACHE_TTL_SECONDS + 1)) is None
+    [path] = (home / ".lium" / "pod_cache").iterdir()
+    assert oct(path.stat().st_mode & 0o777) == "0o600" and "test-key" not in path.read_text()
 
 
 
@@ -228,6 +282,17 @@ def bench():
 
 
 
+def test_a_symlinked_socket_dir_is_refused_and_its_target_left_alone(tmp_path):
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    victim.chmod(0o755)
+    link = tmp_path / "lium-ssh-mux"
+    link.symlink_to(victim)
+
+    with pytest.raises(ssh_mux.LiumError):
+        ssh_mux.ensure_socket_dir(link)
+
+    assert (victim.stat().st_mode & 0o777) == 0o755
 
 
 _OUTPUT_600_OUT_401_ERR = [sys.executable, "-c", "import os; os.write(1, b'o' * 600); os.write(2, b'e' * 401)"]
