@@ -370,6 +370,8 @@ class Template(_Serializable):
     docker_image_tag: str
     category: str
     status: str
+    # The template's image can mount an encrypted local volume; set by the API.
+    supports_volume_encryption: bool = False
 
 
 @dataclass
