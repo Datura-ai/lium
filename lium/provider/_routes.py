@@ -43,8 +43,8 @@ EXECUTOR_MACHINE_REQUESTS = "/executors/{id}/machine-requests"
 EXECUTOR_MIN_GPU_FOR_RENTAL = "/executors/{id}/min-gpu-count-for-rental"
 EXECUTOR_VERIFICATION = "/executors/{id}/verification"
 
-# Billing: the signed-in provider's own rows (DAH-4627; `/billing` and `/billing/{hotkey}` are being retired)
-PROVIDER_BILLING = "/provider-ledger/billing"
+# Billing: the signed-in provider's own daily ledger (DAH-4627; `/billing` and `/billing/{hotkey}` are being retired)
+PROVIDER_LEDGER_DAILY = "/provider-ledger/daily"
 
 # Machine requests
 MACHINE_REQUESTS = "/machine-requests"
@@ -75,7 +75,7 @@ __all__ = [
     "MINER_OPT_IN",
     "MINERS",
     "MINERS_OVERVIEW",
-    "PROVIDER_BILLING",
+    "PROVIDER_LEDGER_DAILY",
     "PROVIDER_OPT_IN",
     "SET_EMAIL",
     "SET_MACHINE_REQUEST_SUBSCRIPTION",

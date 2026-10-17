@@ -367,14 +367,14 @@ def test_sync_nodes_to_miner_server_posts_miner_portal_route(client) -> None:
 # Read-only queries
 
 
-def test_billing_history_reads_the_signed_in_providers_scoped_rows(client) -> None:
-    portal = _Portal(get_body={"data": []})
+def test_billing_history_reads_the_signed_in_providers_daily_ledger(client) -> None:
+    portal = _Portal(get_body={"data": {"rows": []}})
     c = client(portal)
     c.billing_history()
-    c.billing_history(page=2, limit=10)
+    c.billing_history(start_day="2026-10-01", end_day="2026-10-17")
     assert [g[:2] for g in portal.gets] == [
-        ("/provider-ledger/billing", None),
-        ("/provider-ledger/billing", {"page": 2, "limit": 10}),
+        ("/provider-ledger/daily", None),
+        ("/provider-ledger/daily", {"from": "2026-10-01", "to": "2026-10-17"}),
     ]
 
 

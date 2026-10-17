@@ -60,17 +60,18 @@ def patched_build_client(
 # Billing
 
 
-def test_billing_list_reads_the_signed_in_providers_scoped_rows(patched_build_client) -> None:
-    portal = _Portal(get_body={"data": [{"id": 1}, {"id": 2}, {"id": 3}], "total": 3})
+def test_billing_list_reads_the_signed_in_providers_daily_ledger(patched_build_client) -> None:
+    rows = [{"date": "2026-10-16", "kind": "rental_share", "amount_usd": 4.5}] * 3
+    portal = _Portal(get_body={"data": {"date_from": "2026-10-01", "date_to": "2026-10-17", "summary": {}, "rows": rows}})
     patched_build_client(portal)
     runner = CliRunner()
-    result = runner.invoke(provider_command, ["--hotkey", "hk1", "billing", "list", "--page", "2", "--limit", "10"])
+    result = runner.invoke(provider_command, ["--hotkey", "hk1", "billing", "list", "--from", "2026-10-01", "--to", "2026-10-17"])
     assert result.exit_code == 0, result.output
-    assert "billing entries: 3" in result.output
-    assert portal.gets[0][:2] == ("/provider-ledger/billing", {"page": 2, "limit": 10})
+    assert "ledger rows: 3" in result.output
+    assert portal.gets[0][:2] == ("/provider-ledger/daily", {"from": "2026-10-01", "to": "2026-10-17"})
 
 
-@pytest.mark.parametrize("flag", [["--all"], ["--miner-hotkey", "5Foo"]])
+@pytest.mark.parametrize("flag", [["--all"], ["--miner-hotkey", "5Foo"], ["--page", "2"]])
 def test_billing_list_no_longer_reads_other_providers(patched_build_client, flag) -> None:
     portal = _Portal(get_body={"data": []})
     patched_build_client(portal)

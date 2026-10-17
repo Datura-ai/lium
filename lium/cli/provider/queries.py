@@ -25,23 +25,23 @@ def billing_command() -> None:
     """Billing history queries."""
 
 
-@billing_command.command("list", short_help="Your paginated billing history.")
-@click.option("--page", type=int, default=None, help="1-indexed page number.")
-@click.option("--limit", type=int, default=None, help="Page size.")
+@billing_command.command("list", short_help="Your daily earnings ledger.")
+@click.option("--from", "start_day", metavar="YYYY-MM-DD", default=None, help="First UTC day (default: 30 days ago).")
+@click.option("--to", "end_day", metavar="YYYY-MM-DD", default=None, help="Last UTC day (default: today; at most 90 days).")
 @with_provider_overrides
 @click.pass_context
-def list_billing(ctx: click.Context, page: int | None, limit: int | None) -> None:
-    """The signed-in provider's own billing history (DAH-4627: no other provider's rows)."""
+def list_billing(ctx: click.Context, start_day: str | None, end_day: str | None) -> None:
+    """The signed-in provider's own earnings, one row per UTC day and kind (DAH-4627: no other provider's rows)."""
     require_hotkey(ctx, group="billing")
     client = build_client(ctx)
     try:
-        body = client.billing_history(page=page, limit=limit)
+        body = client.billing_history(start_day=start_day, end_day=end_day)
     except ProviderError as e:
         ctx.exit(handle_provider_error(ctx, e))
         return
-    rows = body.get("data") if isinstance(body, dict) else body
+    rows = (body.get("data") or {}).get("rows") if isinstance(body, dict) else None
     count = len(rows) if isinstance(rows, list) else 0
-    render(ctx, body, summary=f"billing entries: {count}")
+    render(ctx, body, summary=f"ledger rows: {count}")
 
 
 # ---------------------------------------------------------------------------
