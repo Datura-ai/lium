@@ -140,13 +140,15 @@ A long job goes on a pod the caller keeps: `detach=True` starts it in the backgr
 
 ```python
 node = lium.ls(gpu_type="A100")[0]
-pod = lium.up(executor_id=node.id, name="train", wait=True)
+pod = lium.up(executor_id=node.id, name="train", wait=True, verify_gpus=True)
 job = lium.exec(pod, command="python train.py", detach=True)   # {"pid", "log_path", "command"}
 for gpu in lium.gpu_stats(pod):                                  # parsed nvidia-smi
     print(gpu.index, gpu.utilization_pct, gpu.memory_pct)
 print(pod.to_dict())                                             # JSON-ready
 # later: lium.down(pod)
 ```
+
+`verify_gpus=True` checks the requested count against the billed count and then runs `nvidia-smi -L` inside the ready pod. A failed check raises `LiumError` with the pod ID; the pod remains rented and billing until you remove it. It requires `wait=True`.
 
 For work that must not outlive the code using it, `rental()` rents a named node for a `with` block and removes the pod on the way out, whatever happened inside — so run the work to completion inside the block (a detached job started here would be killed with the pod). `rent()` above is the other way in: it picks the node by spec and hands you a pod you own.
 
