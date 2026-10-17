@@ -202,7 +202,8 @@ def test_start_executor_timeout_includes_compose_diagnostics(monkeypatch, tmp_pa
     assert "Restarting (1)" in msg and "Created" in msg
     assert "address already in use" in msg and "exited with code 1" in msg
     assert "no such service" not in msg
-    assert calls[0] == "docker compose up -d --force-recreate"  # a running executor must pick up the new .env
+    # the old container ID is read first, so the wait can tell the new container from it
+    assert calls[:2] == ["docker compose -f docker-compose.app.yml ps -q executor", "docker compose up -d --force-recreate"]
     # each compose file is asked for the service it declares (`executor` lives in docker-compose.app.yml)
     assert [c for c in calls if "logs" in c] == [
         "docker compose logs --no-color --tail 30 executor-runner",
