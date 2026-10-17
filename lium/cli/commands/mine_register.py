@@ -68,7 +68,7 @@ class RegisterToken:
     the claim."""
     exp: int | None
     opt_in_status: bool | None
-    node_claim: str | None = None
+    account_claim: str | None = None
     """``MINER_ACCOUNT_CLAIM`` for the executor's ``.env``: the token's ``node_claim``. Every custodied node reports the
     same pool hotkey, so the portal adds a pool-hotkey node only to the account whose claim it reports."""
 
@@ -131,7 +131,7 @@ def parse_register_token(token: str, *, now: int | None = None) -> RegisterToken
         node_hotkey=node_hotkey,
         exp=exp,
         opt_in_status=opt_in if isinstance(opt_in, bool) else None,
-        node_claim=node_claim,
+        account_claim=node_claim,
     )
 
 

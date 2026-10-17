@@ -88,10 +88,10 @@ def test_parse_register_token_node_identity_is_the_account_key_unless_the_token_
 
 def test_parse_register_token_reads_the_node_claim_and_drops_a_non_hex_one() -> None:
     claim = "ab12" * 8
-    assert reg.parse_register_token(_token(node_claim=claim), now=NOW).node_claim == claim
-    assert reg.parse_register_token(_token(), now=NOW).node_claim is None
+    assert reg.parse_register_token(_token(node_claim=claim), now=NOW).account_claim == claim
+    assert reg.parse_register_token(_token(), now=NOW).account_claim is None
     # it is written into .env verbatim: a newline must never get there
-    assert reg.parse_register_token(_token(node_claim="ab12\nSSH_PORT=1"), now=NOW).node_claim is None
+    assert reg.parse_register_token(_token(node_claim="ab12\nSSH_PORT=1"), now=NOW).account_claim is None
 
 
 def test_register_path_writes_the_account_claim_to_env(tmp_path: Path) -> None:

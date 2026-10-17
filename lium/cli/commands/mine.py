@@ -467,7 +467,8 @@ def _compose_diagnostics(executor_dir: Path, tail: int = 30) -> str:
 
 def _start_executor(executor_dir: Path, wait_secs: int = 180):
     # Start using the default docker-compose.yml
-    _run("docker compose up -d", capture=True, cwd=str(executor_dir))
+    # recreate: an executor already running keeps its old .env, so a new MINER_ACCOUNT_CLAIM never reaches it
+    _run("docker compose up -d --force-recreate", capture=True, cwd=str(executor_dir))
 
     # Wait for the executor service to be fully healthy
     start = time.time()
@@ -917,7 +918,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 ssh=answers["ssh_port"],
                 ssh_pub=answers["ssh_public_port"],
                 rng=answers["port_range"],
-                account_claim=token.node_claim if token else None,
+                account_claim=token.account_claim if token else None,
             )
 
             # A taken host port makes `docker compose up` loop on
