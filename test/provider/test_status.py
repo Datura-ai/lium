@@ -104,7 +104,7 @@ def test_status_does_not_fall_back_to_the_global_node_list_when_the_hotkey_is_un
     fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
 ) -> None:
     """No ss58 → no ``GET /executors`` at all (it would count every provider's nodes as ours),
-    a warning names the fix, the same refusal ``node list`` / ``billing list`` make."""
+    a warning names the fix, the same refusal ``node list`` makes."""
 
     class _NoAddress:
         hotkey = "missing"
