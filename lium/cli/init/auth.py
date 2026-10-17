@@ -2,6 +2,7 @@ import os, sys, time, requests, webbrowser
 from typing import Optional
 
 from lium.cli import ui
+from lium.sdk.config import Config
 
 class quiet_fds:
     """Redirect stdout/stderr to /dev/null (silences child processes)."""
@@ -17,9 +18,13 @@ class quiet_fds:
         os.close(self._stdout); os.close(self._stderr)
         self._null.close()
 
+def _base_url() -> str:
+    # Same API as every other call, so a staging LIUM_BASE_URL logs in against staging.
+    return os.getenv("LIUM_BASE_URL", Config.base_url).rstrip("/")
+
 def init_auth() -> tuple[str, str]:
     """Request a new auth session. Returns (browser_url, session_id)."""
-    url = "https://lium.io/api/cli-auth/init"
+    url = f"{_base_url()}/cli-auth/init"
     resp = requests.post(url, timeout=10)
     resp.raise_for_status()
     data = resp.json()
@@ -27,7 +32,7 @@ def init_auth() -> tuple[str, str]:
 
 def poll_auth(session_id: str, max_attempts: int = 6, interval: int = 5) -> Optional[str]:
     """Poll for auth approval. Returns API key or None on timeout."""
-    url = f"https://lium.io/api/cli-auth/poll/{session_id}"
+    url = f"{_base_url()}/cli-auth/poll/{session_id}"
     for _ in range(max_attempts):
         try:
             resp = requests.get(url, timeout=5)
