@@ -278,7 +278,8 @@ def _satisfies_spec(executor: ExecutorInfo, spec: Dict[str, Any]) -> bool:
     floors = {
         "min_vram_gb": (gpu_detail.get("capacity") or 0) / _MIB_PER_GB if gpu_detail.get("capacity") else None,
         "min_cpus": (specs.get("cpu") or {}).get("count"),
-        # the RAM a pod gets: the host total less the reserve the feed publishes (as the server's rent-by-spec)
+        # the RAM a pod gets: the host total less the reserve GET /executors serves (as the server's rent-by-spec);
+        # an older backend sends no pod_reserve, so it counts as 0
         "min_ram_gb": (ram.get("total") - (ram.get("pod_reserve") or 0)) / _KIB_PER_GB if ram.get("total") else None,
         "min_disk_gb": disk_kib / _KIB_PER_GB if disk_kib else None,
         "min_download_mbps": executor.effective_download_speed_mbps,
