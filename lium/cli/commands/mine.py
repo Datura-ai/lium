@@ -465,10 +465,12 @@ def _compose_diagnostics(executor_dir: Path, tail: int = 30) -> str:
     return "\n".join(parts)
 
 
-def _start_executor(executor_dir: Path, wait_secs: int = 180):
+def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = False):
     # Start using the default docker-compose.yml
-    # recreate: an executor already running keeps its old .env, so a new MINER_ACCOUNT_CLAIM never reaches it
-    _run("docker compose up -d --force-recreate", capture=True, cwd=str(executor_dir))
+    # recreate: an executor already running keeps its old .env, so a new MINER_ACCOUNT_CLAIM never reaches it;
+    # a plain re-run leaves a running executor alone
+    command = "docker compose up -d --force-recreate" if recreate else "docker compose up -d"
+    _run(command, capture=True, cwd=str(executor_dir))
 
     # Wait for the executor service to be fully healthy
     start = time.time()
@@ -927,7 +929,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             _check_ports_free(_host_ports_from_answers(answers), executor_dir)
 
         with timed_step_status(5, TOTAL_STEPS, "Starting node"):
-            _start_executor(executor_dir)
+            _start_executor(executor_dir, recreate=token is not None)
 
         console.dim(
             "Validation runs the validator's preflight image: GPU check, matrix "
