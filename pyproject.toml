@@ -56,6 +56,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# `lium mcp`, the MCP server for agent hosts; 1.x and 2.x both work (lium/cli/mcp/command.py)
+mcp = ["mcp>=1.10,<3"]
 provider = [
     # The chain stack. Renting a pod never touches it. bittensor-drand does not
     # build on 3.14, and its traceback names cargo and an unrelated repo rather
