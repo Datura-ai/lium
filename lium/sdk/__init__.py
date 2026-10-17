@@ -24,6 +24,7 @@ from .exceptions import (
     PodStartError,
     RemoteExecutionError,
 )
+from .bounded_job import JobResult
 from .jobs import Job
 from .models import (
     ApiKeyInfo,
@@ -69,6 +70,7 @@ __all__ = [
     "Template",
     "GpuStats",
     "Job",
+    "JobResult",
     "VolumeInfo",
     "BackupConfig",
     "BackupLog",

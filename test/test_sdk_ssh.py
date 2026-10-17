@@ -64,6 +64,8 @@ def test_ssh_connection_falls_back_to_agent_when_key_file_cannot_be_loaded(monke
             "port": 20299,
             "username": "root",
             "timeout": 30,
+            "banner_timeout": 15,
+            "auth_timeout": 30,
             "look_for_keys": False,
             "key_filename": str(key_path),
             "allow_agent": True,
