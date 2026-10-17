@@ -72,6 +72,8 @@ class ExecutorInfo(_Serializable):
     # The most reduced GPU's current and default power limit in watts; None with the verdict.
     gpu_power_limit_w: Optional[int] = None
     gpu_power_limit_default_w: Optional[int] = None
+    # When a validator last passed the node, as the API's ISO 8601 UTC string; None = never passed.
+    last_verified_at: Optional[str] = None
 
     @property
     def link(self) -> Optional[str]:
