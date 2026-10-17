@@ -76,6 +76,6 @@ def quote_command(node, hours, gpu_count, volume_gb, backup_gb, output_format, j
         table.add_row(line["item"], rate, f"{line['quantity']:g}", _money(line["amount_usd"]), line["note"])
     ui.print(table)
     ui.info(f"Total {_money(quote['total_usd'])} (egress not included)")
-    ui.dim(f"Balance needed to start the rent: {_money(quote['min_balance_to_rent_usd'])}")
+    ui.dim(f"This pod's share of the balance a rent needs: {_money(quote['pod_balance_floor_usd'])} (pods you already run add theirs)")
     if anonymous:
         ui.dim(SIGNUP_NUDGE)

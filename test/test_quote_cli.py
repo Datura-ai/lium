@@ -13,7 +13,7 @@ from lium.sdk import Config, Lium, LiumNotFoundError
 NODE = "3f2b9c1e-8a4d-4b6e-9f10-2c3d4e5f6a7b"
 QUOTE = {
     "executor_id": NODE, "gpu_count": 8, "hours": 2.0, "price_per_hour": 16.0, "total_usd": 32.05,
-    "min_balance_to_rent_usd": 16.0,
+    "pod_balance_floor_usd": 16.0,
     "lines": [
         {"item": "compute", "unit": "hour", "rate_usd": 16.0, "quantity": 2.0, "amount_usd": 32.0, "note": "per second"},
         {"item": "volume", "unit": "GB-hour", "rate_usd": 0.000125, "quantity": 400.0, "amount_usd": 0.05, "note": ""},
