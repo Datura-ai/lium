@@ -62,13 +62,26 @@ def patched_build_client(
 
 def test_billing_list_reads_the_signed_in_providers_daily_ledger(patched_build_client) -> None:
     rows = [{"date": "2026-10-16", "kind": "rental_share", "amount_usd": 4.5}] * 3
-    portal = _Portal(get_body={"data": {"date_from": "2026-10-01", "date_to": "2026-10-17", "summary": {}, "rows": rows}})
+    # the transport shape: portal_http unwraps the DetailResponse, so `rows` is top level
+    portal = _Portal(get_body={"date_from": "2026-10-01", "date_to": "2026-10-17", "summary": {}, "rows": rows})
     patched_build_client(portal)
     runner = CliRunner()
     result = runner.invoke(provider_command, ["--hotkey", "hk1", "billing", "list", "--from", "2026-10-01", "--to", "2026-10-17"])
     assert result.exit_code == 0, result.output
     assert "ledger rows: 3" in result.output
+    assert result.output.count("rental_share") == 3
     assert portal.gets[0][:2] == ("/provider-ledger/daily", {"from": "2026-10-01", "to": "2026-10-17"})
+
+
+@pytest.mark.parametrize(
+    "window",
+    [["--from", "2026-13-01"], ["--to", "17-10-2026"], ["--from", "2026-10-17", "--to", "2026-10-01"], ["--from", "2026-01-01", "--to", "2026-10-17"]],
+)
+def test_billing_list_refuses_a_bad_window_before_the_request(patched_build_client, window) -> None:
+    portal = _Portal(get_body={"rows": []})
+    patched_build_client(portal)
+    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", "billing", "list", *window])
+    assert result.exit_code != 0 and portal.gets == []
 
 
 @pytest.mark.parametrize("flag", [["--all"], ["--miner-hotkey", "5Foo"], ["--page", "2"]])

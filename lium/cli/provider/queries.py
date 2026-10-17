@@ -7,13 +7,21 @@ unknown future fields surface without a model bump.
 
 from __future__ import annotations
 
+import re
+from datetime import date, datetime, timedelta, timezone
+
 import click
 
 from lium.cli.provider._client import build_client
 from lium.cli.provider._guards import handle_provider_error, require_hotkey
 from lium.cli.provider._overrides import with_provider_overrides
-from lium.cli.provider._render import render
-from lium.provider.errors import ProviderError
+from lium.cli.provider._render import _json_mode, fatal, render
+from lium.provider.errors import ARG_INVALID, ProviderError
+
+# The portal's /provider-ledger/daily window: 30 days by default, at most 90 (routes/provider_ledger.py).
+_LEDGER_DEFAULT_DAYS = 30
+_LEDGER_MAX_DAYS = 90
+_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 # ---------------------------------------------------------------------------
@@ -31,17 +39,51 @@ def billing_command() -> None:
 @with_provider_overrides
 @click.pass_context
 def list_billing(ctx: click.Context, start_day: str | None, end_day: str | None) -> None:
-    """The signed-in provider's own earnings, one row per UTC day and kind (DAH-4627: no other provider's rows)."""
+    """The signed-in provider's own earnings, one row per UTC day and kind."""
     require_hotkey(ctx, group="billing")
+    _check_ledger_range(ctx, start_day, end_day)
     client = build_client(ctx)
     try:
         body = client.billing_history(start_day=start_day, end_day=end_day)
     except ProviderError as e:
         ctx.exit(handle_provider_error(ctx, e))
         return
-    rows = (body.get("data") or {}).get("rows") if isinstance(body, dict) else None
-    count = len(rows) if isinstance(rows, list) else 0
-    render(ctx, body, summary=f"ledger rows: {count}")
+    # the transport unwraps the DetailResponse, so `rows` is top level
+    rows = body.get("rows") if isinstance(body, dict) else None
+    rows = rows if isinstance(rows, list) else []
+    if _json_mode(ctx):
+        render(ctx, body)
+        return
+    period = {key: body.get(key) for key in ("date_from", "date_to")}
+    render(ctx, {"data": rows, **period}, summary=f"ledger rows: {len(rows)}")
+
+
+def _check_ledger_range(ctx: click.Context, start_day: str | None, end_day: str | None) -> None:
+    """Refuse a bad day or window before the request: the portal's 422 would read as schema drift."""
+
+    def day(option: str, value: str | None) -> date | None:
+        if value is None:
+            return None
+        try:
+            if _DAY_RE.match(value):
+                return date.fromisoformat(value)
+        except ValueError:
+            pass
+        fatal(ctx, ProviderError(f"{option} must be a UTC day as YYYY-MM-DD, not '{value}'", code=ARG_INVALID))
+
+    end = day("--to", end_day) or datetime.now(timezone.utc).date()
+    start = day("--from", start_day) or end - timedelta(days=_LEDGER_DEFAULT_DAYS - 1)
+    if start > end:
+        fatal(ctx, ProviderError("--from must be on or before --to", code=ARG_INVALID))
+    if (end - start).days + 1 > _LEDGER_MAX_DAYS:
+        fatal(
+            ctx,
+            ProviderError(
+                f"the window is {(end - start).days + 1} days; at most {_LEDGER_MAX_DAYS}",
+                code=ARG_INVALID,
+                hint="Split it into several calls of 90 days or fewer.",
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
