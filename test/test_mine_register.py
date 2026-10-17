@@ -100,6 +100,38 @@ def test_register_path_writes_the_account_claim_to_env(tmp_path: Path) -> None:
     assert "MINER_ACCOUNT_CLAIM=" + "ab12" * 8 in (tmp_path / ".env").read_text().splitlines()
 
 
+def test_rerun_without_register_keeps_the_account_claim(tmp_path: Path) -> None:
+    """A later `lium mine` without --register rebuilds .env from the template; the claim must survive it."""
+    (tmp_path / ".env.template").write_text("MINER_HOTKEY_SS58_ADDRESS=\nMINER_ACCOUNT_CLAIM=\nSSH_PORT=2200\n")
+    (tmp_path / ".env").write_text("MINER_HOTKEY_SS58_ADDRESS=x\nMINER_ACCOUNT_CLAIM=" + "ab12" * 8 + "\n")
+    mine._setup_executor_env(tmp_path, hotkey=HOTKEY)
+    mine._apply_env_overrides(tmp_path, "8080", "8080", "2200", "", "", account_claim=None)
+    assert "MINER_ACCOUNT_CLAIM=" + "ab12" * 8 in (tmp_path / ".env").read_text().splitlines()
+    # a template without the key still gets it
+    (tmp_path / ".env.template").write_text("MINER_HOTKEY_SS58_ADDRESS=\n")
+    mine._setup_executor_env(tmp_path, hotkey=HOTKEY)
+    assert "MINER_ACCOUNT_CLAIM=" + "ab12" * 8 in (tmp_path / ".env").read_text().splitlines()
+
+
+def test_recreate_waits_for_a_new_healthy_container(tmp_path: Path, monkeypatch) -> None:
+    """After --force-recreate the old container can still read healthy; the wait must not return on it."""
+    ps = iter(["old\n", "old\n", "new\n"])  # before up, then the old container lingers once, then the new one
+    inspected = []
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        if "ps -q" in cmd:
+            return next(ps), ""
+        if cmd.startswith("docker inspect"):
+            inspected.append(cmd.split()[-1])
+            return "healthy", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+    mine._start_executor(tmp_path, recreate=True)
+    assert inspected == ["new"]
+
+
 def test_parse_register_token_refuses_a_custodied_token_without_a_usable_node_identity() -> None:
     """Negative control: an opaque account id with no ``node_hotkey`` (or a non-SS58 one) cannot fill the .env."""
     for claim in (None, "", "0xnot-ss58"):
