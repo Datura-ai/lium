@@ -53,6 +53,12 @@ def ls_store_executor(gpu_type: Optional[str] = None) -> List[ExecutorInfo]:
     default=None,
     help="Minimum Download (Mbps) a node must report; nodes with no figure are excluded.",
 )
+@click.option(
+    "--reliable",
+    is_flag=True,
+    default=False,
+    help="Only nodes whose provider's reliability score rests on enough rentals; unrated providers are excluded.",
+)
 @click.option("--lat", type=float, help="Latitude for distance filtering")
 @click.option("--lon", type=float, help="Longitude for distance filtering")
 @click.option("--max-distance", "max_distance", type=int, help="Maximum distance in miles from --lat/--lon")
@@ -90,6 +96,7 @@ def ls_command(
     min_cpus: Optional[int],
     nvlink: bool,
     min_download_mbps: Optional[float],
+    reliable: bool,
 ):
     """List available GPU nodes.
 
@@ -121,6 +128,7 @@ def ls_command(
       lium ls --gpu H100 --count 8
       lium ls --gpu H100 --country US,NL --max-price 2.50
       lium ls --min-vram 80 --min-cuda 12.8 --tier secure
+      lium ls --gpu H100 --reliable
       lium ls --gpu A100 --format json | jq '.[0].huid'
     """
     output_format = resolve_output_format(output_format, json_output)
@@ -152,6 +160,7 @@ def ls_command(
         "min_cpus": min_cpus,
         "nvlink": nvlink,
         "min_download_mbps": min_download_mbps,
+        "reliable": reliable,
     }
 
     action = GetExecutorsAction()
@@ -197,7 +206,7 @@ def ls_command(
             return
         server_filters = [flag for flag, on in (
             ("--count", gpu_count), ("--min-cuda", min_cuda_version), ("--min-cpus", min_cpus),
-            ("--max-distance", max_distance),
+            ("--max-distance", max_distance), ("--reliable", reliable),
         ) if on]
         if server_filters:
             ui.error(f"No available node matches {', '.join(server_filters)}")
