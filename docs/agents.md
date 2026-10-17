@@ -207,6 +207,7 @@ From Python: `Lium().down(pod, rating=2, feedback="...")`. Over the API: send th
 - **Minimal images lack tools** scripts assume: `apt-get update && apt-get install -y rsync ffmpeg git`.
 - **Set `--ttl` on every `up`.** Billing runs until the pod is removed, whether or not the job is alive.
 - **Executor vs. template CUDA:** `lium ls --format json` reports `max_cuda_version` per node; choose a template whose CUDA build does not exceed it.
+- **Partly rented nodes:** `lium ls --format json` reports `gpu_count` (the node's GPUs) and `available_gpu_count` (free now, `null` when the server does not say). Rent at most `available_gpu_count` GPUs; a larger `-c` is refused with `gpu_count_invalid`.
 
 ## 5. Discovering the shapes
 
