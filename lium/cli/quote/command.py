@@ -31,6 +31,12 @@ def _money(value) -> str:
     return "-" if value is None else f"${value:,.4f}"
 
 
+def _rate(value) -> str:
+    """A per-unit rate at full precision: storage rates are fractions of a cent per GB-hour."""
+    digits = f"{value:,.8f}".rstrip("0")
+    return f"${digits}{'0' * max(0, 2 - len(digits.split('.')[1]))}"
+
+
 @click.command("quote", epilog="Use --format json for machine-readable output.")
 @click.argument("node")
 @click.option("--hours", type=float, required=True, help="How long the job runs.")
@@ -72,7 +78,7 @@ def quote_command(node, hours, gpu_count, volume_gb, backup_gb, output_format, j
     for column in ("Item", "Rate", "Quantity", "Amount", "Note"):
         table.add_column(column)
     for line in quote["lines"]:
-        rate = "-" if line["rate_usd"] is None else f"{_money(line['rate_usd'])}/{line['unit']}"
+        rate = "-" if line["rate_usd"] is None else f"{_rate(line['rate_usd'])}/{line['unit']}"
         table.add_row(line["item"], rate, f"{line['quantity']:g}", _money(line["amount_usd"]), line["note"])
     ui.print(table)
     ui.info(f"Total {_money(quote['total_usd'])} (egress not included)")

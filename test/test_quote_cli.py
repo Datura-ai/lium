@@ -86,6 +86,7 @@ def test_quote_by_huid_resolves_the_listed_node_and_passes_gpus(requests_seen, m
     assert out.exit_code == 0, out.output
     assert requests_seen[0][1] == f"/executors/{NODE}/quote" and requests_seen[0][2]["gpu_count"] == 1
     assert "Total $32.0500 (egress not included)" in out.output
+    assert "$0.000125/GB-hour" in out.output and "$0.0001/" not in out.output
 
 
 def test_quote_of_an_unlisted_huid_is_not_found_without_a_request(monkeypatch):
@@ -124,3 +125,10 @@ def test_quote_without_an_api_key_prices_the_node_and_says_how_to_rent(monkeypat
     assert out.exit_code == 0, out.output
     assert seen == [("GET", f"/executors/{NODE}/quote", "")]
     assert "Total $32.0500" in out.output and SIGNUP_NUDGE in out.output
+
+
+@pytest.mark.parametrize("rate,shown", [(0.0000288, "$0.0000288"), (0.00005, "$0.00005"), (0.000125, "$0.000125"), (16.0, "$16.00"), (1234.5, "$1,234.50")])
+def test_rate_keeps_fractions_of_a_cent(rate, shown):
+    from lium.cli.quote.command import _rate
+
+    assert _rate(rate) == shown
