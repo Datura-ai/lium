@@ -476,6 +476,7 @@ def _stub_host(monkeypatch, tmp_path: Path, *, nvidia_smi: str = "NVIDIA L4, 230
     monkeypatch.setattr(mine, "_clone_or_update_repo", fake_clone)
     for name in ("_install_executor_tools", "_check_prereqs", "_check_free_disk", "_start_executor", "_validate_executor", "_check_ports_free"):
         monkeypatch.setattr(mine, name, lambda *a, **k: None)
+    monkeypatch.setattr(mine, "_docker_storage_limited", lambda: True)
 
     class _Pull:
         def poll(self): return 0

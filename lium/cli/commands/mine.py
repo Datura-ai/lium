@@ -167,6 +167,49 @@ def _check_prereqs():
         )
 
 
+# Validators score 0 a node whose Docker cannot cap a container's disk (STORAGE_LIMIT_REQUIRED): one renter
+# filling an uncapped disk fills /var/lib/docker and takes the host and every pod on it down (18 Oct 2026).
+_STORAGE_GUIDE = "https://docs.lium.io/providers/nodes/docker-storage"
+
+
+def _docker_storage_limited() -> bool:
+    """True when Docker is overlay2 on xfs mounted with pquota, so `--storage-opt size=` caps a container."""
+    from ..mine.docker_config import build_verification_result
+    from ..mine.gpu_splitting import run_command
+
+    return build_verification_result(run_command).passed
+
+
+def _setup_docker_storage(auto: bool):
+    """Move Docker storage to an xfs pquota mount with `lium gpu-splitting setup`'s own plan, on a safe spare disk.
+
+    The plan is printed and confirmed first (`--auto` confirms it); the target is picked the same conservative way
+    (blank or unused disk/partition, never root or the current Docker disk) and a failed setup rolls back.
+    """
+    import os
+
+    from ..mine.gpu_splitting import _build_setup_plan, _confirm_plan, _execute_setup, _preflight
+
+    manual = (
+        "Docker cannot limit a container's disk on this host (needs overlay2 on xfs mounted with pquota); "
+        "validators require it.\n"
+        "Set it up with: sudo lium gpu-splitting setup --device <spare disk>\n"
+        f"then run `lium mine` again. Guide: {_STORAGE_GUIDE}"
+    )
+    if os.geteuid() != 0:
+        raise Exception(manual.replace("Set it up with", "Run `sudo lium mine`, or set it up with"))
+    console.print("[yellow]Docker cannot limit a container's disk yet; setting up xfs storage with pquota.[/yellow]")
+    try:
+        plan = _build_setup_plan(_preflight(), None)
+    except RuntimeError as exc:
+        raise Exception(f"{manual}\nNo spare disk was picked automatically: {exc}") from exc
+    try:
+        _confirm_plan(plan, yes=auto)
+    except click.Abort:
+        raise Exception(manual) from None
+    _execute_setup(plan)
+
+
 # The printed command fetches the official installer, never the checkout's copy; the CLI does not run it (it needs sudo).
 _SYSBOX_SETUP_COMMAND = (
     "curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-io/main/neurons/executor/"
@@ -893,7 +936,10 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
 
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
             _check_prereqs()
-            _check_free_disk(target_dir / "neurons" / "executor")
+            storage_ok = _docker_storage_limited()
+        if not storage_ok:
+            _setup_docker_storage(auto)   # outside the spinner: it prints the plan and may ask to confirm
+        _check_free_disk(target_dir / "neurons" / "executor")
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.
         preflight_pull = _start_preflight_pull()
