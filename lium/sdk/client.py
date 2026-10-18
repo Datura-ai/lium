@@ -5302,6 +5302,8 @@ class Lium:
         Raises:
             LiumError: ``code`` ``self_transfer`` (400), ``insufficient_balance`` (402) or
                 ``recipient_unavailable`` (409, a missing or deleted account).
+            LiumChargeOutcomeUnknownError: timeout, dropped connection or 5xx after the POST — the
+                transfer may have happened; repeat only with ``idempotency_key`` from the error.
         """
         if not math.isfinite(amount) or amount <= 0:
             raise LiumError("amount must be a positive, finite number of dollars.", code="invalid_arguments")
@@ -5309,9 +5311,20 @@ class Lium:
         payload: Dict[str, Any] = {"receiver_email" if "@" in to else "receiver_id": to.strip(), "amount": amount}
         if description:
             payload["description"] = description
-        body = self._request(
-            "POST", "/users/me/transfer-credits", json=payload, headers={**self.headers, "Idempotency-Key": key}
-        ).json()
+        try:
+            body = self._request(
+                "POST", "/users/me/transfer-credits", json=payload, headers={**self.headers, "Idempotency-Key": key}
+            ).json()
+        except (LiumServerError, requests.RequestException) as exc:
+            # the debit may have committed before the answer was lost: never "nothing happened"
+            raise LiumChargeOutcomeUnknownError(
+                "The transfer may or may not have happened: the API did not answer after it was posted. "
+                "Check the balance before trying again; a repeat with the same idempotency_key moves the "
+                "credit once.",
+                idempotency_key=key,
+                code="transfer_outcome_unknown",
+                request_id=getattr(exc, "request_id", None),
+            ) from exc
         body.setdefault("idempotency_key", key)
         return body
 

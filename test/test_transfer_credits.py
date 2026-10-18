@@ -4,6 +4,7 @@ import json
 import uuid
 
 import pytest
+import requests
 import responses
 from click.testing import CliRunner
 
@@ -119,3 +120,36 @@ def test_cli_key_without_billing_scope_gets_the_billing_key_hint(client):
     error = json.loads(result.stderr.strip().splitlines()[-1])["error"]
     assert error["code"] == "missing_scope"
     assert "lium keys create payer --scope billing" in error["hint"]
+
+
+@responses.activate
+def test_cli_passes_the_idempotency_key_through(client):
+    responses.post(URL, json=OK)
+
+    result = _run("friend@example.com", "25", "--idempotency-key", "k-7", "--yes")
+
+    assert result.exit_code == 0, result.output
+    assert responses.calls[0].request.headers["Idempotency-Key"] == "k-7"
+    assert "k-7" in result.output
+
+
+@pytest.mark.parametrize("answer", [requests.Timeout("read timed out"), 502])
+@responses.activate
+def test_cli_lost_answer_is_outcome_unknown_with_the_key(client, answer):
+    if isinstance(answer, int):
+        responses.post(URL, json=_error("server_error", "bad gateway"), status=answer)
+    else:
+        responses.post(URL, body=answer)
+
+    text = _run("friend@example.com", "25", "--idempotency-key", "k-9", "--yes")
+    assert text.exit_code == EXIT_PERMISSION_DENIED, text.output
+    assert "may or may not have happened" in text.output and "k-9" in text.output
+    assert len(responses.calls) == 1  # posted once, never retried blindly
+
+    as_json = _run("friend@example.com", "25", "--yes", "--json")
+    assert as_json.exit_code == EXIT_PERMISSION_DENIED
+    error = json.loads(as_json.stderr.strip().splitlines()[-1])["error"]
+    assert error["code"] == "transfer_outcome_unknown"
+    sent = responses.calls[-1].request.headers["Idempotency-Key"]
+    assert sent in error["hint"]
+    assert json.loads(as_json.stderr.strip().splitlines()[-1])["data"]["idempotency_key"] == sent
