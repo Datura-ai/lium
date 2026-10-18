@@ -2213,6 +2213,32 @@ class Lium:
         self._release_ssh(pod)
         return result
 
+    def reset_gpu(self, pod: PodInfo, gpu_indices: Optional[List[int]] = None) -> Dict[str, Any]:
+        """Reset a pod's hung GPUs: stops the container, resets the GPUs, starts it again.
+
+        Every process in the pod is stopped, even when one GPU is named; files are kept and the
+        SSH host key stays. ``POST /pods/{id}/reset-gpu``.
+
+        Args:
+            pod: Pod whose GPUs to reset.
+            gpu_indices: Pod GPU indices as ``nvidia-smi`` numbers them inside the pod; ``None`` resets all.
+
+        Returns:
+            ``{"pod_id", "ok", "container_restarted", "gpus": [{"index", "uuid", "result", "detail"}]}``,
+            ``result`` being ``reset``, ``latch_cleared`` or ``failed``.
+
+        Raises:
+            LiumError: 400/409 with the API's ``code`` (``invalid_gpu_index``, ``mig_enabled``,
+                ``reset_not_supported``, ...); ``LiumServerError`` on 503 ``gpu_reset_unavailable``.
+        """
+        # sent once: a 429 is the 1/min limit and a second reset must not follow a lost answer;
+        # the backend waits up to 90 s for the validator, past the 30 s default timeout
+        result = self._request(
+            "POST", f"/pods/{pod.id}/reset-gpu", json={"gpu_indices": gpu_indices}, retry=False, timeout=120,
+        ).json()
+        self._release_ssh(pod)  # the container was stopped; held connections are dead
+        return result
+
     # -- multi-node clusters ---------------------------------------------------------------------
 
     #: Only an image with this prefix reads the injected overlay config; the API refuses any other.
