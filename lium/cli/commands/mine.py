@@ -188,16 +188,19 @@ def _setup_docker_storage(auto: bool):
     """
     import os
 
-    from ..mine.gpu_splitting import _build_setup_plan, _confirm_plan, _execute_setup, _preflight
+    from ..mine.gpu_splitting import _build_setup_plan, _confirm_plan, _execute_setup, _preflight, run_command
 
     manual = (
         "Docker cannot limit a container's disk on this host (needs overlay2 on xfs mounted with pquota); "
-        "validators require it.\n"
+        "validators will require it.\n"
         "Set it up with: sudo lium gpu-splitting setup --device <spare disk>\n"
         f"then run `lium mine` again. Guide: {_STORAGE_GUIDE}"
     )
     if os.geteuid() != 0:
         raise Exception(manual.replace("Set it up with", "Run `sudo lium mine`, or set it up with"))
+    # the migration stops host Docker: never take running rentals down, even with --auto
+    if run_command(["docker", "ps", "-q"]).stdout.strip():
+        raise Exception(f"{manual}\nContainers are running on this host; migrate only while it has no rentals.")
     console.print("[yellow]Docker cannot limit a container's disk yet; setting up xfs storage with pquota.[/yellow]")
     try:
         plan = _build_setup_plan(_preflight(), None)

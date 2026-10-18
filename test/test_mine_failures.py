@@ -10,6 +10,7 @@
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -128,7 +129,7 @@ def test_prereqs_pass_with_sysbox(monkeypatch):
     mine._check_prereqs()
 
 
-def _storage_host(monkeypatch, *, root: bool, plan_error: Exception | None = None):
+def _storage_host(monkeypatch, *, root: bool, plan_error: Exception | None = None, running: str = ""):
     import lium.cli.mine.gpu_splitting as gs
 
     calls = []
@@ -139,6 +140,7 @@ def _storage_host(monkeypatch, *, root: bool, plan_error: Exception | None = Non
             raise plan_error
         return "plan"
 
+    monkeypatch.setattr(gs, "run_command", lambda cmd: SimpleNamespace(stdout=running))
     monkeypatch.setattr(gs, "_preflight", lambda: "preflight")
     monkeypatch.setattr(gs, "_build_setup_plan", plan)
     monkeypatch.setattr(gs, "_confirm_plan", lambda p, yes: calls.append(("confirm", p, yes)))
@@ -165,4 +167,12 @@ def test_storage_setup_with_no_safe_disk_names_the_manual_command(monkeypatch):
     with pytest.raises(Exception) as err:
         mine._setup_docker_storage(auto=True)
     assert "lium gpu-splitting setup --device" in str(err.value) and "two equally safe" in str(err.value)
+    assert calls == []
+
+
+def test_storage_setup_refuses_while_containers_run(monkeypatch):
+    calls = _storage_host(monkeypatch, root=True, running="abc123\n")
+    with pytest.raises(Exception) as err:
+        mine._setup_docker_storage(auto=True)
+    assert "no rentals" in str(err.value)
     assert calls == []
