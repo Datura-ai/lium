@@ -21,6 +21,7 @@ from .rm import rm_command
 from .logs import logs_command
 from .reboot import reboot_command
 from .reset_gpu import reset_gpu_command
+from .gpu_clocks import gpu_clocks_command
 from .scp.command import scp_command
 from .rsync import rsync_command
 from .whoami import whoami_command
@@ -122,6 +123,7 @@ cli.add_command(rm_command)
 cli.add_command(logs_command)
 cli.add_command(reboot_command)
 cli.add_command(reset_gpu_command)
+cli.add_command(gpu_clocks_command)
 cli.add_command(scp_command)
 cli.add_command(rsync_command)
 cli.add_command(whoami_command)

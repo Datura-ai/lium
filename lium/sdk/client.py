@@ -2239,6 +2239,38 @@ class Lium:
         self._release_ssh(pod)  # the container was stopped; held connections are dead
         return result
 
+    def lock_gpu_clocks(
+        self, pod: PodInfo, min_mhz: int, max_mhz: int, gpu_indices: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        """Lock a pod's GPU core clocks to ``min_mhz``..``max_mhz``. Nothing in the pod is stopped.
+
+        ``POST /pods/{id}/gpu-clocks``.
+
+        Args:
+            pod: Pod whose GPU clocks to lock.
+            min_mhz: Lowest core clock in MHz.
+            max_mhz: Highest core clock in MHz.
+            gpu_indices: Pod GPU indices as ``nvidia-smi`` numbers them inside the pod; ``None`` means all.
+
+        Returns:
+            ``{"pod_id", "ok", "gpus": [{"index", "uuid", "result", "applied_min_mhz", "applied_max_mhz", "detail"}]}``,
+            ``result`` being ``locked``, ``reset`` or ``failed``.
+
+        Raises:
+            LiumError: 400/409 with the API's ``code`` (``invalid_clock_range``, ``pod_not_running``,
+                ``clock_lock_not_supported``, ``mig_enabled``, ``operation_in_progress``, ...);
+                ``LiumServerError`` on 503 ``gpu_clocks_unavailable``.
+        """
+        return self._gpu_clocks(pod, {"gpu_indices": gpu_indices, "min_mhz": min_mhz, "max_mhz": max_mhz})
+
+    def reset_gpu_clocks(self, pod: PodInfo, gpu_indices: Optional[List[int]] = None) -> Dict[str, Any]:
+        """Return a pod's GPU clocks to the driver default; same response and errors as ``lock_gpu_clocks``."""
+        return self._gpu_clocks(pod, {"gpu_indices": gpu_indices, "reset": True})
+
+    def _gpu_clocks(self, pod: PodInfo, body: Dict[str, Any]) -> Dict[str, Any]:
+        # sent once (a lost answer must not stack a second operation); the backend waits up to 60 s
+        return self._request("POST", f"/pods/{pod.id}/gpu-clocks", json=body, retry=False, timeout=90).json()
+
     # -- multi-node clusters ---------------------------------------------------------------------
 
     #: Only an image with this prefix reads the injected overlay config; the API refuses any other.

@@ -232,6 +232,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium rm <POD>` - Remove/stop a pod (`--name-only` to refuse `lium ps` row numbers in scripts; `--format json` prints what was removed with its estimated spend; `--rating 1-5 --feedback "..."` rates the node in the same call)
 - `lium reboot <POD>` - Reboot a pod
 - `lium reset-gpu <POD> [--gpu N ...]` - Reset a pod's hung GPUs; stops the pod's processes, keeps its files
+- `lium gpu-clocks <POD> --lock MIN,MAX | --reset [--gpu N ...]` - Lock a pod's GPU core clocks to a MHz range, or reset them to the default; the pod keeps running
 - `lium audit [--pod POD] [--since 24h] [--key ID]` - Who did what to the account's pods, and when: every rent, reboot, edit and delete with the session or API key that requested it (add `--json` for machine-readable output)
 - `lium audit --account [--action pod.] [--source cli] [--since 7d] [--cursor <next_cursor>]` - The account audit log: every request that changed something (pods, keys, logins, balance, settings, team members) with the client and IP it came from; your own IPs only, 90 days (`--json` prints the page with `next_cursor`)
 - `lium update <POD> --jupyter <PORT>` - Install Jupyter Notebook on a pod, served on that internal port (`--jupyter` is the only update; without it the command prints `No updates specified`)
