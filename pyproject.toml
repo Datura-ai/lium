@@ -79,6 +79,8 @@ docs = ["sphinx>=7.3", "sphinx-rtd-theme>=1.3"]
 
 [project.scripts]
 lium = "lium.cli.cli:main"
+# `uvx --from 'lium.io[mcp]' lium.io mcp`, the command MCP Registry clients build from server.json
+"lium.io" = "lium.cli.cli:main"
 
 # The version is the git tag (vX.Y.Z): a GitHub release IS the version bump (DAH-3225).
 # hatch-vcs writes lium/_version.py at build time; __about__ re-exports it.

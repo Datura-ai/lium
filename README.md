@@ -637,6 +637,14 @@ pip install 'lium.io[mcp]'
 {"mcpServers": {"lium": {"command": "lium", "args": ["mcp"]}}}
 ```
 
+Without installing anything, with [uv](https://docs.astral.sh/uv/):
+
+```json
+{"mcpServers": {"lium": {"command": "uvx", "args": ["--from", "lium.io[mcp]", "lium.io", "mcp"]}}}
+```
+
+It is listed on the official MCP Registry as `io.github.Datura-ai/lium`.
+
 A rented pod is billed per second until `remove_pod`. The docs-search MCP server (no key, read-only) is separate:
 https://docs.lium.io/mcp.
 

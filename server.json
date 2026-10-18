@@ -1,0 +1,35 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Datura-ai/lium",
+  "title": "Lium GPU Cloud",
+  "description": "Rent NVIDIA GPU pods on Lium, run commands on them and remove them, billed per second.",
+  "version": "0.0.0",
+  "websiteUrl": "https://lium.io",
+  "repository": {
+    "url": "https://github.com/Datura-ai/lium",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "lium.io",
+      "version": "0.0.0",
+      "runtimeHint": "uvx",
+      "runtimeArguments": [
+        {"type": "named", "name": "--from", "value": "lium.io[mcp]"}
+      ],
+      "packageArguments": [
+        {"type": "positional", "value": "mcp"}
+      ],
+      "transport": {"type": "stdio"},
+      "environmentVariables": [
+        {
+          "name": "LIUM_API_KEY",
+          "description": "Lium API key from https://lium.io (or run `lium init` once instead)",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}

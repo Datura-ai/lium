@@ -1107,8 +1107,8 @@ def tool_functions(tools: LiumTools) -> List[Callable[..., Awaitable[Dict[str, A
     so a slow rental would otherwise stall every other request, including the remove_pod that stops billing."""
 
     async def list_gpus(gpu_type: Optional[str] = None, gpu_count: Optional[int] = None, limit: int = 20) -> Dict[str, Any]:
-        """Find GPU nodes for rent on Lium, cheapest first. Use before rent_pod to pick an executor_id.
-        gpu_type filters by model ("H100", "RTX 4090", "B200"); gpu_count by GPUs on the node."""
+        """Use this when you need a GPU: lists Lium nodes for rent, cheapest first, with the executor_id rent_pod
+        takes. gpu_type filters by model ("H100", "RTX 4090", "B200"); gpu_count by GPUs on the node."""
         return await asyncio.to_thread(tools.list_gpus, gpu_type, gpu_count, limit)
 
     async def rent_pod(
@@ -1118,9 +1118,10 @@ def tool_functions(tools: LiumTools) -> List[Callable[..., Awaitable[Dict[str, A
         timeout_seconds: int = 600,
         known_pod_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Rent a GPU pod on a node from list_gpus and wait until it is running. This spends money: the pod is
-        billed per second at the node's hourly price until remove_pod. Give it a short unique name. If the result
-        has status "pending", the pod is already rented: do not rent again, poll list_pods or remove_pod its pod_id.
+        """Use this when you have picked a node from list_gpus and want a GPU pod on it: rents it and waits until
+        it is running. This spends money: the pod is billed per second at the node's hourly price until
+        remove_pod. Give it a short unique name. If the result has status "pending", the pod is already rented: do
+        not rent again, poll list_pods or remove_pod its pod_id.
         If it has status "recovered", nothing new was rented: it lists pods earlier calls rented that you have not
         used yet. To rent another pod next to those, pass their ids as known_pod_ids. One rent_pod runs at a time:
         while one is still running, another returns the error rent_in_progress and rents nothing."""
@@ -1137,7 +1138,7 @@ def tool_functions(tools: LiumTools) -> List[Callable[..., Awaitable[Dict[str, A
         return result
 
     async def list_pods() -> Dict[str, Any]:
-        """List your pods with their status, GPU, price per hour and SSH command."""
+        """Use this when you need your pods: lists them with status, GPU, price per hour and SSH command."""
         receiver = _Rental()
         try:
             result = await asyncio.to_thread(tools.list_pods, receiver)
@@ -1148,16 +1149,17 @@ def tool_functions(tools: LiumTools) -> List[Callable[..., Awaitable[Dict[str, A
         return result
 
     async def run_command(pod: str, command: str, timeout_seconds: int = 300) -> Dict[str, Any]:
-        """Run a shell command on a running pod (by pod id, or a huid or name that matches one pod) and return exit
-        code, stdout and stderr."""
+        """Use this when you want to run something on a pod: runs a shell command on a running pod (by pod id, or a
+        huid or name that matches one pod) and returns exit code, stdout and stderr."""
         return await asyncio.to_thread(tools.run_command, pod, command, timeout_seconds)
 
     async def remove_pod(pod: str) -> Dict[str, Any]:
-        """Remove a pod (by pod id, or a huid or name that matches one pod). Billing stops; anything on its disk is gone."""
+        """Use this when you are done with a pod: removes it (by pod id, or a huid or name that matches one pod).
+        Billing stops; anything on its disk is gone."""
         return await asyncio.to_thread(tools.remove_pod, pod)
 
     async def get_balance() -> Dict[str, Any]:
-        """Your Lium account balance in USD."""
+        """Use this when you need to know whether you can afford a rental: returns your Lium balance in USD."""
         return await asyncio.to_thread(tools.get_balance)
 
     return [list_gpus, rent_pod, list_pods, run_command, remove_pod, get_balance]

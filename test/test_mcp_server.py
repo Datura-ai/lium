@@ -320,6 +320,14 @@ def test_a_slow_tool_call_does_not_block_the_others(tools, fake, monkeypatch, sl
     asyncio.run(check())
 
 
+def test_every_tool_description_says_when_to_use_it(tools):
+    from lium.cli.mcp.tools import tool_functions
+
+    # MCP directories (Glama) grade descriptions that open with when to call the tool
+    for function in tool_functions(tools):
+        assert function.__doc__.startswith("Use this when "), function.__name__
+
+
 def test_a_rental_cancelled_mid_call_removes_its_pod_before_a_retry_rents(tools, fake, monkeypatch):
     from lium.cli.mcp.tools import tool_functions
 
