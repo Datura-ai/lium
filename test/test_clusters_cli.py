@@ -8,7 +8,7 @@ from lium.cli import interactive
 from lium.cli.cli import cli
 from lium.cli.clusters import command as clusters_command
 from lium.sdk import (
-    Cluster, ClusterOffer, ExecutorInfo, LiumNotFoundError, LiumServerError, PodInfo,
+    Cluster, ClusterOffer, ExecutorInfo, LiumNotFoundError, LiumPermissionError, LiumServerError, PodInfo,
 )
 
 FABRIC = "hot:infiniband:0x3:0x7fff:NVIDIA H100 80GB HBM3:8"
@@ -151,3 +151,60 @@ def test_clusters_rm_reports_a_member_that_stayed(monkeypatch, tmp_path):
     assert payload["ok"] is False and [r["success"] for r in payload["results"]] == [True, False]
     assert payload["results"][1]["error"].startswith("Pod deletion failed")
     assert "still billing" in payload["error"] and "lium clusters rm c-1" in payload["error"]
+
+
+def test_clusters_up_and_rm_ask_first_in_json_mode_too(monkeypatch, tmp_path):
+    """Money is spent only after -y or an answered prompt, whatever the output format (as `lium up` does)."""
+    _patch(monkeypatch, tmp_path)
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "--format", "json", "--no-wait", input="n\n")
+    assert result.exit_code == 0 and FakeLium.up_calls == [], result.output
+    assert "[y/n]" not in result.stdout, "the prompt goes to stderr: stdout is the JSON document"
+
+    result = _run("rm", "c-1", "--format", "json", input="n\n")
+    assert result.exit_code == 0 and FakeLium.removed == [], result.output
+    assert "[y/n]" not in result.stdout
+
+
+def test_clusters_up_asks_before_spending_and_names_the_price(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", input="n\n")
+
+    assert result.exit_code == 0 and "$33.00/h" in result.output and FakeLium.up_calls == []
+
+
+def test_clusters_rm_asks_first(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+
+    result = _run("rm", "c-1", input="n\n")
+
+    assert result.exit_code == 0 and FakeLium.removed == []
+
+
+def test_clusters_rm_404_from_the_route_is_exit_5_and_removes_nothing_per_pod(monkeypatch, tmp_path):
+    """The listing showed the cluster, then `DELETE /clusters/{id}` answered 404: it was removed meanwhile, or the
+    server has no such route. Regression: the old client fell through to per-pod deletes. Now: exit 5
+    (`cluster_not_found`), the hint names `lium clusters ps` and `lium rm`, and no per-pod call is made."""
+    _patch(monkeypatch, tmp_path, rm_error=LiumNotFoundError("Resource not found: Cluster not found"))
+
+    result = _run("rm", "c-1", "-y", "--format", "json")
+
+    assert result.exit_code == 5, result.output
+    error = json.loads(result.stderr)["error"]
+    assert error["code"] == "cluster_not_found" and "Cluster not found" in error["message"]
+    assert "Nothing was deleted" in error["message"] and "lium rm <huid>" in error["hint"]
+    assert FakeLium.removed == ["c-1"]  # the one cluster call; FakeLium has no per-pod rm to fall back to
+
+
+def test_clusters_rm_403_is_permission_denied_exit_6(monkeypatch, tmp_path):
+    """A member of another user, or an API key without the manage scope: the server refuses the whole cluster.
+    Regression guarded: the command's `except LiumNotFoundError` must not widen to `LiumError`, or a 403 would come
+    out as exit 5 `cluster_not_found` saying the cluster is gone while it is billing."""
+    _patch(monkeypatch, tmp_path, rm_error=LiumPermissionError("Permission denied: You do not have permission to access this pod"))
+
+    result = _run("rm", "c-1", "-y", "--format", "json")
+
+    assert result.exit_code == 6, result.output
+    error = json.loads(result.stderr)["error"]
+    assert error["code"] == "permission_denied" and "You do not have permission" in error["message"]
