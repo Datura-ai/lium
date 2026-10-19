@@ -27,7 +27,7 @@ NOW = 1_800_000_000
 
 
 def _token(exp: int | None = NOW + 3600, hotkey: str | None = HOTKEY, opt_in: bool | None = True,
-           node_hotkey: str | None = None, **extra) -> str:
+           node_hotkey: str | None = None, node_claim: str | None = None, **extra) -> str:
     # the portal's fastapi_jwt layout (lium-platform#291): the miner's to_json() plus "scope" under "subject", exp on top;
     # lium-platform#294 adds "node_hotkey" = the miner's listing_hotkey (its own key, or the pool's when custodied)
     subject = {"id": "acct-1", "opt_in_status": opt_in, "scope": "node:register"}
@@ -35,6 +35,8 @@ def _token(exp: int | None = NOW + 3600, hotkey: str | None = HOTKEY, opt_in: bo
         subject["miner_hotkey"] = hotkey
     if node_hotkey is not None:
         subject["node_hotkey"] = node_hotkey
+    if node_claim is not None:
+        subject["node_claim"] = node_claim
     claims = {"subject": subject, "type": "access", **extra}
     if exp is not None:
         claims["exp"] = exp
@@ -82,6 +84,52 @@ def test_parse_register_token_node_identity_is_the_account_key_unless_the_token_
     assert (own_with_claim.miner_hotkey, own_with_claim.node_hotkey) == (HOTKEY, HOTKEY)
     custodied = reg.parse_register_token(_token(hotkey=ACCOUNT_ID, node_hotkey=POOL_HOTKEY), now=NOW)
     assert (custodied.miner_hotkey, custodied.node_hotkey) == (ACCOUNT_ID, POOL_HOTKEY)
+
+
+def test_parse_register_token_reads_the_node_claim_and_drops_a_non_hex_one() -> None:
+    claim = "ab12" * 8
+    assert reg.parse_register_token(_token(node_claim=claim), now=NOW).account_claim == claim
+    assert reg.parse_register_token(_token(), now=NOW).account_claim is None
+    # it is written into .env verbatim: a newline must never get there
+    assert reg.parse_register_token(_token(node_claim="ab12\nSSH_PORT=1"), now=NOW).account_claim is None
+
+
+def test_register_path_writes_the_account_claim_to_env(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("MINER_HOTKEY_SS58_ADDRESS=x\n")
+    mine._apply_env_overrides(tmp_path, "8080", "8080", "2200", "", "", account_claim="ab12" * 8)
+    assert "MINER_ACCOUNT_CLAIM=" + "ab12" * 8 in (tmp_path / ".env").read_text().splitlines()
+
+
+def test_rerun_without_register_keeps_the_account_claim(tmp_path: Path) -> None:
+    """A later `lium mine` without --register rebuilds .env from the template; the claim must survive it."""
+    (tmp_path / ".env.template").write_text("MINER_HOTKEY_SS58_ADDRESS=\nMINER_ACCOUNT_CLAIM=\nSSH_PORT=2200\n")
+    (tmp_path / ".env").write_text("MINER_HOTKEY_SS58_ADDRESS=x\nMINER_ACCOUNT_CLAIM=" + "ab12" * 8 + "\n")
+    mine._setup_executor_env(tmp_path, hotkey=HOTKEY)
+    mine._apply_env_overrides(tmp_path, "8080", "8080", "2200", "", "", account_claim=None)
+    assert "MINER_ACCOUNT_CLAIM=" + "ab12" * 8 in (tmp_path / ".env").read_text().splitlines()
+    # a template without the key still gets it
+    (tmp_path / ".env.template").write_text("MINER_HOTKEY_SS58_ADDRESS=\n")
+    mine._setup_executor_env(tmp_path, hotkey=HOTKEY)
+    assert "MINER_ACCOUNT_CLAIM=" + "ab12" * 8 in (tmp_path / ".env").read_text().splitlines()
+
+
+def test_recreate_waits_for_a_new_healthy_container(tmp_path: Path, monkeypatch) -> None:
+    """After --force-recreate the old container can still read healthy; the wait must not return on it."""
+    ps = iter(["old\n", "old\n", "new\n"])  # before up, then the old container lingers once, then the new one
+    inspected = []
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        if "ps -q" in cmd:
+            return next(ps), ""
+        if cmd.startswith("docker inspect"):
+            inspected.append(cmd.split()[-1])
+            return "healthy", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+    mine._start_executor(tmp_path, recreate=True)
+    assert inspected == ["new"]
 
 
 def test_parse_register_token_refuses_a_custodied_token_without_a_usable_node_identity() -> None:
