@@ -570,6 +570,8 @@ def _real_sdk(monkeypatch, outcomes, pods=lambda posts: [], api_key="test", feat
     monkeypatch.setattr(type(sdk.config), "ssh_public_keys", property(lambda self: ["ssh-ed25519 test"]))
     monkeypatch.setattr(sdk, "get_executor", lambda executor_id: _node("node-a", 2.0))
     monkeypatch.setattr(sdk, "_ensure_ssh_keys_registered", lambda *a, **k: None)
+    # only rent POSTs are answered here; the template lookup up() does for its encryption default is not
+    monkeypatch.setattr(sdk, "_template_offers_volume_encryption", lambda *a, **k: False)
     posts, removed, accounts = [], [], []
     monkeypatch.setattr(sdk, "ps", lambda: pods(posts))
     monkeypatch.setattr(sdk, "rm", lambda pod: removed.append(pod.id))
