@@ -477,9 +477,11 @@ def _compose_diagnostics(executor_dir: Path, tail: int = 30) -> str:
 
 
 def _env_value(env_f: Path, key: str) -> str:
-    if not env_f.exists():
+    try:
+        lines = env_f.read_text().splitlines()
+    except FileNotFoundError:
         return ""
-    return next((line.split("=", 1)[1].strip() for line in env_f.read_text().splitlines() if line.startswith(f"{key}=")), "")
+    return next((line.split("=", 1)[1].strip() for line in lines if line.startswith(f"{key}=")), "")
 
 
 def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = False):
