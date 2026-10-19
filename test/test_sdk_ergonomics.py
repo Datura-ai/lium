@@ -156,6 +156,7 @@ def test_rental_removes_a_pod_the_server_created_before_the_rent_call_raised():
     class _RentRaises(_Client):
         def _rent(self, **kwargs):
             self.calls.append(("rent", kwargs))
+            kwargs["posted"].append(True)
             raise LiumError("Failed to create pod job")
 
     client = _RentRaises(ps_sequence=[[stale], [stale, fresh]])
@@ -180,6 +181,7 @@ def test_rental_cleanup_leaves_a_same_name_pod_whose_executor_is_unknown_or_diff
 
     class _RentRaises(_Client):
         def _rent(self, **kwargs):
+            kwargs["posted"].append(True)
             raise LiumError("Failed to create pod job")
 
     client = _RentRaises(ps_sequence=[[], [unknown, elsewhere, mine]])
@@ -201,6 +203,31 @@ def test_rental_that_raised_before_any_pod_appeared_removes_nothing():
 
     with pytest.raises(ValueError):
         with client.rental(executor_id="exec-1", name="job"):
+            pass
+
+    assert not [c for c in client.calls if c[0] == "DELETE"]
+
+
+def test_rental_that_failed_before_the_rent_post_leaves_a_concurrent_same_name_pod():
+    """A failure before the POST (here the template lookup) cannot have created a pod: a
+    same-name pod that appeared meanwhile on the node is another worker's and stays."""
+    other = _pod()
+    other.id, other.name = "pod-other", "Your Pod"
+
+    class _LookupFails(_Client):
+        def _rent(self, **kwargs):
+            return Lium._rent(self, **kwargs)  # the real one, up to its failed lookup
+
+        def get_executor(self, executor_id):
+            return _executor()
+
+        def get_template(self, template_id):
+            return None
+
+    client = _LookupFails(ps_sequence=[[], [other]])
+
+    with pytest.raises(LiumError, match="Could not look up template"):
+        with client.rental(executor_id="exec-1", template_id="tpl-x", ssh_keys=["ssh-ed25519 AAA"]):
             pass
 
     assert not [c for c in client.calls if c[0] == "DELETE"]
