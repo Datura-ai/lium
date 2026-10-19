@@ -92,7 +92,7 @@ def test_rent_by_spec_and_up_send_termination_hours(monkeypatch):
     sent = []
     monkeypatch.setattr(client, "supports", lambda feature: True)
     monkeypatch.setattr(client, "_ensure_ssh_keys_registered", lambda *a, **k: None)
-    monkeypatch.setattr(client, "_pod_ids_before_rent", lambda: frozenset())
+    monkeypatch.setattr(client, "_pod_ids_before_rent", frozenset)
     monkeypatch.setattr(client, "_template_offers_volume_encryption", lambda *a: False)
 
     def request(method, path, json=None, **kwargs):
