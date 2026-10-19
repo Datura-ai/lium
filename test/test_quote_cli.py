@@ -132,3 +132,13 @@ def test_rate_keeps_fractions_of_a_cent(rate, shown):
     from lium.cli.quote.command import _rate
 
     assert _rate(rate) == shown
+
+
+def test_sdk_quote_returns_a_typed_quote(requests_seen):
+    from lium.sdk import JobQuote, JobQuoteLine
+
+    quote = requests_seen.client.quote(NODE, hours=2)
+
+    assert isinstance(quote, JobQuote) and quote.total_usd == 32.05 and quote.allocation is None
+    assert isinstance(quote.lines[2], JobQuoteLine) and quote.lines[2].rate_usd is None
+    assert quote.to_dict()["lines"][0] == QUOTE["lines"][0]

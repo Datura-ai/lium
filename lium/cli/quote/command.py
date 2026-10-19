@@ -1,4 +1,4 @@
-"""`lium quote`: what a job on a node costs before renting it (H100 item 9)."""
+"""`lium quote`: what a job on a node costs before renting it."""
 
 import json
 
@@ -27,11 +27,11 @@ def _node_id(node: str) -> str:
     return ids[0]
 
 
-def _money(value) -> str:
+def _money(value: float | None) -> str:
     return "-" if value is None else f"${value:,.4f}"
 
 
-def _rate(value) -> str:
+def _rate(value: float) -> str:
     """A per-unit rate at full precision: storage rates are fractions of a cent per GB-hour."""
     digits = f"{value:,.8f}".rstrip("0")
     return f"${digits}{'0' * max(0, 2 - len(digits.split('.')[1]))}"
@@ -72,16 +72,16 @@ def quote_command(node, hours, gpu_count, volume_gb, backup_gb, output_format, j
     quote = fetch() if json_output else ui.load("Quoting", fetch)
 
     if json_output:
-        click.echo(json.dumps(quote, sort_keys=True))
+        click.echo(json.dumps(quote.to_dict(), sort_keys=True))
         return
-    table = Table(title=f"{quote['gpu_count']} GPU(s) for {quote['hours']:g} h at {_money(quote['price_per_hour'])}/h")
+    table = Table(title=f"{quote.gpu_count} GPU(s) for {quote.hours:g} h at {_money(quote.price_per_hour)}/h")
     for column in ("Item", "Rate", "Quantity", "Amount", "Note"):
         table.add_column(column)
-    for line in quote["lines"]:
-        rate = "-" if line["rate_usd"] is None else f"{_rate(line['rate_usd'])}/{line['unit']}"
-        table.add_row(line["item"], rate, f"{line['quantity']:g}", _money(line["amount_usd"]), line["note"])
+    for line in quote.lines:
+        rate = "-" if line.rate_usd is None else f"{_rate(line.rate_usd)}/{line.unit}"
+        table.add_row(line.item, rate, f"{line.quantity:g}", _money(line.amount_usd), line.note)
     ui.print(table)
-    ui.info(f"Total {_money(quote['total_usd'])} (egress not included)")
-    ui.dim(f"This pod's share of the balance a rent needs: {_money(quote['pod_balance_floor_usd'])} (pods you already run add theirs)")
+    ui.info(f"Total {_money(quote.total_usd)} (egress not included)")
+    ui.dim(f"Balance a rent of this pod needs: {_money(quote.pod_balance_floor_usd)}")
     if anonymous:
         ui.dim(SIGNUP_NUDGE)

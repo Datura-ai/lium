@@ -66,6 +66,7 @@ from .models import (
     ClusterOffer,
     ExecutorInfo,
     GpuStats,
+    JobQuote,
     PodInfo,
     RentResult,
     RestoreLog,
@@ -2500,15 +2501,15 @@ class Lium:
         gpu_count: Optional[int] = None,
         volume_gb: float = 0.0,
         backup_gb: float = 0.0,
-    ) -> Dict[str, Any]:
+    ) -> JobQuote:
         """What renting a node for ``hours`` costs, line by line, at the rates billing charges.
 
         ``GET /executors/{uuid}/quote``: compute (price per GPU × ``gpu_count``; without it the server
         quotes the node's free GPUs, which is what ``lium up <node>`` rents without ``-c``), volume and backup storage per GB-hour, and an egress line with no amount (billed
         at what AWS charges). Returns the API's answer: ``price_per_hour``, ``lines`` (``item``,
         ``unit``, ``rate_usd``, ``quantity``, ``amount_usd``, ``note``), ``total_usd`` (egress not
-        included) and ``pod_balance_floor_usd`` (this pod's contribution to the balance a rent requires,
-        excluding pods already open on the account). Nothing is reserved.
+        included) and ``pod_balance_floor_usd`` (the balance a rent of this pod requires: 15 minutes of
+        ``price_per_hour``). Nothing is reserved. Returned as a :class:`JobQuote`.
 
         Args:
             executor: Node UUID, or the HUID ``lium ls`` prints for it.
@@ -2528,7 +2529,7 @@ class Lium:
         params: Dict[str, Any] = {"hours": hours, "volume_gb": volume_gb, "backup_gb": backup_gb}
         if gpu_count is not None:
             params["gpu_count"] = gpu_count
-        return self._request("GET", f"/executors/{node_id}/quote", params=params).json()
+        return JobQuote.from_api(self._request("GET", f"/executors/{node_id}/quote", params=params).json())
 
     @staticmethod
     def ambiguous_executor_message(executor: str, matches: List[ExecutorInfo]) -> str:
