@@ -1,6 +1,7 @@
 """Gpu-clocks command implementation."""
 
 import json
+import sys
 from typing import Optional, Tuple
 
 import click
@@ -10,7 +11,9 @@ from lium.cli import ui
 from lium.cli.utils import (
     CliFailure,
     EXIT_CONFIGURATION_ERROR,
+    EXIT_GENERAL_ERROR,
     handle_errors,
+    json_output_requested,
     narrate_on_stderr_under_json,
     one_pod,
     sdk_error_failure,
@@ -67,7 +70,7 @@ def gpu_clocks_command(target: str, lock: Optional[Tuple[int, int]], reset: bool
                              lambda: lium.lock_gpu_clocks(pod, lock[0], lock[1], indices))
     except LiumGpuOperationError as e:
         # part of the change ran: show which GPUs are locked and which failed, then fail with the API's code
-        if not json_output:
+        if e.gpus and not (json_output or json_output_requested()):
             _table(e.gpus)
         raise sdk_error_failure(e, {"gpus": [g.to_dict() for g in e.gpus]})
 
@@ -75,7 +78,10 @@ def gpu_clocks_command(target: str, lock: Optional[Tuple[int, int]], reset: bool
         click.echo(json.dumps(result.to_dict(), sort_keys=True))
     else:
         _table(result.gpus)
-        ui.success(f"GPU clocks {'reset' if reset else 'locked'} on {pod.huid}")
+        if result.ok:
+            ui.success(f"GPU clocks {'reset' if reset else 'locked'} on {pod.huid}")
+    if not result.ok:
+        sys.exit(EXIT_GENERAL_ERROR)
 
 
 def _mhz(value) -> str:

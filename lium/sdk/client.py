@@ -867,9 +867,10 @@ class Lium:
         if data.get("gpus"):
             # a GPU operation ran and a GPU failed: keep each GPU's outcome (and container state) for the caller;
             # a precheck refusal (``gpus: []``) stays a plain LiumError
+            outcome = _gpu_clock_outcome if "/gpu-clocks" in (getattr(resp, "url", None) or "") else _gpu_reset_outcome
             raise LiumGpuOperationError(
                 f"API error 409: {_response_error_message(resp)}",
-                gpus=[_gpu_reset_outcome(g) for g in data["gpus"]], container_restarted=data.get("container_restarted"), **context,
+                gpus=[outcome(g) for g in data["gpus"]], container_restarted=data.get("container_restarted"), **context,
             )
         raise LiumError(f"API error {resp.status_code}: {_response_error_message(resp)}", **context)
 
@@ -2305,11 +2306,7 @@ class Lium:
 
     def _gpu_clocks(self, pod: PodInfo, body: Dict[str, Any]) -> GpuClockResult:
         # sent once (a lost answer must not stack a second operation); the backend waits up to 60 s
-        try:
-            answer = self._request("POST", f"/pods/{pod.id}/gpu-clocks", json=body, retry=False, timeout=90).json()
-        except LiumGpuOperationError as e:
-            e.gpus = [_gpu_clock_outcome(g) for g in e.gpus]
-            raise
+        answer = self._request("POST", f"/pods/{pod.id}/gpu-clocks", json=body, retry=False, timeout=90).json()
         return GpuClockResult(
             pod_id=str(answer.get("pod_id", pod.id)), ok=bool(answer.get("ok")),
             gpus=[_gpu_clock_outcome(g) for g in answer.get("gpus") or []],
