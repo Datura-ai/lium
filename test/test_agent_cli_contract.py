@@ -76,7 +76,7 @@ class _FakeLium:
     def ps(self):
         return [_pod()]
 
-    def exec(self, pod, command=None, env=None):
+    def exec(self, pod, command=None, env=None, max_output_bytes=None):
         return dict(self.result)
 
 

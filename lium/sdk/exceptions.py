@@ -77,7 +77,7 @@ class ClusterNotListedError(LiumError):
     Two ways in. ``confirmed`` is True when the rent route confirmed the order and named the
     member pods (``pod_ids``) but the listing did not show every one of them, or failed: the
     nodes are rented and billing. ``confirmed`` is False when the rent route gave no answer
-    (timeout, 5xx) and the by-name lookup then found fewer members than requested, or could not
+    (timeout, 5xx) and the by-name lookup then found fewer members than requested (none included), or could not
     list at all: the nodes may be rented. Either way a second ``up_cluster`` may rent a second
     cluster.
 
@@ -96,6 +96,15 @@ class ClusterNotListedError(LiumError):
 
 class LiumHostKeyError(LiumError):
     """A pod presented an SSH host key that differs from the pinned one."""
+
+
+class LiumSSHError(LiumError):
+    """SSH could not connect to a pod (refused, timed out, login rejected)."""
+
+
+class OutputLimitExceeded(LiumError):
+    """A command run with ``Lium.exec`` produced more than ``max_output_bytes`` bytes of output
+    (stdout and stderr together). The limit bounds output bytes, not memory."""
 
 
 class RemoteExecutionError(LiumError):
@@ -173,8 +182,8 @@ class LiumBudgetExceededError(LiumPermissionError):
     A per-key daily, monthly or lifetime budget (``lium keys create --daily-budget / --monthly-budget /
     --max-budget``, ``lium keys budget``) is reached: the billing tick deletes the key's pods (data outside
     a volume is lost), and a rent, a pod extend / schedule change or a key-initiated top-up (``lium fund``,
-    ``lium topup``, ``lium topup card``) through that key is refused with this one error (server support
-    pending). The message names the window hit.
+    ``lium topup``, ``lium topup card``) through that key is refused with this one error. The message
+    names the window hit.
     ``budget_usd``, ``spent_usd``, ``window`` (``daily``, ``monthly`` or ``max``) and ``api_key_id`` are filled when the
     server's error body carried them, else ``None``. A :class:`LiumPermissionError` handler keeps working; this
     class is for callers that want the numbers.

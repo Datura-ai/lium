@@ -14,8 +14,8 @@ from typing import Mapping, Optional, Tuple
 import click
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from lium.sdk import Lium, PodInfo
-from lium.sdk.client import ENV_NAME
+from lium.sdk import Lium, PodInfo, ssh_mux
+from lium.sdk.client import DEFAULT_MAX_OUTPUT_BYTES, ENV_NAME
 from lium.sdk.detach import (
     DEFAULT_DETACH_LOG_DIR,
     build_detached_command,
@@ -31,6 +31,8 @@ from ..utils import (
     handle_errors,
     loading_status,
     parse_targets,
+    remember_pods,
+    remembered_pods,
 )
 
 # The remote command failed but said nothing about how. Its own status space, not
@@ -238,6 +240,8 @@ def resolve_pods_or_fail(lium: Lium, targets: str, show_progress: bool) -> list[
     """
     with loading_status("Loading pods", "") if show_progress else contextlib.nullcontext():
         all_pods = lium.ps()
+    if uses_control_master(lium):
+        remember_pods(lium, all_pods)
 
     selected_pods = parse_targets(targets, all_pods)
     if selected_pods:
@@ -246,6 +250,36 @@ def resolve_pods_or_fail(lium: Lium, targets: str, show_progress: bool) -> list[
     raise CliFailure(
         "pod_not_found", f"No pods match targets: {targets}", EXIT_POD_NOT_FOUND
     )
+
+
+def uses_control_master(lium: Lium) -> bool:
+    """Whether commands go over a persistent OpenSSH connection (see :mod:`lium.sdk.ssh_mux`)."""
+    return ssh_mux.available() and bool(lium.config.ssh_key_path)
+
+
+def pods_with_live_masters(lium: Lium, targets: str) -> Optional[list[PodInfo]]:
+    """The pods TARGETS names, from the pod cache, when each already has a live control master.
+
+    None sends the caller to the pod list: a target missing from the cache or with no live
+    master, ``all`` (the list is the answer), and row numbers, which are checked against
+    the live list (see :func:`resolve_targets`).
+    """
+    if targets.strip().lower() == "all" or not uses_control_master(lium):
+        return None
+    names = [name.strip() for name in targets.split(",") if name.strip()]
+    if not names or any(name.isdigit() for name in names):
+        return None
+    cached = remembered_pods(lium)
+    if not cached:
+        return None
+    pods = []
+    for name in names:
+        # id and huid only: a name can be renamed, or given to another pod, since the cache was written
+        pod = next((p for p in cached if name in (p.id, p.huid)), None)
+        if pod is None or not ssh_mux.has_live_master(lium, pod):
+            return None
+        pods.append(pod)
+    return pods
 
 
 def report_executions(executions: list[PodExecution], json_output: bool) -> None:
@@ -281,6 +315,10 @@ def report_executions(executions: list[PodExecution], json_output: bool) -> None
     help=f"Log file for --detach on the pod (default: {DEFAULT_DETACH_LOG_DIR}/exec-<timestamp>-<id>.log)",
 )
 @click.option(
+    "--max-output-bytes", type=click.IntRange(min=1), default=DEFAULT_MAX_OUTPUT_BYTES, show_default=True,
+    help="Fail once a pod's stdout and stderr together pass this many bytes (a limit on output bytes, not memory)",
+)
+@click.option(
     "--json", "json_output", is_flag=True,
     help="Print machine-readable JSON (stdout, stderr, exit_code) instead of raw output",
 )
@@ -292,6 +330,7 @@ def exec_command(
     env: Tuple[str],
     detach: bool,
     log_path: Optional[str],
+    max_output_bytes: int,
     json_output: bool,
 ):
     """Execute commands on GPU pods.
@@ -321,6 +360,12 @@ def exec_command(
     The process exits with the remote command's exit code, so
     'lium exec <pod> "cmd" && next-step' behaves the way a caller expects.
     With --detach it exits 0 once the command has been started.
+
+    \b
+    The SSH connection stays open for 10 minutes after the last command
+    (LIUM_SSH_PERSIST=<seconds>; 0 connects per command), so the next
+    'lium exec' to the same pod reuses it; a pod named by huid or ID also
+    skips the pod lookup. --script connects anew each time.
     """
     command_to_run = resolve_command_to_run(command, script)
     env_dict = parse_environment_variables(env)
@@ -330,7 +375,11 @@ def exec_command(
         )
 
     lium = Lium()
-    selected_pods = resolve_pods_or_fail(lium, targets, show_progress=not json_output)
+    # A script's text would travel in ssh's argv (visible to every local user): it stays on the SDK path
+    use_master = uses_control_master(lium) and not script
+    selected_pods = (use_master and pods_with_live_masters(lium, targets)) or resolve_pods_or_fail(
+        lium, targets, show_progress=not json_output
+    )
 
     if not json_output:
         if len(selected_pods) == 1:
@@ -359,10 +408,17 @@ def exec_command(
         else:
             command_to_run = build_detached_command(prelude + command_to_run, log_path)
 
-    if len(selected_pods) == 1:
-        results = [lium.exec(selected_pods[0], command=command_to_run, env=env_dict)]
+    if use_master:
+        if len(selected_pods) == 1:
+            results = [ssh_mux.exec_over_master(lium, selected_pods[0], command=command_to_run, env=env_dict,
+                                                max_output_bytes=max_output_bytes)]
+        else:
+            results = ssh_mux.exec_all_over_masters(lium, selected_pods, command=command_to_run, env=env_dict,
+                                                    max_output_bytes=max_output_bytes)
+    elif len(selected_pods) == 1:
+        results = [lium.exec(selected_pods[0], command=command_to_run, env=env_dict, max_output_bytes=max_output_bytes)]
     else:
-        results = lium.exec_all(selected_pods, command=command_to_run, env=env_dict)
+        results = lium.exec_all(selected_pods, command=command_to_run, env=env_dict, max_output_bytes=max_output_bytes)
 
     if detach:
         detached = [

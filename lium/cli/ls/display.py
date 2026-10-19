@@ -315,6 +315,8 @@ def compact_executor(exe: ExecutorInfo, is_pareto: bool, index: int) -> Dict[str
         "config": _cfg(exe),
         "gpu_type": exe.gpu_type,
         "gpu_count": exe.gpu_count,
+        # GPUs free right now; on a partly rented node `up -c <gpu_count>` is refused
+        "available_gpu_count": getattr(exe, "available_gpu_count", None),
         "price_per_gpu_hour": exe.price_per_gpu,
         "price_per_hour": exe.price_per_hour,
         "country": _country_name(exe.location),

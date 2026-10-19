@@ -158,7 +158,10 @@ class ResolveTemplateAction:
         if template_id:
             template = lium.get_template(template_id)
             if not template:
-                return ActionResult(ok=False, data={}, error=f"Template '{template_id}' not found")
+                return ActionResult(ok=False, data={}, error=(
+                    f"Template '{template_id}' not found among your templates; "
+                    "a public template is chosen by its ID ('lium templates' lists them)"
+                ))
         else:
             template = lium.default_docker_template(executor.id) if executor else None
             if not template:
@@ -230,6 +233,7 @@ class RentPodAction:
         executor: ExecutorInfo = ctx["executor"]
         template: Optional[Template] = ctx.get("template")
         dockerfile_content: Optional[str] = ctx.get("dockerfile_content")
+        build_context_sha256: Optional[str] = ctx.get("build_context_sha256")
         name: Optional[str] = ctx.get("name")
         volume_id: Optional[str] = ctx.get("volume_id")
         ports: Optional[int] = ctx.get("ports")
@@ -255,6 +259,8 @@ class RentPodAction:
             backup_id=backup_id,
             restore_path=restore_path,
         )
+        if build_context_sha256:
+            rental["build_context_sha256"] = build_context_sha256
         spec: Optional[Dict] = ctx.get("spec")
         price_per_hour = getattr(executor, "price_per_hour", None)
         # The GPUs this rent gets: on the node path -c N, else the node's free GPUs (the host

@@ -2,6 +2,7 @@
 from functools import wraps
 from contextlib import contextmanager
 from typing import List, Dict, Any, Tuple, Optional, Callable, TypeVar
+import hashlib
 import json
 import os
 import sys
@@ -20,6 +21,7 @@ from lium.sdk import (
     LiumError,
     LiumBudgetExceededError,
     LiumHostKeyError,
+    LiumSSHError,
     LiumInsufficientBalanceError,
     LiumScopeError,
     LiumNotFoundError,
@@ -354,6 +356,10 @@ _HINTS_BY_CODE: Dict[str, str] = {
                      "mint a key that holds it with 'lium keys create <name> --scope <scope>'",
     "pod_not_found": "Run 'lium ps' to list pods; a name, huid, id or 1-based index is accepted",
     "not_found": "The resource is gone or the id is wrong; list it again and retry",
+    # the rent got no answer and its resend was refused: the first rent may have gone through,
+    # so the exit-3 "Retry" would rent a second pod (lium#328)
+    "rent_outcome_unknown": "Do not re-run the rent yet: the pod may be rented and billing. "
+                            "'lium ps' shows whether it exists; 'lium rm <pod>' removes it",
     "rate_limited": "Wait a few seconds and retry; back off if it repeats",
     "server_error": "Retry; if it persists, re-run with LIUM_DEBUG=1 and report the request",
     # Raised by the non-interactive guard (lium/cli/ui.py confirm/prompt, DAH-2883).
@@ -523,6 +529,8 @@ def _classify_sdk_error(error: LiumError) -> tuple[str, int]:
         # the pod's pinned ssh host key changed (client.py ssh_connection): an ssh failure the
         # user must look at, not an API call to retry — exit 4 like the other ssh errors
         return "ssh_host_key_changed", EXIT_SSH_ERROR
+    if isinstance(error, LiumSSHError):
+        return "ssh_connection_failed", EXIT_SSH_ERROR
     if isinstance(error, LiumInsufficientBalanceError):
         return "insufficient_balance", EXIT_PERMISSION_DENIED
     if isinstance(error, LiumBudgetExceededError):
@@ -1065,6 +1073,65 @@ def get_pod_selection() -> Optional[Dict[str, Any]]:
     if not isinstance(data, dict) or not isinstance(data.get("pods"), list):
         return None
     return data
+
+
+# `lium exec` on a pod it reached in the last minutes resolves the target from this file and
+# skips GET /pods, but only when the pod's SSH control master is still up (lium.sdk.ssh_mux):
+# a live master is a connection that pod accepted, so the pod is there. One file per account,
+# workspace and API server, since each sees different pods.
+POD_CACHE_TTL_SECONDS = 600
+# The file name derives from the API key through a key-derivation function. The key is random and
+# long, so a small iteration count keeps it unguessable and costs ~2 ms on each `lium exec`.
+_POD_CACHE_SALT = b"lium.pod_cache.v1"
+_POD_CACHE_ITERATIONS = 10_000
+
+
+def pod_cache_path(lium: Lium) -> Path:
+    account = f"{lium.config.base_url}\0{lium.config.api_key}\0{getattr(lium.config, 'workspace_id', None) or ''}"
+    digest = hashlib.pbkdf2_hmac("sha256", account.encode(), _POD_CACHE_SALT, _POD_CACHE_ITERATIONS).hex()[:16]
+    return Path.home() / ".lium" / "pod_cache" / f"{digest}.json"
+
+
+def remember_pods(lium: Lium, pods: List[PodInfo], now: Optional[datetime] = None) -> None:
+    """Keep the id, names and ssh address of ``pods`` for :func:`remembered_pods`."""
+    now = now or datetime.now(timezone.utc)
+    cache = {
+        "timestamp": now.isoformat(),
+        "pods": [
+            {"id": pod.id, "huid": pod.huid, "name": pod.name, "status": pod.status, "ssh_cmd": pod.ssh_cmd}
+            for pod in pods
+        ],
+    }
+    path = pod_cache_path(lium)
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(cache, f)
+    except OSError:
+        pass  # without the file every `lium exec` lists the pods first, as it always did
+
+
+def remembered_pods(lium: Lium, now: Optional[datetime] = None) -> Optional[List[PodInfo]]:
+    """The pods :func:`remember_pods` kept in the last ``POD_CACHE_TTL_SECONDS``, or None."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        with open(pod_cache_path(lium)) as f:
+            cache = json.load(f)
+        age = _snapshot_age_seconds(cache, now)
+        if age is None or age < 0 or age > POD_CACHE_TTL_SECONDS:
+            return None
+        return [
+            PodInfo(
+                id=str(row["id"]), name=row.get("name") or "", status=row.get("status") or "",
+                huid=row.get("huid") or "", ssh_cmd=row.get("ssh_cmd"), ports={}, created_at="",
+                updated_at="", executor=None, template={}, removal_scheduled_at=None,
+                jupyter_installation_status=None, jupyter_url=None,
+            )
+            for row in cache["pods"]
+        ]
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
 
 
 def _snapshot_age_seconds(snapshot: Dict[str, Any], now: datetime) -> Optional[float]:

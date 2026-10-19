@@ -255,8 +255,9 @@ class _Stream:
         self.channel = channel
         self.written = b""
 
-    def read(self):
-        return self._text.encode()
+    def read(self, size=-1):
+        data, self._text = self._text.encode(), ""
+        return data
 
     def write(self, data):
         self.written += data
