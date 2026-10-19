@@ -72,6 +72,8 @@ class ExecutorInfo(_Serializable):
     # The most reduced GPU's current and default power limit in watts; None with the verdict.
     gpu_power_limit_w: Optional[int] = None
     gpu_power_limit_default_w: Optional[int] = None
+    # The platform's 0-100 reliability score for the node (uptime and rental history); None when not sent.
+    reliability_score: Optional[float] = None
 
     @property
     def link(self) -> Optional[str]:

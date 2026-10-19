@@ -649,10 +649,10 @@ Without installing anything, with [uv](https://docs.astral.sh/uv/):
 {"mcpServers": {"lium": {"command": "uvx", "args": ["--from", "lium.io[mcp]", "lium.io", "mcp"]}}}
 ```
 
-It is listed on the official MCP Registry as `io.github.Datura-ai/lium`.
-
-A rented pod is billed per second until `remove_pod`. The docs-search MCP server (no key, read-only) is separate:
-https://docs.lium.io/mcp.
+`rent_pod` with `dry_run: true` quotes a node first (tier, reliability, cost per hour, your balance) and rents
+nothing. A rented pod is billed per second until `remove_pod`. The hosted MCP server at https://docs.lium.io/mcp
+(no key, read-only) is separate: it searches the docs and gives live GPU prices and availability; `rent_pod` takes
+the node ids its `search_gpus` returns.
 
 ### Crash reporting (opt-in, off by default)
 

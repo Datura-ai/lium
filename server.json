@@ -3,7 +3,7 @@
   "name": "io.github.Datura-ai/lium",
   "title": "Lium GPU Cloud",
   "description": "Rent NVIDIA GPU pods on Lium, run commands on them and remove them, billed per second.",
-  "version": "0.0.0",
+  "version": "0.24.0",
   "websiteUrl": "https://lium.io",
   "repository": {
     "url": "https://github.com/Datura-ai/lium",
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "lium.io",
-      "version": "0.0.0",
+      "version": "0.24.0",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {"type": "named", "name": "--from", "value": "lium.io[mcp]"}

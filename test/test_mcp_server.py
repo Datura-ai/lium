@@ -51,6 +51,12 @@ class FakeLium:
     def ls(self, gpu_type=None, gpu_count=None):
         return [_node("expensive", 3.0), _node("cheap", 1.5), _node("mid", 2.0)]
 
+    def get_executor(self, executor):
+        return next((n for n in self.ls() if executor in (n.id, n.huid)), None)
+
+    def balance_or_none(self):
+        return 60.0
+
     def ps(self):
         return self.pods
 
@@ -155,6 +161,34 @@ def test_a_slow_rental_returns_the_billing_pod_id_and_says_not_to_rent_again(too
     assert result["ok"] is True and result["status"] == "pending"
     assert result["pod_id"] == "p2"
     assert "Do NOT call rent_pod again" in result["next"]
+
+
+def test_list_gpus_shows_tier_reliability_and_the_rent_price_for_the_free_gpus(fake, tools):
+    node = _node("cheap", 2.5)
+    node.tier, node.reliability_score, node.available_gpu_count = "spot", 81.2, 4
+    fake.ls = lambda gpu_type=None, gpu_count=None: [node]
+
+    listed = tools.list_gpus()["nodes"][0]
+
+    assert (listed["tier"], listed["reliability_score"], listed["rent_price_per_hour_usd"]) == ("spot", 81.2, 10.0)
+
+
+def test_rent_pod_takes_the_id_or_rent_url_docs_search_gpus_returns(tools, fake):
+    assert tools.rent_pod("https://lium.io/browse-pods/cheap", "job")["ok"] is True
+    assert fake.up_kwargs["executor_id"] == "cheap"
+
+
+def test_a_dry_run_quotes_cost_and_balance_and_rents_nothing(tools, fake):
+    from lium.cli.mcp.tools import tool_functions
+
+    rent_pod = next(f for f in tool_functions(tools) if f.__name__ == "rent_pod")
+
+    quote = asyncio.run(rent_pod("https://lium.io/browse-pods/cheap", "job", dry_run=True))
+
+    assert quote["ok"] is True and fake.up_calls == 0
+    assert quote["node"]["executor_id"] == "cheap" and quote["gpus_rented"] == 8
+    assert (quote["cost_per_hour_usd"], quote["balance_usd"], quote["hours_balance_covers"]) == (12.0, 60.0, 5.0)
+    assert asyncio.run(rent_pod("gone", "job", dry_run=True))["error"]["code"] == "node_not_found"
 
 
 def test_a_pod_that_fails_to_start_is_an_error_that_names_it(tools, fake):

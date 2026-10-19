@@ -45,6 +45,17 @@ def _guarded(call: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
         return _error(type(e).__name__, str(e))
 
 
+def _executor_id(node: str) -> str:
+    """The executor id from a node id, huid or rent link (https://lium.io/browse-pods/<id>, as docs.lium.io/mcp
+    search_gpus returns next to the same id)."""
+    return node.strip().rstrip("/").rsplit("/", 1)[-1]
+
+
+def _rent_gpus(node: ExecutorInfo) -> int:
+    # a rent that names no count takes, and bills, the GPUs free on the node right now
+    return node.available_gpu_count or node.gpu_count
+
+
 def _node(node: ExecutorInfo) -> Dict[str, Any]:
     location = node.location or {}
     return {
@@ -55,8 +66,10 @@ def _node(node: ExecutorInfo) -> Dict[str, Any]:
         "available_gpu_count": node.available_gpu_count,
         "price_per_gpu_hour_usd": node.price_per_gpu,
         "price_per_hour_usd": node.price_per_hour,
+        "rent_price_per_hour_usd": round(node.price_per_gpu * _rent_gpus(node), 4),
         "country": location.get("country") or location.get("country_code"),
         "tier": node.tier,
+        "reliability_score": node.reliability_score,
         "max_cuda_version": node.max_cuda_version,
     }
 
@@ -421,6 +434,25 @@ class LiumTools:
 
         return _guarded(call)
 
+    def quote_rental(self, executor_id: str) -> Dict[str, Any]:
+        def call():
+            node = self.client.get_executor(_executor_id(executor_id))
+            if node is None:
+                return _error("node_not_found", f"No node '{executor_id}' is for rent now.", "Call list_gpus for live nodes.")
+            cost = round(node.price_per_gpu * _rent_gpus(node), 4)
+            balance = self.client.balance_or_none()
+            return {
+                "ok": True,
+                "node": _node(node),
+                "gpus_rented": _rent_gpus(node),
+                "cost_per_hour_usd": cost,
+                "balance_usd": balance,
+                "hours_balance_covers": round(balance / cost, 2) if balance is not None and cost else None,
+                "next": "Nothing was rented. Call rent_pod with the same executor_id and dry_run=false to rent.",
+            }
+
+        return _guarded(call)
+
     CLEANUP_WAIT_SECONDS = 30  # how long rent_pod waits for an earlier rental's cleanup before refusing
     CLEANUP_RETRY_SECONDS = 2.0  # first background retry; doubles up to CLEANUP_RETRY_MAX_SECONDS
     CLEANUP_RETRY_MAX_SECONDS = 30.0
@@ -440,6 +472,7 @@ class LiumTools:
         whether the result reached the host; a direct caller gets the result here, so it is delivered on return."""
         direct = rental is None
         rental = rental or _Rental()
+        executor_id = _executor_id(executor_id)
         not_rented = _error("cancelled", "The rental was cancelled before it was sent; nothing was rented.")
 
         admission: List[int] = []  # the account's cross-server admission lock, held until the journal is written
@@ -1108,7 +1141,9 @@ def tool_functions(tools: LiumTools) -> List[Callable[..., Awaitable[Dict[str, A
 
     async def list_gpus(gpu_type: Optional[str] = None, gpu_count: Optional[int] = None, limit: int = 20) -> Dict[str, Any]:
         """Use this when you need a GPU: lists Lium nodes for rent, cheapest first, with the executor_id rent_pod
-        takes. gpu_type filters by model ("H100", "RTX 4090", "B200"); gpu_count by GPUs on the node."""
+        takes, tier ("secure", or "spot": cheaper, may be reclaimed), reliability_score (0-100) and
+        rent_price_per_hour_usd (what rent_pod bills per hour for the node's free GPUs).
+        gpu_type filters by model ("H100", "RTX 4090", "B200"); gpu_count by GPUs on the node."""
         return await asyncio.to_thread(tools.list_gpus, gpu_type, gpu_count, limit)
 
     async def rent_pod(
@@ -1117,14 +1152,19 @@ def tool_functions(tools: LiumTools) -> List[Callable[..., Awaitable[Dict[str, A
         template_id: Optional[str] = None,
         timeout_seconds: int = 600,
         known_pod_ids: Optional[List[str]] = None,
+        dry_run: bool = False,
     ) -> Dict[str, Any]:
-        """Use this when you have picked a node from list_gpus and want a GPU pod on it: rents it and waits until
-        it is running. This spends money: the pod is billed per second at the node's hourly price until
-        remove_pod. Give it a short unique name. If the result has status "pending", the pod is already rented: do
+        """Use this when you have picked a node and want to rent a GPU pod on it: rents it and waits until it is
+        running. executor_id is the executor_id from list_gpus, or the id (or rent_url) that docs.lium.io/mcp
+        search_gpus returns. With dry_run=true it rents nothing and returns a quote: tier, reliability, cost per
+        hour and your balance; show that to the user before renting. This spends money: the pod is billed per
+        second at the node's hourly price until remove_pod. Give it a short unique name. If the result has status "pending", the pod is already rented: do
         not rent again, poll list_pods or remove_pod its pod_id.
         If it has status "recovered", nothing new was rented: it lists pods earlier calls rented that you have not
         used yet. To rent another pod next to those, pass their ids as known_pod_ids. One rent_pod runs at a time:
         while one is still running, another returns the error rent_in_progress and rents nothing."""
+        if dry_run:
+            return await asyncio.to_thread(tools.quote_rental, executor_id)
         rental = _Rental()
         try:
             result = await asyncio.to_thread(
