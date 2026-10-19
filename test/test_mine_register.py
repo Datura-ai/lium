@@ -6,14 +6,18 @@ signal), reports/INVALID_EXECUTOR_ROOTCAUSE.md (hand-typed node values), DAH-307
 
 from __future__ import annotations
 
-
+import json
+import re
+import time
 from pathlib import Path
 
 import jwt as pyjwt
 import pytest
+from click.testing import CliRunner
 
 from lium.cli.commands import mine
 from lium.cli.commands import mine_register as reg
+from lium.provider.portal_http import PortalHTTP
 
 HOTKEY = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
 POOL_HOTKEY = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
@@ -38,6 +42,9 @@ def _token(exp: int | None = NOW + 3600, hotkey: str | None = HOTKEY, opt_in: bo
     if exp is not None:
         claims["exp"] = exp
     return pyjwt.encode(claims, "not-the-portal-secret-but-long-enough-32b", algorithm="HS256")
+
+
+_orig_confirm = reg.confirm_register_token
 
 
 # --- token -----------------------------------------------------------------------------------------------------------
@@ -139,108 +146,72 @@ def test_parse_register_token_refuses_a_custodied_token_without_a_usable_node_id
 # --- host facts ------------------------------------------------------------------------------------------------------
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 # --- price -----------------------------------------------------------------------------------------------------------
-
-
-
-
-
-
 
 
 # --- portal calls ----------------------------------------------------------------------------------------------------
 
 
+class _Resp:
+    def __init__(self, status: int, body) -> None:
+        self.status_code = status
+        self._body = body
+        self.text = json.dumps(body)
+
+    def json(self):
+        return self._body
 
 
+class _Portal:
+    """A scripted portal: every request is recorded; responses come from a per-(method, path) queue."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.queues: dict[tuple[str, str], list[_Resp]] = {}
+
+    def on(self, method: str, path: str, *responses: _Resp) -> None:
+        self.queues.setdefault((method, path), []).extend(responses)
+
+    def request(self, **kw):
+        self.calls.append(kw)
+        path = kw["url"].split("https://portal.example", 1)[1]
+        queue = self.queues[(kw["method"], path)]
+        return queue.pop(0) if len(queue) > 1 else queue[0]
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+def _http(portal: _Portal) -> PortalHTTP:
+    return PortalHTTP(base_url="https://portal.example", token_provider=lambda: "TOKEN", session=portal)  # type: ignore[arg-type]
 
 
 # --- the command -----------------------------------------------------------------------------------------------------
 
 
-_TEMPLATE = "MINER_HOTKEY_SS58_ADDRESS=\nINTERNAL_PORT=8080\nEXTERNAL_PORT=8080\nSSH_PORT=2200\nSSH_PUBLIC_PORT=2200\n"
+_PROBE = "/executors/00000000-0000-0000-0000-000000000000"
 
 
+@pytest.mark.parametrize("resp, refused", [
+    (_Resp(404, {"detail": "Not found node"}), None),
+    (_Resp(401, {"detail": "Invalid or expired token"}), "The portal refused the register token (Invalid or expired token)"),
+    (_Resp(404, {"detail": "Not Found"}), "did not answer as the portal"),
+    (_Resp(200, {"id": "x"}), "did not answer as the portal"),
+])
+def test_confirm_register_token_asks_the_portal_with_the_token(resp, refused) -> None:
+    portal = _Portal()
+    portal.on("GET", _PROBE, resp)
+    if refused is None:
+        _orig_confirm(_http(portal))
+    else:
+        with pytest.raises(reg.RegisterError, match=re.escape(refused)):
+            _orig_confirm(_http(portal))
+    assert portal.calls[0]["headers"]["Authorization"] == "Bearer TOKEN"
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-_orig_wait = reg.wait_until_listed
-
-
-
-
-
-
-
-
+def test_mine_register_refuses_a_token_the_portal_rejects_before_touching_the_host(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(mine, "_clone_or_update_repo", lambda *a, **k: calls.append("clone"))
+    monkeypatch.setattr(reg, "confirm_register_token", _orig_confirm)
+    portal = _Portal()
+    portal.on("GET", _PROBE, _Resp(401, {"detail": "Invalid or expired token"}))
+    monkeypatch.setattr(reg, "build_http", lambda url, token: _http(portal))
+    result = CliRunner().invoke(mine.mine_command, ["--register", _token(exp=int(time.time()) + 3600)])
+    assert result.exit_code == 1 and "refused the register token" in result.output and calls == []

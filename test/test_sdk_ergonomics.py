@@ -6,12 +6,11 @@ A script that rents a pod has to write the same twenty lines every time: poll
 """
 
 import inspect
-import time
 from types import SimpleNamespace
 
 import pytest
 
-from lium.sdk import Config, ExecutorInfo, Lium, PodInfo
+from lium.sdk import Config, ExecutorInfo, Lium, LiumError, PodInfo
 
 
 def _pod(status: str = "RUNNING", ssh_cmd: str | None = "ssh root@1.2.3.4 -p 20299") -> PodInfo:
@@ -58,9 +57,7 @@ class _Client(Lium):
         return SimpleNamespace(json=lambda: {})
 
 
-@pytest.fixture(autouse=True)
-def _no_sleep(monkeypatch):
-    monkeypatch.setattr(time, "sleep", lambda s: None)
+# --- up(wait=True), pod_by_name, rental() -----------------------------------------------------
 
 
 def test_rental_removes_the_pod_after_the_block():
@@ -80,3 +77,39 @@ def test_rental_removes_the_pod_when_the_block_raises():
             raise RuntimeError("job failed")
 
     assert client.calls[-1] == ("DELETE", "/pods/pod-1")
+
+
+def test_rental_that_failed_before_the_rent_post_leaves_a_concurrent_same_name_pod():
+    """A failure before the POST (here the template lookup) cannot have created a pod: a
+    same-name pod that appeared meanwhile on the node is another worker's and stays."""
+    other = _pod()
+    other.id, other.name = "pod-other", "Your Pod"
+
+    class _LookupFails(_Client):
+        def _rent(self, **kwargs):
+            return Lium._rent(self, **kwargs)  # the real one, up to its failed lookup
+
+        def get_executor(self, executor_id):
+            return _executor()
+
+        def get_template(self, template_id):
+            return None
+
+    client = _LookupFails(ps_sequence=[[], [other]])
+
+    with pytest.raises(LiumError, match="Could not look up template"):
+        with client.rental(executor_id="exec-1", template_id="tpl-x", ssh_keys=["ssh-ed25519 AAA"]):
+            pass
+
+    assert not [c for c in client.calls if c[0] == "DELETE"]
+
+
+# --- exec(timeout=), exec(detach=True) ---------------------------------------------------
+
+
+# --- gpu_stats ------------------------------------------------------------------------------
+
+
+# --- to_dict, schema ---------------------------------------------------------------------------
+
+

@@ -136,8 +136,6 @@ def _run_up(monkeypatch, *args, node_gpus=8, free=WHOLE_HOST, billed=8, visible=
     return CliRunner().invoke(cli, ["up", *target, *(["-y"] if yes else []), "--no-ssh", *args])
 
 
-
-
 def test_up_fails_on_a_silent_gpu_downgrade(monkeypatch):
     """Requested 8, billed 1: the pod is named, both numbers are shown, exit is non-zero."""
     result = _run_up(monkeypatch, "-c", "8", node_gpus=8, billed=1)
@@ -151,10 +149,6 @@ def test_up_fails_on_a_silent_gpu_downgrade(monkeypatch):
     assert _FakeLium.removed == []
 
 
-
-
-
-
 def test_up_without_count_on_a_split_host_still_catches_a_downgrade(monkeypatch):
     """2 free, billed for 1: fewer than the rent could take is still a mismatch."""
     result = _run_up(monkeypatch, node_gpus=8, free=2, billed=1)
@@ -162,14 +156,6 @@ def test_up_without_count_on_a_split_host_still_catches_a_downgrade(monkeypatch)
     assert result.exit_code == EXIT_GENERAL_ERROR
     assert "requested 2" in result.output
     assert "billed for 1" in result.output
-
-
-
-
-
-
-
-
 
 
 def test_strict_gpus_removes_a_downgraded_pod(monkeypatch):
@@ -202,13 +188,7 @@ def test_strict_gpus_keeps_a_pod_it_could_not_check(monkeypatch):
     assert _FakeLium.removed == []
 
 
-
-
-
-
 # --- the billed side is the pod's count, not the host's -----------------------------------------
-
-
 
 
 def test_split_rental_matches_when_the_pod_has_what_was_asked():
@@ -230,67 +210,15 @@ def test_split_rental_fewer_than_asked_is_a_mismatch():
     assert "requested 8, pod is billed for 2" in result.error
 
 
-
-
-
-
-
-
-
-
 # --- nvidia-smi -L is read by exit code and GPU lines, not by counting output lines -------------
 
 
-
-
-
-
-
-
-
-
 # --- sshd may not be listening yet when the pod turns RUNNING ------------------------------------
-
-
-
-
-
-
-
-
 
 
 # `lium up <node> -c N` rents N GPUs of a splittable node (DAH-3074). Before, `-c` was only a filter
 # for auto-selection and was rejected next to a node id, so a renter could not ask for 1 GPU of a
 # 3×RTX 3090 node from the CLI although the API allows it. These check that --count is allowed with a
 # node id, that the SDK sends `gpu_count` only when one was asked for, and that the rent action threads it.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 

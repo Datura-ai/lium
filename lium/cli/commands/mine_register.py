@@ -2,7 +2,8 @@
 
 The token is the one the portal's Add Node page prints next to the command (``POST /executors/register-token``,
 lium-platform). It is a short-lived portal JWT; the CLI reads the account it was issued for out of it and uses it
-as the bearer for exactly one call, ``POST /executors``. Everything else here is unauthenticated: the node list and
+as the bearer for two calls: one read the portal checks it on before anything is installed
+(``confirm_register_token``), then ``POST /executors``. Everything else here is unauthenticated: the node list and
 the per-node status the portal shows are public reads.
 
 Nothing about the node is typed by hand: GPU model and count come from ``nvidia-smi`` on this host, the port from
@@ -24,7 +25,7 @@ import jwt as pyjwt
 
 from lium.provider._routes import EXECUTOR_BY_ID, EXECUTORS
 from lium.provider._shared_config import default_price_for_gpu, fetch_shared_config
-from lium.provider.errors import ProviderError
+from lium.provider.errors import ProviderError, ProviderNotFoundError
 from lium.provider.portal_http import DEFAULT_PORTAL_URL, PortalHTTP
 
 LISTED_STATUSES = frozenset({"AVAILABLE", "RENTED"})
@@ -81,7 +82,7 @@ class RegisterToken:
 def parse_register_token(token: str, *, now: int | None = None) -> RegisterToken:
     """Read the account and the expiry out of a portal token without the portal's secret.
 
-    The signature is the portal's to check (it does, on ``POST /executors``); here the claims only decide which
+    The signature is the portal's to check (``confirm_register_token``, before the install); here the claims only decide which
     account the executor is configured for and whether it is worth starting a ten-minute install at all. The
     ``scope`` claim lium-platform#291 writes is not read: the CLI takes any bearer ``POST /executors`` takes.
     """
@@ -209,6 +210,44 @@ def _unknown_gpu_message(gpu_type: str, known: list[str]) -> str:
         f"The portal does not list the GPU model this host reports ({gpu_type!r}). {hint}"
         "Re-run with --gpu-type '<portal name>' to register under that name, or ask support to add the model."
     )
+
+
+_NO_SUCH_NODE = "00000000-0000-0000-0000-000000000000"
+_NOT_FOUND_NODE = "Not found node"
+"""What the portal's ``GET /executors/{id}`` answers for an id no node has (``executor_service.find_by_executor_id``)."""
+
+_NOT_THE_PORTAL = (
+    "Could not confirm the register token: the portal address did not answer as the portal. "
+    "Copy the whole command from the portal's Add Node page and run it again."
+)
+
+
+def confirm_register_token(http: PortalHTTP) -> None:
+    """Have the portal check the register token before anything is installed or started.
+
+    ``parse_register_token`` reads the claims without the portal's secret; the portal signed them, so a token it
+    accepts names exactly the account it was issued for. ``GET /executors/{id}`` is one of the two routes that take
+    a register token and checks it before it looks the node up: on an id no node has, a 404 naming the missing node
+    means the token is good, a 401 that it is not.
+    """
+    try:
+        http.get(EXECUTOR_BY_ID.format(id=_NO_SUCH_NODE))
+    except ProviderNotFoundError as e:
+        if _detail(e) == _NOT_FOUND_NODE:
+            return
+        raise RegisterError(_NOT_THE_PORTAL) from e
+    except ProviderError as e:
+        if (e.context or {}).get("status") in (401, 403):
+            raise RegisterError(
+                "The portal refused the register token (" + _detail(e) + "). Open the Add Node page again and copy "
+                "the new command; a token is valid for one hour."
+            ) from e
+        raise RegisterError(
+            f"Could not confirm the register token with the portal ({_detail(e)}). Nothing was installed; "
+            "check this host's connection and run the command again."
+        ) from e
+    # a 200 is not a portal answer for this id: refuse rather than install under a token nobody checked
+    raise RegisterError(_NOT_THE_PORTAL)
 
 
 def portal_web_url(portal_api_url: str | None) -> str:
