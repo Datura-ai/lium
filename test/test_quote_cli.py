@@ -142,3 +142,14 @@ def test_sdk_quote_returns_a_typed_quote(requests_seen):
     assert isinstance(quote, JobQuote) and quote.total_usd == 32.05 and quote.allocation is None
     assert isinstance(quote.lines[2], JobQuoteLine) and quote.lines[2].rate_usd is None
     assert quote.to_dict()["lines"][0] == QUOTE["lines"][0]
+
+
+def test_signed_in_quote_prints_the_balance_the_rent_needs_with_open_pods(requests_seen, monkeypatch):
+    # millerserhii on lium-platform#1548: with an open $8/h pod, another $8/h pod needs more than $4, not this pod's $2
+    monkeypatch.setitem(QUOTE, "pod_balance_floor_usd", 2.0)
+    monkeypatch.setitem(QUOTE, "rent_balance_required_usd", 4.0)
+
+    out = CliRunner().invoke(cli, ["quote", NODE, "--hours", "2", "--gpus", "8"])
+
+    assert out.exit_code == 0, out.output
+    assert "more than $4.0000" in out.output and "$2.0000" not in out.output

@@ -642,6 +642,8 @@ class JobQuote(_Serializable):
     total_usd: float  # egress not included
     pod_balance_floor_usd: float
     allocation: Optional[Dict[str, Any]] = None  # CPU, RAM and disk inside the pod, as the API sends it
+    # signed in: what the balance must be more than for this rent, this pod plus the payer's open pods
+    rent_balance_required_usd: Optional[float] = None
 
     @classmethod
     def from_api(cls, data: Dict[str, Any]) -> "JobQuote":
@@ -654,4 +656,5 @@ class JobQuote(_Serializable):
             total_usd=data["total_usd"],
             pod_balance_floor_usd=data["pod_balance_floor_usd"],
             allocation=data.get("allocation"),
+            rent_balance_required_usd=data.get("rent_balance_required_usd"),
         )
