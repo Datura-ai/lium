@@ -315,7 +315,7 @@ def test_a_slow_tool_call_does_not_block_the_others(tools, fake, monkeypatch, sl
             assert not finished.is_set()
         finally:
             release.set()
-            await task
+            await asyncio.wait_for(task, 5)
 
     asyncio.run(check())
 
@@ -355,7 +355,7 @@ def test_a_rental_cancelled_mid_call_removes_its_pod_before_a_retry_rents(tools,
         assert await asyncio.to_thread(started.wait, 3)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await asyncio.wait_for(task, 5)
         release.set()
         assert (await rent_pod("cheap", "job"))["ok"] is True
 

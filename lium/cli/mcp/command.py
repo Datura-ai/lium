@@ -36,6 +36,6 @@ def mcp_command():
     try:
         server = build_server()
     except ImportError:
-        raise click.ClickException("The MCP server needs the mcp package: pip install 'lium.io[mcp]'")
+        raise click.ClickException("The MCP server needs the mcp package: pip install \"lium.io[mcp]\"")
     # stdout is the protocol channel: nothing else may print to it
     server.run(transport="stdio")

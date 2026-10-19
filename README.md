@@ -333,7 +333,7 @@ Full reference with every flag and runnable examples: <https://docs.lium.io/deve
 
 ### Other Commands
 
-- `lium mcp` - Serve Lium as an MCP server over stdio for agent hosts (`pip install 'lium.io[mcp]'`; see [MCP server for agent hosts](#mcp-server-for-agent-hosts))
+- `lium mcp` - Serve Lium as an MCP server over stdio for agent hosts (`pip install "lium.io[mcp]"`; see [MCP server for agent hosts](#mcp-server-for-agent-hosts))
 - `lium theme dark|light` - Set the CLI colour theme (the argument is required; there is no `auto`; the value is stored as `[ui] theme` — `lium config get ui.theme` reads it back)
 - `lium mine` - Set up this host as a provider node
 - `lium mine --register <TOKEN>` - Same, then add the node to your portal account from what the host reports and wait until it is listed (token from the portal's Add Node page; the account, and what the node reports under, come from the token — no `-k`)
@@ -636,7 +636,7 @@ MCP host can rent and use GPUs itself. Tools: `list_gpus`, `rent_pod`, `list_pod
 `get_balance`. It uses the API key `lium init` saved, or `LIUM_API_KEY`.
 
 ```bash
-pip install 'lium.io[mcp]'
+pip install "lium.io[mcp]"
 ```
 
 ```json
