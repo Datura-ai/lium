@@ -493,6 +493,26 @@ class GpuStats(_Serializable):
 
 
 @dataclass
+class GpuResetOutcome(_Serializable):
+    """One GPU's result of :meth:`Lium.reset_gpu`: ``result`` is ``reset``, ``latch_cleared`` or ``failed``."""
+
+    index: int
+    uuid: str
+    result: str
+    detail: Optional[str] = None
+
+
+@dataclass
+class GpuResetResult(_Serializable):
+    """What :meth:`Lium.reset_gpu` returns when every GPU was reset."""
+
+    pod_id: str
+    ok: bool
+    container_restarted: bool
+    gpus: List[GpuResetOutcome]
+
+
+@dataclass
 class WorkspaceInfo:
     """A workspace (a team with roles and a billing owner) as the API describes it."""
 

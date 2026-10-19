@@ -8,13 +8,16 @@ from click.testing import CliRunner
 
 from lium.cli.cli import cli
 from lium.cli.reset_gpu import command as reset_gpu_module
-from lium.cli.utils import EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, EXIT_GENERAL_ERROR
-from lium.sdk import Config, Lium, LiumError
+from lium.cli.utils import EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR
+from lium.sdk import Config, GpuResetOutcome, GpuResetResult, Lium, LiumError, LiumGpuOperationError
 
 OK = {
     "pod_id": "pod-uuid-1", "ok": True, "container_restarted": True,
     "gpus": [{"index": 0, "uuid": "GPU-aaa", "result": "reset", "detail": None}],
 }
+RESULT = GpuResetResult(pod_id="pod-uuid-1", ok=True, container_restarted=True,
+                        gpus=[GpuResetOutcome(index=0, uuid="GPU-aaa", result="reset")])
+FAILED_GPU = {"index": 0, "uuid": "GPU-aaa", "result": "failed", "detail": "refused"}
 
 
 class _Resp:
@@ -38,8 +41,8 @@ def test_sdk_posts_indices_once_with_a_long_timeout(monkeypatch):
     monkeypatch.setattr(client, "_release_ssh", lambda pod: None)
     pod = SimpleNamespace(id="pod-uuid-1")
 
-    assert client.reset_gpu(pod, [0, 2]) == OK
-    assert client.reset_gpu(pod) == OK
+    assert client.reset_gpu(pod, [0, 2]) == RESULT
+    assert client.reset_gpu(pod) == RESULT
     (m1, u1, kw1), (_, _, kw2) = calls
     assert m1 == "POST" and u1.endswith("/pods/pod-uuid-1/reset-gpu")
     assert kw1["json"] == {"gpu_indices": [0, 2]} and kw2["json"] == {"gpu_indices": None}
@@ -52,10 +55,25 @@ def test_sdk_409_carries_the_api_code(monkeypatch):
     monkeypatch.setattr("lium.sdk.client.requests.request", lambda *a, **kw: _Resp(409, body))
     with pytest.raises(LiumError) as exc:
         Lium(Config(api_key="test")).reset_gpu(SimpleNamespace(id="p"))
-    assert exc.value.code == "mig_enabled"
+    assert exc.value.code == "mig_enabled" and not isinstance(exc.value, LiumGpuOperationError)
 
 
-def _run(monkeypatch, args, outcome=OK):
+def test_sdk_failed_gpu_409_keeps_the_gpus_and_releases_ssh(monkeypatch):
+    detail = {"code": "reset_not_supported", "message": "GPU 0 failed", "container_restarted": True, "gpus": [FAILED_GPU]}
+    body = {"message": detail, "error": {"code": "reset_not_supported", "message": "GPU 0 failed"}}
+    monkeypatch.setattr("lium.sdk.client.requests.request", lambda *a, **kw: _Resp(409, body))
+    client = Lium(Config(api_key="test"))
+    released = []
+    monkeypatch.setattr(client, "_release_ssh", released.append)
+    pod = SimpleNamespace(id="p")
+    with pytest.raises(LiumGpuOperationError) as exc:
+        client.reset_gpu(pod)
+    assert exc.value.code == "reset_not_supported" and exc.value.container_restarted is True
+    assert exc.value.gpus == [GpuResetOutcome(**FAILED_GPU)]
+    assert released == [pod]
+
+
+def _run(monkeypatch, args, outcome=RESULT):
     seen = {}
 
     class _Lium:
@@ -106,8 +124,14 @@ def test_409_exits_non_zero_with_the_code(monkeypatch):
     assert json.loads(result.stderr)["error"]["code"] == "mig_enabled"
 
 
-def test_a_failed_gpu_exits_non_zero(monkeypatch):
-    failed = {**OK, "ok": False, "gpus": [{"index": 0, "uuid": "GPU-aaa", "result": "failed", "detail": "refused"}]}
+def test_a_failed_gpu_shows_the_gpus_and_exits_non_zero(monkeypatch):
+    failed = LiumGpuOperationError("API error 409: GPU 0 failed", code="reset_not_supported",
+                                   container_restarted=True, gpus=[GpuResetOutcome(**FAILED_GPU)])
     result, _ = _run(monkeypatch, ["my-pod", "--yes"], failed)
-    assert result.exit_code == EXIT_GENERAL_ERROR
+    assert result.exit_code == EXIT_API_ERROR
     assert "refused" in result.output
+
+    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], failed)
+    envelope = json.loads(result.stderr)
+    assert result.exit_code == EXIT_API_ERROR and envelope["error"]["code"] == "reset_not_supported"
+    assert envelope["data"]["gpus"] == [FAILED_GPU] and envelope["data"]["container_restarted"] is True
