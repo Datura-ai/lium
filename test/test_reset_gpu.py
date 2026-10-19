@@ -50,7 +50,7 @@ def test_sdk_posts_indices_once_with_a_long_timeout(monkeypatch):
 
 
 def test_sdk_409_carries_the_api_code(monkeypatch):
-    body = {"detail": {"code": "mig_enabled", "message": "MIG is on"},
+    body = {"detail": {"code": "mig_enabled", "message": "MIG is on", "gpus": []},
             "error": {"code": "mig_enabled", "message": "MIG is on"}}
     monkeypatch.setattr("lium.sdk.client.requests.request", lambda *a, **kw: _Resp(409, body))
     with pytest.raises(LiumError) as exc:
@@ -129,7 +129,12 @@ def test_a_failed_gpu_shows_the_gpus_and_exits_non_zero(monkeypatch):
                                    container_restarted=True, gpus=[GpuResetOutcome(**FAILED_GPU)])
     result, _ = _run(monkeypatch, ["my-pod", "--yes"], failed)
     assert result.exit_code == EXIT_API_ERROR
-    assert "refused" in result.output
+    assert "refused" in result.output and "still stopped" not in result.output
+
+    failed.container_restarted = False
+    result, _ = _run(monkeypatch, ["my-pod", "--yes"], failed)
+    assert "still stopped" in result.output
+    failed.container_restarted = True
 
     result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], failed)
     envelope = json.loads(result.stderr)

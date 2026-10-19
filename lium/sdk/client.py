@@ -864,11 +864,12 @@ class Lium:
         if 500 <= resp.status_code < 600:
             raise LiumServerError(f"Server error: {resp.status_code}", **context)
         data = _error_data(resp) if resp.status_code == 409 else {}
-        if isinstance(data.get("gpus"), list):
-            # a GPU operation ran and a GPU failed: keep each GPU's outcome (and container state) for the caller
+        if data.get("gpus"):
+            # a GPU operation ran and a GPU failed: keep each GPU's outcome (and container state) for the caller;
+            # a precheck refusal (``gpus: []``) stays a plain LiumError
             raise LiumGpuOperationError(
                 f"API error 409: {_response_error_message(resp)}",
-                gpus=data["gpus"], container_restarted=data.get("container_restarted"), **context,
+                gpus=[_gpu_reset_outcome(g) for g in data["gpus"]], container_restarted=data.get("container_restarted"), **context,
             )
         raise LiumError(f"API error {resp.status_code}: {_response_error_message(resp)}", **context)
 
@@ -2260,14 +2261,11 @@ class Lium:
                 ``LiumServerError`` on 503 ``gpu_reset_unavailable``.
         """
         # sent once: a 429 is the 1/min limit and a second reset must not follow a lost answer;
-        # the backend waits up to 90 s for the validator, past the 30 s default timeout
+        # the backend waits up to 50 s for the validator, past the 30 s default timeout
         try:
             body = self._request(
                 "POST", f"/pods/{pod.id}/reset-gpu", json={"gpu_indices": gpu_indices}, retry=False, timeout=120,
             ).json()
-        except LiumGpuOperationError as e:
-            e.gpus = [_gpu_reset_outcome(g) for g in e.gpus]
-            raise
         finally:
             self._release_ssh(pod)  # a failed reset stops the container too; held connections are dead
         return GpuResetResult(

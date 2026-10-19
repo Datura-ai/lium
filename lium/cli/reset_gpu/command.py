@@ -45,8 +45,8 @@ def reset_gpu_command(target: str, gpus: Tuple[int, ...], yes: bool, json_output
 
     which = f"GPU {', '.join(map(str, gpus))}" if gpus else "all GPUs"
     if not yes:
-        ui.warning(f"This stops all processes in {pod.huid}; files are kept.")
-        if not ui.confirm(f"Reset {which} of {pod.huid}?", hint="pass --yes to reset without a prompt", stderr=json_output):
+        question = f"Reset {which} of {pod.huid}? This stops all processes in it; files are kept."
+        if not ui.confirm(question, hint="pass --yes to reset without a prompt", stderr=json_output):
             ui.warning("Nothing reset")
             return
 
@@ -56,6 +56,8 @@ def reset_gpu_command(target: str, gpus: Tuple[int, ...], yes: bool, json_output
         # the reset ran and a GPU failed: show which, then fail with the API's code and every GPU's outcome
         if not json_output:
             _table(e.gpus)
+            if e.container_restarted is False:
+                ui.warning(f"The container of {pod.huid} is still stopped.")
         raise sdk_error_failure(e, {"container_restarted": e.container_restarted, "gpus": [g.to_dict() for g in e.gpus]})
 
     if json_output:
