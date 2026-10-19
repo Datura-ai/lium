@@ -348,7 +348,7 @@ lium ls --format json          # machine-readable
 # differently on a PCIe box or a slow link that the price does not reveal
 lium ls --gpu H200 --nvlink --min-download 2000
 
-# Only providers whose reliability score rests on enough rentals (unrated ones are left out)
+# Skip nodes whose rents often fail to start
 lium ls --gpu H100 --reliable
 
 # Create pod with node index

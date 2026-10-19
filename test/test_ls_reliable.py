@@ -1,4 +1,4 @@
-"""`lium ls --reliable` / `Lium.ls(reliable=True)`: only providers whose reliability score rests on enough rentals."""
+"""`lium ls --reliable` / `Lium.ls(reliable=True)`: hides nodes whose rents often fail to start."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from test_ls_interconnect import _client_with, _executor_dict, _map, _run_ls
 
 def _fleet() -> list[dict]:
     return [
-        _executor_dict("proven", reliability_proven=True),
-        _executor_dict("thin", reliability_proven=False),
+        _executor_dict("healthy", frequent_rent_failures=False),
+        _executor_dict("failing", frequent_rent_failures=True),
         _executor_dict("old-backend"),  # an API that predates the verdict
     ]
 
@@ -20,7 +20,7 @@ def test_ls_reliable_sends_the_server_parameter_and_filters_client_side():
     result = client.ls(reliable=True)
 
     assert captured["reliable_only"] == "true"
-    assert [e.id for e in result] == ["proven"]
+    assert [e.id for e in result] == ["healthy", "old-backend"]
 
 
 def test_ls_without_reliable_keeps_every_node():
@@ -30,11 +30,11 @@ def test_ls_without_reliable_keeps_every_node():
     result = client.ls()
 
     assert "reliable_only" not in captured
-    assert [e.id for e in result] == ["proven", "thin", "old-backend"]
+    assert [e.id for e in result] == ["healthy", "failing", "old-backend"]
 
 
-def test_reliability_proven_is_none_when_the_api_does_not_send_it():
-    assert _map(_executor_dict("old-backend")).reliability_proven is None
+def test_frequent_rent_failures_is_none_when_the_api_does_not_send_it():
+    assert _map(_executor_dict("old-backend")).frequent_rent_failures is None
 
 
 def test_ls_reliable_flag_reaches_the_sdk(monkeypatch):
@@ -50,5 +50,5 @@ def test_nvlink_and_reliable_no_match_names_both_filters(monkeypatch):
     result, _ = _run_ls(monkeypatch, [], "--nvlink", "--reliable")
 
     assert result.exit_code == 0, result.output
-    assert "NVLink between every GPU pair and a reliability score" in result.output
+    assert "NVLink between every GPU pair and rents that rarely fail to start" in " ".join(result.output.split())
     assert "--reliable" in result.output

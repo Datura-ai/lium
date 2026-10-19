@@ -57,7 +57,7 @@ def ls_store_executor(gpu_type: Optional[str] = None) -> List[ExecutorInfo]:
     "--reliable",
     is_flag=True,
     default=False,
-    help="Only nodes whose provider's reliability score rests on enough rentals; unrated providers are excluded.",
+    help="Hide nodes whose rents often fail to start (2 or more failed starts in 7 days, at least 30% of the node's rents).",
 )
 @click.option("--lat", type=float, help="Latitude for distance filtering")
 @click.option("--lon", type=float, help="Longitude for distance filtering")
@@ -190,7 +190,7 @@ def ls_command(
             wanted = [w for w in (
                 "NVLink between every GPU pair" if nvlink else None,
                 f"Download ≥ {min_download_mbps:g} Mbps" if min_download_mbps is not None else None,
-                "a reliability score proven by enough rentals" if reliable else None,
+                "rents that rarely fail to start" if reliable else None,
             ) if w]
             ui.error(f"No available node reports {' and '.join(wanted)}")
             # each filter's rule, as the help text states it: --nvlink needs a topology report; --min-download
@@ -198,7 +198,7 @@ def ls_command(
             rules = [r for r in (
                 "--nvlink excludes nodes with no topology report yet" if nvlink else None,
                 "--min-download judges the Download (Mbps) column" if min_download_mbps is not None else None,
-                "--reliable leaves out unrated providers" if reliable else None,
+                "--reliable hides nodes whose rents often fail to start" if reliable else None,
             ) if r]
             if nvlink:
                 tail = f"Drop the filter and check on the pod: {ui.styled('nvidia-smi topo -m', 'success')}"

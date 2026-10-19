@@ -963,8 +963,9 @@ class Lium:
             gpu_power_limited=gpu_power_limited,
             gpu_power_limit_w=_int_or_none(executor_dict, "gpu_power_limit_w"),
             gpu_power_limit_default_w=_int_or_none(executor_dict, "gpu_power_limit_default_w"),
-            reliability_proven=(
-                executor_dict["reliability_proven"] if isinstance(executor_dict.get("reliability_proven"), bool) else None
+            frequent_rent_failures=(
+                executor_dict["frequent_rent_failures"]
+                if isinstance(executor_dict.get("frequent_rent_failures"), bool) else None
             ),
         )
 
@@ -1841,9 +1842,9 @@ class Lium:
             min_download_mbps: Minimum Download in Mbps, judged on
                 :attr:`ExecutorInfo.effective_download_speed_mbps` (the figure ``lium ls`` shows as
                 Download). Nodes with no figure are excluded.
-            reliable: ``True`` keeps only nodes whose provider's reliability score rests on enough rentals
-                (:attr:`ExecutorInfo.reliability_proven`). Unrated and thinly observed providers are excluded,
-                as is every node when the API does not report the verdict. ``False``/``None`` do not filter.
+            reliable: ``True`` hides nodes whose rents often fail to start: 2 or more failed starts in the
+                last 7 days, at least 30% of the node's rents (:attr:`ExecutorInfo.frequent_rent_failures`).
+                ``False``/``None`` do not filter.
             view: ``"summary"`` (default) asks the API for the fields a listing reads — price, GPU/CPU/RAM/disk
                 headline specs, location, tier, network; an API that does not know the parameter returns the
                 full row. ``"full"`` asks for the whole node-check scrape in :attr:`ExecutorInfo.specs` (docker
@@ -1894,7 +1895,7 @@ class Lium:
         if nvlink:
             executors = [e for e in executors if e.nvlink is True]
         if reliable:
-            executors = [e for e in executors if e.reliability_proven is True]
+            executors = [e for e in executors if e.frequent_rent_failures is not True]
         if min_download_mbps is not None:
             executors = [
                 e for e in executors
