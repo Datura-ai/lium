@@ -887,6 +887,14 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 "❌ --hotkey differs from what the register token says this node reports under; drop -k, the token decides."
             )
             raise SystemExit(1)
+        # the claims were read without the portal's secret: the portal checks them before anything is installed
+        try:
+            reg.confirm_register_token(reg.build_http(portal_url, token.token))
+        except reg.RegisterError as e:
+            from rich.markup import escape
+
+            console.error(f"❌ {escape(str(e))}")
+            raise SystemExit(1)
         # what the executor reports under: the account's own key, or the portal's for an account without one
         # (lium-platform#294) — the SS58 check in _setup_executor_env applies to this value, not to the account id
         hotkey = token.node_hotkey
