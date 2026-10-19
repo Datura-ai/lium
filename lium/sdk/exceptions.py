@@ -1,5 +1,12 @@
 """Exception hierarchy for the Lium SDK."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .models import GpuResetOutcome
+
 class LiumError(Exception):
     """Base exception for Lium SDK.
 
@@ -220,14 +227,14 @@ class LiumGpuOperationError(LiumError):
         self,
         message: str,
         *,
-        gpus: list | None = None,
+        gpus: list[GpuResetOutcome] | None = None,
         container_restarted: bool | None = None,
         code: str | None = None,
         hint: str | None = None,
         request_id: str | None = None,
     ) -> None:
         super().__init__(message, code=code, hint=hint, request_id=request_id)
-        self.gpus = list(gpus or [])
+        self.gpus: list[GpuResetOutcome] = list(gpus or [])
         self.container_restarted = container_restarted
 
 
