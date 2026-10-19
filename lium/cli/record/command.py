@@ -50,7 +50,7 @@ def record_command(pod, output_format, json_output):
     \b
     Examples:
       lium record 1
-      lium record 3f2b9c1e-8a4d-4b6e-9f10-2c3d4e5f6a7b --format json | jq .environment
+      lium record 3f2b9c1e-8a4d-4b6e-9f10-2c3d4e5f6a7b --format json | jq .launch_snapshot
     """
     json_output = resolve_output_format(output_format, json_output) == "json"
     lium = Lium()
@@ -60,8 +60,9 @@ def record_command(pod, output_format, json_output):
     if json_output:
         click.echo(json.dumps(record, sort_keys=True))
         return
-    env = record.get("environment") or {}
-    gpus = f"{record.get('gpu_count')}× {record.get('gpu_name')}" if record.get("gpu_name") else None
+    env = record.get("launch_snapshot") or {}
+    count = f"{record['gpu_count']}× " if record.get("gpu_count") is not None else ""
+    gpus = f"{count}{record['gpu_name']}" if record.get("gpu_name") else None
     _line("Pod", f"{record.get('pod_name') or ''} {record['pod_id']}{' (removed)' if record.get('removed') else ''}")
     _line("GPU", gpus)
     _line("Image", record.get("image"))
@@ -69,7 +70,8 @@ def record_command(pod, output_format, json_output):
     _line("Interconnect", env.get("gpu_interconnect"))
     _line("Node", record.get("executor_id"))
     _line("Started", record.get("created_at"))
-    _line("Ended", record.get("removed_at") and f"{record['removed_at']} ({record.get('close_reason')})")
+    reason = f" ({record['close_reason']})" if record.get("close_reason") else ""
+    _line("Ended", record.get("removed_at") and f"{record['removed_at']}{reason}")
     _line("Charged", f"${record.get('total', 0):,.4f} for {record.get('billed_seconds', 0) / 3600:.2f} h billed")
     if not env:
-        ui.dim("No environment snapshot: the run started before it was recorded, or its container never came up.")
+        ui.dim("No launch snapshot: the run started before it was recorded, or its container never came up.")

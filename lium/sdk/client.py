@@ -2713,7 +2713,7 @@ class Lium:
         """What one run ran on and what it cost, readable after the pod is removed.
 
         ``GET /pods/{id}/record``: GPU model and count, the image (with its digest when the template pins
-        one), the node's driver/CUDA/interconnect when the container came up (``environment``, null for
+        one), the node's driver/CUDA/interconnect when the container came up (``launch_snapshot``, null for
         older runs), start and end, ``close_reason``, ``billed_seconds``, ``total`` (what the ledger
         charged) and ``price_segments``. A 404 is ``LiumNotFoundError`` (no such pod of yours) on a server that
         lists ``run_record`` on ``GET /version``; on one that does not, it is a ``LiumError`` saying the server
