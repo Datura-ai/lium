@@ -17,7 +17,8 @@ from lium.cli.utils import handle_errors
 def request_command(gpu: str, count, json_output: bool):
     """Ask providers for a GPU type that is sold out.
 
-    The providers who list that GPU type are told, and the request shows on
+    The providers who list that GPU type may be notified (not when unsubscribed,
+    in cooldown or over the daily mail budget), and the request shows on
     https://lium.io/machine-requests.
 
     \b
