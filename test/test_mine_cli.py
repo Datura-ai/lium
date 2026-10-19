@@ -203,7 +203,7 @@ def test_start_executor_timeout_includes_compose_diagnostics(monkeypatch, tmp_pa
     assert "address already in use" in msg and "exited with code 1" in msg
     assert "no such service" not in msg
     # the old container ID is read first, so the wait can tell the new container from it
-    assert calls[:2] == ["docker compose -f docker-compose.app.yml ps -q executor", "docker compose up -d --force-recreate"]
+    assert calls[1:3] == ["docker compose -f docker-compose.app.yml ps -q executor", "docker compose up -d --force-recreate"]
     # each compose file is asked for the service it declares (`executor` lives in docker-compose.app.yml)
     assert [c for c in calls if "logs" in c] == [
         "docker compose logs --no-color --tail 30 executor-runner",
@@ -464,3 +464,27 @@ def test_start_executor_without_a_register_token_does_not_recreate_a_running_exe
     mine._start_executor(tmp_path)
 
     assert calls[0] == "docker compose up -d"
+
+
+def test_start_executor_does_not_recreate_under_running_rentals(monkeypatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+    warnings: list[str] = []
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        calls.append(cmd)
+        if cmd.startswith("docker ps --format"):
+            return "filler_1\npod_abc\nexecutor-executor-1\n", ""
+        if "ps -q executor" in cmd:
+            return "abc123\n", ""
+        if cmd.startswith("docker inspect"):
+            return "healthy\n", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+    monkeypatch.setattr(mine.console, "warning", warnings.append)
+
+    mine._start_executor(tmp_path, recreate=True)
+
+    assert "docker compose up -d" in calls and "docker compose up -d --force-recreate" not in calls
+    assert warnings and "1 rental(s) running" in warnings[0]
