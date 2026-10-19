@@ -96,6 +96,8 @@ from .workspaces import WorkspacesClient
 
 # The backend feature `Lium.rent` looks for on GET /version before using POST /executors/rent-by-spec.
 RENT_BY_SPEC = "rent_by_spec"
+# The backend feature that says GET /pods/{id}/record is served (lium-platform#1204).
+RUN_RECORD = "run_record"
 # The backend feature that takes a build-context upload (POST /build-contexts) for a custom-Dockerfile rent.
 BUILD_CONTEXT = "build_context"
 # Advertised by a backend whose rent, rent-by-spec and cluster rent honour Idempotency-Key, so a rent
@@ -2707,6 +2709,27 @@ class Lium:
                 return exact[0]
             raise ValueError(self.ambiguous_executor_message(executor, matches))
         return matches[0] if matches else None
+
+    def pod_record(self, pod_id: str) -> Dict[str, Any]:
+        """What one run ran on and what it cost, readable after the pod is removed.
+
+        ``GET /pods/{id}/record``: GPU model and count, the image (with its digest when the template pins
+        one), the node's driver/CUDA/interconnect when the container came up (``launch_snapshot``, null for
+        older runs), start and end, ``close_reason``, ``billed_seconds``, ``total`` (what the ledger
+        charged) and ``price_segments``. A 404 is ``LiumNotFoundError`` (no such pod of yours) on a server that
+        lists ``run_record`` on ``GET /version``; on one that does not, it is a ``LiumError`` saying the server
+        does not serve run records yet, so a removed pod is not reported as missing.
+        """
+        try:
+            return self._request("GET", f"/pods/{uuid.UUID(str(pod_id))}/record").json()
+        except LiumNotFoundError as exc:
+            if self.supports(RUN_RECORD):
+                raise
+            raise LiumError(
+                "This Lium server does not serve run records yet (GET /version does not list 'run_record').",
+                hint="Until it does, 'lium billing history' shows what the pod was charged.",
+                request_id=exc.request_id,
+            ) from exc
 
     def quote(
         self,
