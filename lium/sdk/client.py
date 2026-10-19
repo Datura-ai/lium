@@ -72,6 +72,7 @@ from .models import (
     ClusterOffer,
     ExecutorInfo,
     GpuStats,
+    JobQuote,
     PodInfo,
     RentResult,
     RestoreLog,
@@ -95,6 +96,8 @@ from .workspaces import WorkspacesClient
 
 # The backend feature `Lium.rent` looks for on GET /version before using POST /executors/rent-by-spec.
 RENT_BY_SPEC = "rent_by_spec"
+# The backend feature that says GET /pods/{id}/record is served (lium-platform#1204).
+RUN_RECORD = "run_record"
 # The backend feature that takes a build-context upload (POST /build-contexts) for a custom-Dockerfile rent.
 BUILD_CONTEXT = "build_context"
 # Advertised by a backend whose rent, rent-by-spec and cluster rent honour Idempotency-Key, so a rent
@@ -2706,6 +2709,65 @@ class Lium:
                 return exact[0]
             raise ValueError(self.ambiguous_executor_message(executor, matches))
         return matches[0] if matches else None
+
+    def pod_record(self, pod_id: str) -> Dict[str, Any]:
+        """What one run ran on and what it cost, readable after the pod is removed.
+
+        ``GET /pods/{id}/record``: GPU model and count, the image (with its digest when the template pins
+        one), the node's driver/CUDA/interconnect when the container came up (``launch_snapshot``, null for
+        older runs), start and end, ``close_reason``, ``billed_seconds``, ``total`` (what the ledger
+        charged) and ``price_segments``. A 404 is ``LiumNotFoundError`` (no such pod of yours) on a server that
+        lists ``run_record`` on ``GET /version``; on one that does not, it is a ``LiumError`` saying the server
+        does not serve run records yet, so a removed pod is not reported as missing.
+        """
+        try:
+            return self._request("GET", f"/pods/{uuid.UUID(str(pod_id))}/record").json()
+        except LiumNotFoundError as exc:
+            if self.supports(RUN_RECORD):
+                raise
+            raise LiumError(
+                "This Lium server does not serve run records yet (GET /version does not list 'run_record').",
+                hint="Until it does, 'lium billing history' shows what the pod was charged.",
+                request_id=exc.request_id,
+            ) from exc
+
+    def quote(
+        self,
+        executor: str,
+        *,
+        hours: float,
+        gpu_count: Optional[int] = None,
+        volume_gb: float = 0.0,
+        backup_gb: float = 0.0,
+    ) -> JobQuote:
+        """What renting a node for ``hours`` costs, line by line, at the rates billing charges.
+
+        ``GET /executors/{uuid}/quote``: compute (price per GPU × ``gpu_count``; without it the server
+        quotes the node's free GPUs, which is what ``lium up <node>`` rents without ``-c``), volume and backup storage per GB-hour, and an egress line with no amount (billed
+        at what AWS charges). Returns the API's answer: ``price_per_hour``, ``lines`` (``item``,
+        ``unit``, ``rate_usd``, ``quantity``, ``amount_usd``, ``note``), ``total_usd`` (egress not
+        included) and ``pod_balance_floor_usd`` (the balance a rent of this pod requires: 15 minutes of
+        ``price_per_hour``). Nothing is reserved. Returned as a :class:`JobQuote`.
+
+        Args:
+            executor: Node UUID, or the HUID ``lium ls`` prints for it.
+
+        Raises:
+            LiumNotFoundError: no listed node has that HUID, the server knows no node with that UUID, or it
+                has no quote route yet. A UUID is sent as given, with no listing read.
+            ValueError: the HUID names more than one listed node.
+        """
+        try:
+            node_id = str(uuid.UUID(executor))
+        except ValueError:
+            node = self.get_executor(executor)
+            if node is None:
+                raise LiumNotFoundError(f"No listed node '{executor}'. Try: lium ls")
+            node_id = node.id
+        params: Dict[str, Any] = {"hours": hours, "volume_gb": volume_gb, "backup_gb": backup_gb}
+        if gpu_count is not None:
+            params["gpu_count"] = gpu_count
+        return JobQuote.from_api(self._request("GET", f"/executors/{node_id}/quote", params=params).json())
 
     @staticmethod
     def ambiguous_executor_message(executor: str, matches: List[ExecutorInfo]) -> str:
