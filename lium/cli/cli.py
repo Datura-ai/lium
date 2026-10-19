@@ -26,6 +26,7 @@ from .whoami import whoami_command
 from .cp import cp_command
 from .spend import spend_command
 from .job import job_command
+from .quote import quote_command
 from .completion_command import completion_command
 from .theme import theme_command
 
@@ -127,6 +128,7 @@ cli.add_command(whoami_command)
 cli.add_command(cp_command)
 cli.add_command(spend_command)
 cli.add_command(job_command)
+cli.add_command(quote_command)
 cli.add_command(completion_command)
 cli.add_command(theme_command)
 cli.add_command(config_command)

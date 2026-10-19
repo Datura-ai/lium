@@ -36,6 +36,8 @@ from .models import (
     ClusterOffer,
     ExecutorInfo,
     GpuStats,
+    JobQuote,
+    JobQuoteLine,
     PodInfo,
     RentResult,
     RestoreLog,
@@ -51,6 +53,8 @@ from .result_codec import ResultEncodingError
 
 __all__ = [
     "Lium",
+    "JobQuote",
+    "JobQuoteLine",
     "ApiKeysClient",
     "ApiKeyInfo",
     "ApiKeyScope",

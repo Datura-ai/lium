@@ -73,6 +73,7 @@ from .models import (
     ClusterOffer,
     ExecutorInfo,
     GpuStats,
+    JobQuote,
     PodInfo,
     RentResult,
     RestoreLog,
@@ -2847,6 +2848,44 @@ class Lium:
                 return exact[0]
             raise ValueError(self.ambiguous_executor_message(executor, matches))
         return matches[0] if matches else None
+
+    def quote(
+        self,
+        executor: str,
+        *,
+        hours: float,
+        gpu_count: Optional[int] = None,
+        volume_gb: float = 0.0,
+        backup_gb: float = 0.0,
+    ) -> JobQuote:
+        """What renting a node for ``hours`` costs, line by line, at the rates billing charges.
+
+        ``GET /executors/{uuid}/quote``: compute (price per GPU × ``gpu_count``; without it the server
+        quotes the node's free GPUs, which is what ``lium up <node>`` rents without ``-c``), volume and backup storage per GB-hour, and an egress line with no amount (billed
+        at what AWS charges). Returns the API's answer: ``price_per_hour``, ``lines`` (``item``,
+        ``unit``, ``rate_usd``, ``quantity``, ``amount_usd``, ``note``), ``total_usd`` (egress not
+        included) and ``pod_balance_floor_usd`` (the balance a rent of this pod requires: 15 minutes of
+        ``price_per_hour``). Nothing is reserved. Returned as a :class:`JobQuote`.
+
+        Args:
+            executor: Node UUID, or the HUID ``lium ls`` prints for it.
+
+        Raises:
+            LiumNotFoundError: no listed node has that HUID, the server knows no node with that UUID, or it
+                has no quote route yet. A UUID is sent as given, with no listing read.
+            ValueError: the HUID names more than one listed node.
+        """
+        try:
+            node_id = str(uuid.UUID(executor))
+        except ValueError:
+            node = self.get_executor(executor)
+            if node is None:
+                raise LiumNotFoundError(f"No listed node '{executor}'. Try: lium ls")
+            node_id = node.id
+        params: Dict[str, Any] = {"hours": hours, "volume_gb": volume_gb, "backup_gb": backup_gb}
+        if gpu_count is not None:
+            params["gpu_count"] = gpu_count
+        return JobQuote.from_api(self._request("GET", f"/executors/{node_id}/quote", params=params).json())
 
     @staticmethod
     def ambiguous_executor_message(executor: str, matches: List[ExecutorInfo]) -> str:
