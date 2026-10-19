@@ -242,3 +242,15 @@ def test_lium_ls_help_explains_the_mark():
     assert result.exit_code == 0
     assert POWER_LIMITED_MARK in result.output
     assert "gpu_power_limited" in result.output
+
+
+def test_lium_ls_json_carries_the_free_gpu_count_of_a_partly_rented_node(monkeypatch):
+    output = _run_ls(
+        monkeypatch,
+        [_executor_dict("partly", gpu_count=8, available_gpu_count=2), _executor_dict("old")],
+        "--format", "json",
+    )
+    rows = {row["id"]: row for row in json.loads(output)}
+
+    assert (rows["partly"]["gpu_count"], rows["partly"]["available_gpu_count"]) == (8, 2)
+    assert rows["old"]["available_gpu_count"] is None

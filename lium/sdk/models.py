@@ -614,3 +614,42 @@ __all__ = [
     "ApiKeyInfo",
     "ApiKeyRefusal",
 ]
+
+
+@dataclass
+class JobQuoteLine(_Serializable):
+    """One charge of a :class:`JobQuote`; ``rate_usd`` and ``amount_usd`` are None for egress (billed at AWS cost)."""
+
+    item: str
+    unit: str
+    rate_usd: Optional[float]
+    quantity: float
+    amount_usd: Optional[float]
+    note: str
+
+
+@dataclass
+class JobQuote(_Serializable):
+    """What :meth:`Lium.quote` returns: a job's cost on a node, line by line."""
+
+    executor_id: str
+    gpu_count: int
+    hours: float
+    price_per_hour: float
+    lines: List[JobQuoteLine]
+    total_usd: float  # egress not included
+    pod_balance_floor_usd: float
+    allocation: Optional[Dict[str, Any]] = None  # CPU, RAM and disk inside the pod, as the API sends it
+
+    @classmethod
+    def from_api(cls, data: Dict[str, Any]) -> "JobQuote":
+        return cls(
+            executor_id=data["executor_id"],
+            gpu_count=data["gpu_count"],
+            hours=data["hours"],
+            price_per_hour=data["price_per_hour"],
+            lines=[JobQuoteLine(**{f.name: line[f.name] for f in fields(JobQuoteLine)}) for line in data["lines"]],
+            total_usd=data["total_usd"],
+            pod_balance_floor_usd=data["pod_balance_floor_usd"],
+            allocation=data.get("allocation"),
+        )
