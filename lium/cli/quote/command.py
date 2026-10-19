@@ -84,6 +84,8 @@ def quote_command(node, hours, gpu_count, volume_gb, backup_gb, output_format, j
     ui.info(f"Total {_money(quote.total_usd)} (egress not included)")
     if quote.rent_balance_required_usd is None:
         ui.dim(f"This pod's balance floor: {_money(quote.pod_balance_floor_usd)}")
+    elif quote.rent_balance_required_usd == 0:
+        ui.dim("No balance floor applies to this account")  # the server's 0 marks an exempt payer
     else:
         ui.dim(f"Balance this rent needs, with your open pods: more than {_money(quote.rent_balance_required_usd)}")
     if anonymous:
