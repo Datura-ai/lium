@@ -83,7 +83,7 @@ def quote_command(node, hours, gpu_count, volume_gb, backup_gb, output_format, j
     ui.print(table)
     ui.info(f"Total {_money(quote.total_usd)} (egress not included)")
     if quote.rent_balance_required_usd is None:
-        ui.dim(f"This pod's part of the balance a rent needs: {_money(quote.pod_balance_floor_usd)}, plus your open pods")
+        ui.dim(f"This pod's balance floor: {_money(quote.pod_balance_floor_usd)}")
     else:
         ui.dim(f"Balance this rent needs, with your open pods: more than {_money(quote.rent_balance_required_usd)}")
     if anonymous:

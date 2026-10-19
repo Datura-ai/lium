@@ -153,3 +153,14 @@ def test_signed_in_quote_prints_the_balance_the_rent_needs_with_open_pods(reques
 
     assert out.exit_code == 0, out.output
     assert "more than $4.0000" in out.output and "$2.0000" not in out.output
+
+
+def test_quote_without_the_required_balance_prints_only_this_pods_floor(requests_seen, monkeypatch):
+    # an older backend omits rent_balance_required_usd and gates on this pod's floor alone: claim nothing about open pods
+    monkeypatch.setitem(QUOTE, "pod_balance_floor_usd", 2.0)
+    monkeypatch.setitem(QUOTE, "rent_balance_required_usd", None)
+
+    out = CliRunner().invoke(cli, ["quote", NODE, "--hours", "2", "--gpus", "8"])
+
+    assert out.exit_code == 0, out.output
+    assert "This pod's balance floor: $2.0000" in out.output and "open pods" not in out.output

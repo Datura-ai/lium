@@ -2783,7 +2783,7 @@ class Lium:
         at what AWS charges). Returns the API's answer: ``price_per_hour``, ``lines`` (``item``,
         ``unit``, ``rate_usd``, ``quantity``, ``amount_usd``, ``note``), ``total_usd`` (egress not
         included), ``pod_balance_floor_usd`` (this pod's part of the balance floor: 15 minutes of
-        ``price_per_hour``) and, signed in, ``rent_balance_required_usd`` (what the balance must be more than
+        ``price_per_hour``) and, when supplied by the server for a signed-in caller, ``rent_balance_required_usd`` (what the balance must be more than
         for this rent: this pod plus 15 minutes of each open pod). Nothing is reserved. Returned as a :class:`JobQuote`.
 
         Args:
