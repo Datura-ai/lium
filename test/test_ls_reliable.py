@@ -44,3 +44,11 @@ def test_ls_reliable_flag_reaches_the_sdk(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert fake.kwargs["reliable"] is True
+
+
+def test_nvlink_and_reliable_no_match_names_both_filters(monkeypatch):
+    result, _ = _run_ls(monkeypatch, [], "--nvlink", "--reliable")
+
+    assert result.exit_code == 0, result.output
+    assert "NVLink between every GPU pair and a reliability score" in result.output
+    assert "--reliable" in result.output

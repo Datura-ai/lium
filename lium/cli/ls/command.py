@@ -190,6 +190,7 @@ def ls_command(
             wanted = [w for w in (
                 "NVLink between every GPU pair" if nvlink else None,
                 f"Download ≥ {min_download_mbps:g} Mbps" if min_download_mbps is not None else None,
+                "a reliability score proven by enough rentals" if reliable else None,
             ) if w]
             ui.error(f"No available node reports {' and '.join(wanted)}")
             # each filter's rule, as the help text states it: --nvlink needs a topology report; --min-download
@@ -197,6 +198,7 @@ def ls_command(
             rules = [r for r in (
                 "--nvlink excludes nodes with no topology report yet" if nvlink else None,
                 "--min-download judges the Download (Mbps) column" if min_download_mbps is not None else None,
+                "--reliable leaves out unrated providers" if reliable else None,
             ) if r]
             if nvlink:
                 tail = f"Drop the filter and check on the pod: {ui.styled('nvidia-smi topo -m', 'success')}"
