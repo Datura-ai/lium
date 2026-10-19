@@ -208,6 +208,29 @@ class LiumBudgetExceededError(LiumPermissionError):
         self.api_key_id = api_key_id
 
 
+class LiumGpuOperationError(LiumError):
+    """A GPU reset ran on the node and at least one GPU failed (409 whose body lists ``gpus``).
+
+    ``gpus`` is each GPU's outcome (:class:`GpuResetOutcome` from :meth:`Lium.reset_gpu`), so the caller sees
+    which GPUs failed; ``container_restarted`` says whether the pod's container was started again (``None`` when
+    the server did not say). ``code`` is the API's (``reset_not_supported``, ...).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        gpus: list | None = None,
+        container_restarted: bool | None = None,
+        code: str | None = None,
+        hint: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message, code=code, hint=hint, request_id=request_id)
+        self.gpus = list(gpus or [])
+        self.container_restarted = container_restarted
+
+
 class LiumCardTopUpError(LiumError):
     """A card top-up (``POST /payments/topup``, :meth:`Lium.topup_card`) did not charge (402).
 

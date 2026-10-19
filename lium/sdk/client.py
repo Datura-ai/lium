@@ -43,6 +43,7 @@ from .exceptions import (
     LiumCardTopUpError,
     LiumChargeOutcomeUnknownError,
     LiumError,
+    LiumGpuOperationError,
     LiumHostKeyError,
     LiumNotFoundError,
     LiumInsufficientBalanceError,
@@ -71,6 +72,8 @@ from .models import (
     Cluster,
     ClusterOffer,
     ExecutorInfo,
+    GpuResetOutcome,
+    GpuResetResult,
     GpuStats,
     PodInfo,
     RentResult,
@@ -484,6 +487,13 @@ def budget_error(detail: str, key: Optional[str] = None, **context: Optional[str
     )
 
 
+def _gpu_reset_outcome(gpu: Dict[str, Any]) -> GpuResetOutcome:
+    return GpuResetOutcome(
+        index=int(gpu.get("index", -1)), uuid=gpu.get("uuid") or "", result=gpu.get("result") or "",
+        detail=gpu.get("detail"),
+    )
+
+
 def _error_data(response: requests.Response) -> Dict[str, Any]:
     """The structured fields of an error body beyond code/message/hint/request_id.
 
@@ -843,6 +853,13 @@ class Lium:
             raise card_topup_error(resp, **context)
         if 500 <= resp.status_code < 600:
             raise LiumServerError(f"Server error: {resp.status_code}", **context)
+        data = _error_data(resp) if resp.status_code == 409 else {}
+        if isinstance(data.get("gpus"), list):
+            # a GPU operation ran and a GPU failed: keep each GPU's outcome (and container state) for the caller
+            raise LiumGpuOperationError(
+                f"API error 409: {_response_error_message(resp)}",
+                gpus=data["gpus"], container_restarted=data.get("container_restarted"), **context,
+            )
         raise LiumError(f"API error {resp.status_code}: {_response_error_message(resp)}", **context)
 
     def _dict_to_backup_config(self, config_dict: Dict) -> BackupConfig:
@@ -2213,7 +2230,7 @@ class Lium:
         self._release_ssh(pod)
         return result
 
-    def reset_gpu(self, pod: PodInfo, gpu_indices: Optional[List[int]] = None) -> Dict[str, Any]:
+    def reset_gpu(self, pod: PodInfo, gpu_indices: Optional[List[int]] = None) -> GpuResetResult:
         """Reset a pod's hung GPUs: stops the container, resets the GPUs, starts it again.
 
         Every process in the pod is stopped, even when one GPU is named; files are kept and the
@@ -2224,20 +2241,31 @@ class Lium:
             gpu_indices: Pod GPU indices as ``nvidia-smi`` numbers them inside the pod; ``None`` resets all.
 
         Returns:
-            ``{"pod_id", "ok", "container_restarted", "gpus": [{"index", "uuid", "result", "detail"}]}``,
-            ``result`` being ``reset``, ``latch_cleared`` or ``failed``.
+            :class:`GpuResetResult`, one :class:`GpuResetOutcome` per GPU.
 
         Raises:
-            LiumError: 400/409 with the API's ``code`` (``invalid_gpu_index``, ``mig_enabled``,
-                ``reset_not_supported``, ...); ``LiumServerError`` on 503 ``gpu_reset_unavailable``.
+            LiumGpuOperationError: 409, the reset ran and a GPU failed; ``gpus`` and ``container_restarted`` say
+                what happened to each GPU.
+            LiumError: 400/409 refusals with the API's ``code`` (``invalid_gpu_index``, ``mig_enabled``, ...);
+                ``LiumServerError`` on 503 ``gpu_reset_unavailable``.
         """
         # sent once: a 429 is the 1/min limit and a second reset must not follow a lost answer;
         # the backend waits up to 90 s for the validator, past the 30 s default timeout
-        result = self._request(
-            "POST", f"/pods/{pod.id}/reset-gpu", json={"gpu_indices": gpu_indices}, retry=False, timeout=120,
-        ).json()
-        self._release_ssh(pod)  # the container was stopped; held connections are dead
-        return result
+        try:
+            body = self._request(
+                "POST", f"/pods/{pod.id}/reset-gpu", json={"gpu_indices": gpu_indices}, retry=False, timeout=120,
+            ).json()
+        except LiumGpuOperationError as e:
+            e.gpus = [_gpu_reset_outcome(g) for g in e.gpus]
+            raise
+        finally:
+            self._release_ssh(pod)  # a failed reset stops the container too; held connections are dead
+        return GpuResetResult(
+            pod_id=str(body.get("pod_id", pod.id)),
+            ok=bool(body.get("ok")),
+            container_restarted=bool(body.get("container_restarted")),
+            gpus=[_gpu_reset_outcome(g) for g in body.get("gpus") or []],
+        )
 
     def lock_gpu_clocks(
         self, pod: PodInfo, min_mhz: int, max_mhz: int, gpu_indices: Optional[List[int]] = None,

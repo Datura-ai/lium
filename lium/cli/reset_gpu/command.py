@@ -5,16 +5,16 @@ from typing import Tuple
 
 import click
 
-from lium.sdk import Lium
+from lium.sdk import Lium, LiumGpuOperationError
 from lium.cli import ui
 from lium.cli.utils import (
     CliFailure,
     EXIT_CONFIGURATION_ERROR,
-    EXIT_GENERAL_ERROR,
     EXIT_POD_NOT_FOUND,
     handle_errors,
     narrate_on_stderr_under_json,
     parse_targets,
+    sdk_error_failure,
 )
 
 
@@ -59,18 +59,20 @@ def reset_gpu_command(target: str, gpus: Tuple[int, ...], yes: bool, json_output
             ui.warning("Nothing reset")
             return
 
-    result = ui.load(f"Resetting {which} of {pod.huid}", lambda: lium.reset_gpu(pod, list(gpus) or None))
+    try:
+        result = ui.load(f"Resetting {which} of {pod.huid}", lambda: lium.reset_gpu(pod, list(gpus) or None))
+    except LiumGpuOperationError as e:
+        # the reset ran and a GPU failed: show which, then fail with the API's code and every GPU's outcome
+        if not json_output:
+            _table(e.gpus)
+        raise sdk_error_failure(e, {"container_restarted": e.container_restarted, "gpus": [g.to_dict() for g in e.gpus]})
 
-    if not json_output:
-        ui.table(
-            ["GPU", "UUID", "Result", "Detail"],
-            [[str(g.get("index", "")), g.get("uuid") or "", g.get("result") or "", g.get("detail") or ""]
-             for g in result.get("gpus") or []],
-        )
-    if not result.get("ok"):
-        # a 200 with ok=false: the reset ran and at least one GPU failed — a script must not read it as done
-        raise CliFailure("gpu_reset_failed", f"GPU reset of {pod.huid} did not succeed", EXIT_GENERAL_ERROR, data=result)
     if json_output:
-        click.echo(json.dumps(result, sort_keys=True))
+        click.echo(json.dumps(result.to_dict(), sort_keys=True))
     else:
+        _table(result.gpus)
         ui.success(f"GPU reset done for {pod.huid}")
+
+
+def _table(gpus) -> None:
+    ui.table(["GPU", "UUID", "Result", "Detail"], [[str(g.index), g.uuid, g.result, g.detail or ""] for g in gpus])
