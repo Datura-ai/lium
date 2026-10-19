@@ -267,6 +267,13 @@ def _setup_executor_env(
         if not _valid_port(p):
             raise Exception(f"Invalid port {name}={p} (must be 1-65535)")
 
+    # a re-run without --register rebuilds .env from the template; keep the claim the earlier --register wrote
+    old_claim = ""
+    if env_f.exists():
+        for line in env_f.read_text().splitlines():
+            if line.startswith("MINER_ACCOUNT_CLAIM="):
+                old_claim = line.split("=", 1)[1].strip()
+
     # read, rewrite, preserve
     src_lines = env_t.read_text().splitlines()
     out_lines = []
@@ -295,6 +302,8 @@ def _setup_executor_env(
             # DAH-3075: blank means "same as SSH_PORT" (the documented meaning); keeping the template's
             # hard-coded 2200 while SSH_PORT changed sent the validator to a port nothing listens on
             put(k, ssh_public_port or ssh_port)
+        elif k == "MINER_ACCOUNT_CLAIM" and old_claim:
+            put(k, old_claim)
         elif k == "RENTING_PORT_RANGE":
             if port_range:
                 put(k, port_range)
@@ -310,6 +319,8 @@ def _setup_executor_env(
         "EXTERNAL_PORT": external_port,
         "SSH_PORT": ssh_port,
     }
+    if old_claim:
+        required["MINER_ACCOUNT_CLAIM"] = old_claim
     for k, v in required.items():
         if k not in seen and not any(l.startswith(f"{k}=") for l in out_lines):
             out_lines.append(f"{k}={v}")
@@ -465,17 +476,23 @@ def _compose_diagnostics(executor_dir: Path, tail: int = 30) -> str:
     return "\n".join(parts)
 
 
-def _start_executor(executor_dir: Path, wait_secs: int = 180):
+def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = False):
     # Start using the default docker-compose.yml
-    _run("docker compose up -d", capture=True, cwd=str(executor_dir))
+    # recreate: an executor already running keeps its old .env, so a new MINER_ACCOUNT_CLAIM never reaches it;
+    # a plain re-run leaves a running executor alone
+    ps_cmd = "docker compose -f docker-compose.app.yml ps -q executor"
+    # after --force-recreate the old container can still report healthy; wait for one with a new ID
+    old_id = _run(ps_cmd, check=False, cwd=str(executor_dir))[0].strip() if recreate else ""
+    command = "docker compose up -d --force-recreate" if recreate else "docker compose up -d"
+    _run(command, capture=True, cwd=str(executor_dir))
 
     # Wait for the executor service to be fully healthy
     start = time.time()
     
     while time.time() - start < wait_secs:
         # Get the container name/ID for the executor service
-        out, _ = _run("docker compose -f docker-compose.app.yml ps -q executor", cwd=str(executor_dir))
-        if not out.strip():
+        out, _ = _run(ps_cmd, cwd=str(executor_dir))
+        if not out.strip() or out.strip() == old_id:
             time.sleep(2)
             continue
             
@@ -498,7 +515,7 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180):
 
 def _apply_env_overrides(
     executor_dir: Path,
-    internal: str, external: str, ssh: str, ssh_pub: str, rng: str
+    internal: str, external: str, ssh: str, ssh_pub: str, rng: str, account_claim: str | None = None
 ):
     env_f = executor_dir / ".env"
     content = env_f.read_text().splitlines()
@@ -519,6 +536,8 @@ def _apply_env_overrides(
     set_or_append("SSH_PUBLIC_PORT", ssh_pub or ssh)
     if rng:
         set_or_append("RENTING_PORT_RANGE", rng)
+    if account_claim:
+        set_or_append("MINER_ACCOUNT_CLAIM", account_claim)
     env_f.write_text("\n".join(content) + "\n")
 
 def _gather_inputs(
@@ -915,6 +934,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 ssh=answers["ssh_port"],
                 ssh_pub=answers["ssh_public_port"],
                 rng=answers["port_range"],
+                account_claim=token.account_claim if token else None,
             )
 
             # A taken host port makes `docker compose up` loop on
@@ -923,7 +943,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             _check_ports_free(_host_ports_from_answers(answers), executor_dir)
 
         with timed_step_status(5, TOTAL_STEPS, "Starting node"):
-            _start_executor(executor_dir)
+            _start_executor(executor_dir, recreate=token is not None)
 
         console.dim(
             "Validation runs the validator's preflight image: GPU check, matrix "
