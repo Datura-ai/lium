@@ -1264,6 +1264,16 @@ def parse_targets(targets: str, all_pods: List[PodInfo], *, allow_index: Optiona
     return [match.pod for match in resolve_targets(targets, all_pods, allow_index=allow_index)]
 
 
+def one_pod(target: str, all_pods: List[PodInfo], command: str) -> PodInfo:
+    """The one pod TARGET names, for a command that acts on a single pod (``reset-gpu``, ``gpu-clocks``)."""
+    selected = parse_targets(target, all_pods) if all_pods else []
+    if not selected:
+        raise CliFailure("pod_not_found", f"No pods match targets: {target}", EXIT_POD_NOT_FOUND)
+    if len(selected) > 1:
+        raise CliFailure("invalid_arguments", f"{command} takes one pod", EXIT_CONFIGURATION_ERROR)
+    return selected[0]
+
+
 def wait_for_pod_ready(
     lium_client, pod_id: str, timeout: Optional[int] = None, on_poll: Optional[Callable[..., None]] = None
 ) -> Optional[PodInfo]:

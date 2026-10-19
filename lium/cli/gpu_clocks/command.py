@@ -5,16 +5,15 @@ from typing import Optional, Tuple
 
 import click
 
-from lium.sdk import Lium
+from lium.sdk import Lium, LiumGpuOperationError
 from lium.cli import ui
 from lium.cli.utils import (
     CliFailure,
     EXIT_CONFIGURATION_ERROR,
-    EXIT_GENERAL_ERROR,
-    EXIT_POD_NOT_FOUND,
     handle_errors,
     narrate_on_stderr_under_json,
-    parse_targets,
+    one_pod,
+    sdk_error_failure,
 )
 
 
@@ -56,35 +55,36 @@ def gpu_clocks_command(target: str, lock: Optional[Tuple[int, int]], reset: bool
     if bool(lock) == reset:
         raise CliFailure("invalid_arguments", "Pass exactly one of --lock MIN,MAX or --reset", EXIT_CONFIGURATION_ERROR)
     lium = Lium()
-    all_pods = ui.load("Loading pods", lambda: lium.ps())
-    selected = parse_targets(target, all_pods) if all_pods else []
-    if not selected:
-        raise CliFailure("pod_not_found", f"No pods match targets: {target}", EXIT_POD_NOT_FOUND)
-    if len(selected) > 1:
-        raise CliFailure("invalid_arguments", "gpu-clocks takes one pod", EXIT_CONFIGURATION_ERROR)
-    pod = selected[0]
+    pod = one_pod(target, ui.load("Loading pods", lambda: lium.ps()), "gpu-clocks")
 
     which = f"GPU {', '.join(map(str, gpus))}" if gpus else "all GPUs"
     indices = list(gpus) or None
-    if reset:
-        result = ui.load(f"Resetting clocks of {which} of {pod.huid}", lambda: lium.reset_gpu_clocks(pod, indices))
-    else:
-        result = ui.load(f"Locking clocks of {which} of {pod.huid} to {lock[0]}-{lock[1]} MHz",
-                         lambda: lium.lock_gpu_clocks(pod, lock[0], lock[1], indices))
+    try:
+        if reset:
+            result = ui.load(f"Resetting clocks of {which} of {pod.huid}", lambda: lium.reset_gpu_clocks(pod, indices))
+        else:
+            result = ui.load(f"Locking clocks of {which} of {pod.huid} to {lock[0]}-{lock[1]} MHz",
+                             lambda: lium.lock_gpu_clocks(pod, lock[0], lock[1], indices))
+    except LiumGpuOperationError as e:
+        # part of the change ran: show which GPUs are locked and which failed, then fail with the API's code
+        if not json_output:
+            _table(e.gpus)
+        raise sdk_error_failure(e, {"gpus": [g.to_dict() for g in e.gpus]})
 
-    if not json_output:
-        ui.table(
-            ["GPU", "UUID", "Result", "Min MHz", "Max MHz", "Detail"],
-            [[str(g.get("index", "")), g.get("uuid") or "", g.get("result") or "",
-              "" if g.get("applied_min_mhz") is None else str(g["applied_min_mhz"]),
-              "" if g.get("applied_max_mhz") is None else str(g["applied_max_mhz"]),
-              g.get("detail") or ""]
-             for g in result.get("gpus") or []],
-        )
-    if not result.get("ok"):
-        # a 200 with ok=false: at least one GPU failed — a script must not read it as done
-        raise CliFailure("gpu_clocks_failed", f"GPU clock change on {pod.huid} did not succeed", EXIT_GENERAL_ERROR, data=result)
     if json_output:
-        click.echo(json.dumps(result, sort_keys=True))
+        click.echo(json.dumps(result.to_dict(), sort_keys=True))
     else:
+        _table(result.gpus)
         ui.success(f"GPU clocks {'reset' if reset else 'locked'} on {pod.huid}")
+
+
+def _mhz(value) -> str:
+    return "" if value is None else str(value)
+
+
+def _table(gpus) -> None:
+    ui.table(
+        ["GPU", "UUID", "Result", "Min MHz", "Max MHz", "Detail"],
+        [[str(g.index), g.uuid, g.result, _mhz(g.applied_min_mhz), _mhz(g.applied_max_mhz), g.detail or ""]
+         for g in gpus],
+    )

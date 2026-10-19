@@ -72,6 +72,8 @@ from .models import (
     Cluster,
     ClusterOffer,
     ExecutorInfo,
+    GpuClockOutcome,
+    GpuClockResult,
     GpuResetOutcome,
     GpuResetResult,
     GpuStats,
@@ -490,6 +492,14 @@ def budget_error(detail: str, key: Optional[str] = None, **context: Optional[str
 def _gpu_reset_outcome(gpu: Dict[str, Any]) -> GpuResetOutcome:
     return GpuResetOutcome(
         index=int(gpu.get("index", -1)), uuid=gpu.get("uuid") or "", result=gpu.get("result") or "",
+        detail=gpu.get("detail"),
+    )
+
+
+def _gpu_clock_outcome(gpu: Dict[str, Any]) -> GpuClockOutcome:
+    return GpuClockOutcome(
+        index=int(gpu.get("index", -1)), uuid=gpu.get("uuid") or "", result=gpu.get("result") or "",
+        applied_min_mhz=gpu.get("applied_min_mhz"), applied_max_mhz=gpu.get("applied_max_mhz"),
         detail=gpu.get("detail"),
     )
 
@@ -2269,7 +2279,7 @@ class Lium:
 
     def lock_gpu_clocks(
         self, pod: PodInfo, min_mhz: int, max_mhz: int, gpu_indices: Optional[List[int]] = None,
-    ) -> Dict[str, Any]:
+    ) -> GpuClockResult:
         """Lock a pod's GPU core clocks to ``min_mhz``..``max_mhz``. Nothing in the pod is stopped.
 
         ``POST /pods/{id}/gpu-clocks``.
@@ -2281,23 +2291,31 @@ class Lium:
             gpu_indices: Pod GPU indices as ``nvidia-smi`` numbers them inside the pod; ``None`` means all.
 
         Returns:
-            ``{"pod_id", "ok", "gpus": [{"index", "uuid", "result", "applied_min_mhz", "applied_max_mhz", "detail"}]}``,
-            ``result`` being ``locked``, ``reset`` or ``failed``.
+            :class:`GpuClockResult`, one :class:`GpuClockOutcome` per GPU.
 
         Raises:
+            LiumGpuOperationError: 409, the change ran and a GPU failed; ``gpus`` says what each GPU has now.
             LiumError: 400/409 with the API's ``code`` (``invalid_clock_range``, ``pod_not_running``,
                 ``clock_lock_not_supported``, ``mig_enabled``, ``operation_in_progress``, ...);
                 ``LiumServerError`` on 503 ``gpu_clocks_unavailable``.
         """
         return self._gpu_clocks(pod, {"gpu_indices": gpu_indices, "min_mhz": min_mhz, "max_mhz": max_mhz})
 
-    def reset_gpu_clocks(self, pod: PodInfo, gpu_indices: Optional[List[int]] = None) -> Dict[str, Any]:
+    def reset_gpu_clocks(self, pod: PodInfo, gpu_indices: Optional[List[int]] = None) -> GpuClockResult:
         """Return a pod's GPU clocks to the driver default; same response and errors as ``lock_gpu_clocks``."""
         return self._gpu_clocks(pod, {"gpu_indices": gpu_indices, "reset": True})
 
-    def _gpu_clocks(self, pod: PodInfo, body: Dict[str, Any]) -> Dict[str, Any]:
+    def _gpu_clocks(self, pod: PodInfo, body: Dict[str, Any]) -> GpuClockResult:
         # sent once (a lost answer must not stack a second operation); the backend waits up to 60 s
-        return self._request("POST", f"/pods/{pod.id}/gpu-clocks", json=body, retry=False, timeout=90).json()
+        try:
+            answer = self._request("POST", f"/pods/{pod.id}/gpu-clocks", json=body, retry=False, timeout=90).json()
+        except LiumGpuOperationError as e:
+            e.gpus = [_gpu_clock_outcome(g) for g in e.gpus]
+            raise
+        return GpuClockResult(
+            pod_id=str(answer.get("pod_id", pod.id)), ok=bool(answer.get("ok")),
+            gpus=[_gpu_clock_outcome(g) for g in answer.get("gpus") or []],
+        )
 
     # -- multi-node clusters ---------------------------------------------------------------------
 

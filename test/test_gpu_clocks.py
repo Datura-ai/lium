@@ -8,14 +8,20 @@ from click.testing import CliRunner
 
 from lium.cli.cli import cli
 from lium.cli.gpu_clocks import command as gpu_clocks_module
-from lium.cli.utils import EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, EXIT_GENERAL_ERROR, EXIT_POD_NOT_FOUND
-from lium.sdk import Config, Lium, LiumError
+from lium.cli.utils import EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, EXIT_POD_NOT_FOUND
+from lium.sdk import Config, GpuClockOutcome, GpuClockResult, Lium, LiumError, LiumGpuOperationError
 
 OK = {
     "pod_id": "pod-uuid-1", "ok": True,
     "gpus": [{"index": 0, "uuid": "GPU-aaa", "result": "locked",
               "applied_min_mhz": 1400, "applied_max_mhz": 1800, "detail": None}],
 }
+RESULT = GpuClockResult(pod_id="pod-uuid-1", ok=True, gpus=[
+    GpuClockOutcome(index=0, uuid="GPU-aaa", result="locked", applied_min_mhz=1400, applied_max_mhz=1800)])
+LOCKED = {"index": 0, "uuid": "GPU-aaa", "result": "locked", "applied_min_mhz": 1400, "applied_max_mhz": 1800,
+          "detail": None}
+FAILED = {"index": 1, "uuid": "GPU-bbb", "result": "failed", "applied_min_mhz": None, "applied_max_mhz": None,
+          "detail": "refused"}
 
 
 class _Resp:
@@ -38,8 +44,8 @@ def test_sdk_lock_and_reset_post_once_with_a_long_timeout(monkeypatch):
     client = Lium(Config(api_key="test"))
     pod = SimpleNamespace(id="pod-uuid-1")
 
-    assert client.lock_gpu_clocks(pod, 1400, 1800, [0, 2]) == OK
-    assert client.reset_gpu_clocks(pod) == OK
+    assert client.lock_gpu_clocks(pod, 1400, 1800, [0, 2]) == RESULT
+    assert client.reset_gpu_clocks(pod) == RESULT
     assert len(calls) == 2
     (m1, u1, kw1), (_, u2, kw2) = calls
     assert m1 == "POST" and u1.endswith("/pods/pod-uuid-1/gpu-clocks") and u2 == u1
@@ -56,9 +62,20 @@ def test_sdk_refusal_carries_the_api_code(monkeypatch, status, code):
     with pytest.raises(LiumError) as exc:
         Lium(Config(api_key="test")).lock_gpu_clocks(SimpleNamespace(id="p"), 1400, 1800)
     assert exc.value.code == code and len(calls) == 1
+    assert not isinstance(exc.value, LiumGpuOperationError)
 
 
-def _run(monkeypatch, args, outcome=OK):
+def test_sdk_partly_failed_lock_keeps_every_gpu_on_the_error(monkeypatch):
+    detail = {"code": "clock_lock_not_supported", "message": "GPU 1 failed", "gpus": [LOCKED, FAILED]}
+    body = {"message": detail, "error": {"code": "clock_lock_not_supported", "message": "GPU 1 failed"}}
+    monkeypatch.setattr("lium.sdk.client.requests.request", lambda *a, **kw: _Resp(409, body))
+    with pytest.raises(LiumGpuOperationError) as exc:
+        Lium(Config(api_key="test")).lock_gpu_clocks(SimpleNamespace(id="p"), 1400, 1800)
+    assert exc.value.code == "clock_lock_not_supported"
+    assert exc.value.gpus == [GpuClockOutcome(**LOCKED), GpuClockOutcome(**FAILED)]
+
+
+def _run(monkeypatch, args, outcome=RESULT):
     seen = {}
 
     class _Lium:
@@ -123,9 +140,14 @@ def test_409_exits_3_with_the_code(monkeypatch):
     assert json.loads(result.stderr)["error"]["code"] == "mig_enabled"
 
 
-def test_a_failed_gpu_exits_1(monkeypatch):
-    failed = {**OK, "ok": False, "gpus": [{"index": 0, "uuid": "GPU-aaa", "result": "failed",
-                                           "applied_min_mhz": None, "applied_max_mhz": None, "detail": "refused"}]}
-    result, _ = _run(monkeypatch, ["my-pod", "--reset"], failed)
-    assert result.exit_code == EXIT_GENERAL_ERROR
-    assert "refused" in result.output
+def test_a_partly_failed_lock_prints_the_locked_gpus_and_exits_non_zero(monkeypatch):
+    failed = LiumGpuOperationError("API error 409: GPU 1 failed", code="clock_lock_not_supported",
+                                   gpus=[GpuClockOutcome(**LOCKED), GpuClockOutcome(**FAILED)])
+    result, _ = _run(monkeypatch, ["my-pod", "--lock", "1400,1800"], failed)
+    assert result.exit_code == EXIT_API_ERROR
+    assert "GPU-aaa" in result.output and "locked" in result.output and "refused" in result.output
+
+    result, _ = _run(monkeypatch, ["my-pod", "--lock", "1400,1800", "--json"], failed)
+    envelope = json.loads(result.stderr)
+    assert result.exit_code == EXIT_API_ERROR and envelope["error"]["code"] == "clock_lock_not_supported"
+    assert envelope["data"]["gpus"] == [LOCKED, FAILED]

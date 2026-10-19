@@ -8,12 +8,9 @@ import click
 from lium.sdk import Lium, LiumGpuOperationError
 from lium.cli import ui
 from lium.cli.utils import (
-    CliFailure,
-    EXIT_CONFIGURATION_ERROR,
-    EXIT_POD_NOT_FOUND,
     handle_errors,
     narrate_on_stderr_under_json,
-    parse_targets,
+    one_pod,
     sdk_error_failure,
 )
 
@@ -44,13 +41,7 @@ def reset_gpu_command(target: str, gpus: Tuple[int, ...], yes: bool, json_output
       lium reset-gpu my-pod --yes --json
     """
     lium = Lium()
-    all_pods = ui.load("Loading pods", lambda: lium.ps())
-    selected = parse_targets(target, all_pods) if all_pods else []
-    if not selected:
-        raise CliFailure("pod_not_found", f"No pods match targets: {target}", EXIT_POD_NOT_FOUND)
-    if len(selected) > 1:
-        raise CliFailure("invalid_arguments", "reset-gpu takes one pod", EXIT_CONFIGURATION_ERROR)
-    pod = selected[0]
+    pod = one_pod(target, ui.load("Loading pods", lambda: lium.ps()), "reset-gpu")
 
     which = f"GPU {', '.join(map(str, gpus))}" if gpus else "all GPUs"
     if not yes:
