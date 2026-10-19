@@ -224,6 +224,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium up [NODE_ID]` - Create a pod (NODE_ID is the HUID or UUID from `lium ls`, or its row number; or use filters like `--gpu`, `--count`, `--country`; cap it with `--ttl 6h` or `--budget 12.50`; `--json` prints the ready pod as JSON instead of opening SSH)
 - `lium ps [--sort KEY] [--filter KEY=VALUE] [--key NAME|ID] [--watch N] [--wide] [--format json]` - List active pods; the `#` column is the row number `rm`/`ssh`/`exec`/`scp` accept in the same shell, for 10 minutes, and only while the pod shown on that row is still listed — the rows of the last listing, in the order shown (sorted or filtered). Use the huid in scripts. A PENDING pod gets a line under the table with the backend's start estimate and phase, worded as `lium up` words it (`eager-wolf-aa PENDING · est. ready in ~18 s (phase: pulling image)`); its `--format json` row carries the same text as `eta_hint` (`null` when the backend sent neither).
 - `lium spend [--format json]` - Hourly burn, estimated spend per pod, balance and runway
+- `lium record <pod> [--format json]` - What a run ran on (GPU, image, driver/CUDA, interconnect) and what it cost; works after removal with the pod UUID
 - `lium quote <node> --hours N [--gpus N] [--volume-gb N] [--backup-gb N] [--format json]` - A job's compute, volume and backup cost on a node at billing's rates, before renting
 - `lium describe <POD>` - Full manifest of one pod: ports, GPU, template, billing, last lifecycle event (why it is REBOOT_FAILED/BROKEN) and the node's disk health (add `--json` for machine-readable output). A deleted pod can still be described by its id: you get the events the backend kept for it and the reason it went away.
 - `lium ssh <POD>` - SSH into a pod
@@ -324,7 +325,7 @@ Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, 
 - `lium provider node notify-added <NODE_ID> --request-id <REQ>` - Mark a tenant machine request fulfilled
 - `lium provider config show|opt-in|opt-out|set-email|set-subscriptions` - Portal-account configuration (incl. lium.io central miner server toggle)
 - `lium provider sync from-miner-server|to-miner-server` - Batch node-state sync between portal and the central miner server
-- `lium provider billing list [--all | --miner-hotkey HK] [--page N] [--limit N]` - Paginated billing history (active hotkey by default; `--all` for every provider's)
+- `lium provider billing list [--from YYYY-MM-DD] [--to YYYY-MM-DD]` - Your daily earnings ledger (the signed-in provider's own rows; last 30 days by default, at most 90)
 - `lium provider machine-request list|get` - Pending tenant machine requests (per-request detail only once one of your nodes is verified by a validator; before that `list` returns counts per GPU class and hourly budget band, and `get` exits 2 with `PORTAL_FORBIDDEN`)
 - `lium provider machine list|estimate` - Machine catalogue + reward estimates
 

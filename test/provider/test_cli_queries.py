@@ -60,75 +60,36 @@ def patched_build_client(
 # Billing
 
 
-def test_billing_list_default(patched_build_client, fake_signer) -> None:
-    portal = _Portal(get_body={"data": [{"id": 1}, {"id": 2}, {"id": 3}], "total": 3})
+def test_billing_list_reads_the_signed_in_providers_daily_ledger(patched_build_client) -> None:
+    rows = [{"date": "2026-10-16", "kind": "rental_share", "amount_usd": 4.5}] * 3
+    # the transport shape: portal_http unwraps the DetailResponse, so `rows` is top level
+    portal = _Portal(get_body={"date_from": "2026-10-01", "date_to": "2026-10-17", "summary": {}, "rows": rows})
     patched_build_client(portal)
     runner = CliRunner()
-    result = runner.invoke(
-        provider_command,
-        ["--hotkey", "hk1", "billing", "list"],
-    )
+    result = runner.invoke(provider_command, ["--hotkey", "hk1", "billing", "list", "--from", "2026-10-01", "--to", "2026-10-17"])
     assert result.exit_code == 0, result.output
-    assert "billing entries: 3" in result.output
-    assert portal.gets[0][0] == "/billing"
-    # Global portal listing → scoped to the caller's hotkey by default.
-    assert portal.gets[0][1] == {"miner_hotkey": fake_signer.ss58_address}
+    assert "ledger rows: 3" in result.output
+    assert result.output.count("rental_share") == 3
+    assert portal.gets[0][:2] == ("/provider-ledger/daily", {"from": "2026-10-01", "to": "2026-10-17"})
 
 
-def test_billing_list_all_is_unfiltered(patched_build_client) -> None:
-    portal = _Portal(get_body={"data": [{"id": "b-1"}], "total": 1})
+@pytest.mark.parametrize(
+    "window",
+    [["--from", "2026-13-01"], ["--to", "17-10-2026"], ["--from", "2026-10-17", "--to", "2026-10-01"], ["--from", "2026-01-01", "--to", "2026-10-17"]],
+)
+def test_billing_list_refuses_a_bad_window_before_the_request(patched_build_client, window) -> None:
+    portal = _Portal(get_body={"rows": []})
     patched_build_client(portal)
-    runner = CliRunner()
-    result = runner.invoke(
-        provider_command, ["--hotkey", "hk1", "--json", "billing", "list", "--all"]
-    )
-    assert result.exit_code == 0, result.output
-    assert portal.gets[0][0] == "/billing"
-    assert portal.gets[0][1] is None
+    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", "billing", "list", *window])
+    assert result.exit_code != 0 and portal.gets == []
 
 
-def test_billing_list_by_miner_uses_path_form(patched_build_client) -> None:
-    portal = _Portal(get_body={"data": [], "total": 0})
-    patched_build_client(portal)
-    runner = CliRunner()
-    result = runner.invoke(
-        provider_command,
-        [
-            "--hotkey",
-            "hk1",
-            "billing",
-            "list",
-            "--miner-hotkey",
-            "5Foo",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    # When only miner_hotkey is given (no page/limit), use path form.
-    assert portal.gets[0][0] == "/billing/5Foo"
-
-
-def test_billing_list_with_pagination_uses_query(patched_build_client) -> None:
+@pytest.mark.parametrize("flag", [["--all"], ["--miner-hotkey", "5Foo"], ["--page", "2"]])
+def test_billing_list_no_longer_reads_other_providers(patched_build_client, flag) -> None:
     portal = _Portal(get_body={"data": []})
     patched_build_client(portal)
-    runner = CliRunner()
-    result = runner.invoke(
-        provider_command,
-        [
-            "--hotkey",
-            "hk1",
-            "billing",
-            "list",
-            "--miner-hotkey",
-            "5Foo",
-            "--page",
-            "1",
-            "--limit",
-            "10",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert portal.gets[0][0] == "/billing"
-    assert portal.gets[0][1] == {"miner_hotkey": "5Foo", "page": 1, "limit": 10}
+    result = CliRunner().invoke(provider_command, ["--hotkey", "hk1", "billing", "list", *flag])
+    assert result.exit_code == 2 and portal.gets == []
 
 
 # ---------------------------------------------------------------------------
