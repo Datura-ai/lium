@@ -2867,7 +2867,7 @@ class Lium:
         """Ask providers for a GPU type that is sold out (``POST /machine-requests``).
 
         ``gpu`` is a short type (``B300``, ``4090``) or a full catalog name. The providers who
-        list that type are told, and the request shows in ``lium.io/machine-requests``. A short
+        list that type may be notified, and the request shows in ``lium.io/machine-requests``. A short
         type that covers several catalog names must be given by one of them.
 
         Returns:
