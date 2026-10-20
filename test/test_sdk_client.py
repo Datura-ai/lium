@@ -651,3 +651,17 @@ def test_stream_exec_decodes_utf8_across_reads_and_at_exit(monkeypatch, out, exp
     text = "".join(chunk["data"] for chunk in client.stream_exec(pod, command="train"))
 
     assert text == expected
+
+
+def test_pod_volume_path_prefers_validator_mount_over_template():
+    from lium.sdk.models import PodInfo
+
+    def pod(**kw):
+        return PodInfo(
+            id="p", name="n", status="RUNNING", huid="h", ssh_cmd=None, ports={}, created_at="", updated_at="",
+            executor=None, template={"volumes": ["/workspace"]}, removal_scheduled_at=None,
+            jupyter_installation_status=None, jupyter_url=None, **kw,
+        )
+
+    assert pod(local_volume_path="/root").default_restore_path == "/root/restored"
+    assert pod().default_restore_path == "/workspace/restored"

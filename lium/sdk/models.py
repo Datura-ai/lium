@@ -198,6 +198,9 @@ class PodInfo(_Serializable):
     # `created_by_api_key_id`, which prod sends as null for a browser rental). False only from a
     # server before per-key pods — the one case `ps --key` cannot tell one key's pods apart.
     api_key_stamped: bool = False
+    # Where the validator mounted the rental volume (`local_volume_path` on the /pods row); None before
+    # the pod has started or from an older server. It can differ from the template's volume.
+    local_volume_path: Optional[str] = None
 
     def eta_hint(self) -> Optional[str]:
         """One line for a pod that is still starting, e.g. ``est. ready in ~18 s (phase: pulling image)``.
@@ -242,7 +245,9 @@ class PodInfo(_Serializable):
 
     @property
     def volume_path(self) -> str:
-        """Return the pod's local volume mount path."""
+        """Return the pod's volume mount path: where the validator mounted it, else the template's."""
+        if self.local_volume_path:
+            return self.local_volume_path
         volumes = self.template.get("volumes", []) if self.template else []
         return volumes[0] if volumes else "/root"
 
