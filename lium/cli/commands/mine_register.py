@@ -2,9 +2,9 @@
 
 The token is the one the portal's Add Node page prints next to the command (``POST /executors/register-token``,
 lium-platform). It is a short-lived portal JWT; the CLI reads the account it was issued for out of it and uses it
-as the bearer for two calls: one read the portal checks it on before anything is installed
-(``confirm_register_token``), then ``POST /executors``. Everything else here is unauthenticated: the node list and
-the per-node status the portal shows are public reads.
+as the bearer for three calls: one read the portal checks it on before anything is installed
+(``confirm_register_token``), ``POST /executors``, and the node list it finds the new node's id in (the portal shows
+a node's address to its owner only). The per-node status the portal shows is a public read.
 
 Nothing about the node is typed by hand: GPU model and count come from ``nvidia-smi`` on this host, the port from
 the executor's own ``.env``, the address from the host's public IPv4, the price is the model's base price from the
@@ -359,12 +359,12 @@ def _known_gpu_types() -> list[str]:
 def find_node_id(
     http: PortalHTTP, *, miner_hotkey: str, ip_address: str, port: int, max_pages: int = 10
 ) -> str | None:
-    """The id of the account's node at ``ip_address:port`` from the public ``GET /executors`` list, or None."""
+    """The id of the account's node at ``ip_address:port`` from ``GET /executors``, or None. The register token goes
+    along: the portal blanks every node's address but its owner's."""
     for page in range(1, max_pages + 1):
         body = http.get(
             EXECUTORS,
             params={"miner_hotkey": miner_hotkey, "page": page, "limit": 100},
-            auth=False,
         )
         rows = body.get("data") if isinstance(body, dict) else None
         if not isinstance(rows, list) or not rows:

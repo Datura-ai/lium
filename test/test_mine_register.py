@@ -257,7 +257,7 @@ def _listing(node_id: str = "node-1", ip: str = "203.0.113.7", port: int = 8080)
     ], "total": 1})
 
 
-def test_register_node_posts_with_the_token_and_finds_the_id_without_it() -> None:
+def test_register_node_posts_and_finds_the_id_with_the_token() -> None:
     portal = _Portal()
     portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued"}}))
     portal.on("GET", "/executors", _listing())
@@ -268,7 +268,7 @@ def test_register_node_posts_with_the_token_and_finds_the_id_without_it() -> Non
     assert post["headers"]["Authorization"] == "Bearer TOKEN"
     assert post["json"] == {"gpu_type": "NVIDIA L4", "ip_address": "203.0.113.7", "port": 8080,
                             "price_per_gpu": 0.11, "gpu_count": 1}
-    assert "Authorization" not in get["headers"]
+    assert get["headers"]["Authorization"] == "Bearer TOKEN"  # the portal shows the address to the owner only
     assert get["params"] == {"miner_hotkey": HOTKEY, "page": 1, "limit": 100}
 
 
