@@ -1249,14 +1249,14 @@ class Lium:
                 none of it is rented). The API rejects a count above the free GPUs, below
                 the provider's minimum, or on nodes that do not allow splitting.
             idempotency_key: The ``Idempotency-Key`` the rent request carries (a new UUID when ``None``).
-                Pass the key from a :class:`LiumRentOutcomeUnknownError` to replay that rent: the API
-                answers with the first request's outcome instead of renting again.
+                The API keeps a key only for a limited time and per account, so a key sent again later
+                can rent a second pod.
             confirmed_only: Return only a pod the rent response named. A pod found by its name after a
                 lost answer is then not returned: :class:`LiumRentOutcomeUnknownError` is raised with its
                 id in ``candidates``, since a same-name pod may belong to another client.
             before_send: Called with ``{"endpoint", "payload", "idempotency_key"}`` right before the first
-                rent request is sent, e.g. to journal it so a crash mid-request can replay it with
-                :meth:`replay_rent`. If it raises, nothing is sent and the exception propagates.
+                rent request is sent, e.g. to journal it. If it raises, nothing is sent and the exception
+                propagates.
             termination_hours: Sent with the rent (1 to 720): the server removes the pod this
                 many hours after it starts, even if this process never gets to schedule it.
 
@@ -1500,8 +1500,12 @@ class Lium:
             payload=payload,
         )
 
-    def replay_rent(self, error: LiumRentOutcomeUnknownError) -> Dict[str, Any]:
+    def _replay_rent(self, error: LiumRentOutcomeUnknownError) -> Dict[str, Any]:
         """Send the rent behind ``error`` once more with the same ``Idempotency-Key``.
+
+        Private: this checks neither the key's age nor the account. Past the API's retention of the key, or
+        under another account, the same key is a new rent; only the MCP server calls this, after its
+        ``_replay_blocker`` checks both.
 
         The API answers a repeated key with the first request's stored outcome: the pod it created, or
         its refusal. Only that one POST is sent (no node check, no lookup by name), so a node that our

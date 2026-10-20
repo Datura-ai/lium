@@ -963,11 +963,11 @@ class LiumTools:
         if blocker:
             return unresolved(blocker + manual)
         try:
-            created = self.client.replay_rent(error)
+            created = self.client._replay_rent(error)
         except LiumRentOutcomeUnknownError as e:
             return unresolved(f"replaying the rent with the same key did not establish its outcome yet: {e}")
         except LiumError:
-            # replay_rent raises a plain LiumError only for the API's stored refusal of the first request
+            # _replay_rent raises a plain LiumError only for the API's stored refusal of the first request
             with rental.lock:
                 rental.outcome = "rejected"
             return True

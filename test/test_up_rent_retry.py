@@ -325,3 +325,9 @@ def test_a_failed_repeat_of_an_unanswered_rent_is_an_unknown_outcome(client, mon
     assert info.value.code == "rent_outcome_unknown"
     assert "Do not rent again" in info.value.hint
     assert isinstance(info.value.__cause__, sdk.LiumError)
+
+
+def test_the_sdk_offers_no_public_replay_that_skips_the_key_age_and_account_checks():
+    """A key replayed past the API's retention, or under another account, is a new rent: only the MCP server's guarded
+    replay (_replay_blocker, test_mcp_server) may resend one."""
+    assert not hasattr(Lium, "replay_rent")
