@@ -553,6 +553,33 @@ def test_mine_register_runs_the_install_then_registers_and_waits(monkeypatch, tm
     assert "VALIDATION_PENDING" in result.output and "Node listed (AVAILABLE)" in result.output
 
 
+def test_mine_register_never_formats_a_disk_for_the_storage_limit(monkeypatch, tmp_path: Path) -> None:
+    """--register implies --auto, and the portal's command runs unattended: on a host whose Docker cannot cap a
+    container's disk it prints the manual setup command and installs on, it never plans or runs the disk setup."""
+    import lium.cli.mine.gpu_splitting as gs
+
+    target, executor_dir = _stub_host(monkeypatch, tmp_path)
+    monkeypatch.setattr(mine, "_docker_storage_limited", lambda: False)
+    touched: list[str] = []
+    monkeypatch.setattr(gs, "_preflight", lambda: touched.append("preflight"))
+    monkeypatch.setattr(gs, "_execute_setup", lambda plan: touched.append("execute"))
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued"}}))
+    portal.on("GET", "/executors", _listing())
+    portal.on("GET", "/executors/node-1", _status("AVAILABLE"))
+    monkeypatch.setattr(reg, "build_http", lambda url, token: _http(portal))
+    monkeypatch.setattr(reg, "wait_until_listed", _wait_no_sleep)
+
+    result = CliRunner().invoke(
+        mine.mine_command,
+        ["--register", _token(exp=int(time.time()) + 3600), "--dir", str(target),
+         "--portal-url", "https://provider-api.example", "--wait", "5"],
+    )
+    assert result.exit_code == 0, result.output
+    assert touched == []
+    assert "lium gpu-splitting setup --device" in result.output
+
+
 def test_mine_register_custodied_token_writes_the_pool_key_to_env_and_lists_under_the_account(monkeypatch, tmp_path: Path) -> None:
     """lium-platform#294: an account created with e-mail or Google has an opaque id as ``miner_hotkey`` and the pool's
     key as ``node_hotkey``. The .env gets the pool's key (the executor's SS58 check passes), the node is looked up

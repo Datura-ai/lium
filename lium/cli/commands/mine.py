@@ -167,49 +167,55 @@ def _check_prereqs():
         )
 
 
-# Validators score 0 a node whose Docker cannot cap a container's disk (STORAGE_LIMIT_REQUIRED): one renter
+# Validators are to score 0 a node whose Docker cannot cap a container's disk (STORAGE_LIMIT_REQUIRED): one renter
 # filling an uncapped disk fills /var/lib/docker and takes the host and every pod on it down (18 Oct 2026).
 _STORAGE_GUIDE = "https://docs.lium.io/providers/nodes/docker-storage"
 
 
 def _docker_storage_limited() -> bool:
     """True when Docker is overlay2 on xfs mounted with pquota, so `--storage-opt size=` caps a container."""
-    from ..mine.docker_config import build_verification_result
+    from ..mine.docker_config import build_verification_result, inspect_docker_state
     from ..mine.gpu_splitting import run_command
 
-    return build_verification_result(run_command).passed
+    return build_verification_result(run_command, inspect_docker_state(run_command).docker_root_dir).passed
 
 
-def _setup_docker_storage(auto: bool):
-    """Move Docker storage to an xfs pquota mount with `lium gpu-splitting setup`'s own plan, on a safe spare disk.
+def _setup_docker_storage():
+    """Offer to move Docker storage to an xfs pquota mount with `lium gpu-splitting setup`'s own plan and checks.
 
-    The plan is printed and confirmed first (`--auto` confirms it); the target is picked the same conservative way
-    (blank or unused disk/partition, never root or the current Docker disk) and a failed setup rolls back.
+    Formatting a disk needs a person at a terminal who types the disk's path: `--auto` and `--register` never consent
+    to it. Otherwise this prints the manual command and the install carries on (validators do not require it yet).
     """
     import os
+    import sys
 
-    from ..mine.gpu_splitting import _build_setup_plan, _confirm_plan, _execute_setup, _preflight, run_command
+    from rich.prompt import Confirm
+
+    from ..mine.gpu_splitting import _build_setup_plan, _confirm_plan, _execute_setup, _preflight
 
     manual = (
-        "Docker cannot limit a container's disk on this host (needs overlay2 on xfs mounted with pquota); "
-        "validators will require it.\n"
+        "Docker cannot limit a container's disk on this host (needs overlay2 on xfs mounted with pquota).\n"
         "Set it up with: sudo lium gpu-splitting setup --device <spare disk>\n"
-        f"then run `lium mine` again. Guide: {_STORAGE_GUIDE}"
+        f"Guide: {_STORAGE_GUIDE}"
     )
+    if not sys.stdin.isatty():
+        console.warning(manual)
+        return
     if os.geteuid() != 0:
-        raise Exception(manual.replace("Set it up with", "Run `sudo lium mine`, or set it up with"))
-    # the migration stops host Docker: never take running rentals down, even with --auto
-    if run_command(["docker", "ps", "-q"]).stdout.strip():
-        raise Exception(f"{manual}\nContainers are running on this host; migrate only while it has no rentals.")
-    console.print("[yellow]Docker cannot limit a container's disk yet; setting up xfs storage with pquota.[/yellow]")
+        console.warning(manual.replace("Set it up with", "Run `sudo lium mine`, or set it up with"))
+        return
+    if not Confirm.ask("Set up Docker storage with a per-container disk limit now? It formats a spare disk", default=False):
+        console.warning(manual)
+        return
     try:
         plan = _build_setup_plan(_preflight(), None)
+        _confirm_plan(plan, yes=False)
     except RuntimeError as exc:
-        raise Exception(f"{manual}\nNo spare disk was picked automatically: {exc}") from exc
-    try:
-        _confirm_plan(plan, yes=auto)
+        console.warning(f"{manual}\nNo spare disk was picked: {exc}")
+        return
     except click.Abort:
-        raise Exception(manual) from None
+        console.warning(manual)
+        return
     _execute_setup(plan)
 
 
@@ -941,7 +947,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             _check_prereqs()
             storage_ok = _docker_storage_limited()
         if not storage_ok:
-            _setup_docker_storage(auto)   # outside the spinner: it prints the plan and may ask to confirm
+            _setup_docker_storage()   # outside the spinner: it prints the plan and may ask to confirm
         _check_free_disk(target_dir / "neurons" / "executor")
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.

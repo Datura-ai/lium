@@ -31,6 +31,7 @@ class BlockDevice:
     model: Optional[str]
     serial: Optional[str]
     is_removable: bool = False
+    transport: Optional[str] = None
     children: list["BlockDevice"] = field(default_factory=list)
 
 

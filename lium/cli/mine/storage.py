@@ -65,6 +65,7 @@ def _build_block_device(item: dict) -> BlockDevice:
         model=item.get("model"),
         serial=item.get("serial"),
         is_removable=bool(item.get("rm")),
+        transport=item.get("tran"),
         children=children,
     )
 
@@ -74,7 +75,7 @@ def load_block_devices(runner: Runner) -> list[BlockDevice]:
 
     Command run:
 
-    - `lsblk --json --bytes -o NAME,KNAME,PATH,TYPE,SIZE,FSTYPE,FSAVAIL,FSUSE%,MOUNTPOINTS,PKNAME,MODEL,SERIAL,RM`
+    - `lsblk --json --bytes -o NAME,KNAME,PATH,TYPE,SIZE,FSTYPE,FSAVAIL,FSUSE%,MOUNTPOINTS,PKNAME,MODEL,SERIAL,RM,TRAN`
 
     The result preserves tree structure so callers can reason about both whole
     disks and their child partitions.
@@ -86,7 +87,7 @@ def load_block_devices(runner: Runner) -> list[BlockDevice]:
             "--json",
             "--bytes",
             "-o",
-            "NAME,KNAME,PATH,TYPE,SIZE,FSTYPE,FSAVAIL,FSUSE%,MOUNTPOINTS,PKNAME,MODEL,SERIAL,RM",
+            "NAME,KNAME,PATH,TYPE,SIZE,FSTYPE,FSAVAIL,FSUSE%,MOUNTPOINTS,PKNAME,MODEL,SERIAL,RM,TRAN",
         ],
     )
     return [_build_block_device(item) for item in data.get("blockdevices", [])]

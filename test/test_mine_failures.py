@@ -129,50 +129,67 @@ def test_prereqs_pass_with_sysbox(monkeypatch):
     mine._check_prereqs()
 
 
-def _storage_host(monkeypatch, *, root: bool, plan_error: Exception | None = None, running: str = ""):
+def _storage_host(monkeypatch, *, root: bool = True, tty: bool = True, answer: bool = True,
+                  plan_error: Exception | None = None, confirm_abort: bool = False):
+    import click
     import lium.cli.mine.gpu_splitting as gs
+    from rich.prompt import Confirm
 
     calls = []
     monkeypatch.setattr("os.geteuid", lambda: 0 if root else 1000)
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: tty))
+    monkeypatch.setattr(Confirm, "ask", lambda *a, **k: calls.append("asked") or answer)
 
     def plan(preflight, device):
         if plan_error:
             raise plan_error
         return "plan"
 
-    monkeypatch.setattr(gs, "run_command", lambda cmd: SimpleNamespace(stdout=running))
+    def confirm(p, yes):
+        calls.append(("confirm", p, yes))
+        if confirm_abort:
+            raise click.Abort()
+
     monkeypatch.setattr(gs, "_preflight", lambda: "preflight")
     monkeypatch.setattr(gs, "_build_setup_plan", plan)
-    monkeypatch.setattr(gs, "_confirm_plan", lambda p, yes: calls.append(("confirm", p, yes)))
+    monkeypatch.setattr(gs, "_confirm_plan", confirm)
     monkeypatch.setattr(gs, "_execute_setup", lambda p: calls.append(("execute", p)))
     return calls
 
 
-def test_storage_setup_without_root_stops_with_the_sudo_command(monkeypatch):
+def test_storage_setup_never_formats_without_a_terminal_whatever_the_flags(monkeypatch, capsys):
+    # --auto and --register run without a person at the keyboard: no prompt, no plan, no format
+    calls = _storage_host(monkeypatch, tty=False)
+    mine._setup_docker_storage()
+    assert calls == []
+    assert "lium gpu-splitting setup --device" in capsys.readouterr().out
+
+
+def test_storage_setup_without_root_prints_the_sudo_command(monkeypatch, capsys):
     calls = _storage_host(monkeypatch, root=False)
-    with pytest.raises(Exception) as err:
-        mine._setup_docker_storage(auto=True)
-    assert "sudo lium mine" in str(err.value) and mine._STORAGE_GUIDE in str(err.value)
+    mine._setup_docker_storage()
     assert calls == []
+    assert "sudo lium mine" in capsys.readouterr().out
 
 
-def test_storage_setup_as_root_runs_the_confirmed_plan(monkeypatch):
-    calls = _storage_host(monkeypatch, root=True)
-    mine._setup_docker_storage(auto=True)
-    assert calls == [("confirm", "plan", True), ("execute", "plan")]
+def test_storage_setup_declined_carries_on_without_touching_the_disk(monkeypatch):
+    calls = _storage_host(monkeypatch, answer=False)
+    mine._setup_docker_storage()
+    assert calls == ["asked"]
 
 
-def test_storage_setup_with_no_safe_disk_names_the_manual_command(monkeypatch):
-    calls = _storage_host(monkeypatch, root=True, plan_error=RuntimeError("two equally safe candidates"))
-    with pytest.raises(Exception) as err:
-        mine._setup_docker_storage(auto=True)
-    assert "lium gpu-splitting setup --device" in str(err.value) and "two equally safe" in str(err.value)
-    assert calls == []
+def test_storage_setup_runs_only_after_the_typed_confirmation(monkeypatch):
+    calls = _storage_host(monkeypatch)
+    mine._setup_docker_storage()
+    assert calls == ["asked", ("confirm", "plan", False), ("execute", "plan")]
+    calls = _storage_host(monkeypatch, confirm_abort=True)
+    mine._setup_docker_storage()
+    assert calls == ["asked", ("confirm", "plan", False)]
 
 
-def test_storage_setup_refuses_while_containers_run(monkeypatch):
-    calls = _storage_host(monkeypatch, root=True, running="abc123\n")
-    with pytest.raises(Exception) as err:
-        mine._setup_docker_storage(auto=True)
-    assert "no rentals" in str(err.value)
-    assert calls == []
+def test_storage_setup_with_no_safe_disk_names_the_manual_command(monkeypatch, capsys):
+    calls = _storage_host(monkeypatch, plan_error=RuntimeError("two equally safe candidates"))
+    mine._setup_docker_storage()
+    out = capsys.readouterr().out
+    assert "lium gpu-splitting setup --device" in out and "two equally safe" in out
+    assert calls == ["asked"]
