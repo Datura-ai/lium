@@ -510,6 +510,9 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = F
     # after --force-recreate the old container can still report healthy; wait for one with a new ID
     old_id = _run(ps_cmd, check=False, cwd=str(executor_dir))[0].strip() if recreate else ""
     command = "docker compose up -d --force-recreate" if recreate else "docker compose up -d"
+    if rentals:
+        # under rentals compose only starts what is missing; a changed config never recreates a running container
+        command = "docker compose up -d --no-recreate"
     if not runner_up:
         _run(command, capture=True, cwd=str(executor_dir))
 
