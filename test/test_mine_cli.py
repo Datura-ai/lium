@@ -463,7 +463,7 @@ def test_start_executor_without_a_register_token_does_not_recreate_a_running_exe
 
     mine._start_executor(tmp_path)
 
-    assert calls[0] == "docker compose up -d"
+    assert [c for c in calls if c.startswith("docker compose up")] == ["docker compose up -d"]
 
 
 def test_start_executor_does_not_recreate_under_running_rentals(monkeypatch, tmp_path: Path) -> None:
@@ -488,3 +488,25 @@ def test_start_executor_does_not_recreate_under_running_rentals(monkeypatch, tmp
 
     assert "docker compose up -d" in calls and "docker compose up -d --force-recreate" not in calls
     assert warnings and "1 rental(s) running" in warnings[0]
+
+
+def test_start_executor_skips_compose_up_under_rentals_while_the_runner_runs(monkeypatch, tmp_path: Path) -> None:
+    """A plain `up -d` recreates a runner whose config changed, and the runner force-recreates the executor."""
+    calls: list[str] = []
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        calls.append(cmd)
+        if cmd.startswith("docker ps --filter status=created --filter status=running "):
+            return "pod_abc\n", ""
+        if "ps -q --status running executor-runner" in cmd or "ps -q executor" in cmd:
+            return "abc123\n", ""
+        if cmd.startswith("docker inspect"):
+            return "healthy\n", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+
+    mine._start_executor(tmp_path)
+
+    assert not [c for c in calls if c.startswith("docker compose up")]
