@@ -610,6 +610,39 @@ def test_mine_register_runs_the_install_then_registers_and_waits(monkeypatch, tm
     assert "VALIDATION_PENDING" in result.output and "Node listed (AVAILABLE)" in result.output
 
 
+def test_mine_register_repeated_with_the_same_claim_does_not_recreate_the_executor(monkeypatch, tmp_path: Path) -> None:
+    """A recreate restarts the executor under its rentals; only a claim the executor does not already run with needs
+    one, so a rerun after a restart skipped under rentals still recreates though .env already holds the claim."""
+    target, _ = _stub_host(monkeypatch, tmp_path)
+    recreates: list[bool] = []
+    executor = {"claim": None, "rentals": False}
+
+    def start(d, recreate=False):
+        recreates.append(recreate)
+        if executor["claim"] is None or (recreate and not executor["rentals"]):
+            executor["claim"] = mine._env_value(d / ".env", "MINER_ACCOUNT_CLAIM")
+
+    monkeypatch.setattr(mine, "_start_executor", start)
+    monkeypatch.setattr(mine, "_executor_env_value", lambda d, key: executor["claim"])
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued"}}))
+    portal.on("GET", "/executors", _listing())
+    portal.on("GET", "/executors/node-1", _status("AVAILABLE"))
+    monkeypatch.setattr(reg, "build_http", lambda url, token: _http(portal))
+    monkeypatch.setattr(reg, "wait_until_listed", _wait_no_sleep)
+
+    for claim, rentals in (("ab12" * 8, False), ("ab12" * 8, False), ("cd34" * 8, True), ("cd34" * 8, False),
+                           ("cd34" * 8, False)):
+        executor["rentals"] = rentals
+        result = CliRunner().invoke(
+            mine.mine_command,
+            ["--register", _token(exp=int(time.time()) + 3600, node_claim=claim), "--dir", str(target),
+             "--portal-url", "https://provider-api.example", "--wait", "5"],
+        )
+        assert result.exit_code == 0, result.output
+    assert recreates == [False, False, True, True, False]
+
+
 def test_mine_register_custodied_token_writes_the_pool_key_to_env_and_lists_under_the_account(monkeypatch, tmp_path: Path) -> None:
     """lium-platform#294: an account created with e-mail or Google has an opaque id as ``miner_hotkey`` and the pool's
     key as ``node_hotkey``. The .env gets the pool's key (the executor's SS58 check passes), the node is looked up
