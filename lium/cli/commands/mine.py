@@ -268,11 +268,7 @@ def _setup_executor_env(
             raise Exception(f"Invalid port {name}={p} (must be 1-65535)")
 
     # a re-run without --register rebuilds .env from the template; keep the claim the earlier --register wrote
-    old_claim = ""
-    if env_f.exists():
-        for line in env_f.read_text().splitlines():
-            if line.startswith("MINER_ACCOUNT_CLAIM="):
-                old_claim = line.split("=", 1)[1].strip()
+    old_claim = _env_value(env_f, "MINER_ACCOUNT_CLAIM")
 
     # read, rewrite, preserve
     src_lines = env_t.read_text().splitlines()
@@ -484,6 +480,15 @@ def _env_value(env_f: Path, key: str) -> str:
     return next((line.split("=", 1)[1].strip() for line in lines if line.startswith(f"{key}=")), "")
 
 
+def _executor_env_value(executor_dir: Path, key: str) -> Optional[str]:
+    """``key`` in the environment the executor container was created with; None when there is no executor container."""
+    cid = _run("docker compose -f docker-compose.app.yml ps -aq executor", check=False, cwd=str(executor_dir))[0].strip()
+    if not cid:
+        return None
+    env = _run(f"docker inspect --format '{{{{range .Config.Env}}}}{{{{println .}}}}{{{{end}}}}' {cid}", check=False)[0]
+    return next((line.split("=", 1)[1].strip() for line in env.splitlines() if line.startswith(f"{key}=")), "")
+
+
 def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = False):
     # Start using the default docker-compose.yml
     # recreate: an executor already running keeps its old .env, so a new MINER_ACCOUNT_CLAIM never reaches it;
@@ -491,7 +496,7 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = F
     ps_cmd = "docker compose -f docker-compose.app.yml ps -q executor"
     if recreate:
         # a recreate restarts the executor under running rentals; the validator names rental pods pod_* (lium-io const.py)
-        names = _run("docker ps --format '{{.Names}}'", check=False)[0].split()
+        names = _run("docker ps --filter status=created --filter status=running --format '{{.Names}}'", check=False)[0].split()
         if rentals := [n for n in names if n.startswith("pod_")]:
             console.warning(
                 f"{len(rentals)} rental(s) running on this node, so the executor was not restarted. "
@@ -939,7 +944,6 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             if not executor_dir.exists():
                 raise Exception(f"Node directory not found at {executor_dir}")
 
-            claim_before = _env_value(executor_dir / ".env", "MINER_ACCOUNT_CLAIM")
             _setup_executor_env(
                 str(executor_dir),
                 hotkey=answers["hotkey"],
@@ -961,8 +965,10 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             _check_ports_free(_host_ports_from_answers(answers), executor_dir)
 
         with timed_step_status(5, TOTAL_STEPS, "Starting node"):
-            # a repeat run with the same claim leaves the running executor alone
-            _start_executor(executor_dir, recreate=_env_value(executor_dir / ".env", "MINER_ACCOUNT_CLAIM") != claim_before)
+            # recreate only an executor whose claim differs from .env: a repeat run leaves it alone, and a rerun after
+            # a restart skipped under rentals still delivers the claim .env already holds
+            running_claim = _executor_env_value(executor_dir, "MINER_ACCOUNT_CLAIM")
+            _start_executor(executor_dir, recreate=running_claim not in (None, _env_value(executor_dir / ".env", "MINER_ACCOUNT_CLAIM")))
 
         console.dim(
             "Validation runs the validator's preflight image: GPU check, matrix "

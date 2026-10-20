@@ -472,7 +472,7 @@ def test_start_executor_does_not_recreate_under_running_rentals(monkeypatch, tmp
 
     def fake_run(cmd, check=True, capture=True, cwd=None):
         calls.append(cmd)
-        if cmd.startswith("docker ps --format"):
+        if cmd.startswith("docker ps --filter status=created --filter status=running "):
             return "filler_1\npod_abc\nexecutor-executor-1\n", ""
         if "ps -q executor" in cmd:
             return "abc123\n", ""
