@@ -74,6 +74,8 @@ class ExecutorInfo(_Serializable):
     gpu_power_limit_default_w: Optional[int] = None
     # When a validator last passed the node, as the API's ISO 8601 UTC string; None = never passed.
     last_verified_at: Optional[str] = None
+    # The platform's 0-100 reliability score for the node (uptime and rental history); None when not sent.
+    reliability_score: Optional[float] = None
 
     @property
     def link(self) -> Optional[str]:
@@ -372,6 +374,8 @@ class Template(_Serializable):
     docker_image_tag: str
     category: str
     status: str
+    # The template's image can mount an encrypted local volume; set by the API.
+    supports_volume_encryption: bool = False
 
 
 @dataclass
@@ -587,7 +591,7 @@ class ApiKeyInfo:
 
 @dataclass
 class ApiKeyRefusal:
-    """One row of ``GET /keys/{id}/refusals`` (server support pending): a request the key's budget
+    """One row of ``GET /keys/{id}/refusals``: a request the key's budget
     refused — when, which window was hit (``daily`` / ``monthly`` / ``max``), the route asked, the USD asked
     for, and the budget and spend at the time. ``raw`` is the server's row."""
 
@@ -616,3 +620,45 @@ __all__ = [
     "ApiKeyInfo",
     "ApiKeyRefusal",
 ]
+
+
+@dataclass
+class JobQuoteLine(_Serializable):
+    """One charge of a :class:`JobQuote`; ``rate_usd`` and ``amount_usd`` are None for egress (billed at AWS cost)."""
+
+    item: str
+    unit: str
+    rate_usd: Optional[float]
+    quantity: float
+    amount_usd: Optional[float]
+    note: str
+
+
+@dataclass
+class JobQuote(_Serializable):
+    """What :meth:`Lium.quote` returns: a job's cost on a node, line by line."""
+
+    executor_id: str
+    gpu_count: int
+    hours: float
+    price_per_hour: float
+    lines: List[JobQuoteLine]
+    total_usd: float  # egress not included
+    pod_balance_floor_usd: float
+    allocation: Optional[Dict[str, Any]] = None  # CPU, RAM and disk inside the pod, as the API sends it
+    # signed in: what the balance must be more than for this rent, this pod plus the payer's open pods
+    rent_balance_required_usd: Optional[float] = None
+
+    @classmethod
+    def from_api(cls, data: Dict[str, Any]) -> "JobQuote":
+        return cls(
+            executor_id=data["executor_id"],
+            gpu_count=data["gpu_count"],
+            hours=data["hours"],
+            price_per_hour=data["price_per_hour"],
+            lines=[JobQuoteLine(**{f.name: line[f.name] for f in fields(JobQuoteLine)}) for line in data["lines"]],
+            total_usd=data["total_usd"],
+            pod_balance_floor_usd=data["pod_balance_floor_usd"],
+            allocation=data.get("allocation"),
+            rent_balance_required_usd=data.get("rent_balance_required_usd"),
+        )

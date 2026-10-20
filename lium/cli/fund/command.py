@@ -30,7 +30,7 @@ from .actions import (
 # A signed transfer may have reached the chain even though the command failed;
 # the generic "re-run" hint would send the TAO twice.
 TRANSFER_FAILED_HINT = (
-    "Do not re-send yet: the transfer was signed and submitted. Check the wallet and "
+    "Do not re-send yet: the transfer may have reached the chain. Check the wallet and "
     "'lium balance' (credits can take a few minutes) before funding again"
 )
 
@@ -297,12 +297,12 @@ def _alpha_fund(
     subnet_label = subnet_label or f"netuid {netuid}"
 
     # Decimal -> Balance: floor the quoted alpha at integer rao with ROUND_DOWN BEFORE
-    # set_unit, so we never transfer more than quoted (keeps the free+fee gate exact).
+    # tagging it with the subnet, so we never transfer more than quoted (keeps the free+fee gate exact).
     # Never via from_tao(float), which would inject binary-float error on a money path.
     floored_rao = int(
         (quote.alpha_amount * _RAO_PER_ALPHA).quantize(Decimal(1), rounding=ROUND_DOWN)
     )
-    amount_bal = bt.Balance.from_rao(floored_rao).set_unit(netuid)
+    amount_bal = validation.alpha_balance(bt, floored_rao, netuid)
     alpha_amount = floored_rao / float(_RAO_PER_ALPHA)
 
     # Phase A: display free alpha + fee before the confirm prompt.

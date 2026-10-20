@@ -1,6 +1,6 @@
 """`lium keys create --scope/--daily-budget/--max-budget/--pod-visibility`, `lium keys show`, `lium keys scopes`,
 `lium ps --key`, `lium billing history --key`, and the SDK behind them (`Lium.api_keys`, `Lium.ps(api_key_id=…)`,
-`Lium.billing_statement`, `LiumBudgetExceededError`, `LiumScopeError`), `lium keys budget` — server support pending.
+`Lium.billing_statement`, `LiumBudgetExceededError`, `LiumScopeError`), `lium keys budget`.
 
 HTTP is answered from test/fixtures/api_keys (and the workspaces fixtures for `/users/me`, `/workspaces`, `/pods`) with
 `responses`, so the real SDK request path runs: what is asserted is the request the CLI sends and what it prints.

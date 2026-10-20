@@ -87,6 +87,7 @@ def test_no_match_on_the_spec_path_is_a_selection_failure_not_an_api_error():
 
     assert not result.ok
     assert "no_executor_matches_spec" in result.error
+    assert result.error.endswith("Ask providers for it: lium request RTX4090 -n 8")
 
 
 def test_the_servers_hint_and_request_id_ride_along_with_a_spec_refusal():
@@ -214,6 +215,24 @@ def test_up_prints_the_servers_hint_under_a_spec_refusal(monkeypatch):
     assert "no_executor_matches_spec" in output
     assert "Drop the country filter." in output
     assert "request_id: req-409-0001" in output
+
+
+def test_up_reports_an_unknown_rent_outcome_without_retry(monkeypatch):
+    """lium#328 r4285798281: the resend refused and no pod listed, the first rent may have landed, so
+    `lium up` must not fall back to the exit-3 "Retry" hint; it points at 'lium ps'."""
+    class _Unknown(_SpecLium):
+        def rent(self, **kwargs):
+            if kwargs.get("dry_run"):
+                return super().rent(**kwargs)
+            raise LiumError("The rent got no answer and its resend was refused (403); the pod may be rented",
+                            code="rent_outcome_unknown")
+
+    result = _run_up(monkeypatch, _Unknown)
+
+    assert result.exit_code == 3, result.output
+    output = " ".join(result.output.split())
+    assert "Retry" not in output and "could not be rented" not in output
+    assert "may be rented and billing" in output and "'lium ps' shows whether it exists" in output
 
 
 def test_up_says_when_the_confirmed_node_was_taken_and_another_rented(monkeypatch):

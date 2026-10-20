@@ -7,6 +7,7 @@ signal), reports/INVALID_EXECUTOR_ROOTCAUSE.md (hand-typed node values), DAH-307
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -27,7 +28,7 @@ NOW = 1_800_000_000
 
 
 def _token(exp: int | None = NOW + 3600, hotkey: str | None = HOTKEY, opt_in: bool | None = True,
-           node_hotkey: str | None = None, **extra) -> str:
+           node_hotkey: str | None = None, node_claim: str | None = None, **extra) -> str:
     # the portal's fastapi_jwt layout (lium-platform#291): the miner's to_json() plus "scope" under "subject", exp on top;
     # lium-platform#294 adds "node_hotkey" = the miner's listing_hotkey (its own key, or the pool's when custodied)
     subject = {"id": "acct-1", "opt_in_status": opt_in, "scope": "node:register"}
@@ -35,10 +36,21 @@ def _token(exp: int | None = NOW + 3600, hotkey: str | None = HOTKEY, opt_in: bo
         subject["miner_hotkey"] = hotkey
     if node_hotkey is not None:
         subject["node_hotkey"] = node_hotkey
+    if node_claim is not None:
+        subject["node_claim"] = node_claim
     claims = {"subject": subject, "type": "access", **extra}
     if exp is not None:
         claims["exp"] = exp
     return pyjwt.encode(claims, "not-the-portal-secret-but-long-enough-32b", algorithm="HS256")
+
+
+_orig_confirm = reg.confirm_register_token
+
+
+@pytest.fixture(autouse=True)
+def _portal_accepts_the_token(monkeypatch):
+    """The command's portal check of the token; the test of it below calls the real one."""
+    monkeypatch.setattr(reg, "confirm_register_token", lambda http: None)
 
 
 # --- token -----------------------------------------------------------------------------------------------------------
@@ -82,6 +94,52 @@ def test_parse_register_token_node_identity_is_the_account_key_unless_the_token_
     assert (own_with_claim.miner_hotkey, own_with_claim.node_hotkey) == (HOTKEY, HOTKEY)
     custodied = reg.parse_register_token(_token(hotkey=ACCOUNT_ID, node_hotkey=POOL_HOTKEY), now=NOW)
     assert (custodied.miner_hotkey, custodied.node_hotkey) == (ACCOUNT_ID, POOL_HOTKEY)
+
+
+def test_parse_register_token_reads_the_node_claim_and_drops_a_non_hex_one() -> None:
+    claim = "ab12" * 8
+    assert reg.parse_register_token(_token(node_claim=claim), now=NOW).account_claim == claim
+    assert reg.parse_register_token(_token(), now=NOW).account_claim is None
+    # it is written into .env verbatim: a newline must never get there
+    assert reg.parse_register_token(_token(node_claim="ab12\nSSH_PORT=1"), now=NOW).account_claim is None
+
+
+def test_register_path_writes_the_account_claim_to_env(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("MINER_HOTKEY_SS58_ADDRESS=x\n")
+    mine._apply_env_overrides(tmp_path, "8080", "8080", "2200", "", "", account_claim="ab12" * 8)
+    assert "MINER_ACCOUNT_CLAIM=" + "ab12" * 8 in (tmp_path / ".env").read_text().splitlines()
+
+
+def test_rerun_without_register_keeps_the_account_claim(tmp_path: Path) -> None:
+    """A later `lium mine` without --register rebuilds .env from the template; the claim must survive it."""
+    (tmp_path / ".env.template").write_text("MINER_HOTKEY_SS58_ADDRESS=\nMINER_ACCOUNT_CLAIM=\nSSH_PORT=2200\n")
+    (tmp_path / ".env").write_text("MINER_HOTKEY_SS58_ADDRESS=x\nMINER_ACCOUNT_CLAIM=" + "ab12" * 8 + "\n")
+    mine._setup_executor_env(tmp_path, hotkey=HOTKEY)
+    mine._apply_env_overrides(tmp_path, "8080", "8080", "2200", "", "", account_claim=None)
+    assert "MINER_ACCOUNT_CLAIM=" + "ab12" * 8 in (tmp_path / ".env").read_text().splitlines()
+    # a template without the key still gets it
+    (tmp_path / ".env.template").write_text("MINER_HOTKEY_SS58_ADDRESS=\n")
+    mine._setup_executor_env(tmp_path, hotkey=HOTKEY)
+    assert "MINER_ACCOUNT_CLAIM=" + "ab12" * 8 in (tmp_path / ".env").read_text().splitlines()
+
+
+def test_recreate_waits_for_a_new_healthy_container(tmp_path: Path, monkeypatch) -> None:
+    """After --force-recreate the old container can still read healthy; the wait must not return on it."""
+    ps = iter(["old\n", "old\n", "new\n"])  # before up, then the old container lingers once, then the new one
+    inspected = []
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        if "ps -q" in cmd:
+            return next(ps), ""
+        if cmd.startswith("docker inspect"):
+            inspected.append(cmd.split()[-1])
+            return "healthy", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+    mine._start_executor(tmp_path, recreate=True)
+    assert inspected == ["new"]
 
 
 def test_parse_register_token_refuses_a_custodied_token_without_a_usable_node_identity() -> None:
@@ -474,7 +532,7 @@ def _stub_host(monkeypatch, tmp_path: Path, *, nvidia_smi: str = "NVIDIA L4, 230
         (executor_dir / ".env.template").write_text(_TEMPLATE)
 
     monkeypatch.setattr(mine, "_clone_or_update_repo", fake_clone)
-    for name in ("_install_executor_tools", "_check_prereqs", "_start_executor", "_validate_executor", "_check_ports_free"):
+    for name in ("_install_executor_tools", "_check_prereqs", "_check_free_disk", "_start_executor", "_validate_executor", "_check_ports_free"):
         monkeypatch.setattr(mine, name, lambda *a, **k: None)
 
     class _Pull:
@@ -550,6 +608,39 @@ def test_mine_register_runs_the_install_then_registers_and_waits(monkeypatch, tm
     assert "Node added: 1×NVIDIA L4 (22 GB) at 203.0.113.7:8080, $0.11/GPU/h" in result.output
     assert "https://provider.example/nodes/node-1" in result.output
     assert "VALIDATION_PENDING" in result.output and "Node listed (AVAILABLE)" in result.output
+
+
+def test_mine_register_repeated_with_the_same_claim_does_not_recreate_the_executor(monkeypatch, tmp_path: Path) -> None:
+    """A recreate restarts the executor under its rentals; only a claim the executor does not already run with needs
+    one, so a rerun after a restart skipped under rentals still recreates though .env already holds the claim."""
+    target, _ = _stub_host(monkeypatch, tmp_path)
+    recreates: list[bool] = []
+    executor = {"claim": None, "rentals": False}
+
+    def start(d, recreate=False):
+        recreates.append(recreate)
+        if executor["claim"] is None or (recreate and not executor["rentals"]):
+            executor["claim"] = mine._env_value(d / ".env", "MINER_ACCOUNT_CLAIM")
+
+    monkeypatch.setattr(mine, "_start_executor", start)
+    monkeypatch.setattr(mine, "_executor_env_value", lambda d, key: executor["claim"])
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued"}}))
+    portal.on("GET", "/executors", _listing())
+    portal.on("GET", "/executors/node-1", _status("AVAILABLE"))
+    monkeypatch.setattr(reg, "build_http", lambda url, token: _http(portal))
+    monkeypatch.setattr(reg, "wait_until_listed", _wait_no_sleep)
+
+    for claim, rentals in (("ab12" * 8, False), ("ab12" * 8, False), ("cd34" * 8, True), ("cd34" * 8, False),
+                           ("cd34" * 8, False)):
+        executor["rentals"] = rentals
+        result = CliRunner().invoke(
+            mine.mine_command,
+            ["--register", _token(exp=int(time.time()) + 3600, node_claim=claim), "--dir", str(target),
+             "--portal-url", "https://provider-api.example", "--wait", "5"],
+        )
+        assert result.exit_code == 0, result.output
+    assert recreates == [False, False, True, True, False]
 
 
 def test_mine_register_custodied_token_writes_the_pool_key_to_env_and_lists_under_the_account(monkeypatch, tmp_path: Path) -> None:
@@ -644,3 +735,34 @@ def test_mine_register_unknown_gpu_is_a_named_fix_and_nothing_is_posted(monkeypa
     assert result.exit_code == 1
     assert "does not list the GPU model this host reports ('NVIDIA A10G')" in result.output
     assert "NVIDIA A10 Tensor Core GPU" in result.output and portal.calls == []
+
+
+_PROBE = "/executors/00000000-0000-0000-0000-000000000000"
+
+
+@pytest.mark.parametrize("resp, refused", [
+    (_Resp(404, {"detail": "Not found node"}), None),
+    (_Resp(401, {"detail": "Invalid or expired token"}), "The portal refused the register token (Invalid or expired token)"),
+    (_Resp(404, {"detail": "Not Found"}), "did not answer as the portal"),
+    (_Resp(200, {"id": "x"}), "did not answer as the portal"),
+])
+def test_confirm_register_token_asks_the_portal_with_the_token(resp, refused) -> None:
+    portal = _Portal()
+    portal.on("GET", _PROBE, resp)
+    if refused is None:
+        _orig_confirm(_http(portal))
+    else:
+        with pytest.raises(reg.RegisterError, match=re.escape(refused)):
+            _orig_confirm(_http(portal))
+    assert portal.calls[0]["headers"]["Authorization"] == "Bearer TOKEN"
+
+
+def test_mine_register_refuses_a_token_the_portal_rejects_before_touching_the_host(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(mine, "_clone_or_update_repo", lambda *a, **k: calls.append("clone"))
+    monkeypatch.setattr(reg, "confirm_register_token", _orig_confirm)
+    portal = _Portal()
+    portal.on("GET", _PROBE, _Resp(401, {"detail": "Invalid or expired token"}))
+    monkeypatch.setattr(reg, "build_http", lambda url, token: _http(portal))
+    result = CliRunner().invoke(mine.mine_command, ["--register", _token(exp=int(time.time()) + 3600)])
+    assert result.exit_code == 1 and "refused the register token" in result.output and calls == []

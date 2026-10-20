@@ -110,7 +110,17 @@ def test_collect_identity_without_a_key_stops_before_the_network(monkeypatch, lo
 
     assert identity.api_key_fingerprint == "none" and not identity.has_api_key
     assert identity.api_reachable is None and identity.account_id is None
-    assert any("LIUM_API_KEY" in w for w in identity.warnings)
+    assert identity.warnings == []  # the no_api_key failure's hint says what to do
+
+
+def test_whoami_without_a_key_says_what_to_do_once(monkeypatch, local_setup, fake_lium):
+    monkeypatch.setattr(identity_module, "resolve_api_key", lambda: (None, None))
+
+    result = CliRunner().invoke(cli, ["whoami"])
+
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR
+    assert result.output.count("LIUM_API_KEY") == 1
+    assert "lium signup" in result.output
 
 
 def test_collect_identity_keeps_an_api_error_instead_of_raising(local_setup, fake_lium):

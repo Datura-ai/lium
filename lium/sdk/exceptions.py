@@ -77,7 +77,7 @@ class ClusterNotListedError(LiumError):
     Two ways in. ``confirmed`` is True when the rent route confirmed the order and named the
     member pods (``pod_ids``) but the listing did not show every one of them, or failed: the
     nodes are rented and billing. ``confirmed`` is False when the rent route gave no answer
-    (timeout, 5xx) and the by-name lookup then found fewer members than requested, or could not
+    (timeout, 5xx) and the by-name lookup then found fewer members than requested (none included), or could not
     list at all: the nodes may be rented. Either way a second ``up_cluster`` may rent a second
     cluster.
 
@@ -98,8 +98,18 @@ class LiumHostKeyError(LiumError):
     """A pod presented an SSH host key that differs from the pinned one."""
 
 
+class LiumSSHError(LiumError):
+    """SSH could not connect to a pod (refused, timed out, login rejected)."""
+
+
+class OutputLimitExceeded(LiumError):
+    """A command run with ``Lium.exec`` produced more than ``max_output_bytes`` bytes of output
+    (stdout and stderr together). The limit bounds output bytes, not memory."""
+
+
 class RemoteExecutionError(LiumError):
-    """A function offloaded with ``@lium.machine`` did not return a result from the pod.
+    """A function offloaded with ``@lium.machine`` did not return a result from the pod,
+    or a command streamed with ``Lium.stream_exec(check=True)`` exited non-zero.
 
     When the function raised, the caller sees the original exception type and this
     error is its ``__cause__``; ``remote_traceback`` is the traceback from the pod.
@@ -172,8 +182,8 @@ class LiumBudgetExceededError(LiumPermissionError):
     A per-key daily, monthly or lifetime budget (``lium keys create --daily-budget / --monthly-budget /
     --max-budget``, ``lium keys budget``) is reached: the billing tick deletes the key's pods (data outside
     a volume is lost), and a rent, a pod extend / schedule change or a key-initiated top-up (``lium fund``,
-    ``lium topup``, ``lium topup card``) through that key is refused with this one error (server support
-    pending). The message names the window hit.
+    ``lium topup``, ``lium topup card``) through that key is refused with this one error. The message
+    names the window hit.
     ``budget_usd``, ``spent_usd``, ``window`` (``daily``, ``monthly`` or ``max``) and ``api_key_id`` are filled when the
     server's error body carried them, else ``None``. A :class:`LiumPermissionError` handler keeps working; this
     class is for callers that want the numbers.
@@ -201,12 +211,24 @@ class LiumBudgetExceededError(LiumPermissionError):
 class LiumCardTopUpError(LiumError):
     """A card top-up (``POST /payments/topup``, :meth:`Lium.topup_card`) did not charge (402).
 
-    ``code`` says why: ``CARD_AUTHENTICATION_REQUIRED`` (the bank wants a one-time confirmation
-    the API cannot show — top up once by card at ``dashboard_url``, then retry), ``CARD_DECLINED``
-    (``decline_code`` is the bank's reason), ``NO_SAVED_CARD``, ``NO_DEFAULT_CARD``, or
-    ``WALLET_NOT_SUPPORTED`` (the saved method is Link, Apple Pay or Google Pay). A key
-    budget refusal is not this class. The message is the server's plain sentence; the balance
-    did not change.
+    ``code`` says why: ``CARD_AUTHENTICATION_REQUIRED`` (the bank wants the cardholder to confirm
+    with 3-D Secure, see below), ``CARD_AUTHENTICATION_NOT_COMPLETED`` (the cardholder failed or
+    abandoned that confirmation), ``CARD_AUTHENTICATION_UNAVAILABLE`` (3-D Secure cannot run for
+    this card), ``CARD_AUTHENTICATION_EXPIRED`` (not confirmed within 7 days, canceled),
+    ``CARD_DECLINED`` (``decline_code`` is the bank's reason), ``NO_SAVED_CARD``,
+    ``NO_DEFAULT_CARD``, or ``WALLET_NOT_SUPPORTED`` (the saved method is Link, Apple Pay or
+    Google Pay). A key budget refusal is not this class. The message is the server's plain
+    sentence; the balance did not change.
+
+    ``idempotency_key`` is the key the call was sent with (yours, or the one the SDK made), and
+    ``transaction_id`` the platform's row for it when the server named one.
+
+    A ``CARD_AUTHENTICATION_REQUIRED`` **with** ``next_action_url`` (``is_step_up``) is not final:
+    the payment is open. The cardholder confirms at ``next_action_url`` and the balance is credited
+    with no further call. Repeat only with the **same** ``idempotency_key`` (it answers the same URL
+    until the cardholder confirms, then the charge); a new key opens a second payment on the card.
+    Without ``next_action_url`` it is final: top up once by card at ``dashboard_url``, then retry
+    with a new key. Every other code is final too: retry with a new key once the cause is fixed.
     """
 
     def __init__(
@@ -220,12 +242,24 @@ class LiumCardTopUpError(LiumError):
         decline_code: str | None = None,
         dashboard_url: str | None = None,
         payment_intent_id: str | None = None,
+        transaction_id: str | None = None,
+        next_action_url: str | None = None,
+        idempotency_key: str | None = None,
     ) -> None:
         super().__init__(message, code=code, hint=hint, request_id=request_id)
         self.status = status
         self.decline_code = decline_code
         self.dashboard_url = dashboard_url
         self.payment_intent_id = payment_intent_id
+        self.transaction_id = transaction_id
+        self.next_action_url = next_action_url
+        self.idempotency_key = idempotency_key
+
+    @property
+    def is_step_up(self) -> bool:
+        """True for a 3-D Secure step-up: the payment is open until the cardholder confirms at
+        ``next_action_url``; repeat only with the same ``idempotency_key``."""
+        return self.code == "CARD_AUTHENTICATION_REQUIRED" and bool(self.next_action_url)
 
 
 class LiumChargeOutcomeUnknownError(LiumError):
@@ -248,6 +282,38 @@ class LiumChargeOutcomeUnknownError(LiumError):
         super().__init__(message, code=code, hint=hint, request_id=request_id)
         self.idempotency_key = idempotency_key
 
+class LiumRentOutcomeUnknownError(LiumError):
+    """A rent (:meth:`Lium.up`) was posted and its outcome could not be established: the first request got
+    no answer (a timeout, a dropped connection, a 5xx), no new pod was listed yet, and the repeat was refused
+    or failed too. The server may still be completing the first request, so a pod **may exist and bill**:
+    check ``ps()`` before renting again. ``idempotency_key`` is the key both requests carried.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        idempotency_key: str | None = None,
+        pod_name: str | None = None,
+        executor_id: str | None = None,
+        candidates: list[str] | None = None,
+        endpoint: str | None = None,
+        payload: dict | None = None,
+        code: str | None = None,
+        hint: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message, code=code, hint=hint, request_id=request_id)
+        self.idempotency_key = idempotency_key
+        self.pod_name = pod_name
+        self.executor_id = executor_id
+        # new pods with the rent's name, found after the answer was lost: maybe this rent's, maybe another client's
+        self.candidates = list(candidates or [])
+        # the rent request, kept for the MCP server's guarded replay with the same key
+        self.endpoint = endpoint
+        self.payload = payload
+
+
 __all__ = [
     "LiumError",
     "LiumAuthError",
@@ -263,4 +329,5 @@ __all__ = [
     "RemoteExecutionError",
     "LiumCardTopUpError",
     "LiumChargeOutcomeUnknownError",
+    "LiumRentOutcomeUnknownError",
 ]

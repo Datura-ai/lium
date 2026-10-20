@@ -35,6 +35,7 @@ SYNC_EXECUTOR_CENTRAL_PROVIDER = "/executors/sync-executor-central-provider"
 EXECUTOR_BY_ID = "/executors/{id}"
 UPDATE_PRICE = "/executors/{id}/update-price"
 UPDATE_GPU = "/executors/{id}/update-gpu"
+UPDATE_ADDRESS = "/executors/{id}/update-address"
 EXECUTOR_PODS = "/executors/{id}/pods"
 EXECUTOR_NOTICE_PERIOD = "/executors/{id}/notice-period"
 EXECUTOR_MACHINE_ADDED = "/executors/{id}/machine-added"
@@ -42,9 +43,8 @@ EXECUTOR_MACHINE_REQUESTS = "/executors/{id}/machine-requests"
 EXECUTOR_MIN_GPU_FOR_RENTAL = "/executors/{id}/min-gpu-count-for-rental"
 EXECUTOR_VERIFICATION = "/executors/{id}/verification"
 
-# Billing
-BILLING = "/billing"
-BILLING_BY_MINER = "/billing/{miner_hotkey}"
+# Billing: the signed-in provider's own daily ledger (DAH-4627; `/billing` and `/billing/{hotkey}` are being retired)
+PROVIDER_LEDGER_DAILY = "/provider-ledger/daily"
 
 # Machine requests
 MACHINE_REQUESTS = "/machine-requests"
@@ -56,8 +56,6 @@ ESTIMATED_REWARDS = "/machines/estimated-rewards"
 
 
 __all__ = [
-    "BILLING",
-    "BILLING_BY_MINER",
     "DISCORD_OAUTH_URL",
     "ESTIMATED_REWARDS",
     "EXECUTOR_BY_ID",
@@ -77,6 +75,7 @@ __all__ = [
     "MINER_OPT_IN",
     "MINERS",
     "MINERS_OVERVIEW",
+    "PROVIDER_LEDGER_DAILY",
     "PROVIDER_OPT_IN",
     "SET_EMAIL",
     "SET_MACHINE_REQUEST_SUBSCRIPTION",
@@ -85,5 +84,6 @@ __all__ = [
     "SYNC_EXECUTOR_CENTRAL_PROVIDER",
     "SYNC_EXECUTOR_MINER_PORTAL",
     "UPDATE_GPU",
+    "UPDATE_ADDRESS",
     "UPDATE_PRICE",
 ]

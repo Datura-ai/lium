@@ -367,19 +367,15 @@ def test_sync_nodes_to_miner_server_posts_miner_portal_route(client) -> None:
 # Read-only queries
 
 
-def test_billing_history_path_form(client) -> None:
-    portal = _Portal(get_body={"data": []})
+def test_billing_history_reads_the_signed_in_providers_daily_ledger(client) -> None:
+    portal = _Portal(get_body={"data": {"rows": []}})
     c = client(portal)
-    c.billing_history(miner_hotkey="5Foo")
-    assert portal.gets[0][0] == "/billing/5Foo"
-
-
-def test_billing_history_query_form(client) -> None:
-    portal = _Portal(get_body={"data": []})
-    c = client(portal)
-    c.billing_history(miner_hotkey="5Foo", page=1, limit=10)
-    assert portal.gets[0][0] == "/billing"
-    assert portal.gets[0][1] == {"miner_hotkey": "5Foo", "page": 1, "limit": 10}
+    c.billing_history()
+    c.billing_history(start_day="2026-10-01", end_day="2026-10-17")
+    assert [g[:2] for g in portal.gets] == [
+        ("/provider-ledger/daily", None),
+        ("/provider-ledger/daily", {"from": "2026-10-01", "to": "2026-10-17"}),
+    ]
 
 
 def test_list_machine_requests_and_get(client) -> None:
@@ -486,23 +482,3 @@ def test_list_nodes_explicit_hotkey_wins(client) -> None:
     c.list_nodes(miner_hotkey=other)
     _, params, _ = portal.gets[0]
     assert params == {"miner_hotkey": other}
-
-
-def test_billing_history_defaults_to_own_hotkey(client, fake_signer) -> None:
-    portal = _Portal(get_body={"data": []})
-    c = client(portal)
-    c.billing_history(page=1, limit=10)
-    assert portal.gets[0][0] == "/billing"
-    assert portal.gets[0][1] == {
-        "miner_hotkey": fake_signer.ss58_address,
-        "page": 1,
-        "limit": 10,
-    }
-
-
-def test_billing_history_all_miners_is_unfiltered(client) -> None:
-    portal = _Portal(get_body={"data": []})
-    c = client(portal)
-    c.billing_history(all_miners=True)
-    assert portal.gets[0][0] == "/billing"
-    assert portal.gets[0][1] is None

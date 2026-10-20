@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fold changelog.d/*.md fragments into CHANGELOG.md under a new version heading (Keep a Changelog layout).
 
-    python scripts/changelog.py --version 0.0.38            # writes CHANGELOG.md, deletes the fragments
+    python scripts/changelog.py --version 0.0.38            # writes CHANGELOG.md and server.json's version, deletes the fragments
     python scripts/changelog.py --version 0.0.38 --dry-run  # prints the new section only
 
 Each fragment holds `### Added|Changed|Deprecated|Removed|Fixed|Security` headings followed by bullets (see
@@ -90,6 +90,10 @@ def main(argv=None):
     for f in files:
         f.unlink()
     print(f"CHANGELOG.md: added [{a.version}] from {len(files)} fragment(s)")
+    server = a.root / "server.json"  # the MCP Registry entry carries the release version too
+    if server.exists():
+        server.write_text(re.sub(r'("version": ")[^"]*"', rf'\g<1>{a.version}"', server.read_text(encoding="utf-8")),
+                          encoding="utf-8")
 
 
 if __name__ == "__main__":

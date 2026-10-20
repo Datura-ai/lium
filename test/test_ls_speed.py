@@ -116,7 +116,7 @@ def test_a_summary_row_carries_every_field_the_table_and_json_render():
     assert (executor.nvlink, executor.link, executor.p2p) == (True, "NV18", True)
     # the `lium ls --format json` object, name for name as README.md documents it
     assert set(row) == {
-        "index", "id", "huid", "config", "gpu_type", "gpu_count", "price_per_gpu_hour", "price_per_hour", "country",
+        "index", "id", "huid", "config", "gpu_type", "gpu_count", "available_gpu_count", "price_per_gpu_hour", "price_per_hour", "country",
         "country_code", "city", "vram_gb", "ram_gb", "cpu_count", "disk_gb", "disk_total_gb", "upload_mbps",
         "download_mbps", "upload_source", "download_source", "available_ports", "docker_in_docker", "is_pareto",
         "max_cuda_version", "tier", "machine_name", "link", "nvlink", "p2p", "interconnect", "gpu_power_limited",

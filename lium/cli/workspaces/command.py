@@ -29,15 +29,19 @@ ROLES = click.Choice(["member", "admin", "owner"])
 WORKSPACE_ARG = click.argument("workspace", required=False)
 
 
-def workspace_client() -> Lium:
+def workspace_client(*, login: bool = False) -> Lium:
     """The SDK client for `lium workspaces` and `lium keys`; the config prompts run first.
 
     These commands manage teams with the account's key and a session: `--workspace` / LIUM_WORKSPACE
     names their default target but does not pick their key, so `lium keys create … --save` and
     `LIUM_API_KEY=… lium workspaces use …` work when no key is saved for that workspace yet.
     """
-    ensure_config()
-    return Lium(config=Config.load(key_for_workspace=False), source="cli")
+    config = Config.load(key_for_workspace=False, require_key=False)
+    if config.api_key or not (login or config.session_token):
+        # a password login, or a session with no API key saved, needs neither an API key nor an SSH key
+        ensure_config()
+        config = Config.load(key_for_workspace=False)
+    return Lium(config=config, source="cli")
 
 
 def target_workspace(lium: Lium, workspace: Optional[str]) -> WorkspaceInfo:
@@ -231,8 +235,7 @@ def workspaces_login_command(email: Optional[str], password_stdin: bool):
     Accounts created with GitHub or Google sign-in set a password with "Forgot password" on lium.io first.
     Without a terminal (or with LIUM_NONINTERACTIVE=1) nothing is asked: pass --email and --password-stdin.
     """
-    lium = workspace_client()
-    lium.workspaces.require_enabled()  # nothing to sign in for on a server without workspaces
+    lium = workspace_client(login=True)  # no workspace check: `lium keys` needs the session on a server without workspaces too
     email = email or ui.prompt("E-mail", hint="pass --email")
     if password_stdin:
         password = sys.stdin.readline().rstrip("\n")
@@ -246,7 +249,7 @@ def workspaces_login_command(email: Optional[str], password_stdin: bool):
         password = click.prompt("Password", hide_input=True)
     token = lium.workspaces.login(email, password)
     settings.set("session.token", token)
-    ui.success("Signed in; `lium workspaces` subcommands can now manage your teams")
+    ui.success("Signed in; `lium keys` and the `lium workspaces` subcommands can now use this session")
 
 
 @workspaces_command.command("create")

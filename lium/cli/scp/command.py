@@ -1,5 +1,7 @@
 """SCP command implementation."""
 
+import posixpath
+import shlex
 from typing import Optional
 
 import click
@@ -89,8 +91,25 @@ def scp_command(
     if not result.ok:
         failed_huids = result.data.get("failed_huids", [])
         action_name = "download from" if download_mode else "upload to"
+        directory_error = result.data.get("directory_error")
+        hint = None
+        if directory_error:
+            remote = parsed["remote_path"].rstrip("/")
+            parent, name = posixpath.split(remote)
+            if name in ("", ".", ".."):
+                hint = f"{directory_error}. Archive it on the pod with tar, then download the archive with lium scp -d"
+            else:
+                # a relative path is relative to the SSH home, which is also where lium exec runs;
+                # "name/." makes tar follow a symlinked directory instead of archiving the link
+                archive = f"{remote}.tar.gz"
+                tar = shlex.join(["tar", "czf", archive, *(["-C", parent] if parent else []), f"{name}/."])
+                hint = (
+                    f"{directory_error}. Archive it on the pod, then download the archive: "
+                    f"lium exec {targets} {shlex.quote(tar)} && lium scp {targets} {shlex.quote(archive)} -d"
+                )
         raise CliFailure(
             "scp_failed",
             f"Failed to {action_name}: {', '.join(failed_huids)}",
             EXIT_GENERAL_ERROR,
+            hint=hint,
         )

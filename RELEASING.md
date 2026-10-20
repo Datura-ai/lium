@@ -9,7 +9,7 @@ only once the assets are up. The `lium` CLI and the
 ## Choosing the version
 
 1. Run `make next-version` on the commit you are about to tag; it prints the smallest version the changelog allows and which entries ask for it.
-2. Two sources count, both read since the previous `vX.Y.Z` tag: the `changelog.d/` fragments still in the tree, and the `## [X.Y.Z]` sections that `python scripts/changelog.py --version X.Y.Z` folded into `CHANGELOG.md` (that fold deletes the fragments, so the folded section is what remains of them). `changelog.d/README.md` is documentation, not a fragment.
+2. Two sources count, both read since the previous `vX.Y.Z` tag: the `changelog.d/` fragments still in the tree, and the `## [X.Y.Z]` sections that `python scripts/changelog.py --version X.Y.Z` folded into `CHANGELOG.md` (that fold deletes the fragments, so the folded section is what remains of them). The fold also writes X.Y.Z into `server.json` (the MCP Registry entry; the registry job stamps the PyPI version at publish either way). `changelog.d/README.md` is documentation, not a fragment.
 3. The headers decide: `### Added` (someone can do something new) needs a minor bump; `### Changed`, `### Fixed`, `### Security`, `### Deprecated` a patch. A fragment with no header, or a header not in that list, counts as `### Added` and is named in a warning — give every fragment a header.
 4. `### Removed` or a bullet that starts with `BREAKING` needs a major bump once we are past 1.0, a minor bump before that.
 5. No entry from either source means the next patch — unless files under `lium/`, `lium_entry.py` or `pyproject.toml` changed since the previous tag. Code with no changelog entry is refused: add a fragment to the release commit, or use the skip line below when there is nothing to tell (a dependency pin, say).
@@ -19,7 +19,7 @@ only once the assets are up. The `lium` CLI and the
 
 ## The 0.1.0 catch-up
 
-`v0.0.42` … `v0.0.46` shipped `### Added` fragments as patch releases (DAH-3328). `changelog.d/.deferred_minimum` is
+`v0.0.42` … `v0.0.46` shipped `### Added` fragments as patch releases. `changelog.d/.deferred_minimum` is
 seeded with `0.1.0`, so the next release must be `v0.1.0` or higher; delete the file after that release. Fold the
 fragments that have piled up in `changelog.d/` in the `0.1.0` release commit (`python scripts/changelog.py --version
 0.1.0`): they carry `### Added`, so whichever release first folds them is held to a minor bump — at `0.1.0` that costs

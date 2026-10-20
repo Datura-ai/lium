@@ -67,7 +67,6 @@ class SaveApiKeyAction:
             api_key=self.api_key,
             api_key_source="--api-key",   # a 401 then reads "key sk_…abcd from --api-key", not "from explicit"
             base_url=os.getenv("LIUM_BASE_URL", Config.base_url),
-            base_pay_url=os.getenv("LIUM_PAY_URL", Config.base_pay_url),
         ), source="cli")
         try:
             client.balance()
@@ -122,7 +121,6 @@ class CheckSavedApiKeyAction:
             api_key=self.api_key,
             api_key_source=f"config:{config.get_config_path()}",
             base_url=os.getenv("LIUM_BASE_URL", Config.base_url),
-            base_pay_url=os.getenv("LIUM_PAY_URL", Config.base_pay_url),
         ), source="cli")
         try:
             client.balance()
