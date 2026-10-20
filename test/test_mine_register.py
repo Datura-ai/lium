@@ -47,6 +47,12 @@ def _token(exp: int | None = NOW + 3600, hotkey: str | None = HOTKEY, opt_in: bo
 _orig_confirm = reg.confirm_register_token
 
 
+@pytest.fixture(autouse=True)
+def _portal_accepts_the_token(monkeypatch):
+    """The command's portal check of the token; the test of it below calls the real one."""
+    monkeypatch.setattr(reg, "confirm_register_token", lambda http: None)
+
+
 # --- token -----------------------------------------------------------------------------------------------------------
 
 
@@ -149,6 +155,10 @@ def test_parse_register_token_refuses_a_custodied_token_without_a_usable_node_id
 # --- price -----------------------------------------------------------------------------------------------------------
 
 
+class _Snapshot:
+    machine_prices = {"NVIDIA L4": 0.11, "NVIDIA A10 Tensor Core GPU": 0.2, "NVIDIA GeForce RTX 4090": 0.3}
+
+
 # --- portal calls ----------------------------------------------------------------------------------------------------
 
 
@@ -183,7 +193,90 @@ def _http(portal: _Portal) -> PortalHTTP:
     return PortalHTTP(base_url="https://portal.example", token_provider=lambda: "TOKEN", session=portal)  # type: ignore[arg-type]
 
 
+def _listing(node_id: str = "node-1", ip: str = "203.0.113.7", port: int = 8080) -> _Resp:
+    return _Resp(200, {"success": True, "data": [
+        {"id": node_id, "executor_ip_address": ip, "executor_ip_port": str(port)},
+    ], "total": 1})
+
+
+def _status(status: str, message: str = "", last_error: dict | None = None) -> _Resp:
+    computed = {"status": status, "message": message, "last_error": last_error}
+    return _Resp(200, {"id": "node-1", "computed_status": computed})
+
+
 # --- the command -----------------------------------------------------------------------------------------------------
+
+
+_TEMPLATE = "MINER_HOTKEY_SS58_ADDRESS=\nINTERNAL_PORT=8080\nEXTERNAL_PORT=8080\nSSH_PORT=2200\nSSH_PUBLIC_PORT=2200\n"
+
+
+def _stub_host(monkeypatch, tmp_path: Path, *, nvidia_smi: str = "NVIDIA L4, 23034\n") -> tuple[Path, Path]:
+    """Steps 1–6 with every host action stubbed: the clone drops an executor ``.env.template``, install/prereqs/start/
+    validate/port checks are no-ops, ``nvidia-smi`` answers ``nvidia_smi``, the public IP is TEST-NET. Returns
+    ``(target, executor_dir)``; the portal is the caller's."""
+    target = tmp_path / "compute-subnet"
+    executor_dir = target / "neurons" / "executor"
+
+    def fake_clone(target_dir: Path, branch: str) -> None:
+        executor_dir.mkdir(parents=True, exist_ok=True)
+        (executor_dir / ".env.template").write_text(_TEMPLATE)
+
+    monkeypatch.setattr(mine, "_clone_or_update_repo", fake_clone)
+    for name in ("_install_executor_tools", "_check_prereqs", "_check_free_disk", "_start_executor", "_validate_executor", "_check_ports_free"):
+        monkeypatch.setattr(mine, name, lambda *a, **k: None)
+
+    class _Pull:
+        def poll(self): return 0
+        def wait(self): return 0
+    monkeypatch.setattr(mine, "_start_preflight_pull", lambda: _Pull())
+    monkeypatch.setattr(mine, "_run", lambda cmd, **k: (nvidia_smi, "") if "nvidia-smi" in cmd else ("", ""))
+    monkeypatch.setattr(mine, "_get_public_ip", lambda: "203.0.113.7")
+    monkeypatch.setattr(reg, "fetch_shared_config", _Snapshot)
+    return target, executor_dir
+
+
+def test_mine_register_repeated_with_the_same_claim_does_not_recreate_the_executor(monkeypatch, tmp_path: Path) -> None:
+    """A recreate restarts the executor under its rentals; only a claim the executor does not already run with needs
+    one, so a rerun after a restart skipped under rentals still recreates though .env already holds the claim."""
+    target, _ = _stub_host(monkeypatch, tmp_path)
+    recreates: list[bool] = []
+    executor = {"claim": None, "rentals": False}
+
+    def start(d, recreate=False):
+        recreates.append(recreate)
+        if executor["claim"] is None or (recreate and not executor["rentals"]):
+            executor["claim"] = mine._env_value(d / ".env", "MINER_ACCOUNT_CLAIM")
+
+    monkeypatch.setattr(mine, "_start_executor", start)
+    monkeypatch.setattr(mine, "_executor_env_value", lambda d, key: executor["claim"])
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued"}}))
+    portal.on("GET", "/executors", _listing())
+    portal.on("GET", "/executors/node-1", _status("AVAILABLE"))
+    monkeypatch.setattr(reg, "build_http", lambda url, token: _http(portal))
+    monkeypatch.setattr(reg, "wait_until_listed", _wait_no_sleep)
+
+    for claim, rentals in (("ab12" * 8, False), ("ab12" * 8, False), ("cd34" * 8, True), ("cd34" * 8, False),
+                           ("cd34" * 8, False)):
+        executor["rentals"] = rentals
+        result = CliRunner().invoke(
+            mine.mine_command,
+            ["--register", _token(exp=int(time.time()) + 3600, node_claim=claim), "--dir", str(target),
+             "--portal-url", "https://provider-api.example", "--wait", "5"],
+        )
+        assert result.exit_code == 0, result.output
+    assert recreates == [False, False, True, True, False]
+
+
+def _wait_no_sleep(http, node_id, **kw):
+    """The real wait loop on a fake clock: every sleep advances it by the interval, so OFFLINE_CONFIRM_S elapses in no time."""
+    now = {"t": 0.0}
+    kw.setdefault("sleep", lambda secs: now.__setitem__("t", now["t"] + secs))
+    kw.setdefault("clock", lambda: now["t"])
+    return _orig_wait(http, node_id, **kw)
+
+
+_orig_wait = reg.wait_until_listed
 
 
 _PROBE = "/executors/00000000-0000-0000-0000-000000000000"
