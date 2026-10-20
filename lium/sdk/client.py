@@ -55,6 +55,7 @@ from .exceptions import (
     PodStartError,
     RemoteExecutionError,
 )
+from .bounded_job import JobResult, run_job
 from .jobs import (
     DEFAULT_JOB_DIR,
     _NAME_RE,
@@ -654,6 +655,62 @@ class AlphaSubnets:
         return next((s for s in self.subnets if s.netuid == netuid), None)
 
 
+@contextmanager
+def _transfer_deadline(client: Any, timeout: Optional[float], what: str):
+    """Close ``client`` once ``timeout`` runs out, which ends a stalled or dripping SFTP read or
+    write at once, and turn the error that follows into :class:`TimeoutError`."""
+    if timeout is None:
+        yield
+        return
+    if timeout <= 0:
+        raise TimeoutError(f"no time left for the {what}")
+    cut = threading.Event()
+
+    def stop() -> None:
+        cut.set()
+        client.close()
+
+    timer = threading.Timer(timeout, stop)
+    timer.daemon = True
+    timer.start()
+    try:
+        yield
+    except Exception as exc:
+        if cut.is_set() and not isinstance(exc, TimeoutError):
+            raise TimeoutError(f"the {what} did not finish within {timeout:.0f}s") from exc
+        raise
+    finally:
+        timer.cancel()
+    if cut.is_set():
+        raise TimeoutError(f"the {what} did not finish within {timeout:.0f}s")
+
+
+def _connect_by(client: Any, connect_kwargs: Dict[str, Any], deadline: float, what: str) -> None:
+    """``client.connect`` that ends by ``deadline`` however many auth attempts paramiko makes:
+    the client is closed at the deadline, and again every 50 ms until connect returns, since
+    its transport may not exist yet at the first close."""
+    done, late = threading.Event(), threading.Event()
+
+    def cut() -> None:
+        while not done.wait(0.05 if late.is_set() else max(0.0, deadline - time.monotonic())):
+            late.set()
+            client.close()
+
+    watcher = threading.Thread(target=cut, daemon=True)
+    watcher.start()
+    try:
+        client.connect(**connect_kwargs)
+    except Exception as exc:
+        if late.is_set():
+            raise TimeoutError(f"the {what} did not finish in time") from exc
+        raise
+    finally:
+        done.set()
+        watcher.join()
+    if late.is_set():
+        raise TimeoutError(f"the {what} did not finish in time")
+
+
 # Main SDK Class
 def _remote_file_path(sftp: Any, local: str, remote: str) -> str:
     """Resolve an SFTP upload destination: a directory becomes ``<dir>/<basename(local)>``.
@@ -1134,6 +1191,7 @@ class Lium:
         gpu_count: Optional[int] = None,
         wait: bool = False,
         timeout: int = 600,
+        termination_hours: Optional[int] = None,
     ) -> Union[Dict[str, Any], PodInfo]:
         """Start a new pod on a specific node.
 
@@ -1181,6 +1239,8 @@ class Lium:
                 takes every GPU that is free on the node right now (the whole node when
                 none of it is rented). The API rejects a count above the free GPUs, below
                 the provider's minimum, or on nodes that do not allow splitting.
+            termination_hours: Sent with the rent (1 to 720): the server removes the pod this
+                many hours after it starts, even if this process never gets to schedule it.
 
         Returns:
             Pod metadata as returned by the rent API (id, name, status, ssh command,
@@ -1201,6 +1261,7 @@ class Lium:
             backup_id=backup_id,
             restore_path=restore_path,
             gpu_count=gpu_count,
+            termination_hours=termination_hours,
         )
         if not wait:
             return created
@@ -1230,6 +1291,7 @@ class Lium:
         backup_id: Optional[str],
         restore_path: Optional[str],
         gpu_count: Optional[int] = None,
+        termination_hours: Optional[int] = None,
         posted: Optional[List[bool]] = None,
         build_context_sha256: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -1286,6 +1348,8 @@ class Lium:
         }
         if gpu_count is not None:
             payload["gpu_count"] = gpu_count
+        if termination_hours is not None:
+            payload["termination_hours"] = termination_hours
         if build_context_sha256 is not None:
             payload["build_context_sha256"] = build_context_sha256
 
@@ -1532,6 +1596,78 @@ class Lium:
                 # before the POST nothing of ours exists; a new same-name pod is another caller's
                 self._remove_strays(rent_args["name"], executor_id, exclude=pods_before)
 
+    def run_job(
+        self,
+        *,
+        command: str,
+        gpu_type: str,
+        max_cost_usd: float,
+        deadline_s: float,
+        gpu_count: int = 1,
+        inputs: Optional[Dict[str, str]] = None,
+        outputs: Optional[Dict[str, str]] = None,
+        env: Optional[Dict[str, str]] = None,
+        name: Optional[str] = None,
+        boot_timeout: float = 600,
+        output_reserve_s: float = 120,
+        output_tail_bytes: int = 16 << 20,
+        max_download_bytes: int = 10 << 30,
+        **rent_kwargs: Any,
+    ) -> JobResult:
+        """Run one bounded job on a rented GPU and remove the pod; never raises for the job's outcome.
+
+        Rents the cheapest node that fits (:meth:`rent`), schedules the pod's removal server-side
+        for the earlier of ``deadline_s`` and the moment the rental has cost ``max_cost_usd`` at
+        its initial hourly price (both counted from just before the rent request), waits for it,
+        uploads ``inputs``, runs ``command`` under ``bash -c`` bounded by the time left, downloads
+        ``outputs`` (after a failure or a timeout too; each transfer bounded by the time left),
+        then deletes the pod, waits until it is gone and reads its billed cost.
+
+        After server-side scheduling succeeds, removal survives caller exit. A Ctrl-C during the
+        rent still finds the pod by name and removes it (then re-raises); a hard kill during rent
+        or scheduling leaves the pod to the removal sent with the rent (``termination_hours``):
+        the deadline rounded up to whole hours, at most 720, counted by the server from boot. The limits are best
+        effort: scheduled removal is processed periodically, so charges can exceed the budget.
+
+        Args:
+            command: Shell command to run on the pod.
+            gpu_type, gpu_count: What to rent, as in :meth:`rent`.
+            max_cost_usd: Approximate compute budget in USD, boot and copying included.
+            deadline_s: Wall-clock ceiling in seconds from this call, boot and copying included.
+            inputs: ``{local path: remote path}`` uploaded before the command runs.
+            outputs: ``{remote path: local path}`` downloaded after it ends.
+            env: Environment for the command, sent as :meth:`exec` sends it.
+            name: Pod name prefix (default ``job``); ``-<8 hex>`` is always appended so only this
+                call's pod matches it when a lost rent response is looked up.
+            boot_timeout: Seconds to wait for the pod to become ready (never past the limits).
+            output_reserve_s: Seconds kept back from the command for copying outputs.
+            output_tail_bytes: Keep the last this many bytes of stdout and of stderr each (16 MiB;
+                ``0`` keeps none). The timeout check does not depend on it.
+            max_download_bytes: Refuse an output file past this size (10 GiB); it is reported
+                in ``missing_outputs``.
+            **rent_kwargs: Any other :meth:`rent` constraint (``max_price_per_gpu_hour``,
+                ``template_id``, ``min_vram_gb``, ``country``, ...).
+
+        Returns:
+            A :class:`JobResult`: ``status`` is one of ``succeeded``, ``failed``, ``timed_out``,
+            ``budget_exhausted``, ``rent_failed``, ``boot_failed`` or ``error``; ``cleanup`` says
+            whether the pod's removal was confirmed (``removed``), left to the acknowledged schedule
+            (``scheduled``) or neither (``unknown``); ``cost_usd`` is the billed cost, read only
+            after a confirmed removal, ``estimated_cost_usd`` the price times the rented time.
+
+        Example:
+            >>> r = lium.run_job(command="python train.py", gpu_type="H100", max_cost_usd=5,
+            ...                  deadline_s=1800, inputs={"train.py": "/root/train.py"},
+            ...                  outputs={"/root/model.pt": "model.pt"})
+            >>> r.status, r.exit_code, r.cleanup, r.cost_usd
+        """
+        return run_job(
+            self, command=command, gpu_type=gpu_type, max_cost_usd=max_cost_usd, deadline_s=deadline_s,
+            gpu_count=gpu_count, inputs=inputs, outputs=outputs, env=env, name=name,
+            boot_timeout=boot_timeout, output_reserve_s=output_reserve_s,
+            output_tail_bytes=output_tail_bytes, max_download_bytes=max_download_bytes, **rent_kwargs,
+        )
+
     def _pod_ids_or_none(self) -> Optional[frozenset]:
         """Ids of the pods that exist now, or ``None`` when the listing failed."""
         try:
@@ -1595,6 +1731,7 @@ class Lium:
         backup_id: Optional[str] = None,
         restore_path: Optional[str] = None,
         dry_run: bool = False,
+        termination_hours: Optional[int] = None,
     ) -> RentResult:
         """Rent the cheapest available node that satisfies a spec, without listing the fleet.
 
@@ -1623,7 +1760,7 @@ class Lium:
                 Client-side only: a rent-by-spec backend has no such field, so the call is
                 refused there rather than sent with a constraint the server would not check.
             volume_id, ports, ssh_keys, ssh_name, enable_volume_encryption, backup_id,
-                restore_path: as in :meth:`up`.
+                restore_path, termination_hours: as in :meth:`up`.
             dry_run: Choose and price only; nothing is rented and no SSH key is registered
                 with the account. Against a rent-by-spec backend the request still carries
                 your SSH public key (``ssh_keys`` or the configured key: the server validates
@@ -1688,6 +1825,7 @@ class Lium:
             "enable_volume_encryption": enable_volume_encryption,
             "backup_id": backup_id,
             "restore_path": restore_path,
+            "termination_hours": termination_hours,
         }
         if self.supports(RENT_BY_SPEC):
             return self._rent_on_server(spec, rental, dry_run)
@@ -1727,6 +1865,8 @@ class Lium:
             "dry_run": dry_run,
             **({"build_context_sha256": rental["build_context_sha256"]} if rental["build_context_sha256"] else {}),
         }
+        if rental["termination_hours"] is not None:
+            payload["termination_hours"] = rental["termination_hours"]
         gpu_count = int(spec.get("gpu_count") or 1)
         # A rent is billable and a lost response may have succeeded server-side, so it is never
         # retried blindly; a dry run rents nothing and keeps the retries. Pods that exist before
@@ -1856,6 +1996,7 @@ class Lium:
                 enable_volume_encryption=rental["enable_volume_encryption"],
                 backup_id=rental["backup_id"],
                 restore_path=rental["restore_path"],
+                termination_hours=rental["termination_hours"],
             )
         return RentResult(
             executor=executor,
@@ -3000,12 +3141,14 @@ class Lium:
                 return t
 
     @contextmanager
-    def ssh_connection(self, pod: PodInfo, timeout: int = 30):
+    def ssh_connection(self, pod: PodInfo, timeout: int = 30, deadline: Optional[float] = None):
         """SSH connection context manager.
 
         Args:
             pod: Pod whose SSH metadata is used.
             timeout: Connection timeout in seconds.
+            deadline: A ``time.monotonic()`` instant the whole connect (TCP, banner and every
+                auth attempt) must end by; no wait runs past it (:class:`TimeoutError`).
 
         Yields:
             An active ``paramiko.SSHClient``.
@@ -3031,6 +3174,11 @@ class Lium:
         # The same shape check the OpenSSH path (ssh_argv, pod_ssh_command) applies: only
         # `ssh <user>@<host> [-p <port>]` reaches connect(); anything else is a ValueError here.
         user, host, port = ssh_target(pod.ssh_cmd)
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError(f"no time left to connect to pod {pod.name}")
+            timeout = min(timeout, left)
 
         # Load SSH key
         key = None
@@ -3056,6 +3204,9 @@ class Lium:
             "port": port,
             "username": user,
             "timeout": timeout,
+            # paramiko's banner (15s) and auth (30s) waits are separate; keep them inside timeout
+            "banner_timeout": min(15, timeout),
+            "auth_timeout": timeout,
             "look_for_keys": False,
         }
         if key:
@@ -3067,7 +3218,10 @@ class Lium:
             connect_kwargs["key_filename"] = str(self.config.ssh_key_path)
             connect_kwargs["allow_agent"] = True
         try:
-            client.connect(**connect_kwargs)
+            if deadline is None:
+                client.connect(**connect_kwargs)
+            else:
+                _connect_by(client, connect_kwargs, deadline, f"SSH connection to pod {pod.name}")
         except paramiko.BadHostKeyException as e:
             hosts_file = known_hosts_path(pod)
             raise LiumHostKeyError(
@@ -3348,6 +3502,24 @@ class Lium:
             entry.give_back_sftp(sftp, shared)
             self._done_with(pod, entry)
 
+    @contextmanager
+    def _timed_sftp(self, pod: PodInfo, timeout: Optional[float], what: str):
+        """:meth:`_sftp`; with ``timeout``, an SFTP session on a connection that one deadline bounds
+        (connect, auth and transfer) and that is closed when it runs out, so never the kept one
+        other calls share."""
+        if timeout is None:
+            with self._sftp(pod) as sftp:
+                yield sftp
+            return
+        deadline = time.monotonic() + timeout
+        with self.ssh_connection(pod, deadline=deadline) as client:
+            with _transfer_deadline(client, deadline - time.monotonic(), what):
+                sftp = client.open_sftp()
+                try:
+                    yield sftp
+                finally:
+                    sftp.close()
+
     def _prep_command(self, command: str, env: Optional[Dict[str, str]] = None) -> str:
         """Prefix ``command`` with the exports spelled out inline.
 
@@ -3372,6 +3544,7 @@ class Lium:
         timeout: Optional[float] = None,
         detach: bool = False,
         log_path: Optional[str] = None,
+        output_tail_bytes: Optional[int] = None,
         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
     ) -> Dict[str, Any]:
         """Execute a shell command on a pod over SSH.
@@ -3399,6 +3572,11 @@ class Lium:
             log_path: Log file for ``detach`` (default
                 ``/workspace/logs/exec-<UTC timestamp>-<id>.log``, the ``<id>`` a
                 6-hex tail that keeps two launches in the same second apart).
+            output_tail_bytes: Keep only the last this many bytes of stdout and of stderr
+                each (``0`` keeps none); the rest is read and dropped while the command runs,
+                and ``truncated`` is ``True`` in the result. The call still succeeds: this
+                keeps a tail, it is not a limit that fails the call. ``timeout`` then also bounds reading the
+                output, so a host that never stops sending cannot hold the call.
 
             max_output_bytes: Limit on the output bytes, stdout and stderr
                 together (default 64 MiB). It bounds output bytes, not memory:
@@ -3414,9 +3592,11 @@ class Lium:
 
         Raises:
             OutputLimitExceeded: stdout and stderr together are more than ``max_output_bytes``.
-            ValueError: an ``env`` name is not a shell identifier. Raised before
-                the connection is opened, so nothing reaches the pod.
+            ValueError: an ``env`` name is not a shell identifier, or ``output_tail_bytes``
+                is negative. Raised before the connection is opened, so nothing reaches the pod.
         """
+        if output_tail_bytes is not None and output_tail_bytes < 0:
+            raise ValueError(f"output_tail_bytes must be 0 or more, got {output_tail_bytes!r}")
         if log_path is not None and not detach:
             raise ValueError("log_path only applies with detach=True")
         if detach:
@@ -3435,6 +3615,8 @@ class Lium:
             # and this call has no stdin to give it.
             stdin.close()
             channel = stdout.channel
+            if output_tail_bytes is not None:
+                return self._drain_capped(channel, output_tail_bytes, timeout, pod, command)
             # Drain both streams while waiting: output past the SSH channel window (2 MiB) blocks the
             # remote command, which then never sends the exit status waited for below.
             total, over, lock = [0], threading.Event(), threading.Lock()
@@ -3490,6 +3672,39 @@ class Lium:
                 "exit_code": exit_code,
                 "success": exit_code == 0
             }
+
+    @staticmethod
+    def _drain_capped(channel: Any, cap: int, timeout: Optional[float], pod: PodInfo, command: str) -> Dict[str, Any]:
+        """Read both streams as they arrive, keeping the last ``cap`` bytes of each, until the remote
+        closes them and exits; ``timeout`` bounds the whole read, the remote's data included."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        kept = {"stdout": bytearray(), "stderr": bytearray()}
+        truncated = False
+        while True:
+            moved = False
+            for key, ready, recv in (("stdout", channel.recv_ready, channel.recv),
+                                     ("stderr", channel.recv_stderr_ready, channel.recv_stderr)):
+                if ready():
+                    data, moved = recv(65536), True
+                    kept[key] += data
+                    if len(kept[key]) > cap:  # the tail: an error, or the timeout marker, comes last
+                        truncated = True
+                        del kept[key][: len(kept[key]) - cap]  # not [:-cap]: cap 0 would keep all
+            if not moved and channel.exit_status_ready() and channel.eof_received:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                channel.close()
+                raise TimeoutError(f"Command did not finish within {timeout}s on pod {pod.name or pod.huid}: {command}")
+            if not moved:
+                time.sleep(0.05)
+        exit_code = channel.recv_exit_status()
+        return {
+            "stdout": kept["stdout"].decode("utf-8", errors="replace"),
+            "stderr": kept["stderr"].decode("utf-8", errors="replace"),
+            "exit_code": exit_code,
+            "success": exit_code == 0,
+            "truncated": truncated,
+        }
 
     @staticmethod
     def default_detach_log_path() -> str:
@@ -4075,41 +4290,58 @@ class Lium:
             time.sleep(self.poll_delay(elapsed, poll_interval))
         return None
 
-    def scp(self, pod: PodInfo, *, local: str, remote: str) -> None:
+    def scp(self, pod: PodInfo, *, local: str, remote: str, timeout: Optional[float] = None) -> None:
         """Upload a local file to a pod via SFTP.
 
         ``remote`` is a file path, or a directory: an existing remote directory, or a
         path ending in ``/`` (created if missing), receives the file under its own name.
+        ``timeout`` bounds the whole transfer, connecting included (:class:`TimeoutError`).
         """
-        with self._sftp(pod) as sftp:
+        with self._timed_sftp(pod, timeout, f"upload of {local}") as sftp:
             sftp.put(local, _remote_file_path(sftp, local, remote))
 
-    def download(self, pod: PodInfo, *, remote: str, local: str) -> None:
+    def download(
+        self, pod: PodInfo, *, remote: str, local: str,
+        max_bytes: Optional[int] = None, timeout: Optional[float] = None,
+    ) -> None:
         """Download a file from a pod via SFTP.
 
         Args:
             pod: The pod to download from.
             remote: Remote file path on the pod.
             local: Local destination path.
+            max_bytes: Refuse a file larger than this; the transfer stops there.
+            timeout: Seconds for the whole transfer, connecting included; the
+                connection is closed when they run out.
 
         Raises:
-            ValueError: If SSH is not configured for the pod.
+            ValueError: If SSH is not configured for the pod, or the file passes ``max_bytes``.
             IsADirectoryError: If ``remote`` is a directory (SFTP copies one file);
                 nothing is written locally.
+            TimeoutError: The transfer did not finish within ``timeout``.
         """
-        with self._sftp(pod) as sftp:
+        with self._timed_sftp(pod, timeout, f"download of {remote}") as sftp:
             # sftp.get creates the local file before it reads the remote one, so check first.
             if stat.S_ISDIR(sftp.stat(remote).st_mode):
                 raise IsADirectoryError(f"{remote} is a directory on the pod; download copies one file")
             existed = os.path.lexists(local)  # lexists: a dangling symlink is the user's too
             try:
-                sftp.get(remote, local)
+                if max_bytes is None and timeout is None:
+                    sftp.get(remote, local)
+                else:  # chunked, so the size limit and the deadline's close cut it mid-file
+                    with sftp.open(remote, "rb") as src, open(local, "wb") as dst:
+                        total = 0
+                        while chunk := src.read(32768):
+                            total += len(chunk)
+                            if max_bytes is not None and total > max_bytes:
+                                raise ValueError(f"{remote} is larger than the {max_bytes}-byte limit")
+                            dst.write(chunk)
             except BaseException:
                 if not existed:  # never leave a partial or 0-byte file behind, never delete the user's own file
                     Path(local).unlink(missing_ok=True)
                 raise
 
-    def upload(self, pod: PodInfo, *, local: str, remote: str) -> None:
+    def upload(self, pod: PodInfo, *, local: str, remote: str, timeout: Optional[float] = None) -> None:
         """Upload a file to a pod via SFTP.
 
         This is an alias for :meth:`scp` for parity with the CLI.
@@ -4118,11 +4350,12 @@ class Lium:
             pod: The pod to upload to.
             local: Local file path to upload.
             remote: Remote destination path on the pod.
+            timeout: Seconds for the whole transfer, as in :meth:`scp`.
 
         Raises:
             ValueError: If SSH is not configured for the pod.
         """
-        self.scp(pod, local=local, remote=remote)
+        self.scp(pod, local=local, remote=remote, timeout=timeout)
 
     def ssh_argv(self, pod: PodInfo) -> List[str]:
         """The OpenSSH argument list that opens a shell on a pod.
