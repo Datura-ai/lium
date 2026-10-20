@@ -149,6 +149,11 @@ def _check_prereqs(compute_dir: Path | None = None):
 
     _run("nvidia-smi --query-gpu=name --format=csv,noheader")
 
+    # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
+    # provider learns it from the preflight or a validator cycle later. The installer also installs the
+    # NVIDIA Container Toolkit, so it runs before the toolkit check.
+    failure = _install_sysbox(compute_dir) if compute_dir and not _has_sysbox() else ""
+
     if not _exists("nvidia-container-cli"):
         raise Exception("NVIDIA Container Toolkit not found (required for Docker GPU access)")
 
@@ -157,16 +162,15 @@ def _check_prereqs(compute_dir: Path | None = None):
 
     _run("docker info")
 
-    # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
-    # provider learns it from the preflight or a validator cycle later.
     if not _has_sysbox():
-        failure = _install_sysbox(compute_dir) if compute_dir else ""
-        if not _has_sysbox():
-            raise Exception(
-                "Sysbox runtime not found in Docker (required by validators).\n"
-                f"Install it with: {_SYSBOX_SETUP_COMMAND}\n"
-                "then run `lium mine` again." + (f"\n{failure}" if failure else "")
-            )
+        raise Exception(
+            "Sysbox runtime not found in Docker (required by validators).\n"
+            f"Install it with: {_SYSBOX_SETUP_COMMAND}\n"
+            "then run `lium mine` again." + (f"\n{failure}" if failure else "")
+        )
+    if failure:
+        # the installer registers the runtime before its GPU checks, so a late failure still leaves sysbox-runc
+        console.warning(f"The Sysbox installer reported a failure after installing the runtime:\n{failure}")
 
 
 def _install_sysbox(compute_dir: Path) -> str:
