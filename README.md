@@ -404,6 +404,9 @@ lium up 1 --ttl 6h                    # Terminate after 6 hours
 lium up 1 --budget 12.50              # Terminate once $12.50 has been spent
 lium up 1 --until "today 23:00"       # Terminate at 11 PM today
 
+# Create pod without the automatic volume backup
+lium up 1 --no-backup
+
 # Create pod with Jupyter
 lium up 1 --jupyter --yes
 

@@ -162,6 +162,7 @@ def test_rent_action_re_selects_on_the_server_capped_at_the_confirmed_price():
     assert "min_download_mbps" not in rent
     assert rent["max_price_per_gpu_hour"] == 0.30
     assert rent["template_id"] == "tpl-1" and rent["name"] == "my-pod" and rent["ports"] == 5
+    assert rent["enable_backups"] is True
     assert "dry_run" not in rent
 
 
@@ -277,3 +278,15 @@ def test_help_states_who_picks():
     assert result.exit_code == 0
     assert "the backend chooses" in result.output
     assert "one GPU unless -c" in result.output
+
+
+def test_rent_action_passes_no_backup_through():
+    lium = _SpecLium()
+
+    RentPodAction().execute(
+        {"lium": lium, "executor": CHEAP, "spec": {"gpu_type": "RTX4090", "gpu_count": 1},
+         "name": "my-pod", "enable_backups": False}
+    )
+
+    (rent,) = lium.rents
+    assert rent["enable_backups"] is False

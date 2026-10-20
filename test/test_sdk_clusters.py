@@ -206,6 +206,7 @@ def test_up_cluster_posts_the_group_and_returns_the_members(monkeypatch):
     assert post[2] == {
         "pod_name": "job", "template_id": "tpl-0.0.7", "executor_uuids": ["exec-0", "exec-1"],
         "user_public_key": ["ssh-ed25519 AAAA test"], "initial_port_count": 2, "enable_volume_encryption": True,
+        "enable_backups": True,
     }
     assert ("ssh-keys", ("ssh-ed25519 AAAA test",)) in client.calls
     assert cluster.id == "c-1" and [p.id for p in cluster.pods] == ["pod-0", "pod-1"]

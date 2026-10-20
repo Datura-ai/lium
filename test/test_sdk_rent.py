@@ -130,7 +130,7 @@ def test_rent_posts_the_spec_once_and_maps_the_pick(client):
         "min_download_mbps": 100,
         "pod_name": "train-1", "template_id": None, "dockerfile_content": None, "volume_id": None,
         "user_public_key": [KEY], "initial_port_count": 3, "enable_volume_encryption": True,
-        "backup_log_id": None, "restore_path": None, "dry_run": False,
+        "backup_log_id": None, "restore_path": None, "enable_backups": True, "dry_run": False,
     }
     assert [c.request.url for c in responses.calls] == [f"{BASE}/version", f"{BASE}/pods", f"{BASE}/executors/rent-by-spec"]
     assert isinstance(result, RentResult) and result.server_side is True and result.gpu_count == 1
@@ -317,6 +317,22 @@ def test_older_backend_lists_filters_picks_the_cheapest_and_rents_by_id(client):
     assert result.pod == {"id": "pod-uuid-9", "name": "train-1"}
     assert responses.calls[-1].request.url == f"{BASE}/executors/cheap/rent"
     assert json.loads(responses.calls[-1].request.body)["template_id"] == "22222222-2222-4222-8222-222222222222"
+    assert json.loads(responses.calls[-1].request.body)["enable_backups"] is True
+
+
+@responses.activate
+def test_a_rent_by_id_can_turn_the_automatic_backup_off(client):
+    _version(None)
+    _template()
+    _fleet()
+    responses.add(responses.POST, f"{BASE}/executors/cheap/rent", json={"id": "pod-uuid-9", "name": "train-1"})
+
+    client.rent(
+        gpu_type="H100", gpu_count=1, name="train-1", template_id="22222222-2222-4222-8222-222222222222", min_cpus=16, min_download_mbps=100,
+        ssh_keys=[KEY], enable_backups=False,
+    )
+
+    assert json.loads(responses.calls[-1].request.body)["enable_backups"] is False
 
 
 @responses.activate
@@ -387,6 +403,17 @@ def test_rent_by_spec_with_a_dockerfile_does_not_request_encryption(client):
     client.rent(gpu_type="H100", name="train-1", dockerfile_content="FROM busybox", ssh_keys=[KEY])
 
     assert json.loads(responses.calls[-1].request.body)["enable_volume_encryption"] is False
+
+
+@responses.activate
+def test_rent_by_spec_can_turn_the_automatic_backup_off(client):
+    _version(["rent_by_spec"])
+    responses.add(responses.GET, f"{BASE}/pods", json=[])
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", json=RENTED)
+
+    client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY], enable_backups=False)
+
+    assert json.loads(responses.calls[-1].request.body)["enable_backups"] is False
 
 
 @pytest.mark.parametrize("server_side", [True, False])
