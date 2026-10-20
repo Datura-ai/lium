@@ -2923,8 +2923,9 @@ class Lium:
         quotes the node's free GPUs, which is what ``lium up <node>`` rents without ``-c``), volume and backup storage per GB-hour, and an egress line with no amount (billed
         at what AWS charges). Returns the API's answer: ``price_per_hour``, ``lines`` (``item``,
         ``unit``, ``rate_usd``, ``quantity``, ``amount_usd``, ``note``), ``total_usd`` (egress not
-        included) and ``pod_balance_floor_usd`` (the balance a rent of this pod requires: 15 minutes of
-        ``price_per_hour``). Nothing is reserved. Returned as a :class:`JobQuote`.
+        included), ``pod_balance_floor_usd`` (this pod's part of the balance floor: 15 minutes of
+        ``price_per_hour``) and, when supplied by the server for a signed-in caller, ``rent_balance_required_usd`` (what the balance must be more than
+        for this rent: this pod plus 15 minutes of each open pod; 0 for an exempt account). Nothing is reserved. Returned as a :class:`JobQuote`.
 
         Args:
             executor: Node UUID, or the HUID ``lium ls`` prints for it.
