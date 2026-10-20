@@ -34,6 +34,7 @@ HOTKEY_NOT_REGISTERED = "HOTKEY_NOT_REGISTERED"
 PORTAL_AUTH_EXPIRED = "PORTAL_AUTH_EXPIRED"
 PORTAL_AUTH_INVALID = "PORTAL_AUTH_INVALID"
 PORTAL_AUTH_REFRESH_RACE = "PORTAL_AUTH_REFRESH_RACE"
+PORTAL_AUTH_TOTP_REQUIRED = "PORTAL_AUTH_TOTP_REQUIRED"
 PORTAL_FORBIDDEN = "PORTAL_FORBIDDEN"
 
 # Portal
@@ -65,6 +66,7 @@ _HINTS: dict[str, str] = {
     PORTAL_AUTH_EXPIRED: "Run `lium provider portal login` to refresh the JWT.",
     PORTAL_AUTH_INVALID: "Token rejected. Re-login with `lium provider portal login`.",
     PORTAL_AUTH_REFRESH_RACE: "Another lium provider process is refreshing the token; retry in a moment.",
+    PORTAL_AUTH_TOTP_REQUIRED: "Run `lium provider portal login --totp-code <code>` with your authenticator code or a recovery code.",
     PORTAL_FORBIDDEN: "The portal accepted the token but refused the action for this hotkey (e.g. machine-request detail needs a validator-verified node).",
     PORTAL_CONTRACT_DRIFT: "Portal payload schema mismatch. The portal API may have changed; report to maintainers.",
     PORTAL_NOT_FOUND: "The portal returned 404 for that resource (wrong UUID or already removed).",
@@ -179,6 +181,7 @@ __all__ = [
     "PORTAL_AUTH_EXPIRED",
     "PORTAL_AUTH_INVALID",
     "PORTAL_AUTH_REFRESH_RACE",
+    "PORTAL_AUTH_TOTP_REQUIRED",
     "PORTAL_FORBIDDEN",
     "PORTAL_CONTRACT_DRIFT",
     "PORTAL_NOT_FOUND",

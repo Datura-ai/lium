@@ -285,3 +285,52 @@ def test_signer_lazy_default_requires_coldkey_and_hotkey() -> None:
     client = ProviderClient(hotkey="hk")
     with pytest.raises(ValueError):
         _ = client.hotkey_ss58
+
+
+class _SequencedPortal(_FakePortal):
+    """Answers each POST with the next body in ``answers``."""
+
+    def __init__(self, answers: list[dict]) -> None:
+        super().__init__()
+        self.answers = answers
+
+    def post(self, path: str, *, json_body: dict | None = None, auth: bool = True) -> dict:
+        self.posts.append((path, json_body or {}, auth))
+        return self.answers.pop(0)
+
+
+def _mfa_challenge_body(hotkey: str) -> dict:
+    body = _login_response_body("", hotkey)
+    body.update(token=None, mfa_required=True, mfa_token="challenge-1")
+    return body
+
+
+def test_login_sends_the_authenticator_code_when_the_portal_asks_for_it(
+    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
+) -> None:
+    token = _make_jwt(int(time.time()) + 3600)
+    portal = _SequencedPortal(
+        [_mfa_challenge_body(fake_signer.ss58_address), _login_response_body(token, fake_signer.ss58_address)]
+    )
+    client = _build_client(portal, tmp_token_store, fake_signer)
+    client.totp_code = lambda: " 123456 "
+
+    response = client.login()
+
+    assert response.token == token
+    assert portal.posts[1] == ("/auth/login-totp", {"mfa_token": "challenge-1", "code": "123456"}, False)
+    assert tmp_token_store.load(fake_signer.ss58_address).token == token
+
+
+def test_login_without_a_code_source_refuses_an_authenticator_account(
+    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
+) -> None:
+    portal = _SequencedPortal([_mfa_challenge_body(fake_signer.ss58_address)])
+    client = _build_client(portal, tmp_token_store, fake_signer)
+
+    with pytest.raises(ProviderAuthError) as excinfo:
+        client.login()
+
+    assert excinfo.value.code == "PORTAL_AUTH_TOTP_REQUIRED"
+    assert [path for path, _, _ in portal.posts] == ["/auth/login-flexible"]
+    assert tmp_token_store.load(fake_signer.ss58_address) is None

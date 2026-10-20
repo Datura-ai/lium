@@ -7,6 +7,8 @@ The flag → env → ``~/.lium/config.ini`` resolution happens once in the
 
 from __future__ import annotations
 
+import sys
+
 import click
 
 from lium.provider.client import ProviderClient
@@ -15,11 +17,17 @@ from lium.provider.client import ProviderClient
 def build_client(ctx: click.Context) -> ProviderClient:
     """Construct ``ProviderClient`` from the resolved opts in ``ctx.obj``."""
     opts = (ctx.obj or {}).get("provider_opts") or {}
-    return ProviderClient(
+    client = ProviderClient(
         coldkey=opts.get("coldkey"),
         hotkey=opts.get("hotkey"),
         portal_url=opts.get("portal_url"),
     )
+    # an account with an authenticator app signs in with a code; only a terminal can be asked
+    if sys.stdin.isatty():
+        client.totp_code = lambda: click.prompt(
+            "Authenticator code (or a recovery code)", err=True
+        )
+    return client
 
 
 __all__ = ["build_client"]

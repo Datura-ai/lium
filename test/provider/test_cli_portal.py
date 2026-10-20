@@ -313,3 +313,30 @@ def test_provider_help_does_not_call_mine_a_renter_workflow() -> None:
 
     assert "renter workflows" not in result.output
     assert "validator weights" not in result.output
+
+
+def test_portal_login_totp_code_completes_the_authenticator_step(patched_build_client, fake_signer) -> None:
+    provider = {
+        "id": "m-7",
+        "miner_hotkey": fake_signer.ss58_address,
+        "provider_coldkey": "5CK",
+        "created_at": "2026-05-06T00:00:00",
+        "updated_at": "2026-05-06T00:00:00",
+    }
+    answers = [
+        {"provider": provider, "token": None, "mfa_required": True, "mfa_token": "challenge-1"},
+        {"provider": provider, "token": _make_jwt(int(time.time()) + 3600)},
+    ]
+    portal = _Portal()
+    portal.post = lambda path, *, json_body=None, auth=True: (  # type: ignore[method-assign]
+        portal.posts.append((path, json_body, auth)) or answers.pop(0)
+    )
+    patched_build_client(portal)
+
+    result = CliRunner().invoke(
+        provider_command,
+        ["--hotkey", "hk1", "portal", "login", "--totp-code", "654321"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert portal.posts[1] == ("/auth/login-totp", {"mfa_token": "challenge-1", "code": "654321"}, False)

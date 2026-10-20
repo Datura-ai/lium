@@ -11,6 +11,8 @@ executor). Re-add only when a corresponding portal route is re-enabled.
 
 # Auth
 LOGIN_FLEXIBLE = "/auth/login-flexible"
+# second step for an account with an authenticator app (portal DAH-4455)
+LOGIN_TOTP = "/auth/login-totp"
 LOGOUT = "/auth/logout"
 ME = "/auth/me"
 DISCORD_OAUTH_URL = "/auth/me/discord/oauth-url"
@@ -67,6 +69,7 @@ __all__ = [
     "EXECUTOR_VERIFICATION",
     "EXECUTORS",
     "LOGIN_FLEXIBLE",
+    "LOGIN_TOTP",
     "LOGOUT",
     "MACHINE_REQUEST_BY_ID",
     "MACHINE_REQUESTS",
