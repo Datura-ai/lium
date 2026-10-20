@@ -433,3 +433,26 @@ def test_unresolved_first_rent_is_not_retried_on_another_node_in_either_journey(
 
     cli = _TimedOut({})
     assert conftest.up_first_accepting(cli, _rental(conftest)).rc == 3 and cli.ups == ["x0"]
+
+
+def test_delete_registered_keys_removes_only_this_runs_keys_and_never_raises(monkeypatch, tmp_path):
+    """DAH-4715: each run's throwaway HOME mints a key that `up` registers; the account holds 50. Teardown deletes the
+    account keys matching home/.ssh/*.pub (comment ignored), retries a 400 (pod still stopping), and only warns."""
+    conftest = _load(monkeypatch)
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / ".ssh" / "id_ed25519.pub").write_text("ssh-ed25519 AAAAmine runner@host\n")
+    rows = [{"id": "k1", "public_key": "ssh-ed25519 AAAAmine"}, {"id": "k2", "public_key": "ssh-ed25519 AAAAhuman me@laptop"}]
+    calls, fail = [], [_http_error(400)]
+
+    def fake_urlopen(req, timeout):
+        calls.append((req.get_method(), req.full_url))
+        if req.get_method() == "DELETE" and fail:
+            raise fail.pop(0)
+        return _FakeListing(rows if req.get_method() == "GET" else {})
+
+    monkeypatch.setattr(conftest.urllib.request, "urlopen", fake_urlopen)
+    assert conftest.delete_registered_keys(tmp_path, url="https://x/api", sleep=lambda s: None) == 1
+    assert [c for c in calls if c[0] == "DELETE"] == [("DELETE", "https://x/api/ssh-keys/k1")] * 2
+    monkeypatch.setattr(conftest.urllib.request, "urlopen", lambda req, timeout: (_ for _ in ()).throw(_http_error(500)))
+    with pytest.warns(UserWarning, match="could not delete"):
+        assert conftest.delete_registered_keys(tmp_path, sleep=lambda s: None) == 0

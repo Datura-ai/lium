@@ -69,7 +69,7 @@ def get_version():
 # provider group and the package behind it — pydantic models, JWT, the portal client — are a fifth of
 # the CLI's import time warm (89 of 440 ms on a pod) and 40 % cold (281 of 696 ms on a fresh box);
 # `lium ls`/`ps`/`up` never touch it (DAH-3053).
-LAZY_COMMANDS = {"provider": "lium.cli.provider:provider_command"}
+LAZY_COMMANDS = {"provider": "lium.cli.provider:provider_command", "mcp": "lium.cli.mcp:mcp_command"}
 
 
 class LazyGroup(click.Group):
