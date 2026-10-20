@@ -28,6 +28,11 @@ def test_empty_machine_name_falls_back_to_gpu_details():
     assert info.gpu_count == 8
 
 
+def test_reliability_score_is_read_and_absent_is_none():
+    assert _client()._dict_to_executor_info(_record(reliability_score=81.2)).reliability_score == 81.2
+    assert _client()._dict_to_executor_info(_record()).reliability_score is None
+
+
 def test_missing_machine_name_key_does_not_raise():
     rec = _record()
     del rec["machine_name"]

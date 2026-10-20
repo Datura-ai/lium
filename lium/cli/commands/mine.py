@@ -319,6 +319,9 @@ def _setup_executor_env(
         if not _valid_port(p):
             raise Exception(f"Invalid port {name}={p} (must be 1-65535)")
 
+    # a re-run without --register rebuilds .env from the template; keep the claim the earlier --register wrote
+    old_claim = _env_value(env_f, "MINER_ACCOUNT_CLAIM")
+
     # read, rewrite, preserve
     src_lines = env_t.read_text().splitlines()
     out_lines = []
@@ -347,6 +350,8 @@ def _setup_executor_env(
             # DAH-3075: blank means "same as SSH_PORT" (the documented meaning); keeping the template's
             # hard-coded 2200 while SSH_PORT changed sent the validator to a port nothing listens on
             put(k, ssh_public_port or ssh_port)
+        elif k == "MINER_ACCOUNT_CLAIM" and old_claim:
+            put(k, old_claim)
         elif k == "RENTING_PORT_RANGE":
             if port_range:
                 put(k, port_range)
@@ -362,6 +367,8 @@ def _setup_executor_env(
         "EXTERNAL_PORT": external_port,
         "SSH_PORT": ssh_port,
     }
+    if old_claim:
+        required["MINER_ACCOUNT_CLAIM"] = old_claim
     for k, v in required.items():
         if k not in seen and not any(l.startswith(f"{k}=") for l in out_lines):
             out_lines.append(f"{k}={v}")
@@ -517,17 +524,49 @@ def _compose_diagnostics(executor_dir: Path, tail: int = 30) -> str:
     return "\n".join(parts)
 
 
-def _start_executor(executor_dir: Path, wait_secs: int = 180):
+def _env_value(env_f: Path, key: str) -> str:
+    try:
+        lines = env_f.read_text().splitlines()
+    except FileNotFoundError:
+        return ""
+    return next((line.split("=", 1)[1].strip() for line in lines if line.startswith(f"{key}=")), "")
+
+
+def _executor_env_value(executor_dir: Path, key: str) -> Optional[str]:
+    """``key`` in the environment the executor container was created with; None when there is no executor container."""
+    cid = _run("docker compose -f docker-compose.app.yml ps -aq executor", check=False, cwd=str(executor_dir))[0].strip()
+    if not cid:
+        return None
+    env = _run(f"docker inspect --format '{{{{range .Config.Env}}}}{{{{println .}}}}{{{{end}}}}' {cid}", check=False)[0]
+    return next((line.split("=", 1)[1].strip() for line in env.splitlines() if line.startswith(f"{key}=")), "")
+
+
+def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = False):
     # Start using the default docker-compose.yml
-    _run("docker compose up -d", capture=True, cwd=str(executor_dir))
+    # recreate: an executor already running keeps its old .env, so a new MINER_ACCOUNT_CLAIM never reaches it;
+    # a plain re-run leaves a running executor alone
+    ps_cmd = "docker compose -f docker-compose.app.yml ps -q executor"
+    if recreate:
+        # a recreate restarts the executor under running rentals; the validator names rental pods pod_* (lium-io const.py)
+        names = _run("docker ps --filter status=created --filter status=running --format '{{.Names}}'", check=False)[0].split()
+        if rentals := [n for n in names if n.startswith("pod_")]:
+            console.warning(
+                f"{len(rentals)} rental(s) running on this node, so the executor was not restarted. "
+                "The new account claim is in .env and applies on its next restart; rerun this command once the rentals end."
+            )
+            recreate = False
+    # after --force-recreate the old container can still report healthy; wait for one with a new ID
+    old_id = _run(ps_cmd, check=False, cwd=str(executor_dir))[0].strip() if recreate else ""
+    command = "docker compose up -d --force-recreate" if recreate else "docker compose up -d"
+    _run(command, capture=True, cwd=str(executor_dir))
 
     # Wait for the executor service to be fully healthy
     start = time.time()
     
     while time.time() - start < wait_secs:
         # Get the container name/ID for the executor service
-        out, _ = _run("docker compose -f docker-compose.app.yml ps -q executor", cwd=str(executor_dir))
-        if not out.strip():
+        out, _ = _run(ps_cmd, cwd=str(executor_dir))
+        if not out.strip() or out.strip() == old_id:
             time.sleep(2)
             continue
             
@@ -550,7 +589,7 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180):
 
 def _apply_env_overrides(
     executor_dir: Path,
-    internal: str, external: str, ssh: str, ssh_pub: str, rng: str
+    internal: str, external: str, ssh: str, ssh_pub: str, rng: str, account_claim: str | None = None
 ):
     env_f = executor_dir / ".env"
     content = env_f.read_text().splitlines()
@@ -571,6 +610,8 @@ def _apply_env_overrides(
     set_or_append("SSH_PUBLIC_PORT", ssh_pub or ssh)
     if rng:
         set_or_append("RENTING_PORT_RANGE", rng)
+    if account_claim:
+        set_or_append("MINER_ACCOUNT_CLAIM", account_claim)
     env_f.write_text("\n".join(content) + "\n")
 
 def _gather_inputs(
@@ -920,6 +961,14 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 "❌ --hotkey differs from what the register token says this node reports under; drop -k, the token decides."
             )
             raise SystemExit(1)
+        # the claims were read without the portal's secret: the portal checks them before anything is installed
+        try:
+            reg.confirm_register_token(reg.build_http(portal_url, token.token))
+        except reg.RegisterError as e:
+            from rich.markup import escape
+
+            console.error(f"❌ {escape(str(e))}")
+            raise SystemExit(1)
         # what the executor reports under: the account's own key, or the portal's for an account without one
         # (lium-platform#294) — the SS58 check in _setup_executor_env applies to this value, not to the account id
         hotkey = token.node_hotkey
@@ -970,6 +1019,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 ssh=answers["ssh_port"],
                 ssh_pub=answers["ssh_public_port"],
                 rng=answers["port_range"],
+                account_claim=token.account_claim if token else None,
             )
 
             # A taken host port makes `docker compose up` loop on
@@ -978,7 +1028,10 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             _check_ports_free(_host_ports_from_answers(answers), executor_dir)
 
         with timed_step_status(5, TOTAL_STEPS, "Starting node"):
-            _start_executor(executor_dir)
+            # recreate only an executor whose claim differs from .env: a repeat run leaves it alone, and a rerun after
+            # a restart skipped under rentals still delivers the claim .env already holds
+            running_claim = _executor_env_value(executor_dir, "MINER_ACCOUNT_CLAIM")
+            _start_executor(executor_dir, recreate=running_claim not in (None, _env_value(executor_dir / ".env", "MINER_ACCOUNT_CLAIM")))
 
         console.dim(
             "Validation runs the validator's preflight image: GPU check, matrix "

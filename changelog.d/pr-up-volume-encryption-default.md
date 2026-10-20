@@ -1,0 +1,2 @@
+### Changed
+- `lium up` and `Lium.up()` / `Lium.rent()` request an encrypted local volume only when the template says its image supports one (`Template.supports_volume_encryption`, now read from the API), or when asked with `--volume-encryption` / `enable_volume_encryption=True`. A `--dockerfile` build or an `--image` without support no longer asks for encryption it cannot get. `--no-volume-encryption` / `enable_volume_encryption=False` work as before. `rent()` without a template still requests it, since the recommended template supports it.
