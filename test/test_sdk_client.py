@@ -665,3 +665,29 @@ def test_pod_volume_path_prefers_validator_mount_over_template():
 
     assert pod(local_volume_path="/root").default_restore_path == "/root/restored"
     assert pod().default_restore_path == "/workspace/restored"
+
+
+def test_ps_maps_local_volume_path_from_the_pods_row(monkeypatch):
+    payload = [{"id": "p1", "pod_name": "n", "status": "RUNNING", "template": {"volumes": ["/workspace"]},
+                "local_volume_path": "/root"}]
+    monkeypatch.setattr(Lium, "_request", lambda self, *a, **kw: SimpleNamespace(json=lambda: payload))
+
+    pod = Lium(Config(api_key="test")).ps()[0]
+
+    assert pod.local_volume_path == "/root"
+    assert pod.default_restore_path == "/root/restored"
+
+
+def test_switch_template_maps_local_volume_path_from_the_response(monkeypatch):
+    import lium.sdk.client as client_mod
+
+    response = {"pod_name": "n", "status": "PENDING", "template_id": "t2", "local_volume_path": "/root"}
+    monkeypatch.setattr(Lium, "_request", lambda self, *a, **kw: SimpleNamespace(json=lambda: response))
+    monkeypatch.setattr(client_mod, "forget_host_key", lambda pod: None)
+    monkeypatch.setattr(Lium, "_release_ssh", lambda self, pod: None)
+    pod = SimpleNamespace(id="p1", name="n", huid="h")
+
+    new = Lium(Config(api_key="test")).switch_template(pod, template_id="t2")
+
+    assert new.local_volume_path == "/root"
+    assert new.default_restore_path == "/root/restored"
