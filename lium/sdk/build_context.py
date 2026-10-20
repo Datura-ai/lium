@@ -95,8 +95,9 @@ def is_ignored(rel_path: str, rules: List[Tuple[bool, re.Pattern]]) -> bool:
 def pack(context_dir: Path, max_bytes: Optional[int] = None, dockerfile: Optional[Path] = None) -> bytes:
     """A gzipped tar of ``context_dir`` without what its ignore file leaves out (see :func:`read_dockerignore`).
 
-    Raises ValueError for a symlink that points outside the context (the build could not
-    follow it either) or a context past ``max_bytes``, counted both as the files' unpacked size
+    Written as plain ustar (no PAX, long-name or hard-link headers), the only form the validator unpacks.
+    Raises ValueError for a symlink whose target is absolute or has a ``..`` part, a path past ustar's
+    limit (255 characters, 100 for the last part) or a context past ``max_bytes``, counted both as the files' unpacked size
     (so a sparse or zero-filled file cannot unpack to gigabytes on the node) and as the archive. Owners are dropped: the build
     sees root-owned files, as with ``docker build``.
     """
@@ -116,7 +117,19 @@ def pack(context_dir: Path, max_bytes: Optional[int] = None, dockerfile: Optiona
     )
     unpacked = 0
     buffer = io.BytesIO()
-    with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) as gz, tarfile.open(fileobj=gz, mode="w") as tar:
+    with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) as gz, tarfile.open(
+        fileobj=gz, mode="w", format=tarfile.USTAR_FORMAT
+    ) as tar:
+
+        def _add(full: str, rel: str) -> None:
+            tar.inodes.clear()  # a second name of one inode goes in as a file, never a hard link
+            try:
+                tar.add(full, arcname=rel, recursive=False, filter=_reset_owner)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{rel}: the path or link target is too long for the build context (255 characters, 100 for the last part)"
+                ) from exc
+
         for root, dirs, files in os.walk(context_dir):
             rel_root = Path(root).relative_to(context_dir).as_posix()
             rel_root = "" if rel_root == "." else rel_root + "/"
@@ -126,7 +139,7 @@ def pack(context_dir: Path, max_bytes: Optional[int] = None, dockerfile: Optiona
                 rel = rel_root + name
                 ignored = is_ignored(rel, rules)
                 if not ignored:
-                    tar.add(os.path.join(root, name), arcname=rel, recursive=False, filter=_reset_owner)
+                    _add(os.path.join(root, name), rel)
                 if os.path.islink(os.path.join(root, name)):
                     if not ignored:
                         _check_link(context_dir, root, name, rel)
@@ -147,7 +160,7 @@ def pack(context_dir: Path, max_bytes: Optional[int] = None, dockerfile: Optiona
                     unpacked += os.stat(full).st_size  # before reading it: st_size is what the node unpacks
                     if max_bytes is not None and unpacked > max_bytes:
                         raise too_large
-                tar.add(full, arcname=rel, recursive=False, filter=_reset_owner)
+                _add(full, rel)
                 if max_bytes is not None and buffer.tell() > max_bytes:
                     raise too_large
     data = buffer.getvalue()
@@ -157,7 +170,10 @@ def pack(context_dir: Path, max_bytes: Optional[int] = None, dockerfile: Optiona
 
 
 def _check_link(context_dir: Path, root: str, name: str, rel: str) -> None:
-    target = os.readlink(os.path.join(root, name))
-    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(rel), target.replace(os.sep, "/")))
+    target = os.readlink(os.path.join(root, name)).replace(os.sep, "/")
+    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(rel), target))
     if os.path.isabs(target) or resolved == ".." or resolved.startswith("../"):
         raise ValueError(f"{rel} is a symlink to {target}, outside the build context")
+    # the validator refuses any `..` in a link: a chain of links through `.` could otherwise leave the context
+    if ".." in target.split("/"):
+        raise ValueError(f"{rel} is a symlink to {target}; point it without `..` or copy the file into place")

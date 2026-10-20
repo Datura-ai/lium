@@ -151,6 +151,45 @@ def test_pack_refuses_a_symlink_out_of_the_context(tmp_path, target):
         build_context.pack(tmp_path)
 
 
+def test_pack_refuses_a_symlink_with_a_dotdot_part_even_inside_the_context(tmp_path):
+    # Arrange: resolves inside the context, but the validator refuses any `..` in a link
+    _tree(tmp_path, {"src/lib.py": "x"})
+    (tmp_path / "pkg").mkdir()
+    os.symlink("../src/lib.py", tmp_path / "pkg" / "lib.py")
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="without `..`"):
+        build_context.pack(tmp_path)
+
+
+def test_pack_writes_plain_ustar_headers_only(tmp_path):
+    # Arrange: a 200-character path (ustar prefix field) and a second name of one inode
+    long_rel = "d" * 99 + "/" + "f" * 100
+    _tree(tmp_path, {long_rel: "x", "a.txt": "y"})
+    os.link(tmp_path / "a.txt", tmp_path / "b.txt")
+
+    # Act
+    archive = build_context.pack(tmp_path)
+
+    # Assert: no PAX, GNU long-name or hard-link header, every member a file, directory or symlink
+    raw = gzip.decompress(archive)
+    assert b"PaxHeader" not in raw and b"././@LongLink" not in raw
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        members = tar.getmembers()
+    assert long_rel in {m.name for m in members}
+    assert all(m.type in (tarfile.REGTYPE, tarfile.DIRTYPE, tarfile.SYMTYPE) for m in members)
+    assert {m.name for m in members if m.isfile()} >= {"a.txt", "b.txt"}
+
+
+def test_pack_refuses_a_path_past_the_ustar_limit(tmp_path):
+    # Arrange: the last part alone is longer than 100 characters
+    _tree(tmp_path, {"f" * 101: "x"})
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="too long for the build context"):
+        build_context.pack(tmp_path)
+
+
 def test_pack_refuses_more_than_max_bytes(tmp_path):
     # Arrange
     (tmp_path / "noise.bin").write_bytes(os.urandom(64 * 1024))
