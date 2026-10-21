@@ -490,7 +490,7 @@ def test_start_executor_does_not_recreate_under_running_rentals(monkeypatch, tmp
     assert warnings and "1 rental(s) running" in warnings[0]
 
 
-def test_start_executor_skips_compose_up_under_rentals_while_the_runner_runs(monkeypatch, tmp_path: Path) -> None:
+def test_start_executor_keeps_a_running_runner_under_rentals(monkeypatch, tmp_path: Path) -> None:
     """A plain `up -d` recreates a runner whose config changed, and the runner force-recreates the executor."""
     calls: list[str] = []
 
@@ -509,7 +509,7 @@ def test_start_executor_skips_compose_up_under_rentals_while_the_runner_runs(mon
 
     mine._start_executor(tmp_path)
 
-    assert not [c for c in calls if c.startswith("docker compose up")]
+    assert [c for c in calls if c.startswith("docker compose up")] == ["docker compose up -d --no-recreate"]
 
 
 def test_start_executor_does_not_recreate_containers_under_rentals_when_starting_a_stopped_runner(monkeypatch, tmp_path: Path) -> None:

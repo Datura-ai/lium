@@ -503,18 +503,14 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = F
             "The new account claim is in .env and applies on its next restart; rerun this command once the rentals end."
         )
         recreate = False
-    # even a plain `up -d` recreates a runner whose config changed, and the runner force-recreates the executor
-    runner_up = bool(rentals) and bool(
-        _run("docker compose ps -q --status running executor-runner", check=False, cwd=str(executor_dir))[0].strip()
-    )
     # after --force-recreate the old container can still report healthy; wait for one with a new ID
     old_id = _run(ps_cmd, check=False, cwd=str(executor_dir))[0].strip() if recreate else ""
     command = "docker compose up -d --force-recreate" if recreate else "docker compose up -d"
     if rentals:
-        # under rentals compose only starts what is missing; a changed config never recreates a running container
+        # even a plain `up -d` recreates a runner whose config changed, and the runner force-recreates the executor;
+        # under rentals compose only starts what is missing
         command = "docker compose up -d --no-recreate"
-    if not runner_up:
-        _run(command, capture=True, cwd=str(executor_dir))
+    _run(command, capture=True, cwd=str(executor_dir))
 
     # Wait for the executor service to be fully healthy
     start = time.time()
