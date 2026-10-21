@@ -522,3 +522,19 @@ def test_help_documents_timeout_with_its_default():
 
     assert "--timeout" in result.output
     assert "900" in result.output
+
+
+@pytest.mark.parametrize("args, backups", [((), True), (("--no-backup",), False)])
+def test_up_says_backups_are_on_unless_no_backup_turns_them_off(monkeypatch, args, backups):
+    seen = []
+
+    class _Rent:
+        def execute(self, ctx):
+            seen.append(ctx["enable_backups"])
+            return ActionResult(ok=True, data={"pod_info": {}, "pod_id": "pod-1", "pod_name": "train"})
+
+    result = _run_up(monkeypatch, rent_action=_Rent, args=args)
+
+    assert result.exit_code == 0, result.output
+    assert seen == [backups]
+    assert ("Backups on:" in _flat(result.output)) is backups

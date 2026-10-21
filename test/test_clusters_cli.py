@@ -179,6 +179,17 @@ def test_clusters_up_by_index_rents_the_cheapest_nodes(monkeypatch, tmp_path):
     assert [p for p, _ in FakeLium.scheduled] == ["pod-0", "pod-1"]
 
 
+@pytest.mark.parametrize("args, backups", [((), True), (("--no-backup",), False)])
+def test_clusters_up_says_backups_are_on_unless_no_backup_turns_them_off(monkeypatch, tmp_path, args, backups):
+    _patch(monkeypatch, tmp_path)
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--no-wait", *args)
+
+    assert result.exit_code == 0, result.output
+    assert FakeLium.up_calls[0][1]["enable_backups"] is backups
+    assert ("Backups on:" in _flat(result.output)) is backups
+
+
 def test_clusters_up_no_wait_does_not_wait(monkeypatch, tmp_path):
     _patch(monkeypatch, tmp_path)
 

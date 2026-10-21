@@ -466,6 +466,7 @@ class LiumTools:
         timeout_seconds: int = 600,
         rental: Optional[_Rental] = None,
         known_pod_ids: Optional[List[str]] = None,
+        enable_backups: bool = True,
     ) -> Dict[str, Any]:
         """``known_pod_ids``: pods the host says it already holds; naming one acknowledges its delivery.
         ``rental``: the async tool passes its own and calls :meth:`deliver` or :meth:`cancel_rental` once it knows
@@ -574,7 +575,7 @@ class LiumTools:
             try:
                 created = self.client.up(
                     executor_id=executor_id, name=name, template_id=template_id, wait=False,
-                    idempotency_key=key, confirmed_only=True, before_send=journal,
+                    idempotency_key=key, confirmed_only=True, before_send=journal, enable_backups=enable_backups,
                 )
             except LiumRentOutcomeUnknownError as e:
                 # a request went unanswered and nothing proved what became of it: a pod may exist. The journaled
@@ -1153,6 +1154,7 @@ def tool_functions(tools: LiumTools) -> List[Callable[..., Awaitable[Dict[str, A
         timeout_seconds: int = 600,
         known_pod_ids: Optional[List[str]] = None,
         dry_run: bool = False,
+        enable_backups: bool = True,
     ) -> Dict[str, Any]:
         """Use this when you have picked a node and want to rent a GPU pod on it: rents it and waits until it is
         running. executor_id is the executor_id from list_gpus, or the id (or rent_url) that docs.lium.io/mcp
@@ -1162,13 +1164,14 @@ def tool_functions(tools: LiumTools) -> List[Callable[..., Awaitable[Dict[str, A
         not rent again, poll list_pods or remove_pod its pod_id.
         If it has status "recovered", nothing new was rented: it lists pods earlier calls rented that you have not
         used yet. To rent another pod next to those, pass their ids as known_pod_ids. One rent_pod runs at a time:
-        while one is still running, another returns the error rent_in_progress and rents nothing."""
+        while one is still running, another returns the error rent_in_progress and rents nothing.
+        Lium backs up the pod's data automatically; enable_backups=false rents it without that backup."""
         if dry_run:
             return await asyncio.to_thread(tools.quote_rental, executor_id)
         rental = _Rental()
         try:
             result = await asyncio.to_thread(
-                tools.rent_pod, executor_id, name, template_id, timeout_seconds, rental, known_pod_ids
+                tools.rent_pod, executor_id, name, template_id, timeout_seconds, rental, known_pod_ids, enable_backups
             )
         except asyncio.CancelledError:
             # the thread runs on; whatever pod it rents is removed, since the host will never learn its id

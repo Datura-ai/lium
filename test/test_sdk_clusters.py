@@ -212,6 +212,19 @@ def test_up_cluster_posts_the_group_and_returns_the_members(monkeypatch):
     assert cluster.id == "c-1" and [p.id for p in cluster.pods] == ["pod-0", "pod-1"]
 
 
+def test_up_cluster_can_turn_the_automatic_backup_off(monkeypatch):
+    client = _Client(
+        routes={("POST", "/executors/cluster/rent"): {"success": True, "pod_ids": ["pod-0", "pod-1"]}},
+        ps_sequence=[_pods([_pod_payload(0), _pod_payload(1)])],
+    )
+    monkeypatch.setattr(client, "cluster_template", lambda: _template("0.0.7"))
+
+    client.up_cluster(["exec-0", "exec-1"], name="job", enable_backups=False)
+
+    post = next(c for c in client.calls if c[0] == "POST")
+    assert post[2]["enable_backups"] is False
+
+
 def test_up_cluster_uses_the_given_template_and_skips_the_lookup(monkeypatch):
     client = _Client(
         routes={("POST", "/executors/cluster/rent"): {"success": True, "pod_ids": ["pod-0", "pod-1"]}},

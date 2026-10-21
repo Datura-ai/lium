@@ -123,6 +123,17 @@ def test_rental_passes_image_through_to_the_rent():
     assert rent[1]["image"] == "repo/img:tag"
 
 
+def test_up_and_rental_pass_the_backup_opt_out_through_to_the_rent():
+    client = _Client(ps_sequence=[[_pod("RUNNING")]])
+
+    client.up(executor_id="exec-1", name="job", enable_backups=False)
+    with client.rental(executor_id="exec-1", name="job", enable_backups=False):
+        pass
+
+    rents = [call[1] for call in client.calls if call[0] == "rent"]
+    assert [r["enable_backups"] for r in rents] == [False, False]
+
+
 def test_rental_removes_the_pod_when_the_block_raises():
     client = _Client(ps_sequence=[[_pod()]])
 
