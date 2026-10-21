@@ -2409,6 +2409,7 @@ class Lium:
                 api_key_id=_pod_api_key_id(d),
                 api_key_name=d.get("api_key_name"),
                 api_key_stamped="api_key_id" in d or "created_by_api_key_id" in d,
+                local_volume_path=d.get("local_volume_path"),
             ))
 
         return pods
@@ -4932,6 +4933,7 @@ class Lium:
             jupyter_url=None,
             enable_volume_encryption=response.get("enable_volume_encryption"),
             volume_encryption_status=response.get("volume_encryption_status"),
+            local_volume_path=response.get("local_volume_path"),
         )
 
     
