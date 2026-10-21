@@ -257,7 +257,7 @@ def _listing(node_id: str = "node-1", ip: str = "203.0.113.7", port: int = 8080)
     ], "total": 1})
 
 
-def test_register_node_posts_with_the_token_and_finds_the_id_without_it() -> None:
+def test_register_node_posts_and_finds_the_id_with_the_token() -> None:
     portal = _Portal()
     portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued"}}))
     portal.on("GET", "/executors", _listing())
@@ -268,7 +268,7 @@ def test_register_node_posts_with_the_token_and_finds_the_id_without_it() -> Non
     assert post["headers"]["Authorization"] == "Bearer TOKEN"
     assert post["json"] == {"gpu_type": "NVIDIA L4", "ip_address": "203.0.113.7", "port": 8080,
                             "price_per_gpu": 0.11, "gpu_count": 1}
-    assert "Authorization" not in get["headers"]
+    assert get["headers"]["Authorization"] == "Bearer TOKEN"  # the portal shows the address to the owner only
     assert get["params"] == {"miner_hotkey": HOTKEY, "page": 1, "limit": 100}
 
 
@@ -534,6 +534,7 @@ def _stub_host(monkeypatch, tmp_path: Path, *, nvidia_smi: str = "NVIDIA L4, 230
     monkeypatch.setattr(mine, "_clone_or_update_repo", fake_clone)
     for name in ("_install_executor_tools", "_check_prereqs", "_check_free_disk", "_start_executor", "_validate_executor", "_check_ports_free"):
         monkeypatch.setattr(mine, name, lambda *a, **k: None)
+    monkeypatch.setattr(mine, "_docker_storage_limited", lambda: True)
 
     class _Pull:
         def poll(self): return 0
@@ -610,6 +611,34 @@ def test_mine_register_runs_the_install_then_registers_and_waits(monkeypatch, tm
     assert "VALIDATION_PENDING" in result.output and "Node listed (AVAILABLE)" in result.output
 
 
+def test_mine_register_never_formats_a_disk_for_the_storage_limit(monkeypatch, tmp_path: Path) -> None:
+    """--register implies --auto, and the portal's command runs unattended: on a host whose Docker cannot cap a
+    container's disk it prints the manual setup command and installs on, it never plans or runs the disk setup."""
+    import lium.cli.mine.gpu_splitting as gs
+
+    target, executor_dir = _stub_host(monkeypatch, tmp_path)
+    monkeypatch.setattr(mine, "_docker_storage_limited", lambda: False)
+    touched: list[str] = []
+    monkeypatch.setattr(gs, "_preflight", lambda: touched.append("preflight"))
+    monkeypatch.setattr(gs, "_execute_setup", lambda plan: touched.append("execute"))
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued"}}))
+    portal.on("GET", "/executors", _listing())
+    portal.on("GET", "/executors/node-1", _status("AVAILABLE"))
+    monkeypatch.setattr(reg, "build_http", lambda url, token: _http(portal))
+    monkeypatch.setattr(reg, "wait_until_listed", _wait_no_sleep)
+
+
+    result = CliRunner().invoke(
+        mine.mine_command,
+        ["--register", _token(exp=int(time.time()) + 3600), "--dir", str(target),
+         "--portal-url", "https://provider-api.example", "--wait", "5"],
+    )
+    assert result.exit_code == 0, result.output
+    assert touched == []
+    assert "lium gpu-splitting setup --device" in result.output
+
+
 def test_mine_register_repeated_with_the_same_claim_does_not_recreate_the_executor(monkeypatch, tmp_path: Path) -> None:
     """A recreate restarts the executor under its rentals; only a claim the executor does not already run with needs
     one, so a rerun after a restart skipped under rentals still recreates though .env already holds the claim."""
@@ -630,6 +659,7 @@ def test_mine_register_repeated_with_the_same_claim_does_not_recreate_the_execut
     portal.on("GET", "/executors/node-1", _status("AVAILABLE"))
     monkeypatch.setattr(reg, "build_http", lambda url, token: _http(portal))
     monkeypatch.setattr(reg, "wait_until_listed", _wait_no_sleep)
+
 
     for claim, rentals in (("ab12" * 8, False), ("ab12" * 8, False), ("cd34" * 8, True), ("cd34" * 8, False),
                            ("cd34" * 8, False)):

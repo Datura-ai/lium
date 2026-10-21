@@ -113,6 +113,7 @@ def _execution_plan(tmp_path, docker_mount: MountInfo | None = None) -> SetupPla
 
 def _patch_execute_setup_dependencies(monkeypatch, run_command, load_mount_info, verification=None):
     monkeypatch.setattr(gpu_splitting, "timed_step_status", _no_spinner)
+    monkeypatch.setattr(gpu_splitting, "_pre_stop_checks", lambda *_: None)
     monkeypatch.setattr(gpu_splitting, "_partition_paths_for_disk", lambda *_: set())
     monkeypatch.setattr(gpu_splitting, "_ensure_xfs_compliant", lambda *_: None)
     monkeypatch.setattr(gpu_splitting, "_mount_validation", lambda *_: None)
@@ -217,7 +218,8 @@ def test_gpu_splitting_setup_aborts_on_negative_confirmation(monkeypatch):
     monkeypatch.setattr(gpu_splitting, "timed_step_status", _no_spinner)
     monkeypatch.setattr(gpu_splitting, "_preflight", _sample_preflight)
     monkeypatch.setattr(gpu_splitting, "_build_setup_plan", lambda preflight, device: _sample_plan())
-    monkeypatch.setattr(gpu_splitting.Confirm, "ask", lambda *args, **kwargs: False)
+    monkeypatch.setattr(gpu_splitting.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(gpu_splitting.Prompt, "ask", lambda *args, **kwargs: "")
     called = {"executed": False}
     monkeypatch.setattr(gpu_splitting, "_execute_setup", lambda plan: called.__setitem__("executed", True))
 
@@ -241,7 +243,7 @@ def test_gpu_splitting_setup_yes_prints_plan_then_executes(monkeypatch):
 
     monkeypatch.setattr(gpu_splitting, "_execute_setup", execute)
 
-    result = CliRunner().invoke(cli, ["gpu-splitting", "setup", "--yes"])
+    result = CliRunner().invoke(cli, ["gpu-splitting", "setup", "--yes", "--device", "/dev/nvme1n1"])
 
     assert result.exit_code == 0
     assert "GPU Splitting Requirements" in result.output
@@ -283,6 +285,7 @@ def test_mine_does_not_route_gpu_splitting_as_subcommand(monkeypatch):
     monkeypatch.setattr(legacy_mine, "_clone_or_update_repo", lambda *args, **kwargs: None)
     monkeypatch.setattr(legacy_mine, "_install_executor_tools", lambda *args, **kwargs: None)
     monkeypatch.setattr(legacy_mine, "_check_prereqs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(legacy_mine, "_docker_storage_limited", lambda: True)
     monkeypatch.setattr(legacy_mine, "_check_free_disk", lambda *args, **kwargs: None)
     monkeypatch.setattr(legacy_mine, "_setup_executor_env", lambda *args, **kwargs: None)
     monkeypatch.setattr(legacy_mine, "_apply_env_overrides", lambda *args, **kwargs: None)

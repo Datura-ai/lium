@@ -34,10 +34,13 @@ jobs:
         id: stamp
         env:
           VERSION: ${{ inputs.version }}
+          PYPI_RUN_TITLE: ${{ github.event.workflow_run.display_title }}
         run: |
+          # PyPI's "latest" lags an upload by minutes (v0.25.0 read 0.24.1); a release's PyPI run is titled "PyPI vX.Y.Z"
+          [[ -z "$VERSION" && "$PYPI_RUN_TITLE" =~ ^PyPI\ v([0-9]+\.[0-9]+\.[0-9]+)$ ]] && VERSION="${BASH_REMATCH[1]}"
           version="${VERSION:-$(curl -fsSL https://pypi.org/pypi/lium.io/json | jq -r .info.version)}"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not a release version: $version" >&2; exit 1; }
-          curl -fsSL "https://pypi.org/pypi/lium.io/$version/json" | jq -e '.info.description | contains("mcp-name: io.github.Datura-ai/lium")' >/dev/null ||
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 30 "https://pypi.org/pypi/lium.io/$version/json" | jq -e '.info.description | contains("mcp-name: io.github.Datura-ai/lium")' >/dev/null ||
             { echo "lium.io $version on PyPI has no mcp-name line in its README" >&2; exit 1; }
           jq --arg v "$version" '.version = $v | .packages[0].version = $v' server.json > server.tmp && mv server.tmp server.json
           cat server.json
