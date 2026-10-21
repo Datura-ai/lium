@@ -97,7 +97,7 @@ def pack(context_dir: Path, max_bytes: Optional[int] = None, dockerfile: Optiona
 
     Written as plain ustar (no PAX, long-name or hard-link headers), the only form the validator unpacks.
     Raises ValueError for a symlink whose target is absolute or has a ``..`` part, a path past ustar's
-    limit (255 characters, 100 for the last part) or a context past ``max_bytes``, counted both as the files' unpacked size
+    limit (path 255 bytes, 100 for the last part; link target 100 bytes) or a context past ``max_bytes``, counted both as the files' unpacked size
     (so a sparse or zero-filled file cannot unpack to gigabytes on the node) and as the archive. Owners are dropped: the build
     sees root-owned files, as with ``docker build``.
     """
@@ -127,7 +127,7 @@ def pack(context_dir: Path, max_bytes: Optional[int] = None, dockerfile: Optiona
                 tar.add(full, arcname=rel, recursive=False, filter=_reset_owner)
             except ValueError as exc:
                 raise ValueError(
-                    f"{rel}: the path or link target is too long for the build context (255 characters, 100 for the last part)"
+                    f"{rel}: the path or link target is too long for the build context (path 255 bytes, 100 for the last part; link target 100 bytes)"
                 ) from exc
 
         for root, dirs, files in os.walk(context_dir):
