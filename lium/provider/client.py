@@ -57,7 +57,9 @@ from lium.provider.errors import (
     ARG_INVALID,
     PORTAL_AUTH_EXPIRED,
     PORTAL_AUTH_INVALID,
+    PORTAL_AUTH_TOTP_INVALID,
     PORTAL_AUTH_TOTP_REQUIRED,
+    PORTAL_FORBIDDEN,
     ProviderAuthError,
     ProviderConfigError,
     ProviderError,
@@ -187,9 +189,17 @@ class ProviderClient:
                     code=PORTAL_AUTH_TOTP_REQUIRED,
                 )
             totp_payload = {"mfa_token": response.mfa_token, "code": self.totp_code().strip()}
-            response = _login_response(
-                self._http.post(LOGIN_TOTP, json_body=totp_payload, auth=False)
-            )
+            try:
+                response = _login_response(
+                    self._http.post(LOGIN_TOTP, json_body=totp_payload, auth=False)
+                )
+            except ProviderAuthError as e:
+                # the portal answers a wrong code with 403, which elsewhere means a refused action
+                if e.code != PORTAL_FORBIDDEN:
+                    raise
+                raise ProviderAuthError(
+                    "wrong or expired authenticator code", code=PORTAL_AUTH_TOTP_INVALID, context=e.context
+                ) from e
         if not response.token:
             raise ProviderAuthError(
                 "portal sign-in returned no session token",

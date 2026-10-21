@@ -64,12 +64,14 @@ def patched_build_client(monkeypatch, fake_signer: LocalKeypairSigner, tmp_token
     def _factory(portal: _Portal):
         portals.append(portal)
 
-        def _builder(ctx):
+        def _builder(ctx, totp_code=None):
             client = ProviderClient(
                 signer=fake_signer,
                 token_store=tmp_token_store,
                 http=portal,  # type: ignore[arg-type]
             )
+            if totp_code:
+                client.totp_code = lambda: totp_code
             return client
 
         for module in (
@@ -340,3 +342,17 @@ def test_portal_login_totp_code_completes_the_authenticator_step(patched_build_c
 
     assert result.exit_code == 0, result.output
     assert portal.posts[1] == ("/auth/login-totp", {"mfa_token": "challenge-1", "code": "654321"}, False)
+
+
+def test_build_client_asks_for_a_code_only_when_a_prompt_can_be_answered(monkeypatch) -> None:
+    import click as _click
+
+    from lium.cli.provider import _client
+
+    ctx = _click.Context(_click.Command("x"), obj={"provider_opts": {"hotkey": "hk1"}})
+    monkeypatch.setattr("lium.cli.interactive.stdin_is_terminal", lambda: True)
+    assert _client.build_client(ctx).totp_code is not None
+    assert _client.build_client(ctx, "123456").totp_code() == "123456"
+
+    monkeypatch.setenv("LIUM_NONINTERACTIVE", "1")
+    assert _client.build_client(ctx).totp_code is None

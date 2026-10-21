@@ -47,9 +47,7 @@ def login(ctx: click.Context, force: bool, totp_code: str | None) -> None:
             )
         )
 
-    client = build_client(ctx)
-    if totp_code:
-        client.totp_code = lambda: totp_code
+    client = build_client(ctx, totp_code)
     try:
         response = client.login(force=force)
     except ProviderError as e:

@@ -7,23 +7,24 @@ The flag → env → ``~/.lium/config.ini`` resolution happens once in the
 
 from __future__ import annotations
 
-import sys
-
 import click
 
+from lium.cli.interactive import is_interactive
 from lium.provider.client import ProviderClient
 
 
-def build_client(ctx: click.Context) -> ProviderClient:
-    """Construct ``ProviderClient`` from the resolved opts in ``ctx.obj``."""
+def build_client(ctx: click.Context, totp_code: str | None = None) -> ProviderClient:
+    """Construct ``ProviderClient`` from the resolved opts in ``ctx.obj``; ``totp_code`` answers a sign-in that asks for one."""
     opts = (ctx.obj or {}).get("provider_opts") or {}
     client = ProviderClient(
         coldkey=opts.get("coldkey"),
         hotkey=opts.get("hotkey"),
         portal_url=opts.get("portal_url"),
     )
-    # an account with an authenticator app signs in with a code; only a terminal can be asked
-    if sys.stdin.isatty():
+    # an account with an authenticator app signs in with a code; only an interactive terminal can be asked
+    if totp_code:
+        client.totp_code = lambda: totp_code
+    elif is_interactive():
         client.totp_code = lambda: click.prompt(
             "Authenticator code (or a recovery code)", err=True
         )

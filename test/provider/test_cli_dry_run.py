@@ -14,7 +14,7 @@ from lium.cli.provider.command import provider_command
 def no_client(monkeypatch):
     built: list[str] = []
 
-    def _builder(ctx):
+    def _builder(ctx, *_):
         built.append(ctx.command_path)
         raise AssertionError("dry run built a portal client")
 

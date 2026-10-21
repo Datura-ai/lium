@@ -47,12 +47,14 @@ def patched_build_client(
     monkeypatch, fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
 ):
     def _factory(portal: _Portal):
-        def _builder(ctx):
-            return ProviderClient(
+        def _builder(ctx, totp_code=None):
+            client = ProviderClient(
                 signer=fake_signer,
                 token_store=tmp_token_store,
                 http=portal,  # type: ignore[arg-type]
             )
+            client.built_with_totp_code = totp_code  # type: ignore[attr-defined]
+            return client
 
         monkeypatch.setattr("lium.cli.provider.config.build_client", _builder)
         return portal
@@ -394,3 +396,16 @@ def test_config_opt_in_passes_through_provider_error(patched_build_client) -> No
         ["-y", "--hotkey", "hk1", "config", "opt-in"],
     )
     assert result.exit_code == 3, result.output
+
+
+def test_config_set_email_passes_the_authenticator_code_to_the_sign_in(patched_build_client, monkeypatch) -> None:
+    portal = _Portal(post_body={"data": {}})
+    patched_build_client(portal)
+    seen: list = []
+    monkeypatch.setattr(ProviderClient, "login", lambda self, force=False: seen.append(self.built_with_totp_code))
+    result = CliRunner().invoke(
+        provider_command,
+        ["-y", "--hotkey", "hk1", "config", "set-email", "x@y.co", "--totp-code", "654321"],
+    )
+    assert result.exit_code == 0, result.output
+    assert seen == ["654321"]

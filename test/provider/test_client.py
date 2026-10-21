@@ -334,3 +334,24 @@ def test_login_without_a_code_source_refuses_an_authenticator_account(
     assert excinfo.value.code == "PORTAL_AUTH_TOTP_REQUIRED"
     assert [path for path, _, _ in portal.posts] == ["/auth/login-flexible"]
     assert tmp_token_store.load(fake_signer.ss58_address) is None
+
+
+def test_a_wrong_authenticator_code_is_its_own_error_not_a_forbidden_action(
+    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
+) -> None:
+    class _WrongCodePortal(_SequencedPortal):
+        def post(self, path: str, *, json_body: dict | None = None, auth: bool = True) -> dict:
+            if path == "/auth/login-totp":
+                self.posts.append((path, json_body or {}, auth))
+                raise ProviderAuthError("portal forbade the requested action", code="PORTAL_FORBIDDEN")
+            return super().post(path, json_body=json_body, auth=auth)
+
+    portal = _WrongCodePortal([_mfa_challenge_body(fake_signer.ss58_address)])
+    client = _build_client(portal, tmp_token_store, fake_signer)
+    client.totp_code = lambda: "000000"
+
+    with pytest.raises(ProviderAuthError) as excinfo:
+        client.login()
+
+    assert excinfo.value.code == "PORTAL_AUTH_TOTP_INVALID"
+    assert tmp_token_store.load(fake_signer.ss58_address) is None
