@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 
-from lium.sdk import Config, Lium
+from lium.sdk import Config, Lium, LiumError
 from lium.cli import up as up_pkg  # noqa: F401  (ensures package import works)
 from lium.cli.up import command as up_command
 from lium.cli.up import validation as up_validation
@@ -33,7 +33,9 @@ def _stub_up(monkeypatch, client, captured):
     """Stub out network + ssh helpers on a real Lium so up() reaches payload build."""
     monkeypatch.setattr(client, "get_executor", lambda executor_id: SimpleNamespace(id="exec-1"))
     monkeypatch.setattr(
-        client, "default_docker_template", lambda executor_id: SimpleNamespace(id="tmpl-default")
+        client,
+        "default_docker_template",
+        lambda executor_id: SimpleNamespace(id="tmpl-default", supports_volume_encryption=True),
     )
     monkeypatch.setattr(client, "_ensure_ssh_keys_registered", lambda *a, **k: None)
 
@@ -80,11 +82,11 @@ def test_up_with_template_sends_template_and_null_dockerfile(monkeypatch):
     _stub_up(monkeypatch, client, captured)
 
     # Act
-    client.up(executor_id="exec-1", template_id="tmpl-xyz", ssh_keys=["ssh-ed25519 AAA"])
+    client.up(executor_id="exec-1", template_id="11111111-1111-4111-8111-111111111111", ssh_keys=["ssh-ed25519 AAA"])
 
     # Assert
     payload = captured["payload"]
-    assert payload["template_id"] == "tmpl-xyz"
+    assert payload["template_id"] == "11111111-1111-4111-8111-111111111111"
     assert payload["dockerfile_content"] is None
 
 
@@ -107,7 +109,6 @@ def test_up_without_template_or_dockerfile_falls_back_to_default_template(monkey
 @pytest.mark.parametrize(
     ("enabled", "expected"),
     [
-        (None, None),
         (False, False),
         (True, True),
     ],
@@ -124,6 +125,78 @@ def test_up_sends_volume_encryption_preference(monkeypatch, enabled, expected):
     )
 
     assert captured["payload"]["enable_volume_encryption"] is expected
+
+
+@pytest.mark.parametrize(("supported", "expected"), [(True, True), (False, False)])
+def test_up_requests_encryption_only_when_the_template_supports_it(monkeypatch, supported, expected):
+    client = Lium(Config(api_key="test"))
+    captured: dict = {}
+    _stub_up(monkeypatch, client, captured)
+    monkeypatch.setattr(
+        client, "get_template", lambda template_id: SimpleNamespace(supports_volume_encryption=supported)
+    )
+
+    client.up(executor_id="exec-1", template_id="11111111-1111-4111-8111-111111111111", ssh_keys=["ssh-ed25519 AAA"])
+
+    assert captured["payload"]["enable_volume_encryption"] is expected
+
+
+@pytest.mark.parametrize(("entry", "server_side"), [("up", False), ("rent", False), ("rent", True)])
+def test_a_failed_template_lookup_refuses_to_rent_rather_than_drop_encryption(monkeypatch, entry, server_side):
+    client = Lium(Config(api_key="test"))
+    captured: dict = {}
+    _stub_up(monkeypatch, client, captured)
+    monkeypatch.setattr(client, "get_template", lambda template_id: None)  # the GET failed
+    monkeypatch.setattr(client, "supports", lambda feature: server_side)
+    target = {"executor_id": "exec-1"} if entry == "up" else {"gpu_type": "H100"}
+
+    with pytest.raises(LiumError, match="Could not look up template 11111111-1111-4111-8111-111111111111"):
+        getattr(client, entry)(**target, template_id="11111111-1111-4111-8111-111111111111", ssh_keys=["ssh-ed25519 AAA"])
+
+    assert not captured  # nothing was rented
+
+
+def test_up_with_dockerfile_does_not_request_encryption(monkeypatch):
+    client = Lium(Config(api_key="test"))
+    captured: dict = {}
+    _stub_up(monkeypatch, client, captured)
+
+    client.up(executor_id="exec-1", dockerfile_content="FROM busybox", ssh_keys=["ssh-ed25519 AAA"])
+
+    assert captured["payload"]["enable_volume_encryption"] is False
+
+
+def test_up_requests_encryption_when_asked_on_a_template_without_support(monkeypatch):
+    client = Lium(Config(api_key="test"))
+    captured: dict = {}
+    _stub_up(monkeypatch, client, captured)
+    monkeypatch.setattr(
+        client, "get_template", lambda template_id: SimpleNamespace(supports_volume_encryption=False)
+    )
+
+    client.up(
+        executor_id="exec-1", template_id="11111111-1111-4111-8111-111111111111", ssh_keys=["ssh-ed25519 AAA"], enable_volume_encryption=True
+    )
+
+    assert captured["payload"]["enable_volume_encryption"] is True
+
+
+def test_get_template_reads_volume_encryption_support(monkeypatch):
+    client = Lium(Config(api_key="test"))
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda method, endpoint, **kwargs: _Resp({"id": "22222222-2222-4222-8222-222222222222", "supports_volume_encryption": True}),
+    )
+
+    template = client.get_template("22222222-2222-4222-8222-222222222222")
+
+    assert template.supports_volume_encryption is True
+
+
+def test_up_command_leaves_volume_encryption_to_the_template_by_default():
+    (option,) = [p for p in up_command.up_command.params if p.name == "volume_encryption"]
+    assert option.default is None
 
 
 def test_up_sends_startup_restore(monkeypatch):
@@ -193,7 +266,7 @@ def test_up_rejects_both_template_and_dockerfile(monkeypatch):
     with pytest.raises(ValueError, match="only one of"):
         client.up(
             executor_id="exec-1",
-            template_id="tmpl-xyz",
+            template_id="11111111-1111-4111-8111-111111111111",
             dockerfile_content="FROM busybox",
             ssh_keys=["ssh-ed25519 AAA"],
         )
@@ -245,7 +318,7 @@ def test_validate_rejects_dockerfile_with_image():
 
 def test_validate_rejects_dockerfile_with_template_id():
     ok, error = up_validation.validate(
-        "node-1", None, None, None, None, None, template_id="tmpl-1", dockerfile="./Dockerfile"
+        "node-1", None, None, None, None, None, template_id="22222222-2222-4222-8222-222222222222", dockerfile="./Dockerfile"
     )
     assert ok is False
     assert "--dockerfile" in error and "--template_id" in error
@@ -555,7 +628,7 @@ def test_up_with_image_creates_a_one_time_template_and_rents_it(monkeypatch):
 
     def fake_create_template(**kwargs):
         created.update(kwargs)
-        return SimpleNamespace(id="tmpl-ephemeral")
+        return SimpleNamespace(id="33333333-3333-4333-8333-333333333333")
 
     monkeypatch.setattr(client, "create_template", fake_create_template)
 
@@ -569,7 +642,7 @@ def test_up_with_image_creates_a_one_time_template_and_rents_it(monkeypatch):
     assert created["docker_image_tag"] == ""
     assert created["ports"] == [22]
     assert created["is_private"] is True and created["one_time_template"] is True
-    assert captured["payload"]["template_id"] == "tmpl-ephemeral"
+    assert captured["payload"]["template_id"] == "33333333-3333-4333-8333-333333333333"
     assert captured["payload"]["dockerfile_content"] is None
 
 
@@ -587,7 +660,7 @@ def test_up_with_image_hands_the_reference_over_whole(monkeypatch, image):
     _stub_up(monkeypatch, client, captured)
     created: dict = {}
     monkeypatch.setattr(
-        client, "create_template", lambda **kwargs: created.update(kwargs) or SimpleNamespace(id="t")
+        client, "create_template", lambda **kwargs: created.update(kwargs) or SimpleNamespace(id="44444444-4444-4444-8444-444444444444")
     )
 
     client.up(executor_id="exec-1", image=image, ssh_keys=["ssh-ed25519 AAA"])
@@ -598,7 +671,7 @@ def test_up_with_image_hands_the_reference_over_whole(monkeypatch, image):
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"image": "ubuntu", "template_id": "tmpl-xyz"},
+        {"image": "ubuntu", "template_id": "11111111-1111-4111-8111-111111111111"},
         {"image": "ubuntu", "dockerfile_content": "FROM busybox"},
     ],
 )

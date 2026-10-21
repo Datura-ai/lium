@@ -33,6 +33,10 @@ class BlockDevice:
     is_removable: bool = False
     transport: Optional[str] = None
     children: list["BlockDevice"] = field(default_factory=list)
+    # Every path (and /dev/<kname>) in the tree of the physical disk this device sits on, LVM/md holders included,
+    # and whether anything in that tree is mounted: set by load_block_devices.
+    family_paths: frozenset = frozenset()
+    family_mounted: bool = False
 
 
 @dataclass

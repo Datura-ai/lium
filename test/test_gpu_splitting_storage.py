@@ -292,3 +292,59 @@ def test_load_daemon_json_invalid(tmp_path):
 
     with pytest.raises(RuntimeError, match="invalid JSON"):
         load_daemon_json(str(path))
+
+
+def _lsblk(blockdevices):
+    import json
+
+    def runner(args, check=True, capture=True):
+        if args[0] == "lsblk":
+            return CommandResult(args, json.dumps({"blockdevices": blockdevices}), "", 0)
+        if args[0] == "parted":  # one large free region: what made a system disk look offerable before
+            return CommandResult(args, "BYT;\n1:1048576B:2000000000000B:1999998951424B:free;\n", "", 0)
+        raise AssertionError(f"Unexpected command: {args}")
+
+    return runner
+
+
+def _dev(name, type_, children=(), mount=None, pkname=None, path=None):
+    return {"name": name, "kname": name, "path": path or f"/dev/{name}", "type": type_, "size": 2 * 1024**4,
+            "mountpoints": [mount] if mount else [None], "pkname": pkname, "children": list(children)}
+
+
+def _verdicts(runner, root_source):
+    devices = storage.load_block_devices(runner)
+    root = MountInfo(target="/", source=root_source, fstype="ext4", options=["rw"])
+    return {c.path: c.classification for c in storage.evaluate_candidates(runner, devices, root, root)}
+
+
+def test_disk_under_an_lvm_root_is_protected():
+    lv = _dev("dm-0", "lvm", mount="/", path="/dev/mapper/ubuntu--vg-root")
+    runner = _lsblk([
+        _dev("nvme0n1", "disk", [_dev("nvme0n1p1", "part", mount="/boot/efi", pkname="nvme0n1"),
+                                 _dev("nvme0n1p3", "part", [lv], pkname="nvme0n1")]),
+        _dev("nvme1n1", "disk"),
+    ])
+    verdicts = _verdicts(runner, "/dev/mapper/ubuntu--vg-root")
+    assert verdicts["/dev/nvme0n1"] == "protected_root_or_docker"
+    assert verdicts["/dev/nvme0n1p3"] == "protected_root_or_docker"
+    assert verdicts["/dev/nvme1n1"] == "blank_whole_disk"
+
+
+def test_every_disk_under_an_mdraid_root_is_protected():
+    def member(disk):
+        md = _dev("md0", "raid1", mount="/")
+        return _dev(disk, "disk", [_dev(f"{disk}1", "part", [md], pkname=disk)])
+
+    runner = _lsblk([member("sda"), member("sdb"), _dev("sdc", "disk")])
+    verdicts = _verdicts(runner, "/dev/md0")
+    assert verdicts["/dev/sda"] == verdicts["/dev/sdb"] == "protected_root_or_docker"
+    assert verdicts["/dev/sdc"] == "blank_whole_disk"
+
+
+def test_a_disk_with_a_mounted_partition_is_never_offered_for_a_new_partition():
+    runner = _lsblk([
+        _dev("nvme0n1", "disk", [_dev("nvme0n1p1", "part", mount="/", pkname="nvme0n1")]),
+        _dev("nvme1n1", "disk", [_dev("nvme1n1p1", "part", mount="/data", pkname="nvme1n1")]),
+    ])
+    assert _verdicts(runner, "/dev/nvme0n1p1")["/dev/nvme1n1"] == "unsupported_or_ambiguous"

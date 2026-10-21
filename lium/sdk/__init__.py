@@ -24,6 +24,7 @@ from .exceptions import (
     PodStartError,
     RemoteExecutionError,
 )
+from .bounded_job import JobResult
 from .jobs import Job
 from .models import (
     ApiKeyInfo,
@@ -35,6 +36,8 @@ from .models import (
     ClusterOffer,
     ExecutorInfo,
     GpuStats,
+    JobQuote,
+    JobQuoteLine,
     PodInfo,
     RentResult,
     RestoreLog,
@@ -50,6 +53,8 @@ from .result_codec import ResultEncodingError
 
 __all__ = [
     "Lium",
+    "JobQuote",
+    "JobQuoteLine",
     "ApiKeysClient",
     "ApiKeyInfo",
     "ApiKeyScope",
@@ -69,6 +74,7 @@ __all__ = [
     "Template",
     "GpuStats",
     "Job",
+    "JobResult",
     "VolumeInfo",
     "BackupConfig",
     "BackupLog",

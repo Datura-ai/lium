@@ -56,6 +56,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# `lium mcp`, the MCP server for agent hosts; 1.x and 2.x both work (lium/cli/mcp/command.py)
+mcp = ["mcp>=1.10,<3"]
 provider = [
     # The chain stack. Renting a pod never touches it. bittensor-drand does not
     # build on 3.14, and its traceback names cargo and an unrelated repo rather
@@ -75,8 +77,15 @@ dev = [
 ]
 docs = ["sphinx>=7.3", "sphinx-rtd-theme>=1.3"]
 
+# mcp needs starlette>=0.39 (via sse-starlette), bittensor pins fastapi 0.110 (starlette 0.37):
+# lock them as separate resolutions so provider installs keep their pins.
+[tool.uv]
+conflicts = [[{ extra = "mcp" }, { extra = "provider" }]]
+
 [project.scripts]
 lium = "lium.cli.cli:main"
+# `uvx --from 'lium.io[mcp]' lium.io mcp`, the command MCP Registry clients build from server.json
+"lium.io" = "lium.cli.cli:main"
 
 # The version is the git tag (vX.Y.Z): a GitHub release IS the version bump (DAH-3225).
 # hatch-vcs writes lium/_version.py at build time; __about__ re-exports it.

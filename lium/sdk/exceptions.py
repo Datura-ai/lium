@@ -262,12 +262,6 @@ class LiumCardTopUpError(LiumError):
         return self.code == "CARD_AUTHENTICATION_REQUIRED" and bool(self.next_action_url)
 
 
-class LiumRentOutcomeUnknownError(LiumError):
-    """A rent was posted, its answer was lost, no pod was found, and the repeat of the POST was refused
-    (a 409 "still processing" or a 400 from the executor lock): the first request may still create a pod.
-    Run :meth:`Lium.ps` before renting again."""
-
-
 class LiumChargeOutcomeUnknownError(LiumError):
     """A card top-up (:meth:`Lium.topup_card`) was posted and the answer was lost — a timeout, a
     dropped connection, or a 5xx after the platform had already asked Stripe to charge. Stripe
@@ -287,6 +281,38 @@ class LiumChargeOutcomeUnknownError(LiumError):
     ) -> None:
         super().__init__(message, code=code, hint=hint, request_id=request_id)
         self.idempotency_key = idempotency_key
+
+class LiumRentOutcomeUnknownError(LiumError):
+    """A rent (:meth:`Lium.up`) was posted and its outcome could not be established: the first request got
+    no answer (a timeout, a dropped connection, a 5xx), no new pod was listed yet, and the repeat was refused
+    or failed too. The server may still be completing the first request, so a pod **may exist and bill**:
+    check ``ps()`` before renting again. ``idempotency_key`` is the key both requests carried.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        idempotency_key: str | None = None,
+        pod_name: str | None = None,
+        executor_id: str | None = None,
+        candidates: list[str] | None = None,
+        endpoint: str | None = None,
+        payload: dict | None = None,
+        code: str | None = None,
+        hint: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message, code=code, hint=hint, request_id=request_id)
+        self.idempotency_key = idempotency_key
+        self.pod_name = pod_name
+        self.executor_id = executor_id
+        # new pods with the rent's name, found after the answer was lost: maybe this rent's, maybe another client's
+        self.candidates = list(candidates or [])
+        # the rent request, kept for the MCP server's guarded replay with the same key
+        self.endpoint = endpoint
+        self.payload = payload
+
 
 __all__ = [
     "LiumError",

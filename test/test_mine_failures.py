@@ -181,31 +181,48 @@ def test_prereqs_pass_with_sysbox(monkeypatch):
     mine._check_prereqs()
 
 
-def _storage_host(monkeypatch, *, root: bool = True, tty: bool = True, answer: bool = True,
-                  plan_error: Exception | None = None, confirm_abort: bool = False):
-    import click
+def _storage_host(monkeypatch, *, root: bool = True, tty: bool = True, typed: str = "",
+                  plan_error: Exception | None = None, execute_error: Exception | None = None):
     import lium.cli.mine.gpu_splitting as gs
-    from rich.prompt import Confirm
+    import lium.cli.mine.storage as st
+    from rich.prompt import Prompt
+
+    from lium.cli.mine.models import BlockDevice, CandidateEvaluation
+
+    def disk(path, model):
+        return BlockDevice(path=path, name=path[5:], kernel_name=path[5:], type="disk", size_bytes=3576 * 1024**3,
+                           fstype=None, mountpoints=[], parent_kernel_name=None, model=model, serial="S6UK")
 
     calls = []
+    preflight = SimpleNamespace(
+        block_devices=[disk("/dev/nvme1n1", "Samsung PM9A3"), disk("/dev/sdb", "WDC WD40EFRX"),
+                       disk("/dev/nvme0n1", "Micron 7450")],
+        root_mount=None, docker_mount=None, docker_state=SimpleNamespace(docker_root_dir="/var/lib/docker"),
+    )
+    candidates = [
+        CandidateEvaluation("/dev/nvme1n1", "disk", "blank_whole_disk", True, "blank whole disk"),
+        CandidateEvaluation("/dev/sdb", "disk", "blank_whole_disk", True, "blank whole disk"),
+        CandidateEvaluation("/dev/nvme0n1", "disk", "protected_root_or_docker", False, "protected root"),
+    ]
     monkeypatch.setattr("os.geteuid", lambda: 0 if root else 1000)
     monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: tty))
-    monkeypatch.setattr(Confirm, "ask", lambda *a, **k: calls.append("asked") or answer)
+    monkeypatch.setattr(Prompt, "ask", lambda *a, **k: calls.append("asked") or typed)
 
-    def plan(preflight, device):
+    def plan(pf, device):
+        calls.append(("plan", device))
         if plan_error:
             raise plan_error
         return "plan"
 
-    def confirm(p, yes):
-        calls.append(("confirm", p, yes))
-        if confirm_abort:
-            raise click.Abort()
+    def execute(p):
+        calls.append(("execute", p))
+        if execute_error:
+            raise execute_error
 
-    monkeypatch.setattr(gs, "_preflight", lambda: "preflight")
+    monkeypatch.setattr(gs, "_preflight", lambda: preflight)
+    monkeypatch.setattr(st, "evaluate_candidates", lambda *a: candidates)
     monkeypatch.setattr(gs, "_build_setup_plan", plan)
-    monkeypatch.setattr(gs, "_confirm_plan", confirm)
-    monkeypatch.setattr(gs, "_execute_setup", lambda p: calls.append(("execute", p)))
+    monkeypatch.setattr(gs, "_execute_setup", execute)
     return calls
 
 
@@ -224,24 +241,40 @@ def test_storage_setup_without_root_prints_the_sudo_command(monkeypatch, capsys)
     assert "sudo lium mine" in capsys.readouterr().out
 
 
-def test_storage_setup_declined_carries_on_without_touching_the_disk(monkeypatch):
-    calls = _storage_host(monkeypatch, answer=False)
-    mine._setup_docker_storage()
-    assert calls == ["asked"]
-
-
-def test_storage_setup_runs_only_after_the_typed_confirmation(monkeypatch):
-    calls = _storage_host(monkeypatch)
-    mine._setup_docker_storage()
-    assert calls == ["asked", ("confirm", "plan", False), ("execute", "plan")]
-    calls = _storage_host(monkeypatch, confirm_abort=True)
-    mine._setup_docker_storage()
-    assert calls == ["asked", ("confirm", "plan", False)]
-
-
-def test_storage_setup_with_no_safe_disk_names_the_manual_command(monkeypatch, capsys):
-    calls = _storage_host(monkeypatch, plan_error=RuntimeError("two equally safe candidates"))
+def test_storage_setup_lists_every_disk_and_enter_skips(monkeypatch, capsys):
+    calls = _storage_host(monkeypatch, typed="")
     mine._setup_docker_storage()
     out = capsys.readouterr().out
-    assert "lium gpu-splitting setup --device" in out and "two equally safe" in out
     assert calls == ["asked"]
+    assert "Samsung PM9A3" in out and "WDC WD40EFRX" in out and "3576 GiB" in out
+    assert "Not offered" in out and "/dev/nvme0n1" in out and "Micron 7450" in out
+    assert "lium gpu-splitting setup --device" in out
+
+
+def test_storage_setup_formats_only_the_typed_listed_disk_with_no_second_prompt(monkeypatch):
+    calls = _storage_host(monkeypatch, typed="/dev/sdb")
+    mine._setup_docker_storage()
+    assert calls == ["asked", ("plan", "/dev/sdb"), ("execute", "plan")]
+
+
+@pytest.mark.parametrize("typed", ["/dev/nvme0n1", "yes", "/dev/sdz"])
+def test_storage_setup_anything_but_a_listed_disk_changes_nothing(monkeypatch, typed):
+    calls = _storage_host(monkeypatch, typed=typed)
+    mine._setup_docker_storage()
+    assert calls == ["asked"]
+
+
+def test_storage_setup_refusal_before_docker_stops_does_not_abort_the_install(monkeypatch, capsys):
+    calls = _storage_host(monkeypatch, typed="/dev/sdb", execute_error=RuntimeError("Containers are running on this host"))
+    mine._setup_docker_storage()
+    out = capsys.readouterr().out
+    assert calls == ["asked", ("plan", "/dev/sdb"), ("execute", "plan")]
+    assert "Containers are running" in out and "lium gpu-splitting setup --device" in out
+
+
+def test_storage_setup_target_check_refusal_names_the_manual_command(monkeypatch, capsys):
+    calls = _storage_host(monkeypatch, typed="/dev/sdb", plan_error=RuntimeError("Refusing /dev/sdb: it is a removable disk"))
+    mine._setup_docker_storage()
+    out = capsys.readouterr().out
+    assert calls == ["asked", ("plan", "/dev/sdb")]
+    assert "removable" in out and "lium gpu-splitting setup --device" in out
