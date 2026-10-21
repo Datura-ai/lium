@@ -154,6 +154,35 @@ def _sample_preflight() -> PreflightResult:
     )
 
 
+def _sample_plan() -> SetupPlan:
+    return SetupPlan(
+        preflight=_sample_preflight(),
+        target=TargetPlan(
+            selection_mode="auto",
+            requested_device=None,
+            resolved_target="/dev/nvme1n1",
+            parent_disk="/dev/nvme1n1",
+            classification="blank_whole_disk",
+            needs_partition_creation=True,
+            needs_format=True,
+            existing_fs_type=None,
+            selection_reason="Auto-selected blank_whole_disk",
+            needs_new_gpt=True,
+        ),
+        backup_dir="/var/lib/docker.lium-backup-20260303120000",
+        daemon_json_path="/etc/docker/daemon.json",
+        daemon_json_changed=True,
+        daemon_json_merged={"storage-driver": "overlay2"},
+        fstab_path="/etc/fstab",
+        fstab_changed=True,
+        destructive_actions=[
+            "create GPT label on /dev/nvme1n1",
+            "create partition on /dev/nvme1n1",
+            "format target as XFS: /dev/nvme1n1",
+        ],
+    )
+
+
 def _execution_plan(tmp_path, docker_mount: MountInfo | None = None) -> SetupPlan:
     preflight = _sample_preflight()
     if docker_mount is not None:
@@ -185,9 +214,7 @@ def _execution_plan(tmp_path, docker_mount: MountInfo | None = None) -> SetupPla
 
 def _patch_execute_setup_dependencies(monkeypatch, run_command, load_mount_info, verification=None):
     monkeypatch.setattr(gpu_splitting, "timed_step_status", _no_spinner)
-    # the cutover recreates the real /var/lib/docker; skip it so the tests do not depend on the host having Docker
-    real_mkdir = Path.mkdir
-    monkeypatch.setattr(Path, "mkdir", lambda self, *a, **k: None if str(self) == "/var/lib/docker" else real_mkdir(self, *a, **k))
+    monkeypatch.setattr(gpu_splitting, "_pre_stop_checks", lambda *_: None)
     monkeypatch.setattr(gpu_splitting, "_partition_paths_for_disk", lambda *_: set())
     monkeypatch.setattr(gpu_splitting, "_ensure_xfs_compliant", lambda *_: None)
     monkeypatch.setattr(gpu_splitting, "_mount_validation", lambda *_: None)
@@ -358,3 +385,59 @@ def test_execute_setup_reports_rollback_failures(monkeypatch, tmp_path):
     assert "Rollback encountered additional errors:" in message
     assert "- start docker: start failed" in message
     assert f"Backup remains at {plan.backup_dir}" in message
+
+
+def _lsblk(blockdevices):
+    import json
+
+    def runner(args, check=True, capture=True):
+        if args[0] == "lsblk":
+            return CommandResult(args, json.dumps({"blockdevices": blockdevices}), "", 0)
+        if args[0] == "parted":  # one large free region: what made a system disk look offerable before
+            return CommandResult(args, "BYT;\n1:1048576B:2000000000000B:1999998951424B:free;\n", "", 0)
+        raise AssertionError(f"Unexpected command: {args}")
+
+    return runner
+
+
+def _dev(name, type_, children=(), mount=None, pkname=None, path=None):
+    return {"name": name, "kname": name, "path": path or f"/dev/{name}", "type": type_, "size": 2 * 1024**4,
+            "mountpoints": [mount] if mount else [None], "pkname": pkname, "children": list(children)}
+
+
+def _verdicts(runner, root_source):
+    devices = storage.load_block_devices(runner)
+    root = MountInfo(target="/", source=root_source, fstype="ext4", options=["rw"])
+    return {c.path: c.classification for c in storage.evaluate_candidates(runner, devices, root, root)}
+
+
+def test_disk_under_an_lvm_root_is_protected():
+    lv = _dev("dm-0", "lvm", mount="/", path="/dev/mapper/ubuntu--vg-root")
+    runner = _lsblk([
+        _dev("nvme0n1", "disk", [_dev("nvme0n1p1", "part", mount="/boot/efi", pkname="nvme0n1"),
+                                 _dev("nvme0n1p3", "part", [lv], pkname="nvme0n1")]),
+        _dev("nvme1n1", "disk"),
+    ])
+    verdicts = _verdicts(runner, "/dev/mapper/ubuntu--vg-root")
+    assert verdicts["/dev/nvme0n1"] == "protected_root_or_docker"
+    assert verdicts["/dev/nvme0n1p3"] == "protected_root_or_docker"
+    assert verdicts["/dev/nvme1n1"] == "blank_whole_disk"
+
+
+def test_every_disk_under_an_mdraid_root_is_protected():
+    def member(disk):
+        md = _dev("md0", "raid1", mount="/")
+        return _dev(disk, "disk", [_dev(f"{disk}1", "part", [md], pkname=disk)])
+
+    runner = _lsblk([member("sda"), member("sdb"), _dev("sdc", "disk")])
+    verdicts = _verdicts(runner, "/dev/md0")
+    assert verdicts["/dev/sda"] == verdicts["/dev/sdb"] == "protected_root_or_docker"
+    assert verdicts["/dev/sdc"] == "blank_whole_disk"
+
+
+def test_a_disk_with_a_mounted_partition_is_never_offered_for_a_new_partition():
+    runner = _lsblk([
+        _dev("nvme0n1", "disk", [_dev("nvme0n1p1", "part", mount="/", pkname="nvme0n1")]),
+        _dev("nvme1n1", "disk", [_dev("nvme1n1p1", "part", mount="/data", pkname="nvme1n1")]),
+    ])
+    assert _verdicts(runner, "/dev/nvme0n1p1")["/dev/nvme1n1"] == "unsupported_or_ambiguous"
