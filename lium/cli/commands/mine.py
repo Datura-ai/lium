@@ -183,40 +183,73 @@ def _docker_storage_limited() -> bool:
 def _setup_docker_storage():
     """Offer to move Docker storage to an xfs pquota mount with `lium gpu-splitting setup`'s own plan and checks.
 
-    Formatting a disk needs a person at a terminal who types the disk's path: `--auto` and `--register` never consent
-    to it. Otherwise this prints the manual command and the install carries on (validators do not require it yet).
+    One question is both the menu and the consent: every disk is listed and the person types the one to format, or
+    presses Enter to skip. `--auto` and `--register` never consent. Whatever stops the setup, the manual command is
+    printed and the install carries on (validators do not require it yet).
     """
     import os
     import sys
 
-    from rich.prompt import Confirm
+    from rich.prompt import Prompt
 
-    from ..mine.gpu_splitting import _build_setup_plan, _confirm_plan, _execute_setup, _preflight
+    from ..mine.gpu_splitting import _build_setup_plan, _execute_setup, _preflight, run_command
+    from ..mine.storage import evaluate_candidates, get_device_by_path
 
+    reason = "Docker cannot limit a container's disk on this host (needs xfs with pquota)."
     manual = (
-        "Docker cannot limit a container's disk on this host (needs overlay2 on xfs mounted with pquota).\n"
         "Set it up with: sudo lium gpu-splitting setup --device <spare disk>\n"
         f"Guide: {_STORAGE_GUIDE}"
     )
     if not sys.stdin.isatty():
-        console.warning(manual)
+        console.warning(f"{reason}\n{manual}")
         return
     if os.geteuid() != 0:
-        console.warning(manual.replace("Set it up with", "Run `sudo lium mine`, or set it up with"))
-        return
-    if not Confirm.ask("Set up Docker storage with a per-container disk limit now? It formats a spare disk", default=False):
-        console.warning(manual)
+        console.warning(f"{reason}\n" + manual.replace("Set it up with", "Run `sudo lium mine`, or set it up with"))
         return
     try:
-        plan = _build_setup_plan(_preflight(), None)
-        _confirm_plan(plan, yes=False)
+        preflight = _preflight()
+        candidates = evaluate_candidates(
+            run_command, preflight.block_devices, preflight.root_mount, preflight.docker_mount
+        )
     except RuntimeError as exc:
-        console.warning(f"{manual}\nNo spare disk was picked: {exc}")
+        console.warning(f"{reason}\n{manual}\nCould not list the disks: {exc}")
         return
-    except click.Abort:
-        console.warning(manual)
+
+    def row(candidate, note):
+        device = get_device_by_path(preflight.block_devices, candidate.path)
+        model = (device.model or "").strip() if device else ""
+        serial = (device.serial or "").strip() if device else ""
+        size = f"{device.size_bytes // 1024**3} GiB" if device else ""
+        return f"  {candidate.path:<16} {model:<20} {serial:<16} {size:>10}   {note}"
+
+    offered = [c for c in candidates if c.allowed]
+    lines = [reason, f"Validators will soon score such nodes 0. Guide: {_STORAGE_GUIDE}", ""]
+    lines += ["Disks that can be formatted for Docker storage:"]
+    lines += [row(c, c.details) for c in offered] or ["  (none)"]
+    rejected = [c for c in candidates if not c.allowed]
+    if rejected:
+        lines += ["", "Not offered:"] + [row(c, c.details) for c in rejected]
+    if not offered:
+        console.warning("\n".join(lines) + f"\n\n{manual}")
         return
-    _execute_setup(plan)
+    lines += [
+        "",
+        f"Setup will stop Docker, format the chosen disk, copy {preflight.docker_state.docker_root_dir} to it "
+        "and start Docker again.",
+    ]
+    console.info("\n".join(lines))
+    typed = Prompt.ask("Type the disk path to format it, or press Enter to skip", default="").strip()
+    if not typed:
+        console.warning(f"Skipped. {manual}")
+        return
+    if typed not in {c.path for c in offered}:
+        console.warning(f"{typed} is not one of the disks listed above; nothing was changed.\n{manual}")
+        return
+    try:
+        _execute_setup(_build_setup_plan(preflight, typed))
+    except RuntimeError as exc:
+        # a refusal (containers running, Docker down, no backup space, target checks) stops only the storage setup
+        console.warning(f"Docker storage was not set up: {exc}\n{manual}")
 
 
 # The printed command fetches the official installer, never the checkout's copy; the CLI does not run it (it needs sudo).
