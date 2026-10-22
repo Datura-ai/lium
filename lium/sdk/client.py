@@ -292,12 +292,15 @@ def _satisfies_spec(executor: ExecutorInfo, spec: Dict[str, Any]) -> bool:
     specs = executor.specs or {}
     gpu_details = (specs.get("gpu") or {}).get("details") or []
     gpu_detail = gpu_details[0] if gpu_details and isinstance(gpu_details[0], dict) else {}
+    ram = specs.get("ram") or {}
     disk = specs.get("hard_disk") or {}
     disk_kib = disk.get("free") if disk.get("free") is not None else disk.get("total")
     floors = {
         "min_vram_gb": (gpu_detail.get("capacity") or 0) / _MIB_PER_GB if gpu_detail.get("capacity") else None,
         "min_cpus": (specs.get("cpu") or {}).get("count"),
-        "min_ram_gb": ((specs.get("ram") or {}).get("total") or 0) / _KIB_PER_GB if (specs.get("ram") or {}).get("total") else None,
+        # the RAM a pod gets: the host total less the reserve GET /executors serves (as the server's rent-by-spec);
+        # an older backend sends no pod_reserve, so it counts as 0; never below the server's 1 GiB pod floor
+        "min_ram_gb": max(ram.get("total") - (ram.get("pod_reserve") or 0), _KIB_PER_GB) / _KIB_PER_GB if ram.get("total") else None,
         "min_disk_gb": disk_kib / _KIB_PER_GB if disk_kib else None,
         "min_download_mbps": executor.effective_download_speed_mbps,
         "min_ports": executor.available_port_count,
