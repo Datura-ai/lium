@@ -91,3 +91,8 @@ def test_computed_status_stays_escaped(capsys):
     """The one place that was escaped before must still be."""
     _render._render_record({"computed_status": {"status": "[/]", "message": "see [/var/log/x]"}})
     assert "[/] — see [/var/log/x]" in capsys.readouterr().out
+
+
+def test_another_providers_node_shows_no_endpoint_at_all():
+    # DAH-4807 (Fish 22 Oct): no address and no placeholder for a node the reader does not own
+    assert _render._ip_port({"id": "n1"}) == ""

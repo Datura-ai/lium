@@ -485,7 +485,7 @@ def _ip_port(row: Mapping[str, Any]) -> str:
     ip = row.get("executor_ip_address") or row.get("ip_address")
     port = row.get("executor_ip_port") or row.get("port")
     if not ip and not port:
-        return console.get_styled("—", "dim")
+        return ""  # another provider's node: its address is not shown at all (DAH-4807)
     if ip and port:
         return f"{_text(ip)}:{_text(port)}"
     return _text(ip or port)

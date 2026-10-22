@@ -442,3 +442,14 @@ def test_describe_never_looks_up_events_for_a_name_or_huid(monkeypatch):
 
     assert result.exit_code == EXIT_POD_NOT_FOUND
     assert _Counting.calls == 0
+
+
+def test_a_node_without_a_shared_ip_shows_no_ip_at_all():
+    """DAH-4807 (Fish 22 Oct): no `ip` key and no IP row when the platform sent no address."""
+    executor = _executor()
+    executor.ip = ""
+    manifest = display.build_manifest(_pod(executor=executor))
+
+    assert "ip" not in manifest["machine"]
+    assert all(row != "IP" for row in display.build_manifest_table(manifest).columns[0]._cells)
+    assert display.build_manifest(_pod())["machine"]["ip"] == "1.2.3.4"
