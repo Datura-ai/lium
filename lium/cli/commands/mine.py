@@ -602,18 +602,22 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = F
     # recreate: an executor already running keeps its old .env, so a new MINER_ACCOUNT_CLAIM never reaches it;
     # a plain re-run leaves a running executor alone
     ps_cmd = "docker compose -f docker-compose.app.yml ps -q executor"
-    if recreate:
-        # a recreate restarts the executor under running rentals; the validator names rental pods pod_* (lium-io const.py)
-        names = _run("docker ps --filter status=created --filter status=running --format '{{.Names}}'", check=False)[0].split()
-        if rentals := [n for n in names if n.startswith("pod_")]:
-            console.warning(
-                f"{len(rentals)} rental(s) running on this node, so the executor was not restarted. "
-                "The new account claim is in .env and applies on its next restart; rerun this command once the rentals end."
-            )
-            recreate = False
+    # a restart under running rentals interrupts them; the validator names rental pods pod_* (lium-io const.py)
+    names = _run("docker ps --filter status=created --filter status=running --format '{{.Names}}'", check=False)[0].split()
+    rentals = [n for n in names if n.startswith("pod_")]
+    if rentals and recreate:
+        console.warning(
+            f"{len(rentals)} rental(s) running on this node, so the executor was not restarted. "
+            "The new account claim is in .env and applies on its next restart; rerun this command once the rentals end."
+        )
+        recreate = False
     # after --force-recreate the old container can still report healthy; wait for one with a new ID
     old_id = _run(ps_cmd, check=False, cwd=str(executor_dir))[0].strip() if recreate else ""
     command = "docker compose up -d --force-recreate" if recreate else "docker compose up -d"
+    if rentals:
+        # even a plain `up -d` recreates a runner whose config changed, and the runner force-recreates the executor;
+        # under rentals compose only starts what is missing
+        command = "docker compose up -d --no-recreate"
     _run(command, capture=True, cwd=str(executor_dir))
 
     # Wait for the executor service to be fully healthy
