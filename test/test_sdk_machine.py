@@ -1,5 +1,6 @@
 """`@lium.machine` against a fake client: node selection, TTL, timeout and cleanup."""
 
+import itertools
 import os
 import subprocess
 import sys
@@ -422,8 +423,11 @@ def test_the_cost_line_uses_what_the_rental_bills(fake, capsys, monkeypatch):
     monkeypatch.setattr(FakeLium, "rent", rent)
     # pin the clock so the run spans exactly one hour: the cost line must read the billed $0.45/h,
     # not the node's $3.60/h (a sub-second run would print ~$0.000x for either)
-    clock = iter([1_000.0] + [4_600.0] * 50)
-    monkeypatch.setattr(D.time, "time", lambda: next(clock))
+    # patch only decorators' view of time: patching the global time.time let other threads (logging,
+    # sockets) eat the 1000.0 start reading on slower runners, so the run read as 0s
+    clock = itertools.chain([1_000.0], itertools.repeat(4_600.0))
+    real = D.time
+    monkeypatch.setattr(D, "time", SimpleNamespace(time=lambda: next(clock), monotonic=real.monotonic))
     assert D.machine(machine="A100")(double)(3) == 6
     err = capsys.readouterr().err
     assert "rented 1xA100 $0.45/h (eight, US)" in err
