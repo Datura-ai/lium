@@ -910,7 +910,7 @@ class Lium:
             try:  # seconds only; the HTTP-date form is ignored
                 exc.retry_after = float((getattr(resp, "headers", None) or {}).get("Retry-After"))
             except (TypeError, ValueError):
-                pass
+                pass  # no or non-numeric Retry-After: the caller backs off on its own schedule
             raise exc
         if resp.status_code == 402 and context.get("code") in CARD_TOPUP_ERROR_CODES:
             raise card_topup_error(resp, **context)

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from lium.cli.actions import ActionResult
 from lium.cli.up import actions as up_actions
 from lium.cli.utils import EXIT_GENERAL_ERROR
 from lium.sdk import LiumRateLimitError
