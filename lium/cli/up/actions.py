@@ -574,9 +574,9 @@ class InstallJupyterAction:
 
             try:
                 all_pods = lium.ps()
-            except LiumRateLimitError:
-                # the API is busy, not the install: poll less often, still inside max_wait (DAH-4993)
-                wait_interval = min(wait_interval * 2, 30)
+            except LiumRateLimitError as exc:
+                # the API is busy, not the install: poll less often (never before Retry-After), still inside max_wait (DAH-4993)
+                wait_interval = max(exc.retry_after or 0, min(wait_interval * 2, 30))
                 continue
             updated_pod = next((p for p in all_pods if p.id == pod_id or p.huid == pod_id or p.name == pod_id), None)
 

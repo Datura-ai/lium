@@ -119,3 +119,21 @@ def test_the_jupyter_wait_stops_at_its_limit_counting_time_inside_ps(monkeypatch
 
     assert not result.ok and "timed out" in result.error
     assert clock["now"] <= 120 + 10 and max(calls) < 120
+
+
+def test_the_jupyter_wait_honours_retry_after(monkeypatch):
+    clock = {"now": 0.0}
+    calls = []
+    monkeypatch.setattr(up_actions.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(up_actions.time, "sleep", lambda s: clock.__setitem__("now", clock["now"] + s))
+
+    def ps():
+        calls.append(clock["now"])
+        exc = LiumRateLimitError("Rate limit exceeded")
+        exc.retry_after = 60
+        raise exc
+
+    lium = SimpleNamespace(install_jupyter=lambda *a, **k: None, ps=ps)
+    up_actions.InstallJupyterAction().execute({"lium": lium, "pod": SimpleNamespace(id="pod-1", ports={"8888": 2})})
+
+    assert calls == [3, 63]  # the next poll waits the 60 s the server asked for
