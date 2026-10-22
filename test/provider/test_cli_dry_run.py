@@ -60,6 +60,17 @@ def test_dry_run_set_password_neither_prompts_nor_echoes_the_password(no_client)
     assert "s3cret-value" not in result.output
 
 
+def test_dry_run_does_not_echo_the_totp_code(no_client) -> None:
+    result = CliRunner().invoke(
+        provider_command,
+        ["--dry-run", "--hotkey", "hk1", "config", "set-email", "a@b.co", "--totp-code", "RECOVERY-1234"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert no_client == []
+    assert "RECOVERY-1234" not in result.output
+
+
 def test_dry_run_json_envelope_reports_intent(no_client) -> None:
     result = CliRunner().invoke(
         provider_command,
