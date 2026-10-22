@@ -53,6 +53,15 @@ def test_two_429s_during_the_wait_slow_it_down_and_up_succeeds(monkeypatch):
     assert sleeps == [7, 7]  # Retry-After, not the 1 s poll
 
 
+def test_without_retry_after_the_interval_grows(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("lium.sdk.client.time.sleep", sleeps.append)
+    client = _Throttled([[_pod("RUNNING")]], throttled=3)
+
+    assert client.wait_ready("pod-1", timeout=600).status == "RUNNING"
+    assert sleeps == [2, 4, 8]  # the 1 s early poll, doubled per 429
+
+
 def test_a_429_that_outlasts_the_budget_still_names_the_billing_pod(monkeypatch):
     clock = {"now": 0.0}
     monkeypatch.setattr("lium.sdk.client.time.time", lambda: clock["now"])

@@ -4381,6 +4381,7 @@ class Lium:
         history: List[str] = []
         last_seen: Optional[PodInfo] = None
         missing_polls = 0
+        throttled = 0  # consecutive 429s
         while True:
             elapsed = time.time() - start
             if timeout is not None and elapsed >= timeout:
@@ -4393,14 +4394,18 @@ class Lium:
             try:
                 fresh_pods = self.ps()
             except LiumRateLimitError as exc:
-                # A 429 says the API is busy, not that the pod is (parallel `lium up` from one IP, DAH-4993):
-                # slow down (Retry-After when sent) and keep waiting inside the budget; when it runs out the
-                # loop ends as a still-starting pod.
-                delay = max(exc.retry_after or 0, self.poll_delay(elapsed, poll_interval))
+                # A 429 says the API is busy, not that the pod is (the poll cap is 60/min per account, so a few
+                # parallel `lium up` exceed it, DAH-4993): back off (Retry-After when sent, else a doubling
+                # interval up to 30 s) and keep waiting inside the budget; when it runs out the loop ends as a
+                # still-starting pod.
+                throttled += 1
+                backoff = min(self.poll_delay(elapsed, poll_interval) * 2 ** throttled, 30)
+                delay = max(exc.retry_after or 0, backoff)
                 if timeout is not None:
                     delay = min(delay, max(0.0, timeout - (time.time() - start)))
                 time.sleep(delay)
                 continue
+            throttled = 0
             current = next((p for p in fresh_pods if p.id == pod_id), None)
 
             if current is None:
