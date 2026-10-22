@@ -906,7 +906,12 @@ class Lium:
         if resp.status_code == 404:
             raise LiumNotFoundError(f"Resource not found: {_response_error_message(resp)}", **context)
         if resp.status_code == 429:
-            raise LiumRateLimitError("Rate limit exceeded", **context)
+            exc = LiumRateLimitError("Rate limit exceeded", **context)
+            try:  # seconds only; the HTTP-date form is ignored
+                exc.retry_after = float((getattr(resp, "headers", None) or {}).get("Retry-After"))
+            except (TypeError, ValueError):
+                pass  # no or non-numeric Retry-After: the caller backs off on its own schedule
+            raise exc
         if resp.status_code == 402 and context.get("code") in CARD_TOPUP_ERROR_CODES:
             raise card_topup_error(resp, **context)
         if 500 <= resp.status_code < 600:
@@ -4376,16 +4381,31 @@ class Lium:
         history: List[str] = []
         last_seen: Optional[PodInfo] = None
         missing_polls = 0
+        throttled = 0  # consecutive 429s
         while True:
             elapsed = time.time() - start
             if timeout is not None and elapsed >= timeout:
-                if last_seen is None and missing_polls and elapsed >= self.MISSING_GRACE_SECONDS:
+                if last_seen is None and missing_polls and not throttled and elapsed >= self.MISSING_GRACE_SECONDS:
                     # The budget and the grace ran out together: an id that was never listed in
                     # 20 s is a missing pod, not a slow one — say so instead of answering None
                     # (wait_ready('00000000-…', timeout=20), the DAH-1942 audit case).
                     raise self._never_listed_error(pod_id, missing_polls, elapsed)
                 break
-            fresh_pods = self.ps()
+            try:
+                fresh_pods = self.ps()
+            except LiumRateLimitError as exc:
+                # A 429 says the API is busy, not that the pod is (the poll cap is 60/min per account, so a few
+                # parallel `lium up` exceed it, DAH-4993): back off (Retry-After when sent, else a doubling
+                # interval up to 30 s) and keep waiting inside the budget; when it runs out the loop ends as a
+                # still-starting pod.
+                throttled += 1
+                backoff = min(self.poll_delay(elapsed, poll_interval) * 2 ** throttled, 30)
+                delay = max(exc.retry_after or 0, backoff)
+                if timeout is not None:
+                    delay = min(delay, max(0.0, timeout - (time.time() - start)))
+                time.sleep(delay)
+                continue
+            throttled = 0
             current = next((p for p in fresh_pods if p.id == pod_id), None)
 
             if current is None:

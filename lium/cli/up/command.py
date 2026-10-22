@@ -816,7 +816,7 @@ def up_command(
     except Exception as exc:
         ui.error(f"Pod {pod_name} (id: {pod_id}) was created but did not become ready")
         if isinstance(exc, (LiumError, requests.RequestException)):
-            # The API failed mid-wait (5xx, 429, a revoked key) or stopped answering (`Lium.ps()`
+            # The API failed mid-wait (5xx, a revoked key; a 429 is waited out inside Lium.wait_ready) or stopped answering (`Lium.ps()`
             # re-raises the transport error after its retries); the pod may well be up and bills.
             raise _post_rent_failure(exc, billing_pod, "waiting for it to become ready")
         raise
