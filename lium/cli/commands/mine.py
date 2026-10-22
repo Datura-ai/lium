@@ -2,6 +2,7 @@
 
 import json
 import re
+import shlex
 import shutil
 import time
 from pathlib import Path
@@ -156,6 +157,155 @@ def _check_prereqs():
 
     _run("docker info")
 
+    # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
+    # provider learns it from the preflight or a validator cycle later.
+    if not _has_sysbox():
+        raise Exception(
+            "Sysbox runtime not found in Docker (required by validators).\n"
+            f"Install it with: {_SYSBOX_SETUP_COMMAND}\n"
+            "then run `lium mine` again."
+        )
+
+
+# Validators are to score 0 a node whose Docker cannot cap a container's disk (STORAGE_LIMIT_REQUIRED): one renter
+# filling an uncapped disk fills /var/lib/docker and takes the host and every pod on it down (18 Oct 2026).
+_STORAGE_GUIDE = "https://docs.lium.io/providers/nodes/docker-storage"
+
+
+def _docker_storage_limited() -> bool:
+    """True when Docker is overlay2 on xfs mounted with pquota, so `--storage-opt size=` caps a container."""
+    from ..mine.docker_config import build_verification_result, inspect_docker_state
+    from ..mine.gpu_splitting import run_command
+
+    return build_verification_result(run_command, inspect_docker_state(run_command).docker_root_dir).passed
+
+
+def _setup_docker_storage():
+    """Offer to move Docker storage to an xfs pquota mount with `lium gpu-splitting setup`'s own plan and checks.
+
+    One question is both the menu and the consent: every disk is listed and the person types the one to format, or
+    presses Enter to skip. `--auto` and `--register` never consent. Whatever stops the setup, the manual command is
+    printed and the install carries on (validators do not require it yet).
+    """
+    import os
+    import sys
+
+    from rich.prompt import Prompt
+
+    from ..mine.gpu_splitting import _build_setup_plan, _execute_setup, _preflight, run_command
+    from ..mine.storage import evaluate_candidates, get_device_by_path
+
+    reason = "Docker cannot limit a container's disk on this host (needs xfs with pquota)."
+    manual = (
+        "Set it up with: sudo lium gpu-splitting setup --device <spare disk>\n"
+        f"Guide: {_STORAGE_GUIDE}"
+    )
+    if not sys.stdin.isatty():
+        console.warning(f"{reason}\n{manual}")
+        return
+    if os.geteuid() != 0:
+        console.warning(f"{reason}\n" + manual.replace("Set it up with", "Run `sudo lium mine`, or set it up with"))
+        return
+    try:
+        preflight = _preflight()
+        candidates = evaluate_candidates(
+            run_command, preflight.block_devices, preflight.root_mount, preflight.docker_mount
+        )
+    except RuntimeError as exc:
+        console.warning(f"{reason}\n{manual}\nCould not list the disks: {exc}")
+        return
+
+    def row(candidate, note):
+        device = get_device_by_path(preflight.block_devices, candidate.path)
+        model = (device.model or "").strip() if device else ""
+        serial = (device.serial or "").strip() if device else ""
+        size = f"{device.size_bytes // 1024**3} GiB" if device else ""
+        return f"  {candidate.path:<16} {model:<20} {serial:<16} {size:>10}   {note}"
+
+    offered = [c for c in candidates if c.allowed]
+    lines = [reason, f"Validators will soon score such nodes 0. Guide: {_STORAGE_GUIDE}", ""]
+    lines += ["Disks that can be formatted for Docker storage:"]
+    lines += [row(c, c.details) for c in offered] or ["  (none)"]
+    rejected = [c for c in candidates if not c.allowed]
+    if rejected:
+        lines += ["", "Not offered:"] + [row(c, c.details) for c in rejected]
+    if not offered:
+        console.warning("\n".join(lines) + f"\n\n{manual}")
+        return
+    lines += [
+        "",
+        f"Setup will stop Docker, format the chosen disk, copy {preflight.docker_state.docker_root_dir} to it "
+        "and start Docker again.",
+    ]
+    console.info("\n".join(lines))
+    typed = Prompt.ask("Type the disk path to format it, or press Enter to skip", default="").strip()
+    if not typed:
+        console.warning(f"Skipped. {manual}")
+        return
+    if typed not in {c.path for c in offered}:
+        console.warning(f"{typed} is not one of the disks listed above; nothing was changed.\n{manual}")
+        return
+    try:
+        _execute_setup(_build_setup_plan(preflight, typed))
+    except RuntimeError as exc:
+        # a refusal (containers running, Docker down, no backup space, target checks) stops only the storage setup
+        console.warning(f"Docker storage was not set up: {exc}\n{manual}")
+
+
+# The printed command fetches the official installer, never the checkout's copy; the CLI does not run it (it needs sudo).
+_SYSBOX_SETUP_COMMAND = (
+    "curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-io/main/neurons/executor/"
+    "nvidia_docker_sysbox_setup.sh | sudo bash"
+)
+
+
+def _has_sysbox() -> bool:
+    # validators run --runtime=sysbox-runc, so the runtime key must match exactly, not as a substring
+    runtimes, _ = _run("docker info --format '{{json .Runtimes}}'", check=False)
+    try:
+        parsed = json.loads(runtimes)
+    except ValueError:
+        return False
+    return isinstance(parsed, dict) and "sysbox-runc" in parsed
+
+
+# VerifyX refuses a node with under 100 GiB free, measured after the node images are pulled (~40 GiB: executor,
+# runner, validator preflight). On 7 Oct 2026 a 100 GB disk passed every earlier check and failed only at step 6.
+NODE_FREE_DISK_GIB = 100
+NODE_IMAGES_GIB = 40
+GIB = 1024**3
+
+
+def _node_images_present(executor_dir: Path) -> bool:
+    """Every image this run would pull is already local. The runner image carries the compose file with the executor
+    digest the runner injects at build, so that file, not the unrendered docker-compose.app.yml, names the images."""
+    try:
+        images = set(_run("docker compose config --images", cwd=str(executor_dir))[0].split())
+        runner = next(i for i in images if "executor-runner" in i)
+        # inspect first: docker run pulls a missing image, which is the download this check exists to precede
+        # (not --pull=never, which Docker before 20.10 rejects)
+        _run(f"docker image inspect {shlex.quote(runner)}")
+        baked = _run(f"docker run --rm --entrypoint cat {shlex.quote(runner)} /root/executor/docker-compose.yml")[0]
+        images.update(re.findall(r"^\s*image:\s*(\S+)", baked, re.MULTILINE))
+        images.add(PREFLIGHT_IMAGE)
+        for image in images:
+            _run(f"docker image inspect {shlex.quote(image)}")
+    except (RuntimeError, StopIteration):
+        return False
+    return True
+
+
+def _check_free_disk(executor_dir: Path):
+    root = _run("docker info --format '{{.DockerRootDir}}'", check=False)[0].strip() or "/var/lib/docker"
+    free = shutil.disk_usage(root if Path(root).exists() else "/").free
+    needed_gib = NODE_FREE_DISK_GIB + (0 if _node_images_present(executor_dir) else NODE_IMAGES_GIB)
+    if free < needed_gib * GIB:
+        raise Exception(
+            f"Not enough free disk: {free / GIB:.1f} GiB free on {root}, {needed_gib} GiB needed "
+            f"(validation requires {NODE_FREE_DISK_GIB} GiB free after about {NODE_IMAGES_GIB} GiB of node images). "
+            "Use a host with a disk of at least 160 GB, or free space and re-run."
+        )
+
 
 def _install_executor_tools(compute_dir: Path):
     script = compute_dir / "scripts" / "install_executor_on_ubuntu.sh"
@@ -202,6 +352,9 @@ def _setup_executor_env(
         if not _valid_port(p):
             raise Exception(f"Invalid port {name}={p} (must be 1-65535)")
 
+    # a re-run without --register rebuilds .env from the template; keep the claim the earlier --register wrote
+    old_claim = _env_value(env_f, "MINER_ACCOUNT_CLAIM")
+
     # read, rewrite, preserve
     src_lines = env_t.read_text().splitlines()
     out_lines = []
@@ -230,6 +383,8 @@ def _setup_executor_env(
             # DAH-3075: blank means "same as SSH_PORT" (the documented meaning); keeping the template's
             # hard-coded 2200 while SSH_PORT changed sent the validator to a port nothing listens on
             put(k, ssh_public_port or ssh_port)
+        elif k == "MINER_ACCOUNT_CLAIM" and old_claim:
+            put(k, old_claim)
         elif k == "RENTING_PORT_RANGE":
             if port_range:
                 put(k, port_range)
@@ -245,6 +400,8 @@ def _setup_executor_env(
         "EXTERNAL_PORT": external_port,
         "SSH_PORT": ssh_port,
     }
+    if old_claim:
+        required["MINER_ACCOUNT_CLAIM"] = old_claim
     for k, v in required.items():
         if k not in seen and not any(l.startswith(f"{k}=") for l in out_lines):
             out_lines.append(f"{k}={v}")
@@ -400,17 +557,49 @@ def _compose_diagnostics(executor_dir: Path, tail: int = 30) -> str:
     return "\n".join(parts)
 
 
-def _start_executor(executor_dir: Path, wait_secs: int = 180):
+def _env_value(env_f: Path, key: str) -> str:
+    try:
+        lines = env_f.read_text().splitlines()
+    except FileNotFoundError:
+        return ""
+    return next((line.split("=", 1)[1].strip() for line in lines if line.startswith(f"{key}=")), "")
+
+
+def _executor_env_value(executor_dir: Path, key: str) -> Optional[str]:
+    """``key`` in the environment the executor container was created with; None when there is no executor container."""
+    cid = _run("docker compose -f docker-compose.app.yml ps -aq executor", check=False, cwd=str(executor_dir))[0].strip()
+    if not cid:
+        return None
+    env = _run(f"docker inspect --format '{{{{range .Config.Env}}}}{{{{println .}}}}{{{{end}}}}' {cid}", check=False)[0]
+    return next((line.split("=", 1)[1].strip() for line in env.splitlines() if line.startswith(f"{key}=")), "")
+
+
+def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = False):
     # Start using the default docker-compose.yml
-    _run("docker compose up -d", capture=True, cwd=str(executor_dir))
+    # recreate: an executor already running keeps its old .env, so a new MINER_ACCOUNT_CLAIM never reaches it;
+    # a plain re-run leaves a running executor alone
+    ps_cmd = "docker compose -f docker-compose.app.yml ps -q executor"
+    if recreate:
+        # a recreate restarts the executor under running rentals; the validator names rental pods pod_* (lium-io const.py)
+        names = _run("docker ps --filter status=created --filter status=running --format '{{.Names}}'", check=False)[0].split()
+        if rentals := [n for n in names if n.startswith("pod_")]:
+            console.warning(
+                f"{len(rentals)} rental(s) running on this node, so the executor was not restarted. "
+                "The new account claim is in .env and applies on its next restart; rerun this command once the rentals end."
+            )
+            recreate = False
+    # after --force-recreate the old container can still report healthy; wait for one with a new ID
+    old_id = _run(ps_cmd, check=False, cwd=str(executor_dir))[0].strip() if recreate else ""
+    command = "docker compose up -d --force-recreate" if recreate else "docker compose up -d"
+    _run(command, capture=True, cwd=str(executor_dir))
 
     # Wait for the executor service to be fully healthy
     start = time.time()
     
     while time.time() - start < wait_secs:
         # Get the container name/ID for the executor service
-        out, _ = _run("docker compose -f docker-compose.app.yml ps -q executor", cwd=str(executor_dir))
-        if not out.strip():
+        out, _ = _run(ps_cmd, cwd=str(executor_dir))
+        if not out.strip() or out.strip() == old_id:
             time.sleep(2)
             continue
             
@@ -433,7 +622,7 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180):
 
 def _apply_env_overrides(
     executor_dir: Path,
-    internal: str, external: str, ssh: str, ssh_pub: str, rng: str
+    internal: str, external: str, ssh: str, ssh_pub: str, rng: str, account_claim: str | None = None
 ):
     env_f = executor_dir / ".env"
     content = env_f.read_text().splitlines()
@@ -454,20 +643,25 @@ def _apply_env_overrides(
     set_or_append("SSH_PUBLIC_PORT", ssh_pub or ssh)
     if rng:
         set_or_append("RENTING_PORT_RANGE", rng)
+    if account_claim:
+        set_or_append("MINER_ACCOUNT_CLAIM", account_claim)
     env_f.write_text("\n".join(content) + "\n")
 
 def _gather_inputs(
     hotkey: Optional[str],
     auto: bool,
+    internal_port: int | None = None,
+    external_port: int | None = None,
 ) -> dict:
     """Ask everything up-front; return a dict of resolved inputs."""
     answers = {}
     if auto:
         # Auto mode - use all defaults
         answers["hotkey"] = hotkey or ""
+        internal = str(internal_port or 8080)
         answers.update(dict(
-            internal_port="8080",
-            external_port="8080",
+            internal_port=internal,
+            external_port=str(external_port) if external_port else internal,
             ssh_port="2200",
             ssh_public_port="",
             port_range=""
@@ -496,9 +690,9 @@ def _gather_inputs(
                 console.warning("Port must be an integer between 1 and 65535.")
         
         # Service ports
-        service_port = ask_port("Service port (where the node API will be reachable)", 8080)
+        service_port = ask_port("Service port (where the node API will be reachable)", internal_port or 8080)
         answers["internal_port"] = service_port
-        answers["external_port"] = service_port  # Set external same as internal
+        answers["external_port"] = str(external_port) if external_port else service_port
         answers["ssh_port"] = ask_port("Node SSH port (used by validator to SSH into the container)", 2200)
         
         # Optional ports
@@ -668,6 +862,17 @@ def _mine_status(args: list[str], hotkey: Optional[str] = None) -> int:
 # --------------------------
 # CLI
 # --------------------------
+def _ipv4(ctx, param, value: str | None) -> str | None:
+    if value is None:
+        return None
+    import ipaddress
+
+    try:
+        return str(ipaddress.IPv4Address(value))
+    except ValueError:
+        raise click.BadParameter(f"{value!r} is not an IPv4 address.")
+
+
 @click.command("mine", context_settings=dict(ignore_unknown_options=True, allow_extra_args=True), add_help_option=False)
 @click.option("--hotkey", "-k", help="Miner hotkey SS58 address (for `mine status`: the wallet hotkey name)")
 @click.option("--dir", "-d", "dir_", default="compute-subnet", help="Target directory")
@@ -711,9 +916,28 @@ def _mine_status(args: list[str], hotkey: Optional[str] = None) -> int:
     help="Minutes to wait for the node to be listed after registering; 0 returns right after the add. "
     "Only with --register.",
 )
+@click.option(
+    "--ip",
+    callback=_ipv4,
+    help="Public IPv4 the node is registered at, instead of the auto-detected one (a node behind CGNAT or a "
+    "port-forwarding VPS: the VPS address).",
+)
+@click.option(
+    "--internal-port",
+    type=click.IntRange(1, 65535),
+    default=None,
+    help="Port the node's service listens on (default 8080).",
+)
+@click.option(
+    "--external-port",
+    type=click.IntRange(1, 65535),
+    default=None,
+    help="Port the node is registered at and validators connect to (default: --internal-port).",
+)
 @click.pass_context
 @handle_errors
-def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token, portal_url, price, gpu_type, wait_minutes):
+def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token, portal_url, price, gpu_type,
+                 wait_minutes, ip, internal_port, external_port):
     """Set up this host as a Lium provider node: clone, configure, start and validate the executor.
 
     Before `docker compose up`, the service and SSH ports are checked on this host: a port
@@ -726,7 +950,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     node reports under come from the token (an account created with e-mail or Google has no key of its own;
     the portal's is written to the executor's .env) and two steps follow: the node
     is added to your account with the GPU model and count nvidia-smi reports, this host's public
-    IPv4 and the executor's port, at the model's base price from lium.io's public shared-config; then the node's
+    IPv4 (or --ip) and the executor's port, at the model's base price from lium.io's public shared-config; then the node's
     status is polled every 15 s until it is listed (exit 0), the portal names something to fix
     (OFFLINE or VALIDATION_FAILED, exit 1), or --wait minutes pass (exit 2). The node page URL is
     printed in every case.
@@ -770,6 +994,14 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 "❌ --hotkey differs from what the register token says this node reports under; drop -k, the token decides."
             )
             raise SystemExit(1)
+        # the claims were read without the portal's secret: the portal checks them before anything is installed
+        try:
+            reg.confirm_register_token(reg.build_http(portal_url, token.token))
+        except reg.RegisterError as e:
+            from rich.markup import escape
+
+            console.error(f"❌ {escape(str(e))}")
+            raise SystemExit(1)
         # what the executor reports under: the account's own key, or the portal's for an account without one
         # (lium-platform#294) — the SS58 check in _setup_executor_env applies to this value, not to the account id
         hotkey = token.node_hotkey
@@ -781,7 +1013,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 "If registration fails with an expired token, copy a fresh command from the portal."
             )
 
-    answers = _gather_inputs(hotkey, auto)
+    answers = _gather_inputs(hotkey, auto, internal_port, external_port)
     target_dir = Path(dir_).absolute()
 
     TOTAL_STEPS = 8 if token else 6
@@ -795,6 +1027,10 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
 
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
             _check_prereqs()
+            storage_ok = _docker_storage_limited()
+        if not storage_ok:
+            _setup_docker_storage()   # outside the spinner: it prints the plan and may ask to confirm
+        _check_free_disk(target_dir / "neurons" / "executor")
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.
         preflight_pull = _start_preflight_pull()
@@ -816,6 +1052,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 ssh=answers["ssh_port"],
                 ssh_pub=answers["ssh_public_port"],
                 rng=answers["port_range"],
+                account_claim=token.account_claim if token else None,
             )
 
             # A taken host port makes `docker compose up` loop on
@@ -824,7 +1061,10 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             _check_ports_free(_host_ports_from_answers(answers), executor_dir)
 
         with timed_step_status(5, TOTAL_STEPS, "Starting node"):
-            _start_executor(executor_dir)
+            # recreate only an executor whose claim differs from .env: a repeat run leaves it alone, and a rerun after
+            # a restart skipped under rentals still delivers the claim .env already holds
+            running_claim = _executor_env_value(executor_dir, "MINER_ACCOUNT_CLAIM")
+            _start_executor(executor_dir, recreate=running_claim not in (None, _env_value(executor_dir / ".env", "MINER_ACCOUNT_CLAIM")))
 
         console.dim(
             "Validation runs the validator's preflight image: GPU check, matrix "
@@ -859,11 +1099,12 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             gpu_type_override=gpu_type,
             wait_minutes=wait_minutes,
             total_steps=TOTAL_STEPS,
+            ip_override=ip,
         ))
 
     # Get executor details for summary
     gpu_info = _get_gpu_info()
-    public_ip = _get_public_ip()
+    public_ip = ip or _get_public_ip()
     
     # Get the external port from answers
     external_port = answers.get("external_port", "8080")
@@ -898,9 +1139,10 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     add_url = f"https://provider.lium.io/nodes?{urlencode(params)}"
     
     console.print("\n[bold cyan]Register this node in the Provider Portal:[/bold cyan]")
-    console.print(f"[yellow]{add_url}[/yellow]\n")
+    # soft_wrap: a hard wrap split the IP across lines and the clicked link opened Add Node with a wrong address
+    console.print(f"[yellow]{add_url}[/yellow]\n", soft_wrap=True)
     console.print("[bold cyan]…or from this terminal:[/bold cyan]")
-    console.print(f"[yellow]{_provider_add_command(gpu_info, public_ip, external_port)}[/yellow]")
+    console.print(f"[yellow]{_provider_add_command(gpu_info, public_ip, external_port)}[/yellow]", soft_wrap=True)
     console.dim(_registration_note())
 
 
@@ -913,6 +1155,7 @@ def _register_and_wait(
     gpu_type_override: Optional[str],
     wait_minutes: int,
     total_steps: int,
+    ip_override: str | None = None,
 ) -> int:
     """Steps 7–8 of `lium mine --register`: add the node to the account, then watch its status. Returns the exit code."""
     from rich.markup import escape
@@ -926,7 +1169,7 @@ def _register_and_wait(
             inventory = reg.read_gpu_inventory(_run)
             gpu_type = gpu_type_override or inventory.gpu_type
             port = reg.executor_port(executor_dir)
-            ip = reg.public_ipv4_or_fail(_get_public_ip())
+            ip = ip_override or reg.public_ipv4_or_fail(_get_public_ip())
             price_per_gpu = reg.resolve_price(gpu_type, price)
             record = reg.register_node(
                 http,
@@ -1005,9 +1248,9 @@ def _provider_add_command(gpu_info: dict, public_ip: str, external_port: str | i
 
 def _registration_note() -> str:
     return (
-        "Validators only reach nodes of providers with a running coordinator: opt in to the "
-        "Lium Central Provider Server (`lium provider config opt-in --yes`, or Profile Settings "
-        "in the portal) or run a self-hosted provider. Until then the node stays "
-        "VALIDATION_PENDING. The first validation takes roughly 15 minutes; add --price to "
-        "`node add` to override the default price."
+        "If your account is not opted in to the Lium Central Provider Server yet (Profile Settings "
+        "in the portal; on by default for new accounts), run `lium provider config opt-in --yes` "
+        "or a self-hosted provider, or the node stays VALIDATION_PENDING. The first validation "
+        "takes roughly 15 minutes. The node is listed at the model's default price; add --price "
+        "to `node add` to set your own within the range the portal shows for the model."
     )

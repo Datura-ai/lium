@@ -6,7 +6,9 @@ pod); the SDK could not reach any of it, so a multi-node job could only be start
 """
 
 import itertools
+import json
 import time
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -14,7 +16,7 @@ import pytest
 from lium.sdk import (
     Cluster, ClusterNotListedError, ClusterOffer, Config, Lium, LiumError, LiumNotFoundError, LiumPermissionError, Template,
 )
-from lium.sdk.exceptions import LiumServerError
+from lium.sdk.exceptions import LiumAuthError, LiumServerError
 
 FABRIC = "hot:infiniband:0x3:0x7fff:NVIDIA H100 80GB HBM3:8"
 
@@ -260,7 +262,7 @@ def test_up_cluster_by_name_ignores_a_cluster_that_existed_before_the_call(monke
         ps_sequence=[stale, stale],
     )
 
-    with pytest.raises(LiumError, match="did not produce pods named 'job'"):
+    with pytest.raises(ClusterNotListedError, match="shows no new pods named 'job'"):
         client.up_cluster(["exec-0", "exec-1"], name="job", template_id="tpl-x")
 
 
@@ -280,7 +282,7 @@ def test_up_cluster_by_name_takes_the_new_cluster_next_to_a_stale_one(monkeypatc
 def test_up_cluster_reports_when_nothing_appeared(monkeypatch):
     client = _Client(routes={("POST", "/executors/cluster/rent"): LiumServerError("Server error: 504")}, ps_sequence=[[]])
 
-    with pytest.raises(LiumError, match="did not produce pods named 'job'"):
+    with pytest.raises(ClusterNotListedError, match="shows no new pods named 'job'"):
         client.up_cluster(["exec-0", "exec-1"], name="job", template_id="tpl-x")
 
 
@@ -639,3 +641,132 @@ def test_rm_cluster_403_is_a_permission_error(monkeypatch, tmp_path):
         client.rm_cluster(Cluster(id="c-1", pods=pods))
 
     assert len(client.calls) == 1
+
+
+def test_up_cluster_sends_an_idempotency_key(monkeypatch):
+    client = _Client(
+        routes={("POST", "/executors/cluster/rent"): {"success": True, "pod_ids": ["pod-0", "pod-1"]}},
+        ps_sequence=[_pods([_pod_payload(0), _pod_payload(1)])],
+    )
+    monkeypatch.setattr(client, "cluster_template", lambda: _template("0.0.7"))
+    sent_headers = []
+    record = client._request
+    monkeypatch.setattr(
+        client, "_request", lambda method, endpoint, **kw: sent_headers.append(kw.get("headers")) or record(method, endpoint, **kw)
+    )
+
+    client.up_cluster(["exec-0", "exec-1"], name="job")
+
+    [headers] = [h for h in sent_headers if h is not None]
+    uuid.UUID(headers["Idempotency-Key"])
+    assert headers["X-API-KEY"] == "test"
+
+
+def test_up_cluster_resends_once_with_the_same_key_when_the_backend_honours_it(monkeypatch):
+    answers = iter([LiumServerError("Server error: 504"), {"success": True, "pod_ids": ["pod-0", "pod-1"]}])
+
+    def order():
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    client = _Client(
+        routes={("GET", "/version"): {"features": ["rent_idempotency"]}, ("POST", "/executors/cluster/rent"): order},
+        ps_sequence=[[], _pods([_pod_payload(0), _pod_payload(1)])],
+    )
+    sent_keys = []
+    record = client._request
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda method, endpoint, **kw: sent_keys.append((kw.get("headers") or {}).get("Idempotency-Key"))
+        or record(method, endpoint, **kw),
+    )
+
+    cluster = client.up_cluster(["exec-0", "exec-1"], name="job", template_id="tpl-x")
+
+    assert cluster.id == "c-1"
+    posts = [c for c in client.calls if c[0] == "POST"]
+    assert len(posts) == 2 and posts[0][2] == posts[1][2]
+    post_keys = [k for k in sent_keys if k is not None]
+    assert len(post_keys) == 2 and post_keys[0] == post_keys[1]
+
+
+@pytest.mark.parametrize(
+    "resend_error",
+    [
+        LiumError("conflict", code="idempotency_in_progress"),
+        LiumError("conflict", code="idempotency_outcome_unknown"),
+        # lium#328 r4285561625: an auth or balance refusal refuses the resend only
+        LiumAuthError("Invalid API key"),
+        LiumPermissionError("Insufficient balance"),
+    ],
+)
+def test_up_cluster_looks_up_by_name_when_the_resend_cannot_replay(resend_error):
+    answers = iter([LiumServerError("Server error: 504"), resend_error])
+
+    def order():
+        raise next(answers)
+
+    client = _Client(
+        routes={("GET", "/version"): {"features": ["rent_idempotency"]}, ("POST", "/executors/cluster/rent"): order},
+        ps_sequence=[[], _pods([_pod_payload(0), _pod_payload(1)])],
+    )
+
+    cluster = client.up_cluster(["exec-0", "exec-1"], name="job", template_id="tpl-x")
+
+    assert cluster.id == "c-1"
+    assert len([c for c in client.calls if c[0] == "POST"]) == 2
+
+
+_TIMEOUT = object()   # the resend times out as well
+
+
+@pytest.mark.parametrize("resend", [_TIMEOUT, "idempotency_in_progress", "idempotency_outcome_unknown"])
+@pytest.mark.parametrize("listing", ["empty", "partial", "failed", "complete"])
+def test_up_cluster_unanswered_order_stays_uncertain_through_the_cli(monkeypatch, tmp_path, resend, listing):
+    """The first order times out and the resend cannot replay it. Only a whole new cluster settles the outcome; an
+    empty, partial or failed listing must stay uncertain (the order may still land), so the CLI must report
+    cluster_rent_uncertain and never 'Retry', which would rent a second cluster (lium#328 r4285299647)."""
+    from click.testing import CliRunner
+
+    from lium.cli.cli import cli
+    from lium.cli.clusters import command as clusters_command
+
+    answers = iter([
+        LiumServerError("Server error: 504"),
+        LiumServerError("Server error: 504") if resend is _TIMEOUT else LiumError("conflict", code=resend),
+    ])
+
+    def order():
+        raise next(answers)
+
+    after = {
+        "empty": [], "partial": _pods([_pod_payload(0)]), "failed": LiumServerError("Server error: 503"),
+        "complete": _pods([_pod_payload(0), _pod_payload(1)]),
+    }[listing]
+    client = _Client(
+        routes={
+            ("GET", "/version"): {"features": ["rent_idempotency"]},
+            ("GET", "/executors/infiniband-clusters"): [_offer_payload()],
+            ("POST", "/executors/cluster/rent"): order,
+        },
+        ps_sequence=[[], after],
+    )
+    monkeypatch.setattr(client, "cluster_template", lambda: SimpleNamespace(id="tpl-c"))
+    monkeypatch.setattr(clusters_command, "Lium", lambda *a, **k: client)
+    monkeypatch.setattr(clusters_command, "ensure_config", lambda: None)
+
+    result = CliRunner().invoke(
+        cli, ["clusters", "up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--format", "json"], catch_exceptions=False,
+    )
+
+    assert len([c for c in client.calls if c[0] == "POST"]) == 2
+    if listing == "complete":
+        assert result.exit_code == 0, result.output
+        return
+    assert result.exit_code == 3, result.output
+    payload = json.loads(result.output)
+    assert payload["error"]["code"] == "cluster_rent_uncertain"
+    assert "Retry" not in result.output and "may be rented" in result.output

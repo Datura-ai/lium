@@ -6,11 +6,12 @@ rent-by-spec 200/409 bodies, and the `GET /executors` rows the client-side path 
 """
 
 import json
+import uuid
 
 import pytest
 import responses
 
-from lium.sdk import Config, Lium, LiumError, LiumServerError, RentResult
+from lium.sdk import Config, Lium, LiumError, LiumServerError, RentResult, Template
 from lium.sdk import client as client_module
 from lium.sdk import utils as sdk_utils
 
@@ -244,10 +245,11 @@ def test_a_lost_rent_response_with_no_pod_raises_and_posts_nothing_more(client, 
     assert urls.count(f"{BASE}/pods") == 1 + 3  # the snapshot, then three looks for the pod
 
 
+@pytest.mark.parametrize("features", [["rent_by_spec"], ["rent_by_spec", "rent_idempotency"]])
 @responses.activate
-def test_a_dry_run_rents_nothing_so_a_transient_failure_is_retried(client, monkeypatch):
+def test_a_dry_run_rents_nothing_so_a_transient_failure_is_retried(client, monkeypatch, features):
     monkeypatch.setattr(sdk_utils.time, "sleep", lambda seconds: None)
-    _version(["rent_by_spec"])
+    _version(features)
     responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", status=502)
     responses.add(
         responses.POST, f"{BASE}/executors/rent-by-spec",
@@ -257,7 +259,10 @@ def test_a_dry_run_rents_nothing_so_a_transient_failure_is_retried(client, monke
     result = client.rent(gpu_type="H100", ssh_keys=[KEY], dry_run=True)
 
     assert result.dry_run is True and result.executor.id == "exec-cheap"
-    assert [c.request.url for c in responses.calls].count(f"{BASE}/executors/rent-by-spec") == 2
+    posts = [c.request for c in responses.calls if c.request.method == "POST"]
+    assert len(posts) == 2
+    # a key would be kept pending by the backend after the 502 and turn the retry into a 409
+    assert all("Idempotency-Key" not in p.headers for p in posts)
 
 
 @responses.activate
@@ -276,6 +281,11 @@ def test_a_rent_by_spec_backend_refuses_interconnect_before_any_call(client):
 # --- the client-side path (older backend) ------------------------------------------------------
 
 
+def _template():
+    # the template offers no volume encryption: rent() looks it up to decide what to ask for
+    responses.add(responses.GET, f"{BASE}/templates/22222222-2222-4222-8222-222222222222", json={"id": "22222222-2222-4222-8222-222222222222", "supports_volume_encryption": False})
+
+
 def _fleet():
     responses.add(responses.GET, f"{BASE}/machines", json=[{"name": "NVIDIA H100 NVL"}, {"name": "NVIDIA H100 80GB HBM3"}])
     fleet = [
@@ -292,11 +302,12 @@ def _fleet():
 @responses.activate
 def test_older_backend_lists_filters_picks_the_cheapest_and_rents_by_id(client):
     _version(None)
+    _template()
     _fleet()
     responses.add(responses.POST, f"{BASE}/executors/cheap/rent", json={"id": "pod-uuid-9", "name": "train-1"})
 
     result = client.rent(
-        gpu_type="H100", gpu_count=1, name="train-1", template_id="tpl-1", min_cpus=16, min_download_mbps=100,
+        gpu_type="H100", gpu_count=1, name="train-1", template_id="22222222-2222-4222-8222-222222222222", min_cpus=16, min_download_mbps=100,
         ssh_keys=[KEY],
     )
 
@@ -305,15 +316,16 @@ def test_older_backend_lists_filters_picks_the_cheapest_and_rents_by_id(client):
     assert result.candidates == 2 and [a["id"] for a in result.alternatives] == ["dear"]
     assert result.pod == {"id": "pod-uuid-9", "name": "train-1"}
     assert responses.calls[-1].request.url == f"{BASE}/executors/cheap/rent"
-    assert json.loads(responses.calls[-1].request.body)["template_id"] == "tpl-1"
+    assert json.loads(responses.calls[-1].request.body)["template_id"] == "22222222-2222-4222-8222-222222222222"
 
 
 @responses.activate
 def test_older_backend_dry_run_only_lists(client):
     _version(None)
+    _template()
     _fleet()
 
-    result = client.rent(gpu_type="H100", template_id="tpl-1", ssh_keys=[KEY], dry_run=True)
+    result = client.rent(gpu_type="H100", template_id="22222222-2222-4222-8222-222222222222", ssh_keys=[KEY], dry_run=True)
 
     assert result.dry_run is True and result.pod is None and result.attempts == 0
     # no floors asked: the three $1.20 nodes tie on price, 900 Mbps beats 50, then the id decides
@@ -335,12 +347,13 @@ def test_older_backend_reads_interconnect_from_the_node_specs(client):
     # the one constraint the server path refuses is checked here: a node that does not report
     # NVLink does not qualify, so the dearer node that does is the pick
     _version(None)
+    _template()
     responses.add(responses.GET, f"{BASE}/machines", json=[{"name": "NVIDIA H100 NVL"}])
     linked = _node("linked", price=1.5)
     linked["specs"]["interconnect"] = {"nvlink": True}
     responses.add(responses.GET, f"{BASE}/executors", json=[_node("plain", price=1.2), linked])
 
-    result = client.rent(gpu_type="H100", interconnect="nvlink", template_id="tpl-1", ssh_keys=[KEY], dry_run=True)
+    result = client.rent(gpu_type="H100", interconnect="nvlink", template_id="22222222-2222-4222-8222-222222222222", ssh_keys=[KEY], dry_run=True)
 
     assert result.executor.id == "linked" and result.candidates == 1
 
@@ -350,6 +363,7 @@ def test_older_backend_reads_the_nvlink_verdict_off_a_summary_row(client):
     # `ls()` asks for `view=summary`, whose rows carry the verdict at the top level and no `specs.interconnect`
     # (lium-platform#522); a check that read only specs.interconnect matched no node on that view
     _version(None)
+    _template()
     responses.add(responses.GET, f"{BASE}/machines", json=[{"name": "NVIDIA H100 NVL"}])
     linked = _node("linked", price=1.5)
     linked["nvlink"] = True
@@ -358,7 +372,160 @@ def test_older_backend_reads_the_nvlink_verdict_off_a_summary_row(client):
     plain["nvlink"] = False
     responses.add(responses.GET, f"{BASE}/executors", json=[plain, linked])
 
-    result = client.rent(gpu_type="H100", interconnect="nvlink", template_id="tpl-1", ssh_keys=[KEY], dry_run=True)
+    result = client.rent(gpu_type="H100", interconnect="nvlink", template_id="22222222-2222-4222-8222-222222222222", ssh_keys=[KEY], dry_run=True)
 
     assert result.executor.id == "linked" and result.candidates == 1
     assert "interconnect" not in linked["specs"]
+
+
+@responses.activate
+def test_rent_by_spec_with_a_dockerfile_does_not_request_encryption(client):
+    _version(["rent_by_spec"])
+    responses.add(responses.GET, f"{BASE}/pods", json=[])
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", json=RENTED)
+
+    client.rent(gpu_type="H100", name="train-1", dockerfile_content="FROM busybox", ssh_keys=[KEY])
+
+    assert json.loads(responses.calls[-1].request.body)["enable_volume_encryption"] is False
+
+
+@pytest.mark.parametrize("server_side", [True, False])
+@pytest.mark.parametrize("template_supports", [True, False])
+@pytest.mark.parametrize("asked", [None, True, False])
+@responses.activate
+def test_rent_without_a_template_asks_for_encryption_only_where_it_can_get_it(
+    client, monkeypatch, server_side, template_supports, asked
+):
+    # The server picks Lium's recommended template, which supports it; the client-side path
+    # leaves the choice to up(), which reads the default template it picks for the node.
+    monkeypatch.setattr(
+        Lium, "default_docker_template",
+        lambda self, executor_id: Template(
+            id="tpl-default", name="default", huid="d", docker_image="img", docker_image_tag="t",
+            category="", status="READY", supports_volume_encryption=template_supports,
+        ),
+    )
+    if server_side:
+        _version(["rent_by_spec"])
+        responses.add(responses.GET, f"{BASE}/pods", json=[])
+        responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", json=RENTED)
+        expected = True if asked is None else asked
+    else:
+        _version(None)
+        _fleet()
+        responses.add(responses.POST, f"{BASE}/executors/cheap/rent", json={"id": "pod-uuid-9", "name": "train-1"})
+        expected = template_supports if asked is None else asked
+
+    client.rent(
+        gpu_type="H100", name="train-1", min_cpus=16, min_download_mbps=100, ssh_keys=[KEY],
+        enable_volume_encryption=asked,
+    )
+
+    assert responses.calls[-1].request.method == "POST"
+    assert json.loads(responses.calls[-1].request.body)["enable_volume_encryption"] is expected
+
+
+@responses.activate
+def test_rent_sends_a_fresh_idempotency_key_and_still_posts_once(client, monkeypatch):
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(sdk_utils.time, "sleep", lambda seconds: None)
+    _version(["rent_by_spec"])
+    responses.add(responses.GET, f"{BASE}/pods", json=[])
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", status=502)
+
+    with pytest.raises(LiumServerError):
+        client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY])
+    responses.replace(responses.POST, f"{BASE}/executors/rent-by-spec", json=RENTED)
+    client.rent(gpu_type="H100", name="train-2", ssh_keys=[KEY])
+
+    posts = [c.request for c in responses.calls if c.request.method == "POST"]
+    assert len(posts) == 2  # the 502 was not resent: a server that ignores the key would rent again
+    keys = [uuid.UUID(p.headers["Idempotency-Key"]) for p in posts]
+    assert keys[0] != keys[1]
+    assert posts[0].headers["X-API-KEY"] == "test"
+
+
+@pytest.mark.parametrize(
+    "resend", ["replay", "timeout", 502, 429, 401, 403, "idempotency_in_progress", "idempotency_outcome_unknown"]
+)
+@responses.activate
+def test_a_lost_rent_response_is_resent_once_with_the_same_key_when_the_backend_honours_it(
+    client, monkeypatch, resend
+):
+    import requests
+
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
+    _version(["rent_by_spec", "rent_idempotency"])
+    for _ in range(4):  # the snapshot and three looks before the resend
+        responses.add(responses.GET, f"{BASE}/pods", json=[])
+    # an ambiguous resend may have created the pod: it is looked for again, never POSTed a third time
+    responses.add(responses.GET, f"{BASE}/pods", json=[_pod_row("pod-uuid-1", "train-1", _node("exec-cheap"), 1.2)])
+    url = f"{BASE}/executors/rent-by-spec"
+    responses.add(responses.POST, url, body=requests.Timeout("first attempt"))
+    if resend == "replay":
+        responses.add(responses.POST, url, json=RENTED)
+    elif resend == "timeout":
+        responses.add(responses.POST, url, body=requests.Timeout("after commit"))
+    elif isinstance(resend, int):
+        responses.add(responses.POST, url, status=resend)
+    else:
+        responses.add(responses.POST, url, status=409, json={"error": {"code": resend, "message": "pending"}})
+
+    result = client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY])
+
+    posts = [c.request for c in responses.calls if c.request.method == "POST"]
+    assert len(posts) == 2
+    assert posts[0].headers["Idempotency-Key"] == posts[1].headers["Idempotency-Key"]
+    assert posts[0].body == posts[1].body
+    assert result.pod["id"] == "pod-uuid-1"
+
+
+@pytest.mark.parametrize("listing", ["empty", "failed"])
+@pytest.mark.parametrize(
+    "resend", ["timeout", 502, 429, 401, 403, "idempotency_in_progress", "idempotency_outcome_unknown"]
+)
+@responses.activate
+def test_an_unresolved_resend_keeps_the_rent_outcome_unknown(client, monkeypatch, resend, listing):
+    # lium#328 r4285561625, r4286119800: when the resend does not settle the first rent and no pod
+    # is listed, either POST may have rented, so the error must keep the warning against a fresh
+    # rent (a bare 502/429 would get the CLI's "Retry", and a re-run sends a new key)
+    import requests
+
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
+    _version(["rent_by_spec", "rent_idempotency"])
+    responses.add(responses.GET, f"{BASE}/pods", json=[])  # the snapshot before the rent
+    if listing == "failed":
+        responses.add(responses.GET, f"{BASE}/pods", status=503)
+    url = f"{BASE}/executors/rent-by-spec"
+    responses.add(responses.POST, url, body=requests.Timeout("first attempt"))
+    if resend == "timeout":
+        responses.add(responses.POST, url, body=requests.Timeout("resend"))
+    elif isinstance(resend, int):
+        responses.add(responses.POST, url, status=resend, json={"error": {"code": "refused", "message": "no"}})
+    else:
+        responses.add(responses.POST, url, status=409, json={"error": {"code": resend, "message": "pending"}})
+
+    with pytest.raises(LiumError) as raised:
+        client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY])
+
+    assert raised.value.code == "rent_outcome_unknown" and "may be rented" in str(raised.value)
+    assert [c.request.url for c in responses.calls].count(url) == 2  # never a third POST
+
+
+@responses.activate
+def test_a_definite_refusal_of_the_resend_propagates_without_another_look(client, monkeypatch):
+    monkeypatch.setattr(client_module.time, "sleep", lambda seconds: None)
+    _version(["rent_by_spec", "rent_idempotency"])
+    responses.add(responses.GET, f"{BASE}/pods", json=[])
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", status=502)
+    responses.add(
+        responses.POST, f"{BASE}/executors/rent-by-spec", status=409,
+        json={"error": {"code": "no_matching_node", "message": "nothing fits"}},
+    )
+
+    with pytest.raises(LiumError):
+        client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY])
+
+    urls = [c.request.url for c in responses.calls]
+    assert urls.count(f"{BASE}/executors/rent-by-spec") == 2
+    assert urls.count(f"{BASE}/pods") == 1 + 3

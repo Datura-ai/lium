@@ -1,6 +1,25 @@
 """Up command validation."""
 
+import json
+import re
 from typing import Optional, Tuple
+
+_HEREDOC_RE = re.compile(r"<<-?[\"']?(\w+)[\"']?")
+_REMOTE_SOURCE_RE = re.compile(r"^(https?://|git://|ssh://|git@)", re.IGNORECASE)
+_DIRECTIVE_RE = re.compile(r"^#\s*([a-zA-Z][a-zA-Z0-9]*)\s*=\s*(.+?)\s*$")
+
+
+def _escape_char(lines: list[str]) -> str:
+    """The line-continuation character: ``\\`` unless a leading ``# escape=`` directive says otherwise."""
+    escape = "\\"
+    for line in lines:
+        # parser directives only count before the first comment, blank line or instruction
+        match = _DIRECTIVE_RE.match(line.strip())
+        if not match:
+            break
+        if match.group(1).lower() == "escape" and match.group(2) in ("\\", "`"):
+            escape = match.group(2)
+    return escape
 
 
 def validate(
@@ -67,3 +86,58 @@ def parse_env_vars(env_list: Tuple[str, ...]) -> Tuple[dict, Optional[str]]:
             return {}, f"Empty key in environment variable: '{env_str}'"
         env_dict[key] = value
     return env_dict, None
+
+
+def build_context_lines(dockerfile_content: str) -> list[str]:
+    """The COPY/ADD lines that read local files, which a `--dockerfile` build cannot see.
+
+    The node builds with the Dockerfile as the only file in its build context, so
+    these fail there with "not found". `COPY --from=<stage>`, heredoc sources and
+    remote ADD sources need no local files and are not listed.
+    """
+    logical: list[str] = []
+    buf: list[str] = []
+    heredoc_end: str | None = None
+    lines = dockerfile_content.splitlines()
+    escape = _escape_char(lines)
+    for line in lines:
+        if heredoc_end is not None:
+            if line.strip() == heredoc_end:
+                heredoc_end = None
+            continue
+        # Docker drops comment lines, and blank lines inside a continuation, before joining
+        if line.lstrip().startswith("#") or (buf and not line.strip()):
+            continue
+        if line.rstrip().endswith(escape):
+            buf.append(line.rstrip()[:-1])
+            continue
+        buf.append(line)
+        joined = " ".join(buf).strip()
+        buf = []
+        if joined:
+            logical.append(joined)
+        heredoc = _HEREDOC_RE.search(joined)
+        if heredoc:
+            heredoc_end = heredoc.group(1)
+
+    found: list[str] = []
+    for line in logical:
+        parts = line.split(maxsplit=1)
+        if len(parts) < 2 or parts[0].upper() not in ("COPY", "ADD"):
+            continue
+        tokens = parts[1].split()
+        flags = []
+        while tokens and tokens[0].startswith("--"):
+            flags.append(tokens.pop(0))
+        if any(flag.startswith("--from=") for flag in flags):
+            continue
+        rest = " ".join(tokens)
+        if rest.startswith("["):
+            try:
+                tokens = [str(t) for t in json.loads(rest)]
+            except ValueError:
+                pass  # not valid JSON: Docker reads it as shell form, so keep the whitespace tokens
+        sources = tokens[:-1]
+        if any(not src.startswith("<<") and not _REMOTE_SOURCE_RE.match(src) for src in sources):
+            found.append(line)
+    return found

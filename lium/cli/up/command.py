@@ -12,9 +12,12 @@ from lium.sdk import (
     LiumError,
     LiumPermissionError,
     LiumRateLimitError,
+    LiumRentOutcomeUnknownError,
     LiumServerError,
     PodStartError,
 )
+from lium.sdk import build_context
+from lium.sdk.client import BUILD_CONTEXT
 from lium.cli import ui
 from lium.cli.workspaces.context import show_workspace
 from lium.cli.utils import (
@@ -51,6 +54,8 @@ from .actions import (
 # few minutes; a wait that has passed fifteen minutes is a rent that is not going to come up on its
 # own, and the caller is billed for every one of those minutes.
 DEFAULT_TIMEOUT_SECONDS = 900
+# what `lium up --dockerfile` packs at most; the API holds its own limit
+BUILD_CONTEXT_MAX_BYTES = 100 * 1024 * 1024
 
 
 def _wait_budget(deadline: float, ready_timeout: Optional[int]) -> int:
@@ -194,12 +199,12 @@ def _post_rent_failure(exc: Exception, billing_pod: dict, doing: str, note: str 
 @click.option("--dockerfile", type=click.Path(exists=True, dir_okay=False, readable=True), help="Path to a Dockerfile to build the pod image from (custom build; mutually exclusive with --image/--template_id)")
 @click.option("-e", "--env", multiple=True, help="Environment variables (KEY=VALUE), can be repeated")
 @click.option("--entrypoint", default="", help="Container entrypoint")
-@click.option("--cmd", default="", help="Command to run in the container")
+@click.option("--cmd", default="", help="Command that keeps the container running. Base images (pytorch/pytorch, nvidia/cuda, ubuntu) need 'sleep infinity'")
 @click.option("--ssh-name", default=None, help="Name to register a new SSH key under (default: cli-<user>@<hostname>)")
 @click.option(
     "--volume-encryption/--no-volume-encryption",
-    default=True,
-    help="Encrypt the local volume when supported (enabled by default)",
+    default=None,
+    help="Encrypt the local volume. Default: on when the template supports it, off otherwise",
 )
 @click.option(
     "--json", "json_output", is_flag=True,
@@ -237,7 +242,7 @@ def up_command(
     entrypoint: Optional[str],
     cmd: Optional[str],
     ssh_name: Optional[str],
-    volume_encryption: bool,
+    volume_encryption: bool | None,
     json_output: bool,
 ):
     """\b
@@ -335,8 +340,10 @@ def up_command(
     volume_create_params = parsed.get("volume_create_params")
 
     # Custom-Dockerfile build: read the Dockerfile text the CLI will send to the
-    # backend (the image is built remotely; no build context is uploaded).
+    # backend (the image is built remotely). The lines that COPY/ADD local files
+    # decide below whether the Dockerfile's directory goes up as the build context.
     dockerfile_content = None
+    local_lines: list[str] = []
     if dockerfile_mode:
         from pathlib import Path
 
@@ -381,8 +388,35 @@ def up_command(
                 f"Dockerfile is too large ({size_bytes} bytes); max is {max_bytes} bytes (64 KiB)",
                 EXIT_CONFIGURATION_ERROR,
             )
+        local_lines = validation.build_context_lines(dockerfile_content)
 
     lium = Lium(source="cli")
+    # COPY/ADD of local files: upload the Dockerfile's directory as the build context when the
+    # backend takes one, else refuse before renting (the node would fail them with 'not found').
+    archive = None
+    if dockerfile_mode and local_lines:
+        if not lium.supports(BUILD_CONTEXT):
+            raise CliFailure(
+                "dockerfile_needs_build_context",
+                "--dockerfile builds on the node with the Dockerfile as its only file; local files "
+                "next to it are not uploaded, so these lines would fail with 'not found':\n  "
+                + "\n  ".join(local_lines),
+                EXIT_CONFIGURATION_ERROR,
+                data={"lines": local_lines},
+                hint="Fetch those files in a RUN step (git clone, curl, pip install), "
+                "or build and push the image yourself and run it with --image.",
+            )
+        context_dir = Path(dockerfile).resolve().parent
+        # packed here (local only) so a bad context fails early; uploaded only after the confirmation
+        try:
+            archive = ui.load(
+                f"Packing build context {context_dir}",
+                lambda: build_context.pack(
+                    context_dir, max_bytes=BUILD_CONTEXT_MAX_BYTES, dockerfile=Path(dockerfile).resolve()
+                ),
+            )
+        except (OSError, ValueError) as exc:
+            raise CliFailure("build_context_invalid", f"Could not pack the build context: {exc}", EXIT_CONFIGURATION_ERROR)
     # the billing owner of this workspace pays for the pod (lium-platform DAH-2986)
     show_workspace(lium, acting=True)
     if restore_backup_id:
@@ -558,6 +592,22 @@ def up_command(
             )
         rent_price = executor.price_per_gpu * rent_count if rent_count != executor.gpu_count else price_per_hour
 
+    # renters wrote "I didn't even know it was a spot" and "throttled to 410 W, not shown before rental":
+    # say both before renting, with or without --yes (on stderr, so --json stdout stays one document)
+    if getattr(executor, "tier", None) == "spot":
+        ui.notice_warning(f"{executor.huid} is a Spot node: the provider can reclaim it at any time, with no refund.")
+    if getattr(executor, "gpu_power_limited", None) and executor.gpu_power_limit_w:
+        ui.notice_warning(
+            f"{executor.huid} runs its GPUs at a reduced power limit "
+            f"({executor.gpu_power_limit_w} W of {executor.gpu_power_limit_default_w or '?'} W)."
+        )
+    if spec:
+        # a --gpu rental selects again at rent time, so the node checked above may not be the one rented
+        ui.notice_warning(
+            "Selection is repeated when renting. The rented node may be Spot, reclaimable at any time "
+            "with no refund, or run its GPUs at a reduced power limit."
+        )
+
     if not yes:
         confirm_msg = (
             f"Acquire pod on {executor.huid} "
@@ -567,6 +617,8 @@ def up_command(
         )
         if restore_backup_id:
             confirm_msg += f" Restore backup {restore_backup_id} to {restore_path} after startup."
+        if archive is not None:
+            confirm_msg += f" Uploads {context_dir} as the build context ({len(archive) // 1024} KiB)."
         asked_at = time.monotonic()
         if not ui.confirm(confirm_msg):
             return
@@ -596,17 +648,49 @@ def up_command(
         created_volume = {"volume_id": volume_id, "volume_huid": result.data["volume"].huid}
         kept = f" The volume {volume_create_params['name']} was created and is kept."
 
-    # --timeout is the whole command's budget. Everything before this line (finding the node and
-    # the template, creating the volume — not the answer at the prompt) counts against it; a budget
-    # that is already spent must not reach the rent, or the pod would be created and then
-    # reported as timed out one second later. The rent is the first thing that bills.
-    if time.monotonic() >= deadline:
-        raise CliFailure(
-            "timeout_before_rent",
-            f"The --timeout budget of {timeout}s ran out before renting {executor.huid}; no pod was created.{kept} "
-            "Run again with a larger --timeout.",
-            EXIT_GENERAL_ERROR,
-            data=created_volume,
+    # --timeout is the whole command's budget. Everything before the rent (finding the node and
+    # the template, creating the volume, uploading the build context — not the answer at the
+    # prompt) counts against it; a budget that is already spent must not reach the rent, or the
+    # pod would be created and then reported as timed out one second later. It is checked before
+    # and again after the upload. The rent is the first thing that bills.
+    def _check_deadline(note: str = "") -> float:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise CliFailure(
+                "timeout_before_rent",
+                f"The --timeout budget of {timeout}s ran out before renting {executor.huid}; no pod was created.{kept}{note} "
+                "Run again with a larger --timeout.",
+                EXIT_GENERAL_ERROR,
+                data=created_volume,
+            )
+        return left
+
+    # Uploaded after the confirmation, so a declined prompt sends nothing, and only while the
+    # budget lasts: a spent budget sends nothing either. The upload's requests timeout is the
+    # budget left, so a stalled upload fails as a timeout; requests bounds each send/read, not the
+    # whole upload, so the deadline is checked again after a finished upload and a late one does
+    # not rent. The API keeps an unused context for a limited time only; removing it at once
+    # needs an API delete/consume (a condition before BUILD_CONTEXT goes on).
+    build_context_sha256 = None
+    left = _check_deadline()
+    if archive is not None:
+        try:
+            build_context_sha256 = ui.load(
+                f"Uploading build context ({len(archive) // 1024} KiB)",
+                lambda: lium.upload_build_context(archive, timeout=left),
+            )
+        except requests.exceptions.Timeout:
+            raise CliFailure(
+                "timeout_before_rent",
+                f"The build context upload did not finish within the --timeout budget of {timeout}s; "
+                f"no pod was created.{kept} The API drops an unused context after a limited time. "
+                "Run again with a larger --timeout.",
+                EXIT_GENERAL_ERROR,
+                data=created_volume,
+            )
+        _check_deadline(
+            f" The build context was uploaded (sha256 {build_context_sha256}) and is kept by the API"
+            " for a limited time."
         )
 
     ui.dim(f"renting {executor.huid}…")
@@ -620,6 +704,7 @@ def up_command(
                 "spec": spec,
                 "template": template,
                 "dockerfile_content": dockerfile_content,
+                "build_context_sha256": build_context_sha256,
                 "name": name,
                 "volume_id": volume_id,
                 "ports": ports,
@@ -630,7 +715,7 @@ def up_command(
                 "gpu_count": requested_gpu_count,
             })
         )
-    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, LiumRentOutcomeUnknownError) as exc:
         # The API did not answer the rent request. Whether a pod was created is unknown, so the
         # caller must look before renting again — a blind retry is how one `up` made two pods.
         raise CliFailure(
@@ -638,7 +723,8 @@ def up_command(
             f"The rent request for {executor.huid} got no answer from the API ({exc.__class__.__name__}). "
             f"Run 'lium ps' before retrying: a pod named {name or executor.huid} may exist and be billing.{kept}",
             EXIT_API_ERROR,
-            data=created_volume,
+            data={**((_api_error_data(exc) if isinstance(exc, LiumError) else None) or {}), **created_volume} or None,
+            hint="Do not run 'lium up' again until 'lium ps' shows whether the first request created a pod.",
         )
     except (LiumAuthError, LiumPermissionError, LiumServerError, LiumRateLimitError) as exc:
         # handle_errors already names these (bad key, no permission, server down, throttled);
@@ -657,7 +743,8 @@ def up_command(
         # generic rent_rejected, the hint replaces the default one, the id is printed under it.
         raise CliFailure(
             exc.code or "rent_rejected",
-            f"Node {executor.huid} could not be rented: {exc}. Run 'lium ps' to check whether a pod was created. "
+            f"Node {executor.huid} {'may or may not be rented' if exc.code == 'rent_outcome_unknown' else 'could not be rented'}: "
+            f"{exc}. Run 'lium ps' to check whether a pod was created. "
             f"Run 'lium ls --format json' for the nodes rentable now.{kept}",
             EXIT_API_ERROR,
             # the server's request_id (DAH-3057) next to the volume the rent leaves behind

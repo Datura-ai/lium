@@ -54,6 +54,9 @@ lium balance
 # List available nodes (GPU machines)
 lium ls
 
+# Price a job on node #1 before renting it (no API key needed)
+lium quote 1 --hours 2
+
 # Create a pod using node index
 lium up 1  # Use node #1 from previous ls
 
@@ -221,15 +224,17 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium up [NODE_ID]` - Create a pod (NODE_ID is the HUID or UUID from `lium ls`, or its row number; or use filters like `--gpu`, `--count`, `--country`; cap it with `--ttl 6h` or `--budget 12.50`; `--json` prints the ready pod as JSON instead of opening SSH)
 - `lium ps [--sort KEY] [--filter KEY=VALUE] [--key NAME|ID] [--watch N] [--wide] [--format json]` - List active pods; the `#` column is the row number `rm`/`ssh`/`exec`/`scp` accept in the same shell, for 10 minutes, and only while the pod shown on that row is still listed — the rows of the last listing, in the order shown (sorted or filtered). Use the huid in scripts. A PENDING pod gets a line under the table with the backend's start estimate and phase, worded as `lium up` words it (`eager-wolf-aa PENDING · est. ready in ~18 s (phase: pulling image)`); its `--format json` row carries the same text as `eta_hint` (`null` when the backend sent neither).
 - `lium spend [--format json]` - Hourly burn, estimated spend per pod, balance and runway
+- `lium record <pod> [--format json]` - What a run ran on (GPU, image, driver/CUDA, interconnect) and what it cost; works after removal with the pod UUID
+- `lium quote <node> --hours N [--gpus N] [--volume-gb N] [--backup-gb N] [--format json]` - A job's compute, volume and backup cost on a node at billing's rates, before renting
 - `lium describe <POD>` - Full manifest of one pod: ports, GPU, template, billing, last lifecycle event (why it is REBOOT_FAILED/BROKEN) and the node's disk health (add `--json` for machine-readable output). A deleted pod can still be described by its id: you get the events the backend kept for it and the reason it went away.
 - `lium ssh <POD>` - SSH into a pod
-- `lium exec <POD> <COMMAND>` - Execute command on pod (`--json` for stdout/stderr/exit_code; `-d/--detach` starts it in the background and returns immediately)
+- `lium exec <POD> <COMMAND>` - Execute command on pod (`--json` for stdout/stderr/exit_code; `-d/--detach` starts it in the background and returns immediately; `--max-output-bytes N` sets the output limit, default 64 MiB)
 - `lium logs <POD>` - Stream a pod's container logs
 - `lium port-forward <POD> <PORT>` - Forward a local port to a pod port
 - `lium scp <POD> <LOCAL_FILE> [REMOTE_PATH]` - Copy files to pods (add `-d` to download from pods)
 - `lium rsync <POD> <LOCAL_DIR> [REMOTE_PATH]` - Sync directories to pods (`--bwlimit`, `--exclude`, `--delete`, `--progress`; resumes on re-run)
 - `lium cp <SRC_POD>:<PATH> <DST_POD>:<PATH>` - Copy files from one pod to another over SSH
-- `lium rm <POD>` - Remove/stop a pod (`--name-only` to refuse `lium ps` row numbers in scripts; `--format json` prints what was removed with its estimated spend)
+- `lium rm <POD>` - Remove/stop a pod (`--name-only` to refuse `lium ps` row numbers in scripts; `--format json` prints what was removed with its estimated spend; `--rating 1-5 --feedback "..."` rates the node in the same call)
 - `lium reboot <POD>` - Reboot a pod
 - `lium audit [--pod POD] [--since 24h] [--key ID]` - Who did what to the account's pods, and when: every rent, reboot, edit and delete with the session or API key that requested it (add `--json` for machine-readable output)
 - `lium audit --account [--action pod.] [--source cli] [--since 7d] [--cursor <next_cursor>]` - The account audit log: every request that changed something (pods, keys, logins, balance, settings, team members) with the client and IP it came from; your own IPs only, 90 days (`--json` prints the page with `next_cursor`)
@@ -237,7 +242,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium templates [SEARCH] [--arch hopper|blackwell] [--format json]` - List Docker templates with the CUDA build and the GPU generations it runs on
 - `lium fund` - Fund account with TAO from your wallet (`--alpha -k <hotkey> -a <USD>` pays with alpha stake instead; add `--netuid <N>` to pay from any subnet Lium accepts, the primary subnet otherwise)
 - `lium topup create -a <USD> -c <COIN> -n <NETWORK>` - Top up with a stablecoin (`lium topup currencies` lists them)
-- `lium topup card -a <USD> [--card <pm_id>] [--yes]` - Charge a card saved on the account, with no browser; the API key needs the `billing` scope (not released: the platform switch is off). Asks first; `--yes` skips the question and `--json` needs it. Sent once with an idempotency key; a lost answer or a 202 without a payment_intent_id exits 6 ("the charge may have gone through" / "still being confirmed") with the key and the same amount to re-run with, never a bare retry. A 202 with a payment_intent_id is success (exit 0). The same key with a different amount is a new charge
+- `lium topup card -a <USD> [--card <pm_id>] [--yes]` - Charge a card saved on the account, with no browser; the API key needs the `billing` scope (not released: the platform switch is off). Asks first; `--yes` skips the question and `--json` needs it. Sent once with an idempotency key; a lost answer or a 202 without a payment_intent_id exits 6 ("the charge may have gone through" / "still being confirmed") with the key and the same amount to re-run with, never a bare retry. A 202 with a payment_intent_id is success (exit 0). The same key with a different amount is a new charge. A 3-D Secure step-up (`CARD_AUTHENTICATION_REQUIRED` with a URL) exits 6 with the URL to confirm at, the transaction id and the exact re-run with the same `--idempotency-key`; a new key would open a second payment
 - `lium ssh-keys list|sync` - SSH public keys registered on the account
 
 `ls`, `ps`, `spend`, `templates`, `balance` and `describe` all accept `--format json` (and `--json`); `rm` accepts `--format json`; `up` accepts `--json`. All of them print a JSON error envelope on stderr when the command fails, so the same flag works across commands in scripts.
@@ -246,7 +251,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 
 - `lium volumes list` - List all volumes
 - `lium volumes new <NAME>` - Create a new volume
-- `lium volumes rm <VOLUME>` - Remove a volume
+- `lium volumes rm <INDICES>` - Remove volumes by their row numbers in the last `lium volumes` list (`1` or `1,3`); the list must come from the same shell and be under 10 minutes old, or the command asks you to list again
 
 ### Cluster Commands
 
@@ -280,16 +285,16 @@ Teams share a workspace whose billing owner pays. An API key is bound to one wor
 - `lium workspaces [list]` - The workspace this key acts in (the role shown is the account's the key runs as — the billing owner's for a team key); every workspace you belong to, with your own role, after `lium workspaces login`
 - `lium workspaces members [WORKSPACE]` - Members, roles and who pays
 - `lium workspaces use <WORKSPACE>` - Default workspace for every command (`~/.lium/config.ini`); run it as `LIUM_API_KEY=<a key bound to it> lium workspaces use <WORKSPACE>` to save that key for `--workspace`
-- `lium workspaces login` - Sign in once (e-mail + password) for the session-only subcommands below
+- `lium workspaces login` - Sign in once (e-mail + password) for the session-only subcommands below; needs no API key, and with none saved `lium keys` runs on the session alone
 - `lium workspaces create <NAME> [--use]` - Create a workspace; you are its owner and billing owner
 - `lium workspaces invite <EMAIL> [WORKSPACE] [--role member|admin|owner]` - E-mail an invitation (no account needed yet)
 - `lium workspaces remove <USER_ID_OR_EMAIL> [WORKSPACE] [--yes]` - Remove a member, asks first (owners and the billing owner cannot be; the server says so)
 - `lium workspaces transfer-billing <USER_ID_OR_EMAIL> [WORKSPACE] [--yes]` - Hand the bill to another member (asks first)
 - `lium workspaces delete [WORKSPACE] [--yes]` - Delete a workspace, asks first (owners; refused while pods run or volumes exist); drops its config section
-- `lium keys list [--workspace W]` / `lium keys create <NAME> [--scope read|rent|manage|billing]… [--daily-budget USD] [--monthly-budget USD] [--max-budget USD] [--pod-visibility own|account] [--workspace W] [--save]` - API keys per workspace; `--save` keeps the key for `--workspace`. Without `--scope` a key gets `read`, `rent`, `manage` — `billing` (card payments, credit transfers, crypto payments through the API) only when named, with a warning first, and alone: `--scope billing` with any other scope is refused here, before any request (exit 2). Budgets — per UTC day, per UTC month, over the key's lifetime — delete the key's pods (data outside a volume is lost) and refuse a rent, a pod schedule change or a top-up through the key once its pods were billed that much (`budget_exceeded`, exit 6, naming the window hit); `--pod-visibility own` shows the key only the pods it rented, `account` every pod — not passed, the server's default decides. `list` shows scopes, spent/budget per window and the active pods per key. `--scope billing` and its money-route rule (card payments, credit transfers and crypto payments through the API need a key holding `billing`), budgets, visibility and the pod count need a newer Lium server (not on lium.io yet: its `POST /keys` takes `read`, `rent` and `manage` only, so `--scope billing` is refused there). Budgets, visibility or the pod count asked of a server that does not record them (each judged on its own): `create` refuses (exit 2; a key the server minted uncapped is revoked) unless `--allow-unbudgeted` is passed
-- `lium keys show <NAME|ID>` / `lium keys scopes` - One key with "What this key can do" in the server's words (`GET /keys/scopes`), spent/budget per window, its pods and the last requests its budget refused (`GET /keys/{id}/refusals`: how many today, the newest one's route, amount and window) / every scope and pod-visibility value with what it allows. Both need a newer Lium server (not on lium.io yet): an older one answers `not_found` for `scopes` and shows the scope names alone in `show`
-- `lium keys budget <NAME|ID> [--daily-budget USD] [--monthly-budget USD] [--max-budget USD] [--no-daily-budget] [--no-monthly-budget] [--no-max-budget]` - Set or clear a key's budgets after creation (`PATCH /keys/{id}`; at least $1, whole cents, daily ≤ monthly ≤ max; a budget not named is left alone). Scopes and pod visibility stay fixed at creation. Needs a server with per-key budgets (not on lium.io yet; an older server has no such route, and a window it did not record is refused, exit 2)
-- `lium ps --key <NAME|ID>` / `lium billing history [--key <NAME|ID>] [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--format json]` - The pods one API key rented / what the ledger charged per pod, removed pods included, for the account or one key (`GET /billing/statement`). The per-key filter needs a server that stamps pods and charges with their key (not on lium.io yet): an older server cannot filter, and both commands then say so and show the account's figures as the account's. A key name needs `lium workspaces login`; an id does not
+- `lium keys list [--workspace W]` / `lium keys create <NAME> [--scope read|rent|manage|billing]… [--daily-budget USD] [--monthly-budget USD] [--max-budget USD] [--pod-visibility own|account] [--workspace W] [--save]` - API keys per workspace; `--save` keeps the key for `--workspace`. Without `--scope` a key gets `read`, `rent`, `manage` — `billing` (card payments, credit transfers, crypto payments through the API) only when named, with a warning first, and alone: `--scope billing` with any other scope is refused here, before any request (exit 2). Budgets — per UTC day, per UTC month, over the key's lifetime — delete the key's pods (data outside a volume is lost) and refuse a rent, a pod schedule change or a top-up through the key once its pods were billed that much (`budget_exceeded`, exit 6, naming the window hit); `--pod-visibility own` shows the key only the pods it rented, `account` every pod — not passed, the server's default decides. `list` shows scopes, spent/budget per window and the active pods per key. `--scope billing` and its money-route rule (card payments, credit transfers and crypto payments through the API need a key holding `billing`), budgets, visibility and the pod count need a newer Lium server. Budgets, visibility or the pod count asked of a server that does not record them (each judged on its own): `create` refuses (exit 2; a key the server minted uncapped is revoked) unless `--allow-unbudgeted` is passed
+- `lium keys show <NAME|ID>` / `lium keys scopes` - One key with "What this key can do" in the server's words (`GET /keys/scopes`), spent/budget per window, its pods and the last requests its budget refused (`GET /keys/{id}/refusals`: how many today, the newest one's route, amount and window) / every scope and pod-visibility value with what it allows. Both need a newer Lium server: an older one answers `not_found` for `scopes` and shows the scope names alone in `show`
+- `lium keys budget <NAME|ID> [--daily-budget USD] [--monthly-budget USD] [--max-budget USD] [--no-daily-budget] [--no-monthly-budget] [--no-max-budget]` - Set or clear a key's budgets after creation (`PATCH /keys/{id}`; at least $1, whole cents, daily ≤ monthly ≤ max; a budget not named is left alone). Scopes and pod visibility stay fixed at creation. Needs a server with per-key budgets (an older server has no such route, and a window it did not record is refused, exit 2)
+- `lium ps --key <NAME|ID>` / `lium billing history [--key <NAME|ID>] [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--format json]` - The pods one API key rented / what the ledger charged per pod, removed pods included, for the account or one key (`GET /billing/statement`). The per-key filter needs a server that stamps pods and charges with their key: an older server cannot filter, and both commands then say so and show the account's figures as the account's. A key name needs `lium workspaces login`; an id does not
 - `lium --workspace NAME <command>` / `LIUM_WORKSPACE=NAME` - Run one command with the key saved for NAME (refused, exit 2, when none is saved); `ps`, `ls`, `up`, `rm` print the workspace they act in, and when that key turns out to act elsewhere `up` / `rm` refuse (exit 2) while `ps` / `ls` warn. `lium workspaces …` and `lium keys …` themselves run with `LIUM_API_KEY`, else NAME's saved key, else the stored default's saved key, else `[api] api_key`, so they can mint or save the missing key
 
 ### Configuration Commands
@@ -310,7 +315,8 @@ Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, 
 
 - `lium provider portal {login,logout,whoami}` - Manage the cached portal JWT
 - `lium provider status [--netuid 51]` - Aggregated provider snapshot (registration, portal session, nodes, validator weights)
-- `lium provider node list|get|add|rm|update-price|update-gpu` - Node lifecycle on the portal; `node list [--all | --miner-hotkey HK]` shows the active hotkey's nodes by default, `--all` every provider's
+- `lium provider node list|get|add|rm|update-price|update-gpu|address` - Node lifecycle on the portal; `node list [--all | --miner-hotkey HK]` shows the active hotkey's nodes by default, `--all` every provider's
+- `lium provider node address <NODE_ID> <IP> <PORT>` - Change a node's IP and port in place (keeps its id and history), e.g. after an ISP changes the IP
 - `lium provider node min-gpu set|unset <NODE_ID> [COUNT]` - Min GPU count for rental matchmaking
 - `lium provider node pods <NODE_ID>` - Pods currently rented on a node
 - `lium provider node machine-requests <NODE_ID>` - Pending tenant requests on a node
@@ -319,7 +325,7 @@ Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, 
 - `lium provider node notify-added <NODE_ID> --request-id <REQ>` - Mark a tenant machine request fulfilled
 - `lium provider config show|opt-in|opt-out|set-email|set-subscriptions` - Portal-account configuration (incl. lium.io central miner server toggle)
 - `lium provider sync from-miner-server|to-miner-server` - Batch node-state sync between portal and the central miner server
-- `lium provider billing list [--all | --miner-hotkey HK] [--page N] [--limit N]` - Paginated billing history (active hotkey by default; `--all` for every provider's)
+- `lium provider billing list [--from YYYY-MM-DD] [--to YYYY-MM-DD]` - Your daily earnings ledger (the signed-in provider's own rows; last 30 days by default, at most 90)
 - `lium provider machine-request list|get` - Pending tenant machine requests (per-request detail only once one of your nodes is verified by a validator; before that `list` returns counts per GPU class and hourly budget band, and `get` exits 2 with `PORTAL_FORBIDDEN`)
 - `lium provider machine list|estimate` - Machine catalogue + reward estimates
 
@@ -327,6 +333,7 @@ Full reference with every flag and runnable examples: <https://docs.lium.io/deve
 
 ### Other Commands
 
+- `lium mcp` - Serve Lium as an MCP server over stdio for agent hosts (`pip install "lium.io[mcp]"`; see [MCP server for agent hosts](#mcp-server-for-agent-hosts))
 - `lium theme dark|light` - Set the CLI colour theme (the argument is required; there is no `auto`; the value is stored as `[ui] theme` — `lium config get ui.theme` reads it back)
 - `lium mine` - Set up this host as a provider node
 - `lium mine --register <TOKEN>` - Same, then add the node to your portal account from what the host reports and wait until it is listed (token from the portal's Add Node page; the account, and what the node reports under, come from the token — no `-k`)
@@ -369,6 +376,9 @@ lium mine --auto --hotkey <HOTKEY>
 curl -fsSL https://lium.io/mine.sh | bash -s -- --register <TOKEN>
 lium mine --register <TOKEN> --wait 0          # add the node, do not wait for the validator
 
+# Node behind CGNAT or a port-forwarding VPS: register the VPS address and forwarded port
+lium mine --auto --hotkey <HOTKEY> --ip <VPS_IP> --external-port <FORWARDED_PORT> --internal-port 8080
+
 # Provider-portal automation (same surface as the portal frontend)
 lium config set provider.coldkey miner-prod        # one-time: persist wallet identity
 lium config set provider.hotkey  miner-1
@@ -378,6 +388,7 @@ lium provider node list --limit 50
 lium provider node add --gpu-type "NVIDIA H200 NVL" --gpu-count 8 \
     --ip 203.0.113.42 --port 8080 --price 1.85 --yes
 lium provider node update-price <NODE_ID> --price 2.10 --yes
+lium provider node address <NODE_ID> 203.0.113.77 8080 --yes
 lium provider config opt-in --yes                  # use lium.io's central miner server
 lium provider machine estimate --gpu-type "NVIDIA H200 NVL" --gpu-count 8
 lium provider --json status                        # JSON envelope for scripts/agents
@@ -447,7 +458,7 @@ lium update my-pod --jupyter 8888
 # Manage volumes
 lium volumes list
 lium volumes new mydata --desc "My dataset"
-lium volumes rm <VOLUME_HUID>
+lium volumes rm 1                              # row 1 of the list above (same shell, under 10 minutes old)
 
 # Multi-node clusters
 lium clusters                                  # fabrics with free nodes
@@ -500,6 +511,7 @@ One object per node, sorted as the table is; the names are stable and pinned by 
 | `index` | row number, what `lium up <index>` takes |
 | `id`, `huid` | node UUID (what the API wants) and its human id (`lium up <huid>`) |
 | `config`, `gpu_type`, `gpu_count`, `machine_name` | `8×H100`, `H100`, `8`, `NVIDIA H100 80GB HBM3` |
+| `available_gpu_count` | GPUs free on the node now (`null` when the server does not say); rent at most this many with `-c` |
 | `price_per_gpu_hour`, `price_per_hour` | USD per GPU-hour and for the whole node |
 | `country`, `country_code`, `city` | country name, ISO code, city |
 | `vram_gb`, `ram_gb`, `cpu_count` | per-GPU VRAM (GiB), host RAM (GiB), CPU threads |
@@ -600,7 +612,7 @@ A pod that later presents a different key is rejected — the SDK raises `LiumHo
 reboot the platform did on its own, or an interception; delete that file if the pod was
 legitimately re-provisioned. Fingerprints are `SHA256:…`, as `ssh-keygen -lf` prints them.
 `LIUM_SSH_INSECURE=1` restores the old accept-anything behaviour (each accepted key is
-reported with its fingerprint). `lium ssh` runs OpenSSH with an argument list built from the
+reported on stderr). `lium ssh` runs OpenSSH with an argument list built from the
 pod's user, address and port; the API's connection string is never handed to a shell.
 
 ### Scripts and agents (non-interactive use)
@@ -617,6 +629,33 @@ lium up --gpu H100 -y --no-ssh     # -y: rent without the confirmation prompt
 lium rm my-pod -y                  # -y on every destructive command; a piped rm without it exits 2 and removes nothing
 lium fund -w default -a 1.5 -y     # values that would be prompted for must be passed as options
 ```
+
+### MCP server for agent hosts
+
+<!-- mcp-name: io.github.Datura-ai/lium -->
+
+`lium mcp` serves Lium as a Model Context Protocol server over stdio, so Claude Desktop, Claude Code, Cursor or any
+MCP host can rent and use GPUs itself. Tools: `list_gpus`, `rent_pod`, `list_pods`, `run_command`, `remove_pod`,
+`get_balance`. It uses the API key `lium init` saved, or `LIUM_API_KEY`.
+
+```bash
+pip install "lium.io[mcp]"
+```
+
+```json
+{"mcpServers": {"lium": {"command": "lium", "args": ["mcp"]}}}
+```
+
+Without installing anything, with [uv](https://docs.astral.sh/uv/):
+
+```json
+{"mcpServers": {"lium": {"command": "uvx", "args": ["--from", "lium.io[mcp]", "lium.io", "mcp"]}}}
+```
+
+`rent_pod` with `dry_run: true` quotes a node first (tier, reliability, cost per hour, your balance) and rents
+nothing. A rented pod is billed per second until `remove_pod`. The hosted MCP server at https://docs.lium.io/mcp
+(no key, read-only) is separate: it searches the docs and gives live GPU prices and availability; `rent_pod` takes
+the node ids its `search_gpus` returns.
 
 ### Crash reporting (opt-in, off by default)
 

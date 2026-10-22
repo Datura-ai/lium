@@ -1,7 +1,7 @@
 # e2e — this checkout's CLI and SDK against a live Lium API
 
 The renter's first hour, asserted: `balance --json` → `ls --format json` (stable fields, `--gpu` filter) → `up`
-(exactly one pod; `up` itself waits for `RUNNING` with an `ssh_cmd`, 540 s budget) → `ps` agrees → `describe --json` → `exec` (exit code 7 comes back
+(exactly one pod, on the cheapest node that accepts the rent; `up` itself waits for `RUNNING` with an `ssh_cmd`, 540 s budget) → `ps` agrees → `describe --json` → `exec` (exit code 7 comes back
 as exit 7 and in the JSON; `nvidia-smi -L` lists at least the GPUs billed) → `scp` up and down, byte-exact →
 billing moves while the pod runs → `rm` → gone from `ps` → the final charge fits the wall clock at the node's
 price (per-second, no 15-minute floor). The error contract agents depend on: wrong key exit 3 with a JSON
@@ -18,11 +18,11 @@ PR. They rent the cheapest ≥1-GPU node under `E2E_MAX_PRICE` (default $0.50/h)
 lium.io (7 Sep 2026: an RTX 4090 at $0.32/h for 6 min plus one at $0.35/h for 30 s), about $0.02 on staging's A4000.
 Nodes in `E2E_EXCLUDE_COUNTRIES` (default `Russia,Belarus,RU,BY`; CI states the same) and executors in `E2E_EXCLUDE_EXECUTORS` (ids or huids; CI
 reads the repository variable `LIUM_E2E_EXCLUDE_EXECUTORS`) are never rented: the cheapest listing is deterministic, so
-a defective node — 8 Sep 2026, `brave-shark-ff` billed 2 GPUs and exposed 1 (B-119) — would fail every run until
+a defective node — 8 Sep 2026, `brave-shark-ff` billed 2 GPUs and exposed 1 — would fail every run until
 it is excluded or fixed. Nor is a node whose public-listing `reliability_score` is under `E2E_MIN_RELIABILITY`
 (default 90; a node with no score yet is kept; `E2E_MIN_RELIABILITY=0` lifts it, e.g. for a staging node with a low
 score): on 10 Sep 2026 a 2×3090 at $0.32/h scoring 72 had an unreachable SSH port map and was the cheapest pick for
-three PRs in a row (DAH-3383). The score is not in `ls --format json` or the SDK's `ExecutorInfo`, so
+three PRs in a row. The score is not in `ls --format json` or the SDK's `ExecutorInfo`, so
 `conftest.reliability_scores()` reads the public `GET /executors` once per journey (three attempts on a 429/5xx/network error, like the SDK's `ls()`). The
 platform's own rental check (`rental_check_verified_status`) would be the natural rule, but the field is not on
 `GET /executors` and 452 of 473 verified executors were still `PENDING` that day — it does not separate a dead node
@@ -30,6 +30,19 @@ from a healthy one. The SDK journey's first `exec` on a fresh pod also retries c
 for 30 s (`first_exec`; each attempt has the SDK's own 30 s connect timeout): `wait_ready` reports the pod RUNNING, and
 sshd's port map can land a few seconds later; a port map that never comes still fails, with the same exception, once
 the budget is spent.
+
+A node that refuses the rent gives way to the next one. Both journeys keep every rentable node, cheapest
+first, and rent the first that accepts. When `lium up` exits 3 with the CLI's "could not be rented" text (the API
+answered the rent with a 400 such as `Can't rent node. Try again later.`, or the node was taken meanwhile), or the
+SDK's `up()` raises the plain `LiumError` that wraps the same answer, the journey makes sure that no pod with its name
+exists, records the refusal and calls `up` on the next candidate with a different executor id. At most `MAX_UP_TRIES`
+(3) `up` calls per journey, all inside the step's one 540 s budget (a further node is tried only with at least 60 s
+left). A timeout, a pod that did not start, an auth, permission, server or
+rate-limit error and every other exit are not retried. Each refusal is a `rent refused: <huid> (<id>) at $<price>/h: <message>` pytest warning in the
+job log (and, in the CLI journey, a note in `commands.json`), so the fleet team can see which nodes refused; when every try
+refused, the failure message lists them. On 14 Sep 2026 the single candidate answered 400 on lium#152 and lium#164
+and each red run cost a human a rerun. `commands.json` and the failure line keep the first 1,500 characters of a
+command's stdout and stderr (`OUTPUT_HEAD_CHARS`), so the API's answer is readable there.
 
 ## Run it
 
@@ -48,7 +61,8 @@ and `test_sdk_journey.py` each under a hard timeout (`T_SUITE` 25m), and always 
 `timings.txt`, `summary.md`, `<suite>-junit.xml`, `commands.json` (every CLI call with exit code, duration and the
 head of its output — the key is never written anywhere). Every `lium` call runs with `HOME` set to a temp dir, so
 `up` mints its SSH key there and the first-run completion hook touches no real shell rc; the key travels only as
-`LIUM_API_KEY`, the target only as `LIUM_BASE_URL`.
+`LIUM_API_KEY`, the target only as `LIUM_BASE_URL`. Teardown deletes that SSH key from the account again (an account
+holds at most 50 keys).
 
 Without `E2E_API_KEY` every test skips and `run.sh` exits 0 — nothing to run against is not a failure.
 
@@ -58,7 +72,7 @@ Runs on every PR from this repo that touches `lium/**`, `e2e/**`, `pyproject.tom
 `e2e-inputs` job reads the PR's file list — the workflow itself has no `paths:` filter since #169, so that `ci-ok`
 always reports; a README- or `test/`-only PR does not rent anything), on `workflow_dispatch`, and once a day
 (`schedule`, e2e-live only — the suite and the build jobs skip on the cron) so API drift shows up without a push.
-`ci-ok` (the check meant to be required; lium requires none today) does not depend on `e2e-live`: a live suite red on a platform defect (B-119) or an empty
+`ci-ok` (the check meant to be required; lium requires none today) does not depend on `e2e-live`: a live suite red on a platform defect or an empty
 listing must not block every merge; the sticky comment is its verdict. Needs the repository secret **`LIUM_E2E_API_KEY`** (the key of a funded account on the target API) and the
 variable `LIUM_E2E_API_URL` (staging when unset). Today the variable is `https://lium.io/api` and the key belongs to
 a dedicated test account funded with $200, which covers about 6,000 runs at $0.03. Fork PRs have no secrets →

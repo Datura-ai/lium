@@ -1,0 +1,77 @@
+{
+ "generated_at": "2026-10-15T09:09:39.423246Z",
+ "nodes": [
+  {
+   "id": "2abf823a-dcc5-49a3-989f-17662c21f4a9",
+   "gpu_model": "A100-SXM4-80GB",
+   "gpu_count": 8,
+   "available_gpu_count": 8,
+   "price_per_gpu_hour": 1.68,
+   "price_per_node_hour": 13.44,
+   "gpu_memory_gb": 80,
+   "tier": "secure",
+   "country_code": "US",
+   "rent_url": "https://lium.io/browse-pods/2abf823a-dcc5-49a3-989f-17662c21f4a9"
+  },
+  {
+   "id": "80cc7015-a0cf-40b9-8c0a-ba1c1eec30f6",
+   "gpu_model": "B200",
+   "gpu_count": 1,
+   "available_gpu_count": 1,
+   "price_per_gpu_hour": 6.0,
+   "price_per_node_hour": 6.0,
+   "gpu_memory_gb": 179,
+   "tier": "secure",
+   "country_code": "US",
+   "rent_url": "https://lium.io/browse-pods/80cc7015-a0cf-40b9-8c0a-ba1c1eec30f6"
+  },
+  {
+   "id": "3e26af9c-e081-4d8f-bf43-b91610141c4d",
+   "gpu_model": "B300 SXM6 PC",
+   "gpu_count": 8,
+   "available_gpu_count": 8,
+   "price_per_gpu_hour": 7.9,
+   "price_per_node_hour": 63.2,
+   "gpu_memory_gb": 269,
+   "tier": "spot",
+   "country_code": "US",
+   "rent_url": "https://lium.io/browse-pods/3e26af9c-e081-4d8f-bf43-b91610141c4d"
+  },
+  {
+   "id": "bc34cbde-9f1a-4739-82d9-1ed35412b661",
+   "gpu_model": "H100 80GB HBM3",
+   "gpu_count": 8,
+   "available_gpu_count": 8,
+   "price_per_gpu_hour": 2.0,
+   "price_per_node_hour": 16.0,
+   "gpu_memory_gb": 80,
+   "tier": "secure",
+   "country_code": "DE",
+   "rent_url": "https://lium.io/browse-pods/bc34cbde-9f1a-4739-82d9-1ed35412b661"
+  },
+  {
+   "id": "dbfe4f06-72fb-47cd-be8e-84389d25d430",
+   "gpu_model": "H100 PCIe",
+   "gpu_count": 1,
+   "available_gpu_count": 1,
+   "price_per_gpu_hour": 1.4,
+   "price_per_node_hour": 1.4,
+   "gpu_memory_gb": 80,
+   "tier": "secure",
+   "country_code": "KZ",
+   "rent_url": "https://lium.io/browse-pods/dbfe4f06-72fb-47cd-be8e-84389d25d430"
+  },
+  {
+   "id": "f092246d-5704-4c9e-b57f-7c0710a06deb",
+   "gpu_model": "H200",
+   "gpu_count": 8,
+   "available_gpu_count": 1,
+   "price_per_gpu_hour": 5.74,
+   "price_per_node_hour": 45.92,
+   "gpu_memory_gb": 140,
+   "tier": "secure",
+   "country_code": "US",
+   "rent_url": "https://lium.io/browse-pods/f092246d-5704-4c9e-b57f-7c0710a06deb"
+  }
+ ]
+}

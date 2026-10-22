@@ -25,6 +25,9 @@ from .rsync import rsync_command
 from .whoami import whoami_command
 from .cp import cp_command
 from .spend import spend_command
+from .job import job_command
+from .record import record_command
+from .quote import quote_command
 from .completion_command import completion_command
 from .theme import theme_command
 
@@ -33,6 +36,7 @@ from .config import config_command
 
 # from .commands.image import image_command  # Disabled for beta.1
 from .balance import balance_command
+from .request import request_command
 from .audit import audit_command
 from .fund import fund_command
 from .topup import topup_command
@@ -65,7 +69,7 @@ def get_version():
 # provider group and the package behind it — pydantic models, JWT, the portal client — are a fifth of
 # the CLI's import time warm (89 of 440 ms on a pod) and 40 % cold (281 of 696 ms on a fresh box);
 # `lium ls`/`ps`/`up` never touch it (DAH-3053).
-LAZY_COMMANDS = {"provider": "lium.cli.provider:provider_command"}
+LAZY_COMMANDS = {"provider": "lium.cli.provider:provider_command", "mcp": "lium.cli.mcp:mcp_command"}
 
 
 class LazyGroup(click.Group):
@@ -124,11 +128,15 @@ cli.add_command(rsync_command)
 cli.add_command(whoami_command)
 cli.add_command(cp_command)
 cli.add_command(spend_command)
+cli.add_command(job_command)
+cli.add_command(record_command)
+cli.add_command(quote_command)
 cli.add_command(completion_command)
 cli.add_command(theme_command)
 cli.add_command(config_command)
 # cli.add_command(image_command)  # Disabled for beta.1
 cli.add_command(balance_command)
+cli.add_command(request_command)
 cli.add_command(audit_command)
 cli.add_command(fund_command)
 cli.add_command(topup_command)

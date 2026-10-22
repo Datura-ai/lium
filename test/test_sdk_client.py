@@ -3,7 +3,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from lium.sdk import Config, Lium, LiumError, LiumPermissionError
+from lium.sdk import (
+    Config,
+    Lium,
+    LiumAuthError,
+    LiumError,
+    LiumNotFoundError,
+    LiumPermissionError,
+    RemoteExecutionError,
+    Template,
+)
 
 
 class _Forbidden:
@@ -469,6 +478,144 @@ def test_stream_exec_default_pty_is_unchanged(monkeypatch):
     assert calls["command"] == "export A=1 && ls"
 
 
+def test_backup_and_restore_logs_follow_every_page(monkeypatch):
+    client = Lium(Config(api_key="test"))
+    sent = []
+
+    class Response:
+        def __init__(self, body):
+            self.body = body
+
+        def json(self):
+            return self.body
+
+    def fake_request(method, endpoint, **kwargs):
+        page = kwargs["params"]["page"]
+        sent.append((endpoint, page, kwargs["params"]["limit"]))
+        return Response({"items": [{"id": f"{endpoint}-{page}"}], "has_next": page < 2})
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    pod = SimpleNamespace(id="pod-1")
+
+    backups = client.backup_logs(pod)
+    restores = client.restore_logs(pod)
+
+    assert [log.id for log in backups] == ["/backup-logs/pod/pod-1-1", "/backup-logs/pod/pod-1-2"]
+    assert [log.id for log in restores] == ["/pods/pod-1/restore-logs-1", "/pods/pod-1/restore-logs-2"]
+    assert sent == [
+        ("/backup-logs/pod/pod-1", 1, 100),
+        ("/backup-logs/pod/pod-1", 2, 100),
+        ("/pods/pod-1/restore-logs", 1, 100),
+        ("/pods/pod-1/restore-logs", 2, 100),
+    ]
+
+
+def test_get_template_finds_a_template_by_huid_or_name(monkeypatch):
+    client = Lium(Config(api_key="test"))
+    template_id = "8fbb30f6-6026-4043-98c7-c4189dc09bef"
+    template = Template(id=template_id, huid="calm-lion-2c", name="Pytorch (Cuda + DinD)", docker_image="a",
+                        docker_image_tag="b", category="PYTORCH", status="VERIFY_SUCCESS")
+    mine = Template(id="mine", huid="quiet-fox-11", name="training", docker_image="m", docker_image_tag="latest",
+                    category="general", status="CREATED")
+    listing = {False: [template, mine], True: [mine]}  # the public listing vs the caller's own templates
+    monkeypatch.setattr(client, "templates", lambda filter=None, only_my=False: listing[only_my])
+    monkeypatch.setattr(client, "_request", lambda *a, **kw: pytest.fail("GET /templates/{id} takes only a UUID"))
+
+    assert client.get_template("training") is mine
+    assert client.get_template("quiet-fox-11") is mine
+    # someone else's template is never picked by its name (the publisher's pick) or HUID (it can be ground):
+    # the error names its ID, so the caller chooses it knowingly
+    for selector in ("Pytorch (Cuda + DinD)", "calm-lion-2c"):
+        with pytest.raises(LiumError, match=f"not one of yours.*{template_id}"):
+            client.get_template(selector)
+    assert client.get_template("no-such-template") is None
+
+    duplicates = [Template(id=i, huid="same-huid", name="training", docker_image=i, docker_image_tag="latest",
+                           category="general", status="CREATED") for i in ("first", "second")]
+    monkeypatch.setattr(client, "templates", lambda filter=None, only_my=False: duplicates)
+    for selector in ("training", "same-huid"):
+        with pytest.raises(LiumError, match="ambiguous"):
+            client.get_template(selector)
+
+    uuid_named = Template(id="third", huid="h", name=template_id, docker_image="c", docker_image_tag="latest",
+                          category="general", status="CREATED")
+    foreign = Template(id="fourth", huid="g", name=template_id, docker_image="d", docker_image_tag="latest",
+                       category="general", status="CREATED")
+    listing = {False: [foreign, uuid_named], True: [uuid_named]}  # the public listing vs the caller's own templates
+    monkeypatch.setattr(client, "templates", lambda filter=None, only_my=False: listing[only_my])
+    def no_such_id(*args, **kwargs):
+        raise LiumNotFoundError("no such id")
+
+    monkeypatch.setattr(client, "_request", no_such_id)
+    assert client.get_template(template_id) is uuid_named
+
+    def anonymous(*args, **kwargs):
+        raise LiumAuthError("no key")
+
+    monkeypatch.setattr(client, "templates", anonymous)
+    with pytest.raises(LiumAuthError):  # a configured key refused between the two calls is not "not found"
+        client.get_template(template_id)
+
+    client.config.api_key = ""
+    assert client.get_template(template_id) is None  # a missing ID looked up without a key is still "not found"
+
+    def public_only(filter=None, only_my=False):
+        if only_my:
+            raise LiumAuthError("no key")
+        return [template]
+
+    monkeypatch.setattr(client, "templates", public_only)
+    for selector in ("calm-lion-2c", "Pytorch (Cuda + DinD)"):  # without a key, no own templates: the ID is named
+        with pytest.raises(LiumError, match=template_id):
+            client.get_template(selector)
+
+
+def test_get_template_raises_errors_other_than_not_found(monkeypatch):
+    client = Lium(Config(api_key="test"))
+
+    def refuse(*args, **kwargs):
+        raise LiumAuthError("bad key")
+
+    monkeypatch.setattr(client, "_request", refuse)
+
+    with pytest.raises(LiumAuthError):
+        client.get_template("8fbb30f6-6026-4043-98c7-c4189dc09bef")
+
+
+def test_wait_template_ready_returns_a_public_template_the_server_does_not_verify(monkeypatch):
+    client = Lium(Config(api_key="test"))
+    template = Template(id="t1", huid="h", name="mine", docker_image="a", docker_image_tag="b",
+                        category="general", status="CREATED")
+    monkeypatch.setattr(client, "templates", lambda only_my: [template])
+    monkeypatch.setattr("lium.sdk.client.time.sleep", lambda s: pytest.fail("waited"))
+
+    assert client.wait_template_ready("t1") is template
+
+
+def test_stream_exec_check_raises_with_exit_code_after_the_last_chunk(monkeypatch):
+    client, _ = _stream_client(monkeypatch, _FakeChannel())
+    pod = SimpleNamespace(id="pod-1", name="p", ssh_cmd="ssh root@10.0.0.1 -p 22")
+    chunks = []
+
+    with pytest.raises(RemoteExecutionError) as err:
+        for chunk in client.stream_exec(pod, command="python -u run.py", env={"TOKEN": "s3cret"}, check=True):
+            chunks.append(chunk)
+
+    assert [c["data"] for c in chunks] == ["one\n", "warn\n", "two\n"]
+    assert err.value.exit_code == 3
+    assert "python -u run.py" in str(err.value)
+    assert "s3cret" not in str(err.value)
+
+
+def test_stream_exec_check_passes_quietly_on_exit_zero(monkeypatch):
+    client, _ = _stream_client(monkeypatch, _SplitCharChannel([b"done\n"]))
+    pod = SimpleNamespace(id="pod-1", name="p", ssh_cmd="ssh root@10.0.0.1 -p 22")
+
+    chunks = list(client.stream_exec(pod, command="train", check=True))
+
+    assert chunks == [{"type": "stdout", "data": "done\n"}]
+
+
 class _SplitCharChannel:
     def __init__(self, out):
         self.out = list(out)
@@ -504,3 +651,43 @@ def test_stream_exec_decodes_utf8_across_reads_and_at_exit(monkeypatch, out, exp
     text = "".join(chunk["data"] for chunk in client.stream_exec(pod, command="train"))
 
     assert text == expected
+
+
+def test_pod_volume_path_prefers_validator_mount_over_template():
+    from lium.sdk.models import PodInfo
+
+    def pod(**kw):
+        return PodInfo(
+            id="p", name="n", status="RUNNING", huid="h", ssh_cmd=None, ports={}, created_at="", updated_at="",
+            executor=None, template={"volumes": ["/workspace"]}, removal_scheduled_at=None,
+            jupyter_installation_status=None, jupyter_url=None, **kw,
+        )
+
+    assert pod(local_volume_path="/root").default_restore_path == "/root/restored"
+    assert pod().default_restore_path == "/workspace/restored"
+
+
+def test_ps_maps_local_volume_path_from_the_pods_row(monkeypatch):
+    payload = [{"id": "p1", "pod_name": "n", "status": "RUNNING", "template": {"volumes": ["/workspace"]},
+                "local_volume_path": "/root"}]
+    monkeypatch.setattr(Lium, "_request", lambda self, *a, **kw: SimpleNamespace(json=lambda: payload))
+
+    pod = Lium(Config(api_key="test")).ps()[0]
+
+    assert pod.local_volume_path == "/root"
+    assert pod.default_restore_path == "/root/restored"
+
+
+def test_switch_template_maps_local_volume_path_from_the_response(monkeypatch):
+    import lium.sdk.client as client_mod
+
+    response = {"pod_name": "n", "status": "PENDING", "template_id": "t2", "local_volume_path": "/root"}
+    monkeypatch.setattr(Lium, "_request", lambda self, *a, **kw: SimpleNamespace(json=lambda: response))
+    monkeypatch.setattr(client_mod, "forget_host_key", lambda pod: None)
+    monkeypatch.setattr(Lium, "_release_ssh", lambda self, pod: None)
+    pod = SimpleNamespace(id="p1", name="n", huid="h")
+
+    new = Lium(Config(api_key="test")).switch_template(pod, template_id="t2")
+
+    assert new.local_volume_path == "/root"
+    assert new.default_restore_path == "/root/restored"

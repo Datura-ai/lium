@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 import requests
 
-from lium.sdk import Config, Lium, LiumServerError
+from lium.sdk import Config, Lium, LiumError, LiumRentOutcomeUnknownError, LiumServerError
 from lium.sdk import client as client_module
 from lium.sdk import utils as sdk_utils
 
@@ -54,6 +54,10 @@ def client(monkeypatch):
     lium = Lium(Config(api_key="test"))
     monkeypatch.setattr(lium, "get_executor", lambda executor_id: SimpleNamespace(id=EXECUTOR_ID))
     monkeypatch.setattr(lium, "_ensure_ssh_keys_registered", lambda *a, **k: None)
+    # the template lookup for the encryption default is not one of the scripted rent calls
+    monkeypatch.setattr(
+        lium, "get_template", lambda template_id: SimpleNamespace(supports_volume_encryption=False)
+    )
     return lium
 
 
@@ -236,12 +240,14 @@ def test_a_pod_id_from_the_api_is_returned_even_when_the_listing_is_down(client,
 
 
 def test_a_second_failure_is_raised_not_retried_again(client, monkeypatch):
+    """Two unanswered requests: the outcome is unknown, and the error says so and carries the key."""
     _rent.outcomes = [requests.Timeout("first"), requests.Timeout("second")]
     monkeypatch.setattr(client_module.requests, "request", _rent(client, pods_after_failure=[]))
 
-    with pytest.raises(requests.Timeout, match="second"):
+    with pytest.raises(LiumRentOutcomeUnknownError, match="second") as raised:
         client.up(executor_id=EXECUTOR_ID, name=POD_NAME, template_id="tpl-1", ssh_keys=["k"])
 
+    assert isinstance(raised.value.__cause__, requests.Timeout)
     assert len(_rent.calls) == 2
 
 
@@ -263,3 +269,65 @@ def test_request_without_retry_fails_on_the_first_server_error(monkeypatch):
     with pytest.raises(LiumServerError):
         client._request("GET", "/pods")
     assert len(attempts) == 1 + 3  # idempotent calls keep their three attempts
+
+
+class _Refusal:
+    ok = False
+    headers = {}
+
+    def __init__(self, status_code, detail):
+        self.status_code, self.text, self._detail = status_code, detail, detail
+
+    def json(self):
+        return {"detail": self._detail}
+
+
+@pytest.mark.parametrize("refusal", [
+    _Refusal(409, "idempotency_in_progress"),
+    _Refusal(400, "A rental is already pending on this node"),
+])
+def test_a_refused_repeat_after_an_unanswered_rent_is_an_unknown_outcome(client, monkeypatch, refusal):
+    """The server may still be finishing the first request; its refusal of the repeat says nothing about it."""
+    _rent.outcomes = [requests.Timeout("read timed out"), refusal]
+    monkeypatch.setattr(client_module.requests, "request", _rent(client, pods_after_failure=[]))
+
+    with pytest.raises(LiumRentOutcomeUnknownError) as raised:
+        client.up(executor_id=EXECUTOR_ID, name=POD_NAME, template_id="tpl-1", ssh_keys=["k"])
+
+    first, second = _rent.calls
+    assert raised.value.idempotency_key == first["headers"]["Idempotency-Key"] == second["headers"]["Idempotency-Key"]
+    assert raised.value.pod_name == POD_NAME and raised.value.executor_id == EXECUTOR_ID
+
+
+def test_a_rent_the_api_refuses_outright_is_a_plain_error_not_an_unknown_outcome(client, monkeypatch):
+    _rent.outcomes = [_Refusal(400, "node is not available")]
+    monkeypatch.setattr(client_module.requests, "request", _rent(client, pods_after_failure=[]))
+
+    with pytest.raises(LiumError) as raised:
+        client.up(executor_id=EXECUTOR_ID, name=POD_NAME, template_id="tpl-1", ssh_keys=["k"])
+
+    assert not isinstance(raised.value, LiumRentOutcomeUnknownError)
+    assert len(_rent.calls) == 1
+
+
+@pytest.mark.parametrize("refusal", [
+    "LiumError", "LiumServerError", "LiumRateLimitError", "LiumPermissionError", "LiumAuthError",
+])
+def test_a_failed_repeat_of_an_unanswered_rent_is_an_unknown_outcome(client, monkeypatch, refusal):
+    """The repeat fails while the first POST may still run: whatever the status, the caller must look at ps."""
+    import lium.sdk as sdk
+    _rent.outcomes = [requests.ConnectionError("timeout"), getattr(sdk, refusal)("repeat failed")]
+    monkeypatch.setattr(client_module.requests, "request", _rent(client, pods_after_failure=[]))
+    monkeypatch.setattr(client, "_request", lambda *a, **k: (_ for _ in ()).throw(_rent.outcomes.pop(0)))
+    with pytest.raises(sdk.LiumRentOutcomeUnknownError) as info:
+        client.up(executor_id=EXECUTOR_ID, name=POD_NAME, template_id="tpl-1", ssh_keys=["k"])
+    # the code and hint never advertise "pick another node", whatever the repeat failed with
+    assert info.value.code == "rent_outcome_unknown"
+    assert "Do not rent again" in info.value.hint
+    assert isinstance(info.value.__cause__, sdk.LiumError)
+
+
+def test_the_sdk_offers_no_public_replay_that_skips_the_key_age_and_account_checks():
+    """A key replayed past the API's retention, or under another account, is a new rent: only the MCP server's guarded
+    replay (_replay_blocker, test_mcp_server) may resend one."""
+    assert not hasattr(Lium, "replay_rent")

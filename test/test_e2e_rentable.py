@@ -361,3 +361,98 @@ def test_the_ci_job_states_the_same_exclusion_as_the_default(monkeypatch):
     line = next(line for line in ci.splitlines() if "E2E_EXCLUDE_COUNTRIES:" in line)
     stated = {c.strip().lower() for c in line.split('"')[1].split(",")}
     assert stated == conftest.EXCLUDE_COUNTRIES
+
+
+class _Up:
+    """A session whose `up` answers per executor id from `rc`; `ps` lists `pods`."""
+
+    def __init__(self, rc, pods=()):
+        self.rc, self.pods, self.log, self.ups = rc, list(pods), [], []
+
+    def lium(self, *argv, check=False, timeout=0):
+        if argv[0] == "ps":
+            return SimpleNamespace(json=lambda: self.pods)
+        self.ups.append(argv[1])
+        rc = self.rc[argv[1]]
+        return SimpleNamespace(rc=rc, out="", err="node could not be rented" if rc == 3 else "", argv=list(argv))
+
+
+def _rental(conftest, n=4):
+    return conftest.Rental(name="e2e-1", candidates=[{"id": f"x{i}", "huid": f"h{i}", "price_per_hour": 0.1 * i} for i in range(n)])
+
+
+def test_rent_step_moves_past_refusals_and_only_refusals(monkeypatch):
+    conftest = _load(monkeypatch)
+    session, rental = _Up({"x0": 3, "x1": 0}), _rental(conftest)
+    with pytest.warns(UserWarning, match="rent refused: h0"):
+        assert conftest.up_first_accepting(session, rental).rc == 0
+    assert session.ups == ["x0", "x1"] and rental.executor_id == "x1" and len(rental.refused) == 1
+    session = _Up({"x0": 1})   # any other failure is returned for the caller to assert on, not retried
+    assert conftest.up_first_accepting(session, _rental(conftest)).rc == 1 and session.ups == ["x0"]
+
+
+def test_rent_step_stops_after_max_tries_and_when_a_pod_was_left_behind(monkeypatch):
+    conftest = _load(monkeypatch)
+    session = _Up({f"x{i}": 3 for i in range(4)})
+    with pytest.warns(UserWarning), pytest.raises(pytest.fail.Exception, match="3 node.*refused"):
+        conftest.up_first_accepting(session, _rental(conftest))
+    assert len(session.ups) == conftest.MAX_UP_TRIES
+    session = _Up({"x0": 3, "x1": 0}, pods=[{"name": "e2e-1"}])
+    with pytest.warns(UserWarning), pytest.raises(pytest.fail.Exception, match="not renting elsewhere"):
+        conftest.up_first_accepting(session, _rental(conftest))
+    assert session.ups == ["x0"]
+
+
+def test_unresolved_first_rent_is_not_retried_on_another_node_in_either_journey(monkeypatch):
+    from lium.sdk.exceptions import LiumRentOutcomeUnknownError
+
+    conftest = _load(monkeypatch)
+    journey = _load_sdk_journey(monkeypatch, conftest)
+
+    class _Sdk:
+        def __init__(self):
+            self.ups = []
+
+        def up(self, executor_id, name):
+            self.ups.append(executor_id)
+            raise LiumRentOutcomeUnknownError("first rent unresolved, repeat refused")
+
+        def ps(self):
+            raise AssertionError("no pod lookup, no second rent")
+
+    sdk, state = _Sdk(), {}
+    nodes = [SimpleNamespace(id=f"x{i}", huid=f"h{i}", price_per_hour=0.1 * i) for i in range(4)]
+    with pytest.raises(LiumRentOutcomeUnknownError):
+        journey.up_first_accepting(sdk, nodes, "e2e-1", state)
+    assert sdk.ups == ["x0"] and not state["refused"]
+
+    class _TimedOut(_Up):   # `lium up` timing out is exit 3 too, but it says "got no answer", not "refused"
+        def lium(self, *argv, check=False, timeout=0):
+            self.ups.append(argv[1])
+            return SimpleNamespace(rc=3, out="", err="api_timeout: got no answer", argv=list(argv))
+
+    cli = _TimedOut({})
+    assert conftest.up_first_accepting(cli, _rental(conftest)).rc == 3 and cli.ups == ["x0"]
+
+
+def test_delete_registered_keys_removes_only_this_runs_keys_and_never_raises(monkeypatch, tmp_path):
+    """DAH-4715: each run's throwaway HOME mints a key that `up` registers; the account holds 50. Teardown deletes the
+    account keys matching home/.ssh/*.pub (comment ignored), retries a 400 (pod still stopping), and only warns."""
+    conftest = _load(monkeypatch)
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / ".ssh" / "id_ed25519.pub").write_text("ssh-ed25519 AAAAmine runner@host\n")
+    rows = [{"id": "k1", "public_key": "ssh-ed25519 AAAAmine"}, {"id": "k2", "public_key": "ssh-ed25519 AAAAhuman me@laptop"}]
+    calls, fail = [], [_http_error(400)]
+
+    def fake_urlopen(req, timeout):
+        calls.append((req.get_method(), req.full_url))
+        if req.get_method() == "DELETE" and fail:
+            raise fail.pop(0)
+        return _FakeListing(rows if req.get_method() == "GET" else {})
+
+    monkeypatch.setattr(conftest.urllib.request, "urlopen", fake_urlopen)
+    assert conftest.delete_registered_keys(tmp_path, url="https://x/api", sleep=lambda s: None) == 1
+    assert [c for c in calls if c[0] == "DELETE"] == [("DELETE", "https://x/api/ssh-keys/k1")] * 2
+    monkeypatch.setattr(conftest.urllib.request, "urlopen", lambda req, timeout: (_ for _ in ()).throw(_http_error(500)))
+    with pytest.warns(UserWarning, match="could not delete"):
+        assert conftest.delete_registered_keys(tmp_path, sleep=lambda s: None) == 0

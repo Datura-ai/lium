@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -195,12 +196,14 @@ def test_start_executor_timeout_includes_compose_diagnostics(monkeypatch, tmp_pa
     monkeypatch.setattr(mine.time, "time", lambda: next(ticks))
 
     with pytest.raises(Exception) as exc:
-        mine._start_executor(tmp_path, wait_secs=5)
+        mine._start_executor(tmp_path, wait_secs=5, recreate=True)
     msg = str(exc.value)
     assert "timed out after 5s" in msg
     assert "Restarting (1)" in msg and "Created" in msg
     assert "address already in use" in msg and "exited with code 1" in msg
     assert "no such service" not in msg
+    # the old container ID is read first, so the wait can tell the new container from it
+    assert calls[1:3] == ["docker compose -f docker-compose.app.yml ps -q executor", "docker compose up -d --force-recreate"]
     # each compose file is asked for the service it declares (`executor` lives in docker-compose.app.yml)
     assert [c for c in calls if "logs" in c] == [
         "docker compose logs --no-color --tail 30 executor-runner",
@@ -362,3 +365,126 @@ def test_step_message_shows_the_live_detail() -> None:
     assert str(msg) == "Validating node"
     msg.detail = "GPU Matrix Multiplication"
     assert str(msg) == "Validating node (GPU Matrix Multiplication)"
+
+
+RUNNER = "daturaai/compute-subnet-executor-runner:latest"
+EXECUTOR = "daturaai/compute-subnet-executor@sha256:aa"
+BAKED_COMPOSE = f"services:\n  executor:\n    image: {EXECUTOR}\n  autoheal:\n    image: willfarrell/autoheal\n"
+CURRENT_NODE_IMAGES = {RUNNER, "daturaai/lium-watchtower:1.1.1", EXECUTOR, "willfarrell/autoheal", mine.PREFLIGHT_IMAGE}
+
+
+def _disk(monkeypatch, free_bytes: float, available_images: set = frozenset()) -> list:
+    calls = []
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        calls.append(cmd)
+        if "DockerRootDir" in cmd:
+            return "/var/lib/docker\n", ""
+        if "config --images" in cmd:
+            # the unrendered app template is never asked: it needs EXECUTOR_IMAGE_SHA256, which only the runner sets
+            assert "app.yml" not in cmd
+            return f"{RUNNER}\ndaturaai/lium-watchtower:1.1.1\n", ""
+        if cmd.startswith("docker run"):
+            # a real docker run would pull a missing image; the check must never get here without the runner local
+            assert RUNNER in available_images
+            assert "--pull" not in cmd  # Docker before 20.10 has no --pull on docker run
+            return BAKED_COMPOSE, ""
+        if cmd.split()[-1].strip("'") not in available_images:  # docker image inspect <ref>
+            raise RuntimeError(f"Command failed (1): {cmd}")
+        return "[]", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.shutil, "disk_usage", lambda path: SimpleNamespace(free=free_bytes))
+    return calls
+
+
+# 140e9 bytes is 130.4 GiB: under the 140 GiB the validator's GiB floor plus the image reserve needs; a stale
+# executor image or a missing runner image leaves the current images to pull
+@pytest.mark.parametrize(
+    ("free_bytes", "available_images"),
+    [
+        (96e9, set()),
+        (140e9, set()),
+        (110 * mine.GIB, set()),
+        (110 * mine.GIB, {"daturaai/compute-subnet-executor:old"}),
+        (110 * mine.GIB, CURRENT_NODE_IMAGES - {EXECUTOR}),
+    ],
+)
+def test_free_disk_check_refuses_a_disk_too_small_before_the_image_pulls(
+    monkeypatch, tmp_path, free_bytes, available_images
+) -> None:
+    _disk(monkeypatch, free_bytes=free_bytes, available_images=available_images)
+
+    with pytest.raises(Exception, match="140 GiB needed"):
+        mine._check_free_disk(tmp_path)
+
+
+def test_free_disk_check_never_runs_a_runner_image_that_is_not_local(monkeypatch, tmp_path) -> None:
+    calls = _disk(monkeypatch, free_bytes=110 * mine.GIB, available_images=CURRENT_NODE_IMAGES - {RUNNER})
+
+    with pytest.raises(Exception, match="140 GiB needed"):
+        mine._check_free_disk(tmp_path)
+    assert not [c for c in calls if c.startswith(("docker run", "docker pull"))]
+
+
+def test_free_disk_check_passes_a_rerun_whose_runner_resolved_images_are_all_local(monkeypatch, tmp_path) -> None:
+    _disk(monkeypatch, free_bytes=110 * mine.GIB, available_images=CURRENT_NODE_IMAGES)
+
+    mine._check_free_disk(tmp_path)
+
+
+def test_free_disk_check_refuses_below_the_validator_floor_even_when_the_images_are_local(monkeypatch, tmp_path) -> None:
+    _disk(monkeypatch, free_bytes=99 * mine.GIB, available_images=CURRENT_NODE_IMAGES)
+
+    with pytest.raises(Exception, match="100 GiB needed"):
+        mine._check_free_disk(tmp_path)
+
+
+def test_gather_inputs_auto_uses_the_given_ports() -> None:
+    answers = mine._gather_inputs("hk", auto=True, internal_port=8081, external_port=40123)
+
+    assert answers["internal_port"] == "8081"
+    assert answers["external_port"] == "40123"
+
+
+def test_start_executor_without_a_register_token_does_not_recreate_a_running_executor(monkeypatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        calls.append(cmd)
+        if "ps -q executor" in cmd:
+            return "abc123\n", ""
+        if cmd.startswith("docker inspect"):
+            return "healthy\n", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+
+    mine._start_executor(tmp_path)
+
+    assert calls[0] == "docker compose up -d"
+
+
+def test_start_executor_does_not_recreate_under_running_rentals(monkeypatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+    warnings: list[str] = []
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        calls.append(cmd)
+        if cmd.startswith("docker ps --filter status=created --filter status=running "):
+            return "filler_1\npod_abc\nexecutor-executor-1\n", ""
+        if "ps -q executor" in cmd:
+            return "abc123\n", ""
+        if cmd.startswith("docker inspect"):
+            return "healthy\n", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+    monkeypatch.setattr(mine.console, "warning", warnings.append)
+
+    mine._start_executor(tmp_path, recreate=True)
+
+    assert "docker compose up -d" in calls and "docker compose up -d --force-recreate" not in calls
+    assert warnings and "1 rental(s) running" in warnings[0]

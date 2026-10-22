@@ -64,6 +64,8 @@ def test_ssh_connection_falls_back_to_agent_when_key_file_cannot_be_loaded(monke
             "port": 20299,
             "username": "root",
             "timeout": 30,
+            "banner_timeout": 15,
+            "auth_timeout": 30,
             "look_for_keys": False,
             "key_filename": str(key_path),
             "allow_agent": True,
@@ -329,6 +331,8 @@ def test_edit_forgets_the_pinned_host_key(monkeypatch, tmp_path):
 
     def fake_request(self, m, p, **kwargs):
         seen.append((m, p, kwargs.get("json")))
+        if m == "GET" and p == "/templates/tpl-1":
+            return Resp({"id": "tpl-1", "docker_image": "a"})
         if m == "GET":
             return Resp({"id": pod.id, "pod_name": pod.name, "template": {"id": "tpl-1", "docker_image": "a"}})
         return Resp({"id": "tpl-1", "docker_image": "a", "startup_commands": "python main.py"})
@@ -340,12 +344,54 @@ def test_edit_forgets_the_pinned_host_key(monkeypatch, tmp_path):
     assert result["startup_commands"] == "python main.py"
     assert seen == [
         ("GET", f"/pods/{pod.id}", None),
+        ("GET", "/templates/tpl-1", None),
         ("PUT", "/templates/tpl-1", {"id": "tpl-1", "docker_image": "a", "startup_commands": "python main.py"}),
     ]
     assert not hosts_file.exists()
 
 
+def _session_client(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LIUM_SSH_INSECURE", "1")  # no known_hosts file to load in this fake
+    key_path = tmp_path / "id_ed25519"
+    key_path.write_text("key")
+    monkeypatch.setattr(sdk_client.paramiko.Ed25519Key, "from_private_key_file", lambda p: object())
+    connects, closes = [], []
+
+    class FakeSSHClient:
+        def set_missing_host_key_policy(self, policy):
+            pass
+
+        def connect(self, **kwargs):
+            connects.append(kwargs["hostname"])
+
+        def close(self):
+            closes.append(True)
+
+    monkeypatch.setattr(sdk_client.paramiko, "SSHClient", FakeSSHClient)
+    return Lium(Config(api_key="test", ssh_key_path=key_path)), connects, closes
+
+
+def test_ssh_session_holds_the_kept_connection_and_leaves_it_open_for_the_next_call(monkeypatch, tmp_path):
+    client, connects, closes = _session_client(monkeypatch, tmp_path)
+    pod = _pod()
+
+    with client.ssh_session(pod) as held:
+        with client.ssh_connection(pod) as a:
+            assert a is held
+    assert client._ssh_sessions == {} and closes == []
+    assert client.has_open_connection(pod)
+
+    with client.ssh_session(pod) as again:        # the next block (the next @lium.machine call) connects no more
+        assert again is held
+    assert connects == ["203.0.113.10"] and closes == []
+
+    client.close()
+    assert closes == [True] and not client.has_open_connection(pod)
+
+
 def test_ssh_session_reuses_one_connection_for_every_operation_inside(monkeypatch, tmp_path):
+    monkeypatch.setenv("LIUM_SSH_REUSE", "0")     # a session of its own, closed when the block ends
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LIUM_SSH_INSECURE", "1")  # no known_hosts file to load in this fake
     key_path = tmp_path / "id_ed25519"
