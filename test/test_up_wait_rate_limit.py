@@ -137,3 +137,22 @@ def test_the_jupyter_wait_honours_retry_after(monkeypatch):
     up_actions.InstallJupyterAction().execute({"lium": lium, "pod": SimpleNamespace(id="pod-1", ports={"8888": 2})})
 
     assert calls == [3, 63]  # the next poll waits the 60 s the server asked for
+
+
+def test_the_jupyter_wait_returns_to_the_normal_poll_once_the_api_answers(monkeypatch):
+    clock = {"now": 0.0}
+    monkeypatch.setattr(up_actions.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(up_actions.time, "sleep", lambda s: clock.__setitem__("now", clock["now"] + s))
+
+    def ps():
+        if clock["now"] < 10:
+            exc = LiumRateLimitError("Rate limit exceeded")
+            exc.retry_after = 60
+            raise exc
+        status = "SUCCESS" if clock["now"] >= 70 else "INSTALLING"
+        return [SimpleNamespace(id="pod-1", huid="x", name="x", jupyter_installation_status=status, jupyter_url="u")]
+
+    lium = SimpleNamespace(install_jupyter=lambda *a, **k: None, ps=ps)
+    result = up_actions.InstallJupyterAction().execute({"lium": lium, "pod": SimpleNamespace(id="pod-1", ports={"8888": 2})})
+
+    assert result.ok and clock["now"] < 80  # 429 at 3 s, INSTALLING at 63 s, SUCCESS seen soon after 70 s

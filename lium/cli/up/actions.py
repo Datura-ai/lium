@@ -578,6 +578,7 @@ class InstallJupyterAction:
                 # the API is busy, not the install: poll less often (never before Retry-After), still inside max_wait (DAH-4993)
                 wait_interval = max(exc.retry_after or 0, min(wait_interval * 2, 30))
                 continue
+            wait_interval = 3  # the API answered: back to the normal poll
             updated_pod = next((p for p in all_pods if p.id == pod_id or p.huid == pod_id or p.name == pod_id), None)
 
             if updated_pod and hasattr(updated_pod, 'jupyter_installation_status'):
