@@ -96,3 +96,10 @@ def test_computed_status_stays_escaped(capsys):
 def test_another_providers_node_shows_no_endpoint_at_all():
     # DAH-4807 (Fish 22 Oct): no address and no placeholder for a node the reader does not own
     assert _render._ip_port({"id": "n1"}) == ""
+
+
+def test_a_node_row_without_an_address_still_gets_the_node_table():
+    # lium-platform#1924 sends another provider's node with no address keys at all
+    row = {"id": "n1", "price_per_gpu": 1.5, "rented_gpu_count": 0, "gpu_count": 8}
+    assert _render._match_preset(row) is _render._match_preset({**row, "executor_ip_address": "203.0.113.10"})
+    assert _render._match_preset(row) is not None

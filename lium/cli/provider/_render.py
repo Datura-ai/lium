@@ -616,9 +616,13 @@ def _validator_weight_preset() -> _TablePreset:
     ]
 
 
+_NODE_PRESET = _node_preset()
+
 # Sentinel keys must all be present in a row for the preset to match.
 _PRESETS: list[tuple[frozenset[str], _TablePreset]] = [
-    (frozenset({"executor_ip_address", "price_per_gpu"}), _node_preset()),
+    (frozenset({"executor_ip_address", "price_per_gpu"}), _NODE_PRESET),
+    # another provider's node row carries no address keys (DAH-4807, lium-platform#1924)
+    (frozenset({"price_per_gpu", "rented_gpu_count"}), _NODE_PRESET),
     (frozenset({"billing_day", "miner_amount"}), _billing_preset()),
     (frozenset({"machine_name", "achieved"}), _machine_request_preset()),
     (frozenset({"pod_name", "status"}), _pod_preset()),
