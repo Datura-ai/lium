@@ -4385,7 +4385,7 @@ class Lium:
         while True:
             elapsed = time.time() - start
             if timeout is not None and elapsed >= timeout:
-                if last_seen is None and missing_polls and elapsed >= self.MISSING_GRACE_SECONDS:
+                if last_seen is None and missing_polls and not throttled and elapsed >= self.MISSING_GRACE_SECONDS:
                     # The budget and the grace ran out together: an id that was never listed in
                     # 20 s is a missing pod, not a slow one — say so instead of answering None
                     # (wait_ready('00000000-…', timeout=20), the DAH-1942 audit case).

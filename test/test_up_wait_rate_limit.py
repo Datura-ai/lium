@@ -82,3 +82,40 @@ def test_retry_after_is_read_from_the_429_response():
         assert exc.retry_after == 12.0
     else:
         raise AssertionError("no LiumRateLimitError")
+
+
+class _MissingThenThrottled(_Client):
+    """The first `ps` lists no pod (inside the listing grace), every later one is a 429."""
+
+    def ps(self):
+        if not getattr(self, "listed_once", False):
+            self.listed_once = True
+            return []
+        raise LiumRateLimitError("Rate limit exceeded")
+
+
+def test_a_429_after_one_empty_listing_is_still_starting_not_failed(monkeypatch):
+    clock = {"now": 0.0}
+    monkeypatch.setattr("lium.sdk.client.time.time", lambda: clock["now"])
+    monkeypatch.setattr("lium.sdk.client.time.sleep", lambda s: clock.__setitem__("now", clock["now"] + s))
+
+    assert _MissingThenThrottled([]).wait_ready("pod-1", timeout=20) is None  # not PodStartError
+
+
+def test_the_jupyter_wait_stops_at_its_limit_counting_time_inside_ps(monkeypatch):
+    clock = {"now": 0.0}
+    calls = []
+    monkeypatch.setattr(up_actions.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(up_actions.time, "sleep", lambda s: clock.__setitem__("now", clock["now"] + s))
+
+    def ps():
+        calls.append(clock["now"])
+        clock["now"] += 10  # the SDK's own retries and the request take time too
+        raise LiumRateLimitError("Rate limit exceeded")
+
+    lium = SimpleNamespace(install_jupyter=lambda *a, **k: None, ps=ps)
+    pod = SimpleNamespace(id="pod-1", ports={"22": 1, "8888": 2})
+    result = up_actions.InstallJupyterAction().execute({"lium": lium, "pod": pod})
+
+    assert not result.ok and "timed out" in result.error
+    assert clock["now"] <= 120 + 10 and max(calls) < 120

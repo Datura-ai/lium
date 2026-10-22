@@ -564,12 +564,13 @@ class InstallJupyterAction:
 
         max_wait = 120
         wait_interval = 3
-        elapsed = 0
+        deadline = time.monotonic() + max_wait  # time inside ps() and its retries counts too (DAH-4993 review)
         pod_id = pod.id
 
-        while elapsed < max_wait:
-            time.sleep(wait_interval)
-            elapsed += wait_interval
+        while time.monotonic() < deadline:
+            time.sleep(min(wait_interval, max(0.0, deadline - time.monotonic())))
+            if time.monotonic() >= deadline:
+                break
 
             try:
                 all_pods = lium.ps()
