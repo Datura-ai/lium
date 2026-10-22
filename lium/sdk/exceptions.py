@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .models import GpuResetOutcome
+    from .models import GpuClockOutcome, GpuResetOutcome
 
 class LiumError(Exception):
     """Base exception for Lium SDK.
@@ -216,25 +216,26 @@ class LiumBudgetExceededError(LiumPermissionError):
 
 
 class LiumGpuOperationError(LiumError):
-    """A GPU reset ran on the node and at least one GPU failed (409 whose body lists ``gpus``).
+    """A GPU reset or clock change ran on the node and at least one GPU failed (409 whose body lists ``gpus``).
 
-    ``gpus`` is each GPU's outcome (:class:`GpuResetOutcome` from :meth:`Lium.reset_gpu`), so the caller sees
-    which GPUs failed; ``container_restarted`` says whether the pod's container was started again (``None`` when
-    the server did not say). ``code`` is the API's (``reset_not_supported``, ...).
+    ``gpus`` is each GPU's outcome (:class:`GpuResetOutcome` from :meth:`Lium.reset_gpu`, :class:`GpuClockOutcome`
+    from :meth:`Lium.lock_gpu_clocks` / :meth:`Lium.reset_gpu_clocks`), so the caller sees which GPUs failed and
+    which stay locked; ``container_restarted`` says whether a reset started the pod's container again (``None``
+    when the server did not say, always for clocks). ``code`` is the API's (``reset_not_supported``, ...).
     """
 
     def __init__(
         self,
         message: str,
         *,
-        gpus: list[GpuResetOutcome] | None = None,
+        gpus: list[GpuResetOutcome | GpuClockOutcome] | None = None,
         container_restarted: bool | None = None,
         code: str | None = None,
         hint: str | None = None,
         request_id: str | None = None,
     ) -> None:
         super().__init__(message, code=code, hint=hint, request_id=request_id)
-        self.gpus: list[GpuResetOutcome] = list(gpus or [])
+        self.gpus: list[GpuResetOutcome | GpuClockOutcome] = list(gpus or [])
         self.container_restarted = container_restarted
 
 
