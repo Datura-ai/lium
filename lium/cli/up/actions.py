@@ -3,7 +3,7 @@ import re
 import time
 
 from lium.cli.actions import ActionResult
-from lium.sdk import ExecutorInfo, Template, PodInfo, Lium, LiumError
+from lium.sdk import ExecutorInfo, Template, PodInfo, Lium, LiumError, LiumRateLimitError
 from lium.sdk.client import RENT_BY_SPEC
 from lium.sdk.client import paramiko  # the lazy stand-in (DAH-3053): `paramiko.SSHException` below resolves when the except runs, not at import
 from lium.cli.utils import (
@@ -571,7 +571,10 @@ class InstallJupyterAction:
             time.sleep(wait_interval)
             elapsed += wait_interval
 
-            all_pods = lium.ps()
+            try:
+                all_pods = lium.ps()
+            except LiumRateLimitError:
+                continue  # the API is busy, not the install: poll again inside max_wait (DAH-4993)
             updated_pod = next((p for p in all_pods if p.id == pod_id or p.huid == pod_id or p.name == pod_id), None)
 
             if updated_pod and hasattr(updated_pod, 'jupyter_installation_status'):

@@ -906,7 +906,12 @@ class Lium:
         if resp.status_code == 404:
             raise LiumNotFoundError(f"Resource not found: {_response_error_message(resp)}", **context)
         if resp.status_code == 429:
-            raise LiumRateLimitError("Rate limit exceeded", **context)
+            exc = LiumRateLimitError("Rate limit exceeded", **context)
+            try:  # seconds only; the HTTP-date form is ignored
+                exc.retry_after = float((getattr(resp, "headers", None) or {}).get("Retry-After"))
+            except (TypeError, ValueError):
+                pass
+            raise exc
         if resp.status_code == 402 and context.get("code") in CARD_TOPUP_ERROR_CODES:
             raise card_topup_error(resp, **context)
         if 500 <= resp.status_code < 600:
@@ -4385,7 +4390,17 @@ class Lium:
                     # (wait_ready('00000000-…', timeout=20), the DAH-1942 audit case).
                     raise self._never_listed_error(pod_id, missing_polls, elapsed)
                 break
-            fresh_pods = self.ps()
+            try:
+                fresh_pods = self.ps()
+            except LiumRateLimitError as exc:
+                # A 429 says the API is busy, not that the pod is (parallel `lium up` from one IP, DAH-4993):
+                # slow down (Retry-After when sent) and keep waiting inside the budget; when it runs out the
+                # loop ends as a still-starting pod.
+                delay = max(exc.retry_after or 0, self.poll_delay(elapsed, poll_interval))
+                if timeout is not None:
+                    delay = min(delay, max(0.0, timeout - (time.time() - start)))
+                time.sleep(delay)
+                continue
             current = next((p for p in fresh_pods if p.id == pod_id), None)
 
             if current is None:
