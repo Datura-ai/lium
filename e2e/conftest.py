@@ -36,6 +36,7 @@ each cost a human a rerun.
 
 Every command runs with HOME set to a temp dir, so `up` mints its SSH key there and the first-run shell-completion
 hook edits a shell rc nobody uses (L-65: never the runner's ~/.lium). The key travels only as LIUM_API_KEY.
+Teardown deletes the SSH key(s) that HOME registered on the account (it holds at most 50; DAH-4715).
 """
 
 from __future__ import annotations
@@ -117,6 +118,44 @@ def reliability_scores(url: str = API_URL, attempts: int = 3, pause_s: float = 3
     return {str(row.get("id")): row.get("reliability_score") for row in rows if isinstance(row, dict) and row.get("id")}
 
 
+def _key_body(public_key: str) -> str:
+    """`<type> <base64>` of an OpenSSH public key: the comment after it is not part of the key."""
+    return " ".join(str(public_key).split()[:2])
+
+
+def delete_registered_keys(home: Path, url: str = API_URL, key: str = API_KEY, tries: int = 6, pause_s: float = 10.0,
+                           sleep=time.sleep) -> int:
+    """Delete from the account the SSH keys whose public key is one of `home`/.ssh/*.pub — every run mints a fresh key
+    in its throwaway HOME and `up` registers it, and the account holds at most 50 (DAH-4715). A 400 (the key is still
+    on a pod that is stopping) is retried `tries` times; any failure is a warning, never a failed step."""
+    mine = {_key_body(p.read_text()) for p in (home / ".ssh").glob("*.pub")}
+
+    def call(method: str, path: str):
+        req = urllib.request.Request(f"{url}{path}", method=method, headers={"X-API-KEY": key, "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310 — https URL from E2E_API_URL, the suite's own target
+            return json.load(resp)
+
+    if not mine:
+        return 0
+    deleted = 0
+    try:
+        for row in call("GET", "/ssh-keys"):
+            if _key_body(row.get("public_key", "")) not in mine:
+                continue
+            for attempt in range(1, tries + 1):
+                try:
+                    call("DELETE", f"/ssh-keys/{row['id']}")
+                    deleted += 1
+                    break
+                except urllib.error.HTTPError as e:
+                    if e.code != 400 or attempt == tries:
+                        raise
+                    sleep(pause_s)
+    except Exception as e:  # noqa: BLE001 — cleanup must not fail the suite
+        warnings.warn(f"e2e: could not delete this run's SSH key(s) from the account: {e}", stacklevel=2)
+    return deleted
+
+
 @dataclass
 class Result:
     argv: list[str]
@@ -182,6 +221,7 @@ def session(tmp_path_factory) -> Session:
     s = Session(home=home)
     yield s
     _write_artifacts(s)
+    delete_registered_keys(home)   # after the rental fixture removed the pod (it depends on this one)
 
 
 @dataclass

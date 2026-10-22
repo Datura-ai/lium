@@ -196,12 +196,14 @@ def test_start_executor_timeout_includes_compose_diagnostics(monkeypatch, tmp_pa
     monkeypatch.setattr(mine.time, "time", lambda: next(ticks))
 
     with pytest.raises(Exception) as exc:
-        mine._start_executor(tmp_path, wait_secs=5)
+        mine._start_executor(tmp_path, wait_secs=5, recreate=True)
     msg = str(exc.value)
     assert "timed out after 5s" in msg
     assert "Restarting (1)" in msg and "Created" in msg
     assert "address already in use" in msg and "exited with code 1" in msg
     assert "no such service" not in msg
+    # the old container ID is read first, so the wait can tell the new container from it
+    assert calls[1:3] == ["docker compose -f docker-compose.app.yml ps -q executor", "docker compose up -d --force-recreate"]
     # each compose file is asked for the service it declares (`executor` lives in docker-compose.app.yml)
     assert [c for c in calls if "logs" in c] == [
         "docker compose logs --no-color --tail 30 executor-runner",
@@ -443,3 +445,90 @@ def test_gather_inputs_auto_uses_the_given_ports() -> None:
 
     assert answers["internal_port"] == "8081"
     assert answers["external_port"] == "40123"
+
+
+def test_start_executor_without_a_register_token_does_not_recreate_a_running_executor(monkeypatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        calls.append(cmd)
+        if "ps -q executor" in cmd:
+            return "abc123\n", ""
+        if cmd.startswith("docker inspect"):
+            return "healthy\n", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+
+    mine._start_executor(tmp_path)
+
+    assert [c for c in calls if c.startswith("docker compose up")] == ["docker compose up -d"]
+
+
+def test_start_executor_does_not_recreate_under_running_rentals(monkeypatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+    warnings: list[str] = []
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        calls.append(cmd)
+        if cmd.startswith("docker ps --filter status=created --filter status=running "):
+            return "filler_1\npod_abc\nexecutor-executor-1\n", ""
+        if "ps -q executor" in cmd:
+            return "abc123\n", ""
+        if cmd.startswith("docker inspect"):
+            return "healthy\n", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+    monkeypatch.setattr(mine.console, "warning", warnings.append)
+
+    mine._start_executor(tmp_path, recreate=True)
+
+    assert [c for c in calls if c.startswith("docker compose up")] == ["docker compose up -d --no-recreate"]
+    assert warnings and "1 rental(s) running" in warnings[0]
+
+
+def test_start_executor_keeps_a_running_runner_under_rentals(monkeypatch, tmp_path: Path) -> None:
+    """A plain `up -d` recreates a runner whose config changed, and the runner force-recreates the executor."""
+    calls: list[str] = []
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        calls.append(cmd)
+        if cmd.startswith("docker ps --filter status=created --filter status=running "):
+            return "pod_abc\n", ""
+        if "ps -q --status running executor-runner" in cmd or "ps -q executor" in cmd:
+            return "abc123\n", ""
+        if cmd.startswith("docker inspect"):
+            return "healthy\n", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+
+    mine._start_executor(tmp_path)
+
+    assert [c for c in calls if c.startswith("docker compose up")] == ["docker compose up -d --no-recreate"]
+
+
+def test_start_executor_does_not_recreate_containers_under_rentals_when_starting_a_stopped_runner(monkeypatch, tmp_path: Path) -> None:
+    """With the runner down, `up -d` starts it, but a changed config must not recreate the executor under rentals."""
+    calls: list[str] = []
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        calls.append(cmd)
+        if cmd.startswith("docker ps --filter status=created --filter status=running "):
+            return "pod_abc\n", ""
+        if "ps -q executor" in cmd:
+            return "abc123\n", ""
+        if cmd.startswith("docker inspect"):
+            return "healthy\n", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+
+    mine._start_executor(tmp_path)
+
+    assert [c for c in calls if c.startswith("docker compose up")] == ["docker compose up -d --no-recreate"]
