@@ -24,6 +24,7 @@ from ..utils import console, timed_step_status
 from .docker_config import build_verification_result, inspect_docker_state, load_daemon_json, merge_overlay2
 from .models import (
     DOCKER_DROP_IN_PATH,
+    LOOP_DEVICE_UDEV_RULE_PATH,
     CandidateEvaluation,
     CommandResult,
     MountInfo,
@@ -72,6 +73,8 @@ class _SetupExecutionState:
     docker_root_mounted_on_target: bool = False
     original_drop_in: Optional[_FileSnapshot] = None
     drop_in_written: bool = False
+    original_udev_rule: Optional[_FileSnapshot] = None
+    udev_rule_written: bool = False
     docker_root_moved: bool = False
     loop_file_created: bool = False
 
@@ -187,8 +190,8 @@ def _preflight() -> PreflightResult:
         "xfs_info",
         "wipefs",
         "du",
-        "fallocate",
         "losetup",
+        "udevadm",
     ]:
         _require_binary(binary)
 
@@ -309,9 +312,16 @@ def _build_setup_plan(
         ]
     )
     if leaves_containerd_store:
-        destructive_actions.append("switch Docker from the containerd image store to overlay2 (images are pulled again)")
+        destructive_actions.append(
+            "switch Docker from the containerd image store to overlay2 (images and containers in the old store become "
+            "unavailable: pull the images and recreate the containers afterwards)"
+        )
     if loop_file:
-        destructive_actions.append(f"add the docker.service drop-in {DOCKER_DROP_IN_PATH} (mount before Docker, direct I/O)")
+        destructive_actions.append(f"add the docker.service drop-in {DOCKER_DROP_IN_PATH} (mount before Docker)")
+        destructive_actions.append(
+            f"add the udev rule {LOOP_DEVICE_UDEV_RULE_PATH} (direct I/O on the loop device, discard off so fstrim "
+            "cannot punch holes in the file)"
+        )
     destructive_actions.extend(["restore Docker data", "restart Docker"])
 
     backup_dir = f"{docker_root}.lium-backup-{datetime.now(timezone.utc):%Y%m%d%H%M%S}"
@@ -463,8 +473,10 @@ def _print_gpu_splitting_requirements():
                     "- Ubuntu/Debian Linux host with systemd",
                     "- Run `check` and `setup` as root (`sudo`)",
                     "- Docker daemon must be running and reachable",
-                    "- Need one safe extra disk/partition (not root or current Docker backing device), or free space "
-                    "on a local filesystem for an XFS image file (single-disk hosts)",
+                    (
+                        "- Need one safe extra disk/partition (not root or current Docker backing device), or free space "
+                        "on a local filesystem for an XFS image file (single-disk hosts)"
+                    ),
                     "- Final required state: Docker `overlay2`, `/var/lib/docker` on XFS with project quota (`pquota`/`prjquota`), `Supports d_type=true`",
                     f"- Docs link: {GPU_SPLITTING_DOC_URL}",
                 ]
@@ -553,15 +565,67 @@ def _fstab_would_change(fstab_path: str, desired: str) -> bool:
     return True
 
 
-def _docker_drop_in(docker_root: str, image_file: str) -> str:
-    # without RequiresMountsFor Docker starts on the empty directory after a reboot and every pod "disappears";
-    # direct I/O cannot be set from fstab, and without it pod creation on the loop device is ~1.4x slower
+def _docker_drop_in(docker_root: str) -> str:
+    # without RequiresMountsFor Docker starts on the empty directory after a reboot and every pod "disappears"
+    return f"[Unit]\nRequiresMountsFor={docker_root}\n"
+
+
+def _loop_device_udev_rule(image_file: str) -> str:
+    # applied on every attach, before the mount completes: direct I/O (without it pod creation is ~1.4x slower,
+    # and fstab cannot set it) and no discard, so fstrim cannot punch holes back into the preallocated file
     return (
-        "[Unit]\n"
-        f"RequiresMountsFor={docker_root}\n"
-        "[Service]\n"
-        f'ExecStartPre=-/bin/sh -c "losetup --direct-io=on $(losetup -j {image_file} -n -O NAME)"\n'
+        'ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="loop*", '
+        f'ATTR{{loop/backing_file}}=="{image_file}", '
+        'ATTR{queue/discard_max_bytes}="0", RUN+="/sbin/losetup --direct-io=on $devnode"\n'
     )
+
+
+def _create_image_file(path: str, size_bytes: int):
+    # exclusive create with the final mode: no following a planted symlink, no formatting a file someone else
+    # put there, no window in which the image is world-readable
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        raise RuntimeError(f"{path} appeared after the plan was made; remove it and run setup again") from None
+    try:
+        os.posix_fallocate(fd, 0, size_bytes)
+    except OSError:
+        # a preallocation that stopped at ENOSPC keeps its extents; the file would leave the host full
+        os.unlink(path)
+        raise
+    finally:
+        os.close(fd)
+
+
+def _same_filesystem(path_a: str, path_b: str) -> bool:
+    return os.stat(path_a).st_dev == os.stat(path_b).st_dev
+
+
+def _check_image_file_parent(image_file: str):
+    # only root may rename or replace entries next to the image file, or the exclusive create above is not enough
+    parent = os.path.dirname(image_file)
+    stat = os.lstat(parent)
+    if not os.path.isdir(parent) or os.path.islink(parent) or stat.st_uid != 0 or stat.st_mode & 0o022:
+        raise RuntimeError(
+            f"{parent} must be a directory owned by root and writable by root only (mode {stat.st_mode & 0o777:o}); "
+            f"the image file would otherwise be created where another user can replace it. Pass --file with a path under /var/lib"
+        )
+    if os.path.lexists(image_file):
+        raise RuntimeError(f"{image_file} already exists; remove it or choose another path")
+
+
+def _write_sysfs(path: str, value: str):
+    Path(path).write_text(value)
+
+
+def _harden_loop_device(image_file: str):
+    # the udev rule does this on every attach; applying it here too exercises the rule and covers an attach
+    # whose uevent udev did not process
+    name = run_command(["losetup", "-j", image_file, "-n", "-O", "NAME"], True, True).stdout.strip().splitlines()[0]
+    run_command(["udevadm", "trigger", "--action=change", name], False, True)
+    run_command(["udevadm", "settle"], False, True)
+    _write_sysfs(f"/sys/block/{os.path.basename(name)}/queue/discard_max_bytes", "0")
+    run_command(["losetup", "--direct-io=on", name], True, True)
 
 
 def _write_text_file(path: str, contents: str):
@@ -758,14 +822,18 @@ def _mount_command_for_mount_info(mount_info: MountInfo, target: str) -> list[st
     return args
 
 
-def _rollback_attempt(errors: list[str], label: str, action):
+def _rollback_attempt(errors: list[str], label: str, action) -> bool:
     try:
         action()
     except Exception as exc:  # pragma: no cover - exercised via callers
         errors.append(f"{label}: {exc}")
+        return False
+    return True
 
 
 def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partition: str) -> list[str]:
+    # undo in reverse order; the image file is removed and Docker started only once the mount is gone and the
+    # data root is back, otherwise a failed step would end with Docker on an empty directory or a nameless image
     docker_root = plan.preflight.docker_state.docker_root_dir
     errors: list[str] = []
 
@@ -773,17 +841,23 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
         _rollback_attempt(errors, "stop docker", lambda: run_command(["systemctl", "stop", "docker"], True, True))
         _rollback_attempt(errors, "stop docker.socket", lambda: run_command(["systemctl", "stop", "docker.socket"], False, True))
 
+    unmounted = True
     if state.docker_root_mounted_on_target:
-        _rollback_attempt(errors, f"unmount {docker_root}", lambda: run_command(["umount", docker_root], True, True))
-        if state.original_docker_mount.target == docker_root and state.original_docker_mount.source != target_partition:
+        unmounted = _rollback_attempt(errors, f"unmount {docker_root}", lambda: run_command(["umount", docker_root], True, True))
+        if unmounted and state.original_docker_mount.target == docker_root and state.original_docker_mount.source != target_partition:
             _rollback_attempt(
                 errors,
                 f"remount original Docker root {state.original_docker_mount.source}",
                 lambda: run_command(_mount_command_for_mount_info(state.original_docker_mount, docker_root), True, True),
             )
 
+    data_restored = True
     if state.docker_root_moved:
-        _rollback_attempt(errors, f"move Docker data back to {docker_root}", lambda: _move_docker_root_back(plan))
+        if unmounted:
+            data_restored = _rollback_attempt(errors, f"move Docker data back to {docker_root}", lambda: _move_docker_root_back(plan))
+        else:
+            data_restored = False
+            errors.append(f"move Docker data back to {docker_root}: skipped, {docker_root} is still mounted")
 
     if state.fstab_written:
         _rollback_attempt(errors, f"restore {plan.fstab_path}", lambda: _restore_text_file(state.original_fstab))
@@ -792,14 +866,24 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
         _rollback_attempt(errors, f"restore {plan.drop_in_path}", lambda: _restore_text_file(state.original_drop_in))
         _rollback_attempt(errors, "systemctl daemon-reload", lambda: run_command(["systemctl", "daemon-reload"], False, True))
 
+    if state.udev_rule_written:
+        _rollback_attempt(errors, f"restore {plan.udev_rule_path}", lambda: _restore_text_file(state.original_udev_rule))
+        _rollback_attempt(errors, "udevadm control --reload-rules", lambda: run_command(["udevadm", "control", "--reload-rules"], False, True))
+
     if state.daemon_json_written:
         _rollback_attempt(errors, f"restore {plan.daemon_json_path}", lambda: _restore_text_file(state.original_daemon_json))
 
     if state.loop_file_created:
-        _rollback_attempt(errors, f"remove {target_partition}", lambda: os.unlink(target_partition))
+        if unmounted:
+            _rollback_attempt(errors, f"remove {target_partition}", lambda: os.unlink(target_partition))
+        else:
+            errors.append(f"remove {target_partition}: skipped, still mounted at {docker_root}")
 
     if state.docker_stopped:
-        _rollback_attempt(errors, "start docker", lambda: run_command(["systemctl", "start", "docker"], True, True))
+        if data_restored:
+            _rollback_attempt(errors, "start docker", lambda: run_command(["systemctl", "start", "docker"], True, True))
+        else:
+            errors.append(f"start docker: skipped, Docker data is not back at {docker_root} (it is at {plan.backup_dir})")
 
     return errors
 
@@ -807,7 +891,8 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
 def _move_docker_root_back(plan: SetupPlan):
     # rmdir first: were the directory not empty, `mv` would put the backup inside it instead of in its place
     docker_root = plan.preflight.docker_state.docker_root_dir
-    run_command(["rmdir", docker_root], True, True)
+    if os.path.isdir(docker_root):  # recreated by the cutover; absent when an earlier step failed
+        run_command(["rmdir", docker_root], True, True)
     run_command(["mv", plan.backup_dir, docker_root], True, True)
 
 
@@ -831,7 +916,9 @@ def _setup_failure_message(plan: SetupPlan, exc: Exception, rollback_errors: lis
 
 
 def _pre_stop_checks(plan: SetupPlan):
-    """Refuse before the first host change: Docker down, containers running, or no room for the backup.
+    """Refuse before the first host change: Docker down, containers running, containers left in the containerd
+    store, no room for the backup, an image file directory other users can write to, or Docker data larger than
+    the planned image file.
 
     Commands run: `docker ps -q`, `du -sxb <docker-root>`.
     """
@@ -841,16 +928,39 @@ def _pre_stop_checks(plan: SetupPlan):
         raise RuntimeError(f"Docker is not responding ({reason}); start it with `systemctl start docker` and run setup again")
     if (ps.stdout or "").strip():
         raise RuntimeError("Containers are running on this host; move Docker storage only while it runs none (no rentals)")
-    if _backup_by_rename(plan.preflight, plan.target):
-        # the data root is renamed, not copied, and the image file was sized from the free space
-        return
+    if plan.preflight.docker_state.storage_driver == "overlayfs":
+        # the switch away from the containerd image store leaves its containers invisible to Docker
+        existing = run_command(["docker", "ps", "-aq"], True, True).stdout.split()
+        if existing:
+            raise RuntimeError(
+                f"{len(existing)} containers exist in Docker's containerd image store; after the switch to overlay2 "
+                "Docker would no longer see them. Remove them (`docker rm`) and run setup again"
+            )
     docker_root = plan.preflight.docker_state.docker_root_dir
     used = int(run_command(["du", "-sxb", docker_root], True, True).stdout.split()[0])
+    if plan.target.classification == "loop_file":
+        _check_image_file_parent(plan.target.resolved_target)
+    if _backup_by_rename(plan.preflight, plan.target):
+        # the data root is renamed, not copied, so the host needs no room for a backup; the image file was sized
+        # from the free space next to that data, and the data is copied into it at the restore step
+        if used > plan.target.loop_file_size_bytes:
+            raise RuntimeError(
+                f"Docker data in {docker_root} takes {used / 1024**3:.1f} GiB, more than the "
+                f"{plan.target.loop_file_size_bytes / 1024**3:.1f} GiB image file; prune images and volumes "
+                "(`docker system prune -a --volumes`) and run setup again"
+            )
+        return
     needed = int(used * 1.1) + 1024**3
-    free = shutil.disk_usage(Path(plan.backup_dir).parent).free
+    what = f"The backup of {docker_root}"
+    backup_parent = str(Path(plan.backup_dir).parent)
+    if plan.target.classification == "loop_file" and _same_filesystem(backup_parent, plan.target.loop_file_filesystem):
+        # the copy and the image file exist side by side until the restore step
+        needed += plan.target.loop_file_size_bytes
+        what += " and the image file"
+    free = shutil.disk_usage(backup_parent).free
     if free < needed:
         raise RuntimeError(
-            f"The backup of {docker_root} needs {needed / 1024**3:.1f} GiB free next to it, "
+            f"{what} needs {needed / 1024**3:.1f} GiB free next to it, "
             f"only {free / 1024**3:.1f} GiB is; free space and run setup again"
         )
 
@@ -873,7 +983,7 @@ def _execute_setup(plan: SetupPlan):
        - optional `parted -s <disk> mkpart primary xfs <start> <end>`
        - optional `partprobe <disk>`
        - `lsblk --json -o PATH,PKNAME,TYPE` before/after via helper
-       - or `fallocate -l <bytes> <image-file>` for an image file
+       - or an exclusive create + `posix_fallocate` of the image file (mode 0600)
 
     4. Format / validate filesystem metadata
        - optional `mkfs.xfs -f <partition>` (`mkfs.xfs -f -K <image-file>`)
@@ -888,7 +998,8 @@ def _execute_setup(plan: SetupPlan):
        - rewrite `/etc/docker/daemon.json`
        - update `/etc/fstab`
        - `blkid -s UUID -o value <partition>`
-       - or, for an image file, the docker.service drop-in and `systemctl daemon-reload`
+       - or, for an image file, the docker.service drop-in + `systemctl daemon-reload` and the udev rule +
+         `udevadm control --reload-rules`; after the mount `udevadm trigger`, discard off, `losetup --direct-io=on`
 
     7. Cut over Docker root and restore data
        - optional `umount /var/lib/docker`
@@ -916,6 +1027,7 @@ def _execute_setup(plan: SetupPlan):
         original_fstab=_snapshot_text_file(plan.fstab_path),
         original_docker_mount=plan.preflight.docker_mount,
         original_drop_in=_snapshot_text_file(plan.drop_in_path),
+        original_udev_rule=_snapshot_text_file(plan.udev_rule_path),
     )
 
     try:
@@ -937,9 +1049,8 @@ def _execute_setup(plan: SetupPlan):
         with timed_step_status(3, total_steps, "Creating the image file" if loop_file else "Preparing partition"):
             if loop_file:
                 console.dim(f"Preallocating {plan.target.loop_file_size_bytes // 1024**3} GiB at {target_partition}")
-                run_command(["fallocate", "-l", str(plan.target.loop_file_size_bytes), target_partition], True, True)
+                _create_image_file(target_partition, plan.target.loop_file_size_bytes)
                 state.loop_file_created = True
-                os.chmod(target_partition, 0o600)
             else:
                 target_partition = _prepare_partition(plan, existing_partition_paths)
 
@@ -964,15 +1075,19 @@ def _execute_setup(plan: SetupPlan):
             _write_json_atomic(plan.daemon_json_path, plan.daemon_json_merged)
             state.daemon_json_written = True
 
-        with timed_step_status(7, total_steps, "Updating fstab and docker.service" if loop_file else "Updating fstab"):
+        with timed_step_status(7, total_steps, "Updating fstab, docker.service and udev" if loop_file else "Updating fstab"):
             if loop_file:
                 console.dim(f"Mounting {target_partition} at {docker_root} with {LOOP_FILE_FSTAB_OPTIONS}")
                 _update_fstab(plan.fstab_path, _fstab_entry(target_partition, LOOP_FILE_FSTAB_OPTIONS))
                 state.fstab_written = True
                 console.dim(f"Writing {plan.drop_in_path}")
-                _write_text_file(plan.drop_in_path, _docker_drop_in(docker_root, target_partition))
+                _write_text_file(plan.drop_in_path, _docker_drop_in(docker_root))
                 state.drop_in_written = True
                 run_command(["systemctl", "daemon-reload"], True, True)
+                console.dim(f"Writing {plan.udev_rule_path}")
+                _write_text_file(plan.udev_rule_path, _loop_device_udev_rule(target_partition))
+                state.udev_rule_written = True
+                run_command(["udevadm", "control", "--reload-rules"], True, True)
             else:
                 uuid = _get_uuid(target_partition)
                 console.dim(f"Using UUID={uuid} for /var/lib/docker")
@@ -990,6 +1105,8 @@ def _execute_setup(plan: SetupPlan):
             current_mount = load_mount_info(run_command, str(docker_root))
             if not has_project_quota_option(current_mount.options):
                 raise RuntimeError("Mounted Docker root without project quota option (pquota/prjquota)")
+            if loop_file:
+                _harden_loop_device(target_partition)
 
         with timed_step_status(9, total_steps, "Restoring Docker data"):
             console.dim(f"Restoring backup from {plan.backup_dir}")

@@ -207,7 +207,7 @@ def _storage_host(monkeypatch, *, root: bool = True, tty: bool = True, typed: st
     image_file_plan = SimpleNamespace(target=SimpleNamespace(
         classification="loop_file", resolved_target="/var/lib/lium-docker.xfs", loop_file_filesystem="/",
         loop_file_size_bytes=180 * 1024**3, loop_file_reserve_bytes=25 * 1024**3,
-    ))
+    ), destructive_actions=["stop Docker services for /var/lib/docker", "move Docker data aside (same filesystem, no copy)"])
     monkeypatch.setattr("os.geteuid", lambda: 0 if root else 1000)
     monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: tty))
     monkeypatch.setattr(Prompt, "ask", lambda *a, **k: calls.append("asked") or typed)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Callable, Optional
@@ -22,6 +23,8 @@ LOOP_FILE_HOST_FSTYPES = {"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "f2fs"}
 LOOP_FILE_RESERVE_FRACTION = 0.10
 LOOP_FILE_MIN_RESERVE_BYTES = 20 * 1024**3
 LOOP_FILE_NAME = "lium-docker.xfs"
+# the path is written into fstab and a udev rule, and the udev rule is parsed as a quoted string
+IMAGE_FILE_PATH_PATTERN = re.compile(r"/[A-Za-z0-9_./-]+")
 
 
 class NoSafeTargetError(RuntimeError):
@@ -577,14 +580,25 @@ def load_mounted_filesystems(runner: Runner, devices: list[BlockDevice]) -> list
 
 
 def _source_disk_is_local(source: str, devices: list[BlockDevice]) -> bool:
+    # every ancestor counts: a USB disk stays a USB disk under a partition, LVM or md (lsblk shows a device with
+    # several parents once per parent; the walk follows the first)
     device = get_device_by_path(devices, _mount_device(source))
     if device is None:
-        # LVM, md and zfs sources name no lsblk disk; the filesystem type allowlist is the gate for those
+        # zfs and bind sources name no lsblk device; the filesystem type allowlist is the gate for those
         return True
-    disk = get_device_by_path(devices, _parent_disk_path(devices, device)) or device
-    if device.is_removable or disk.is_removable:
-        return False
-    return (disk.transport or "").lower() not in NON_LOCAL_TRANSPORTS
+    by_kernel_name = {item.kernel_name: item for item in flatten_devices(devices)}
+    seen: set[str] = set()
+    while device is not None and device.kernel_name not in seen:
+        seen.add(device.kernel_name)
+        if device.is_removable or (device.transport or "").lower() in NON_LOCAL_TRANSPORTS:
+            return False
+        device = by_kernel_name.get(device.parent_kernel_name or "")
+    return True
+
+
+def _filesystem_holding(path: str, filesystems: list[MountedFilesystem]) -> Optional[MountedFilesystem]:
+    holders = [fs for fs in filesystems if path.startswith(fs.target.rstrip("/") + "/")]
+    return max(holders, key=lambda fs: len(fs.target), default=None)
 
 
 def plan_loop_file_target(
@@ -604,10 +618,7 @@ def plan_loop_file_target(
         image_file = os.path.abspath(image_file)
         if image_file.startswith(docker_root.rstrip("/") + "/"):
             raise RuntimeError(f"{image_file} is inside {docker_root}, which the file will be mounted over; choose another path")
-        if os.path.exists(image_file):
-            raise RuntimeError(f"{image_file} already exists; remove it or choose another path")
-        holders = [fs for fs in filesystems if image_file.startswith(fs.target.rstrip("/") + "/")]
-        holder = max(holders, key=lambda fs: len(fs.target), default=None)
+        holder = _filesystem_holding(image_file, filesystems)
         if holder is None or not holder.local or holder.target == docker_root:
             raise RuntimeError(f"{image_file} is not on a local filesystem that can hold the image file")
     else:
@@ -616,6 +627,17 @@ def plan_loop_file_target(
             raise RuntimeError("No local filesystem can hold an XFS image file")
         holder = max(candidates, key=lambda fs: fs.avail_bytes)
         image_file = os.path.join("/var/lib" if holder.target == "/" else holder.target, LOOP_FILE_NAME)
+        if _filesystem_holding(image_file, filesystems) is not holder:
+            # /var or /var/lib is its own filesystem: a file there would be sized from the wrong one
+            image_file = os.path.join(holder.target, LOOP_FILE_NAME)
+
+    if os.path.lexists(image_file):
+        raise RuntimeError(f"{image_file} already exists; remove it or choose another path")
+    if not IMAGE_FILE_PATH_PATTERN.fullmatch(image_file):
+        raise RuntimeError(
+            f"{image_file}: the image file path may only contain letters, digits, '_', '-', '.' and '/'; "
+            "it is written into fstab and a udev rule"
+        )
 
     reserve = max(int(holder.size_bytes * LOOP_FILE_RESERVE_FRACTION), LOOP_FILE_MIN_RESERVE_BYTES)
     room = holder.avail_bytes - reserve

@@ -5,8 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-# docker.service drop-in written by the loop-file setup: mount before Docker, direct I/O on the loop device
+# written by the loop-file setup: the drop-in mounts the image before Docker, the udev rule turns on direct I/O
+# and refuses discard on the loop device (fstrim would otherwise punch holes in the preallocated file)
 DOCKER_DROP_IN_PATH = "/etc/systemd/system/docker.service.d/lium-docker-storage.conf"
+LOOP_DEVICE_UDEV_RULE_PATH = "/etc/udev/rules.d/99-lium-docker-storage.rules"
 
 
 @dataclass
@@ -129,6 +131,7 @@ class SetupPlan:
     fstab_changed: bool
     destructive_actions: list[str]
     drop_in_path: str = DOCKER_DROP_IN_PATH
+    udev_rule_path: str = LOOP_DEVICE_UDEV_RULE_PATH
 
 
 @dataclass

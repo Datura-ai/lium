@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -45,6 +46,7 @@ def _loop_file_plan(tmp_path, docker_mount: MountInfo | None = None) -> SetupPla
         fstab_changed=True,
         destructive_actions=[],
         drop_in_path=str(tmp_path / "docker.service.d" / "lium-docker-storage.conf"),
+        udev_rule_path=str(tmp_path / "rules.d" / "99-lium-docker-storage.rules"),
     )
 
 
@@ -78,7 +80,8 @@ def test_plan_falls_back_to_an_image_file_when_no_disk_is_safe(monkeypatch, tmp_
     assert plan.daemon_json_merged == {"storage-driver": "overlay2", "features": {"containerd-snapshotter": False}}
     assert "create the XFS image file /var/lib/lium-docker.xfs: 175 GiB on /, 25 GiB stay free for the system" in plan.destructive_actions
     assert "move Docker data aside (same filesystem, no copy)" in plan.destructive_actions
-    assert "switch Docker from the containerd image store to overlay2 (images are pulled again)" in plan.destructive_actions
+    assert any(action.startswith("switch Docker from the containerd image store to overlay2") for action in plan.destructive_actions)
+    assert any(action.startswith("add the udev rule /etc/udev/rules.d/99-lium-docker-storage.rules") for action in plan.destructive_actions)
     assert any("docker.service drop-in" in action for action in plan.destructive_actions)
 
 
@@ -91,9 +94,12 @@ def test_fstab_entry_and_drop_in_for_the_image_file():
     assert gpu_splitting._fstab_entry("/var/lib/lium-docker.xfs", gpu_splitting.LOOP_FILE_FSTAB_OPTIONS) == (
         "/var/lib/lium-docker.xfs /var/lib/docker xfs loop,pquota,noatime 0 0"
     )
-    drop_in = gpu_splitting._docker_drop_in("/var/lib/docker", "/var/lib/lium-docker.xfs")
-    assert "RequiresMountsFor=/var/lib/docker\n" in drop_in
-    assert 'ExecStartPre=-/bin/sh -c "losetup --direct-io=on $(losetup -j /var/lib/lium-docker.xfs -n -O NAME)"' in drop_in
+    assert gpu_splitting._docker_drop_in("/var/lib/docker") == "[Unit]\nRequiresMountsFor=/var/lib/docker\n"
+    rule = gpu_splitting._loop_device_udev_rule("/var/lib/lium-docker.xfs")
+    assert 'ATTR{loop/backing_file}=="/var/lib/lium-docker.xfs"' in rule
+    assert 'ATTR{queue/discard_max_bytes}="0"' in rule
+    assert 'RUN+="/sbin/losetup --direct-io=on $devnode"' in rule
+    assert "sh -c" not in rule
 
 
 def test_confirm_yes_is_enough_for_an_image_file(monkeypatch, tmp_path):
@@ -116,17 +122,24 @@ def test_confirm_asks_for_the_image_file_path(monkeypatch, tmp_path):
 # --- execute -----------------------------------------------------------------------------------------------------
 
 
-def _loop_file_host(monkeypatch, plan: SetupPlan, fail_at: list[str] | None = None):
-    commands: list[list[str]] = []
+class _Commands(list):
+    created: list[tuple[str, int]]
+    sysfs: dict[str, str]
+
+
+def _loop_file_host(
+    monkeypatch, plan: SetupPlan, fail_at: list[str] | None = None, and_fail: list[str] | None = None
+) -> _Commands:
+    commands = _Commands()
     mounted = {"on_target": False}
     docker_root = plan.preflight.docker_state.docker_root_dir
 
     def run_command(args, check=True, capture=True):
         commands.append(args)
-        if args == (fail_at or []):
+        if args in ([fail_at] if fail_at else []) + ([and_fail] if and_fail else []):
             raise RuntimeError(f"{args[0]} failed")
-        if args[0] == "fallocate":
-            Path(args[-1]).write_bytes(b"")
+        if args[:2] == ["losetup", "-j"]:
+            return CommandResult(args=args, stdout="/dev/loop5\n", stderr="", returncode=0)
         if args[0] == "mv" and args[1] == docker_root:
             Path(args[1]).rename(args[2])
         if args[0] == "mv" and args[2] == docker_root:
@@ -141,10 +154,83 @@ def _loop_file_host(monkeypatch, plan: SetupPlan, fail_at: list[str] | None = No
 
     _patch_execute_setup_dependencies(monkeypatch, run_command, _mounts(plan, mounted))
     monkeypatch.setattr(gpu_splitting, "_pre_stop_checks", lambda *_: None)
-    monkeypatch.setattr(gpu_splitting.os, "chmod", lambda *_: None)
+    created: list[tuple[str, int]] = []
+
+    def create_image_file(path, size_bytes):
+        created.append((path, size_bytes))
+        Path(path).write_bytes(b"")
+
+    monkeypatch.setattr(gpu_splitting, "_create_image_file", create_image_file)
+    sysfs: dict[str, str] = {}
+    monkeypatch.setattr(gpu_splitting, "_write_sysfs", lambda path, value: sysfs.__setitem__(path, value))
+    commands.created = created
+    commands.sysfs = sysfs
     Path(docker_root).mkdir()
     (Path(docker_root) / "image-layers").write_text("x")
     return commands
+
+
+@pytest.mark.skipif(not hasattr(os, "posix_fallocate"), reason="posix_fallocate is Linux-only")
+def test_create_image_file_is_exclusive_and_private(tmp_path):
+    image = tmp_path / "lium-docker.xfs"
+
+    gpu_splitting._create_image_file(str(image), 4096)
+
+    assert image.stat().st_mode & 0o777 == 0o600
+    assert image.stat().st_size == 4096
+
+
+@pytest.mark.parametrize("planted", ["file", "symlink"])
+def test_create_image_file_refuses_a_planted_path(tmp_path, planted):
+    victim = tmp_path / "victim"
+    victim.write_text("keep me")
+    image = tmp_path / "lium-docker.xfs"
+    if planted == "symlink":
+        image.symlink_to(victim)
+    else:
+        image.write_text("mine")
+
+    with pytest.raises(RuntimeError, match="appeared after the plan was made"):
+        gpu_splitting._create_image_file(str(image), 4096)
+
+    assert victim.read_text() == "keep me"
+
+
+@pytest.mark.parametrize(
+    "uid, mode, match",
+    [(1000, 0o40755, "owned by root"), (0, 0o40777, "mode 777"), (0, 0o40775, "mode 775")],
+)
+def test_image_file_parent_must_be_root_only(monkeypatch, tmp_path, uid, mode, match):
+    monkeypatch.setattr(gpu_splitting.os, "lstat", lambda path: SimpleNamespace(st_uid=uid, st_mode=mode))
+
+    with pytest.raises(RuntimeError, match=match):
+        gpu_splitting._check_image_file_parent(str(tmp_path / "lium-docker.xfs"))
+
+
+def test_image_file_parent_root_only_passes(monkeypatch, tmp_path):
+    monkeypatch.setattr(gpu_splitting.os, "lstat", lambda path: SimpleNamespace(st_uid=0, st_mode=0o40755))
+    monkeypatch.setattr(gpu_splitting.os.path, "lexists", lambda path: False)
+
+    gpu_splitting._check_image_file_parent(str(tmp_path / "lium-docker.xfs"))
+
+
+def test_pre_stop_checks_refuse_docker_data_larger_than_the_image_file(monkeypatch, tmp_path):
+    plan = _loop_file_plan(tmp_path)
+    commands = []
+
+    def run_command(args, check=True, capture=True):
+        commands.append(args)
+        if args[:2] == ["docker", "ps"]:
+            return CommandResult(args, "", "", 0)
+        if args[0] == "du":
+            return CommandResult(args, f"{181 * GIB}\t{plan.preflight.docker_state.docker_root_dir}\n", "", 0)
+        raise AssertionError(f"mutated the host: {args}")
+
+    monkeypatch.setattr(gpu_splitting, "run_command", run_command)
+    monkeypatch.setattr(gpu_splitting, "_check_image_file_parent", lambda *_: None)
+    with pytest.raises(RuntimeError, match="181.0 GiB, more than the 180.0 GiB image file"):
+        gpu_splitting._pre_stop_checks(plan)
+    assert ["systemctl", "stop", "docker"] not in commands
 
 
 def test_execute_setup_image_file_moves_data_aside_preallocates_and_wires_docker_to_the_mount(monkeypatch, tmp_path):
@@ -157,15 +243,20 @@ def test_execute_setup_image_file_moves_data_aside_preallocates_and_wires_docker
 
     assert commands[:2] == [["systemctl", "stop", "docker"], ["systemctl", "stop", "docker.socket"]]
     assert ["mv", docker_root, plan.backup_dir] in commands
-    assert ["fallocate", "-l", str(180 * GIB), image] in commands
+    assert commands.created == [(image, 180 * GIB)]
     assert ["mkfs.xfs", "-f", "-K", image] in commands
     assert ["systemctl", "daemon-reload"] in commands
+    assert ["udevadm", "control", "--reload-rules"] in commands
+    assert commands.index(["mount", docker_root]) < commands.index(["udevadm", "trigger", "--action=change", "/dev/loop5"])
+    assert commands.sysfs == {"/sys/block/loop5/queue/discard_max_bytes": "0"}
+    assert ["losetup", "--direct-io=on", "/dev/loop5"] in commands
     assert ["mount", docker_root] in commands
     assert ["rsync", "-aHAX", "--numeric-ids", f"{plan.backup_dir}/", f"{docker_root}/"] in commands
     assert commands[-1] == ["systemctl", "start", "docker"]
     assert not any(args[0] in {"blkid", "parted", "rsync"} and args[-1] == f"{plan.backup_dir}/" for args in commands)
     assert Path(plan.fstab_path).read_text() == f"{image} /var/lib/docker xfs loop,pquota,noatime 0 0\n"
-    assert f"RequiresMountsFor={docker_root}" in Path(plan.drop_in_path).read_text()
+    assert Path(plan.drop_in_path).read_text() == f"[Unit]\nRequiresMountsFor={docker_root}\n"
+    assert f'ATTR{{loop/backing_file}}=="{image}"' in Path(plan.udev_rule_path).read_text()
     assert not Path(plan.backup_dir).exists()
 
 
@@ -195,9 +286,94 @@ def test_execute_setup_image_file_rollback_moves_data_back_and_removes_the_file(
     assert not Path(plan.backup_dir).exists()
     assert not Path(plan.target.resolved_target).exists()
     assert not Path(plan.drop_in_path).exists()
+    assert not Path(plan.udev_rule_path).exists()
     assert Path(plan.fstab_path).read_text() == "/dev/sda1 / ext4 defaults 0 1\n"
     assert commands.count(["systemctl", "daemon-reload"]) == 2
+    assert commands.count(["udevadm", "control", "--reload-rules"]) == 2
     assert commands[-1] == ["systemctl", "start", "docker"]
+
+
+def test_create_image_file_removes_the_file_when_preallocation_fails(monkeypatch, tmp_path):
+    def enospc(fd, offset, size):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "posix_fallocate", enospc, raising=False)
+    image = tmp_path / "lium-docker.xfs"
+
+    with pytest.raises(OSError):
+        gpu_splitting._create_image_file(str(image), 4096)
+
+    assert not image.exists()
+
+
+def test_execute_setup_image_file_rollback_before_cutover_moves_data_back(monkeypatch, tmp_path):
+    plan = _loop_file_plan(tmp_path)
+    docker_root = plan.preflight.docker_state.docker_root_dir
+    commands = _loop_file_host(monkeypatch, plan, fail_at=["mkfs.xfs", "-f", "-K", plan.target.resolved_target])
+
+    with pytest.raises(RuntimeError, match="mkfs.xfs failed"):
+        gpu_splitting._execute_setup(plan)
+
+    assert (Path(docker_root) / "image-layers").read_text() == "x"
+    assert not Path(plan.backup_dir).exists()
+    assert not any(args[0] == "rmdir" for args in commands)
+    assert commands[-1] == ["systemctl", "start", "docker"]
+
+
+def test_execute_setup_image_file_rollback_keeps_the_image_and_docker_down_when_unmount_fails(monkeypatch, tmp_path):
+    plan = _loop_file_plan(tmp_path)
+    docker_root = plan.preflight.docker_state.docker_root_dir
+    restore = ["rsync", "-aHAX", "--numeric-ids", f"{plan.backup_dir}/", f"{docker_root}/"]
+    commands = _loop_file_host(monkeypatch, plan, fail_at=restore, and_fail=["umount", docker_root])
+
+    with pytest.raises(RuntimeError, match="rsync failed") as exc_info:
+        gpu_splitting._execute_setup(plan)
+
+    assert "still mounted" in str(exc_info.value)
+    assert Path(plan.target.resolved_target).exists()
+    assert Path(plan.backup_dir).exists()
+    assert ["systemctl", "start", "docker"] not in commands
+    assert not any(args[0] in {"rmdir", "mv"} and args[-1] == docker_root for args in commands)
+
+
+def test_pre_stop_checks_refuse_containers_left_in_the_containerd_store(monkeypatch, tmp_path):
+    plan = _loop_file_plan(tmp_path)
+    plan.preflight.docker_state.storage_driver = "overlayfs"
+
+    def run_command(args, check=True, capture=True):
+        if args == ["docker", "ps", "-q"]:
+            return CommandResult(args, "", "", 0)
+        if args == ["docker", "ps", "-aq"]:
+            return CommandResult(args, "abc\ndef\n", "", 0)
+        raise AssertionError(f"mutated the host: {args}")
+
+    monkeypatch.setattr(gpu_splitting, "run_command", run_command)
+    with pytest.raises(RuntimeError, match="2 containers exist in Docker's containerd image store"):
+        gpu_splitting._pre_stop_checks(plan)
+
+
+@pytest.mark.parametrize("free_gib, passes", [(300, True), (250, False)])
+def test_pre_stop_checks_count_the_image_file_beside_the_backup_copy(monkeypatch, tmp_path, free_gib, passes):
+    own_mount = MountInfo(target=str(tmp_path / "docker"), source="/dev/sdc1", fstype="ext4", options=["rw"])
+    plan = _loop_file_plan(tmp_path, docker_mount=own_mount)
+
+    def run_command(args, check=True, capture=True):
+        if args[:2] == ["docker", "ps"]:
+            return CommandResult(args, "", "", 0)
+        if args[0] == "du":
+            return CommandResult(args, f"{100 * GIB}\t{plan.preflight.docker_state.docker_root_dir}\n", "", 0)
+        raise AssertionError(f"mutated the host: {args}")
+
+    monkeypatch.setattr(gpu_splitting, "run_command", run_command)
+    monkeypatch.setattr(gpu_splitting, "_check_image_file_parent", lambda *_: None)
+    monkeypatch.setattr(gpu_splitting, "_same_filesystem", lambda *_: True)
+    monkeypatch.setattr(gpu_splitting.shutil, "disk_usage", lambda path: SimpleNamespace(free=free_gib * GIB))
+
+    if passes:
+        gpu_splitting._pre_stop_checks(plan)
+    else:
+        with pytest.raises(RuntimeError, match="and the image file needs 291.0 GiB"):
+            gpu_splitting._pre_stop_checks(plan)
 
 
 def test_execute_setup_image_file_rollback_after_restore_failure_unmounts_first(monkeypatch, tmp_path):

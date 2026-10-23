@@ -203,11 +203,11 @@ def _docker_storage_limited() -> bool:
     return build_verification_result(run_command, inspect_docker_state(run_command).docker_root_dir).passed
 
 
-def _setup_docker_storage():
+def _setup_docker_storage(auto: bool = False):
     """Offer to move Docker storage to an xfs pquota mount with `lium gpu-splitting setup`'s own plan and checks.
 
     One question is both the menu and the consent: every disk is listed and the person types the one to format, or
-    presses Enter to skip. `--auto` and `--register` never consent. Whatever stops the setup, the manual command is
+    presses Enter to skip. `--auto` and `--register` never consent (they print the manual command). Whatever stops the setup, the manual command is
     printed and the install carries on (validators do not require it yet).
     """
     import os
@@ -224,7 +224,7 @@ def _setup_docker_storage():
         "image file on a single-disk host\n"
         f"Guide: {_STORAGE_GUIDE}"
     )
-    if not sys.stdin.isatty():
+    if auto or not sys.stdin.isatty():
         console.warning(f"{reason}\n{manual}")
         return
     if os.geteuid() != 0:
@@ -297,8 +297,8 @@ def _offer_image_file(preflight, lines: list[str], manual: str):
         f"No spare disk. Docker storage can live in an XFS image file instead: {target.resolved_target}, "
         f"{target.loop_file_size_bytes // gib} GiB on {target.loop_file_filesystem} "
         f"({target.loop_file_reserve_bytes // gib} GiB stay free for the system).",
-        f"Setup will stop Docker, create the file, move {preflight.docker_state.docker_root_dir} into it and start "
-        "Docker again.",
+        "Setup will:",
+        *(f"  - {action}" for action in plan.destructive_actions),
     ]
     console.info("\n".join(lines))
     typed = Prompt.ask("Type `file` to create it, or press Enter to skip", default="").strip()
@@ -1092,7 +1092,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             _check_prereqs(target_dir)
             storage_ok = _docker_storage_limited()
         if not storage_ok:
-            _setup_docker_storage()   # outside the spinner: it prints the plan and may ask to confirm
+            _setup_docker_storage(auto)   # outside the spinner: it prints the plan and may ask to confirm
         _check_free_disk(target_dir / "neurons" / "executor")
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.

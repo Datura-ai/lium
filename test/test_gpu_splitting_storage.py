@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -10,12 +11,16 @@ from lium.cli.mine.docker_config import build_verification_result, inspect_docke
 from lium.cli.mine.models import BlockDevice, CommandResult, MountedFilesystem, MountInfo
 from lium.cli.mine.storage import (
     NoSafeTargetError,
+    _source_disk_is_local,
     auto_select_target,
     load_mounted_filesystems,
     load_mount_info,
     plan_loop_file_target,
     resolve_explicit_target,
 )
+
+
+GIB = 1024**3
 
 
 def _runner_factory(responses: dict[tuple[str, ...], CommandResult]):
@@ -460,3 +465,46 @@ def test_merge_overlay2_switches_off_the_containerd_snapshotter_when_asked():
 
     assert changed is True
     assert merged["features"] == {"buildkit": True, "containerd-snapshotter": False}
+
+
+@pytest.mark.parametrize("image_file", ["/data/$(reboot).xfs", "/data/lium docker.xfs", '/data/a"b.xfs'])
+def test_plan_loop_file_target_refuses_paths_unsafe_for_fstab_and_udev(image_file):
+    filesystems = [_filesystem("/", 100, size_gib=250), _filesystem("/data", 1500, size_gib=2000, source="/dev/sdb1")]
+
+    with pytest.raises(RuntimeError, match="may only contain letters, digits"):
+        plan_loop_file_target(filesystems, "/var/lib/docker", image_file=image_file)
+
+
+def test_source_disk_is_local_walks_every_ancestor():
+    gib = 1024**3
+    lvm = BlockDevice(path="/dev/mapper/vg-data", name="vg-data", kernel_name="dm-0", type="lvm", size_bytes=2000 * gib,
+                      fstype="ext4", mountpoints=["/data"], parent_kernel_name="sdb1", model=None, serial=None)
+    part = BlockDevice(path="/dev/sdb1", name="sdb1", kernel_name="sdb1", type="part", size_bytes=2000 * gib, fstype="LVM2_member",
+                       mountpoints=[], parent_kernel_name="sdb", model=None, serial=None, children=[lvm])
+    usb = BlockDevice(path="/dev/sdb", name="sdb", kernel_name="sdb", type="disk", size_bytes=2000 * gib, fstype=None,
+                      mountpoints=[], parent_kernel_name=None, model=None, serial=None, transport="usb", children=[part])
+    nvme_part = BlockDevice(path="/dev/nvme0n1p2", name="nvme0n1p2", kernel_name="nvme0n1p2", type="part", size_bytes=500 * gib,
+                            fstype="ext4", mountpoints=["/"], parent_kernel_name="nvme0n1", model=None, serial=None)
+    nvme = BlockDevice(path="/dev/nvme0n1", name="nvme0n1", kernel_name="nvme0n1", type="disk", size_bytes=500 * gib, fstype=None,
+                       mountpoints=[], parent_kernel_name=None, model=None, serial=None, transport="nvme", children=[nvme_part])
+
+    assert _source_disk_is_local("/dev/mapper/vg-data", [usb, nvme]) is False
+    assert _source_disk_is_local("/dev/sdb1", [usb, nvme]) is False
+    assert _source_disk_is_local("/dev/nvme0n1p2", [usb, nvme]) is True
+
+
+def test_plan_loop_file_target_leaves_var_lib_when_var_is_its_own_filesystem():
+    filesystems = [_filesystem("/", 800, size_gib=1000), _filesystem("/var", 120, size_gib=200, source="/dev/nvme0n1p3")]
+
+    plan = plan_loop_file_target(filesystems, "/var/lib/docker")
+
+    assert plan.resolved_target == "/lium-docker.xfs"
+    assert plan.loop_file_filesystem == "/"
+    assert plan.loop_file_size_bytes == 700 * GIB
+
+
+def test_plan_loop_file_target_refuses_an_existing_auto_path(monkeypatch):
+    monkeypatch.setattr(os.path, "lexists", lambda path: path == "/var/lib/lium-docker.xfs")
+
+    with pytest.raises(RuntimeError, match="/var/lib/lium-docker.xfs already exists"):
+        plan_loop_file_target([_filesystem("/", 300)], "/var/lib/docker")
