@@ -505,6 +505,38 @@ def _gpu_reset_outcome(gpu: Dict[str, Any]) -> GpuResetOutcome:
     )
 
 
+GPU_RESET_POLL_SECONDS = 3
+# the server marks a reset `timeout` after 300 s; wait past that to read its own answer
+GPU_RESET_CLIENT_DEADLINE_SECONDS = 330
+GPU_RESET_MAY_STILL_RUN = "The reset may still finish; check the pod's GPUs (nvidia-smi) before you reset again"
+
+
+def _gpu_reset_result(pod: PodInfo, body: Dict[str, Any]) -> GpuResetResult:
+    """The final GPU reset answer as the result, or its error. An old backend's 200 has no ``status``."""
+    status = body.get("status") or "done"
+    error = body.get("error") or {}
+    gpus = [_gpu_reset_outcome(g) for g in body.get("gpus") or []]
+    if status == "timeout":
+        raise LiumServerError(
+            f"GPU reset: {error.get('message') or 'no answer in time'}",
+            code=error.get("code") or "gpu_reset_unavailable", hint=GPU_RESET_MAY_STILL_RUN,
+        )
+    if status == "failed":
+        message = f"GPU reset failed: {error.get('message') or 'the GPUs could not be reset'}"
+        code = error.get("code") or "reset_not_supported"
+        if gpus:
+            raise LiumGpuOperationError(
+                message, gpus=gpus, container_restarted=body.get("container_restarted"), code=code,
+            )
+        raise LiumError(message, code=code)
+    return GpuResetResult(
+        pod_id=str(body.get("pod_id", pod.id)),
+        ok=bool(body.get("ok")),
+        container_restarted=bool(body.get("container_restarted")),
+        gpus=gpus,
+    )
+
+
 def _error_data(response: requests.Response) -> Dict[str, Any]:
     """The structured fields of an error body beyond code/message/hint/request_id.
 
@@ -2543,39 +2575,54 @@ class Lium:
         self._release_ssh(pod)
         return result
 
-    def reset_gpu(self, pod: PodInfo, gpu_indices: Optional[List[int]] = None) -> GpuResetResult:
+    def reset_gpu(
+        self,
+        pod: PodInfo,
+        gpu_indices: Optional[List[int]] = None,
+        on_progress: Optional[Callable[[float], None]] = None,
+    ) -> GpuResetResult:
         """Reset a pod's hung GPUs: stops the container, resets the GPUs, starts it again.
 
         Every process in the pod is stopped, even when one GPU is named; files are kept and the
-        SSH host key stays. ``POST /pods/{id}/reset-gpu``.
+        SSH host key stays. ``POST /pods/{id}/reset-gpu`` starts the reset (202 with a ``request_id``),
+        then ``GET /pods/{id}/reset-gpu/{request_id}`` is polled until it ends; a reset takes 1 to 2 minutes.
 
         Args:
             pod: Pod whose GPUs to reset.
             gpu_indices: Pod GPU indices as ``nvidia-smi`` numbers them inside the pod; ``None`` resets all.
+            on_progress: Called with the seconds since the start before each poll.
 
         Returns:
             :class:`GpuResetResult`, one :class:`GpuResetOutcome` per GPU.
 
         Raises:
-            LiumGpuOperationError: 409, the reset ran and a GPU failed; ``gpus`` and ``container_restarted`` say
+            LiumGpuOperationError: the reset ran and a GPU failed; ``gpus`` and ``container_restarted`` say
                 what happened to each GPU.
-            LiumError: 400/409 refusals with the API's ``code`` (``invalid_gpu_index``, ``mig_enabled``, ...);
-                ``LiumServerError`` on 503 ``gpu_reset_unavailable``.
+            LiumError: refusals with the API's ``code`` (``invalid_gpu_index``, ``mig_enabled``, ...).
+            LiumServerError: ``gpu_reset_unavailable`` (the request was not sent, or the server gave up waiting)
+                or ``gpu_reset_timeout`` (this client gave up waiting); after both the reset may still finish.
         """
+        started = time.monotonic()
         # sent once: a 429 is the 1/min limit and a second reset must not follow a lost answer;
-        # the backend waits up to 50 s for the validator, past the 30 s default timeout
+        # an old backend answers 200 with the result after up to 50 s, past the 30 s default timeout
         try:
             body = self._request(
                 "POST", f"/pods/{pod.id}/reset-gpu", json={"gpu_indices": gpu_indices}, retry=False, timeout=120,
             ).json()
+            while body.get("status") == "running":
+                elapsed = time.monotonic() - started
+                if elapsed >= GPU_RESET_CLIENT_DEADLINE_SECONDS:
+                    raise LiumServerError(
+                        f"GPU reset {body.get('request_id')} did not finish in {elapsed:.0f} s",
+                        code="gpu_reset_timeout", hint=GPU_RESET_MAY_STILL_RUN,
+                    )
+                if on_progress:
+                    on_progress(elapsed)
+                time.sleep(GPU_RESET_POLL_SECONDS)
+                body = self._request("GET", f"/pods/{pod.id}/reset-gpu/{body['request_id']}").json()
         finally:
             self._release_ssh(pod)  # a failed reset stops the container too; held connections are dead
-        return GpuResetResult(
-            pod_id=str(body.get("pod_id", pod.id)),
-            ok=bool(body.get("ok")),
-            container_restarted=bool(body.get("container_restarted")),
-            gpus=[_gpu_reset_outcome(g) for g in body.get("gpus") or []],
-        )
+        return _gpu_reset_result(pod, body)
 
     # -- multi-node clusters ---------------------------------------------------------------------
 

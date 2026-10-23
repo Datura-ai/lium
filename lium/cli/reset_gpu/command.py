@@ -5,7 +5,7 @@ from typing import Tuple
 
 import click
 
-from lium.sdk import Lium, LiumGpuOperationError
+from lium.sdk import Lium, LiumGpuOperationError, LiumServerError
 from lium.cli import ui
 from lium.cli.utils import (
     CliFailure,
@@ -59,8 +59,21 @@ def reset_gpu_command(target: str, gpus: Tuple[int, ...], yes: bool, json_output
             ui.warning("Nothing reset")
             return
 
+    doing = f"Resetting {which} of {pod.huid} (takes 1-2 min)"
     try:
-        result = ui.load(f"Resetting {which} of {pod.huid}", lambda: lium.reset_gpu(pod, list(gpus) or None))
+        with ui.loading(doing) as status:
+            result = lium.reset_gpu(
+                pod, list(gpus) or None,
+                on_progress=lambda elapsed: status.update(ui.styled(f"{doing}... {elapsed:.0f}s", "info")),
+            )
+    except LiumServerError as e:
+        if e.code != "gpu_reset_timeout":
+            raise
+        # the reset was sent and its end is unknown: a "Retry" could start a second reset
+        failure = sdk_error_failure(e)
+        failure.hint = (f"The reset may still be running. In a minute check the GPUs with "
+                        f"'lium exec {pod.huid} nvidia-smi' before you reset again")
+        raise failure
     except LiumGpuOperationError as e:
         # the reset ran and a GPU failed: show which, then fail with the API's code and every GPU's outcome
         if not json_output:

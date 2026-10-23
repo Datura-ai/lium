@@ -216,7 +216,7 @@ class LiumBudgetExceededError(LiumPermissionError):
 
 
 class LiumGpuOperationError(LiumError):
-    """A GPU reset ran on the node and at least one GPU failed (409 whose body lists ``gpus``).
+    """A GPU reset ran on the node and at least one GPU failed (status ``failed``, or a 409, that lists ``gpus``).
 
     ``gpus`` is each GPU's outcome (:class:`GpuResetOutcome` from :meth:`Lium.reset_gpu`), so the caller sees
     which GPUs failed; ``container_restarted`` says whether the pod's container was started again (``None`` when
