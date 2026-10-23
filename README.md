@@ -333,6 +333,7 @@ Full reference with every flag and runnable examples: <https://docs.lium.io/deve
 
 ### Other Commands
 
+- `lium mcp` - Serve Lium as an MCP server over stdio for agent hosts (`pip install "lium.io[mcp]"`; see [MCP server for agent hosts](#mcp-server-for-agent-hosts))
 - `lium theme dark|light` - Set the CLI colour theme (the argument is required; there is no `auto`; the value is stored as `[ui] theme` — `lium config get ui.theme` reads it back)
 - `lium mine` - Set up this host as a provider node
 - `lium mine --register <TOKEN>` - Same, then add the node to your portal account from what the host reports and wait until it is listed (token from the portal's Add Node page; the account, and what the node reports under, come from the token — no `-k`)
@@ -353,6 +354,9 @@ lium ls --format json          # machine-readable
 # the Download (Mbps) column — tensor parallelism and 700 GB checkpoints behave very
 # differently on a PCIe box or a slow link that the price does not reveal
 lium ls --gpu H200 --nvlink --min-download 2000
+
+# Skip nodes whose rents often fail to start
+lium ls --gpu H100 --reliable
 
 # Create pod with node index
 lium up 1 --name my-pod --yes
@@ -502,7 +506,7 @@ lium fund --alpha -k <hotkey> -a 25 --netuid 64  # Any subnet Lium accepts
 
 ### `lium ls --format json` fields
 
-One object per node, sorted as the table is; the names are stable and pinned by `test/test_ls_speed.py`:
+One object per node, sorted as the table is; the names are stable:
 
 | field | meaning |
 |---|---|
@@ -627,6 +631,33 @@ lium up --gpu H100 -y --no-ssh     # -y: rent without the confirmation prompt
 lium rm my-pod -y                  # -y on every destructive command; a piped rm without it exits 2 and removes nothing
 lium fund -w default -a 1.5 -y     # values that would be prompted for must be passed as options
 ```
+
+### MCP server for agent hosts
+
+<!-- mcp-name: io.github.Datura-ai/lium -->
+
+`lium mcp` serves Lium as a Model Context Protocol server over stdio, so Claude Desktop, Claude Code, Cursor or any
+MCP host can rent and use GPUs itself. Tools: `list_gpus`, `rent_pod`, `list_pods`, `run_command`, `remove_pod`,
+`get_balance`. It uses the API key `lium init` saved, or `LIUM_API_KEY`.
+
+```bash
+pip install "lium.io[mcp]"
+```
+
+```json
+{"mcpServers": {"lium": {"command": "lium", "args": ["mcp"]}}}
+```
+
+Without installing anything, with [uv](https://docs.astral.sh/uv/):
+
+```json
+{"mcpServers": {"lium": {"command": "uvx", "args": ["--from", "lium.io[mcp]", "lium.io", "mcp"]}}}
+```
+
+`rent_pod` with `dry_run: true` quotes a node first (tier, reliability, cost per hour, your balance) and rents
+nothing. A rented pod is billed per second until `remove_pod`. The hosted MCP server at https://docs.lium.io/mcp
+(no key, read-only) is separate: it searches the docs and gives live GPU prices and availability; `rent_pod` takes
+the node ids its `search_gpus` returns.
 
 ### Crash reporting (opt-in, off by default)
 

@@ -21,5 +21,4 @@ Security; bullets in fragment-file-name order; the fragment files deleted. The h
 version and below a `## [Unreleased]` block if one exists (the script warns that the block's bullets are not part of the
 release, and refuses a version that is already in the file). A fragment with no `###` heading, or an unknown one, is
 filed under Changed with a warning. `--date YYYY-MM-DD` overrides today. `--dry-run` prints the section and changes
-nothing; the duplicate-version refusal and the Unreleased warning run in a dry run too. Stdlib only;
-`pytest test/test_changelog_script.py` covers it.
+nothing; the duplicate-version refusal and the Unreleased warning run in a dry run too. Stdlib only.

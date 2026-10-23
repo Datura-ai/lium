@@ -42,6 +42,7 @@ from .exceptions import (
     LiumBudgetExceededError,
     LiumCardTopUpError,
     LiumChargeOutcomeUnknownError,
+    LiumRentOutcomeUnknownError,
     LiumError,
     LiumHostKeyError,
     LiumNotFoundError,
@@ -51,7 +52,6 @@ from .exceptions import (
     LiumRateLimitError,
     LiumScopeError,
     LiumServerError,
-    LiumRentOutcomeUnknownError,
     PodStartError,
     RemoteExecutionError,
 )
@@ -143,6 +143,10 @@ def known_hosts_path(pod: Union[PodInfo, str]) -> Path:
     pod_id = pod if isinstance(pod, str) else pod.id
     safe_id = _POD_ID_SAFE.sub("_", pod_id or "unknown")
     return Path.home() / ".lium" / "known_hosts" / safe_id
+
+
+def _pod_id_of(pod: Union[PodInfo, Dict[str, Any]]) -> str:
+    return str(pod.get("id") if isinstance(pod, dict) else pod.id)
 
 
 def forget_host_key(pod: Union[PodInfo, str]) -> None:
@@ -288,12 +292,15 @@ def _satisfies_spec(executor: ExecutorInfo, spec: Dict[str, Any]) -> bool:
     specs = executor.specs or {}
     gpu_details = (specs.get("gpu") or {}).get("details") or []
     gpu_detail = gpu_details[0] if gpu_details and isinstance(gpu_details[0], dict) else {}
+    ram = specs.get("ram") or {}
     disk = specs.get("hard_disk") or {}
     disk_kib = disk.get("free") if disk.get("free") is not None else disk.get("total")
     floors = {
         "min_vram_gb": (gpu_detail.get("capacity") or 0) / _MIB_PER_GB if gpu_detail.get("capacity") else None,
         "min_cpus": (specs.get("cpu") or {}).get("count"),
-        "min_ram_gb": ((specs.get("ram") or {}).get("total") or 0) / _KIB_PER_GB if (specs.get("ram") or {}).get("total") else None,
+        # the RAM a pod gets: the host total less the reserve GET /executors serves (as the server's rent-by-spec);
+        # an older backend sends no pod_reserve, so it counts as 0; never below the server's 1 GiB pod floor
+        "min_ram_gb": max(ram.get("total") - (ram.get("pod_reserve") or 0), _KIB_PER_GB) / _KIB_PER_GB if ram.get("total") else None,
         "min_disk_gb": disk_kib / _KIB_PER_GB if disk_kib else None,
         "min_download_mbps": executor.effective_download_speed_mbps,
         "min_ports": executor.available_port_count,
@@ -785,16 +792,17 @@ class Lium:
     def features(self) -> set:
         """Optional API capabilities the backend advertises on ``GET /version``.
 
-        Read once per client. A backend that predates the list, or one that cannot be
-        reached, advertises nothing — callers then take their client-side path.
+        Read once per client. A backend that predates the list advertises nothing; one
+        that cannot be reached advertises nothing for now and is asked again next time,
+        so a passing outage does not switch a feature off for the client's lifetime.
         """
         if self._features is None:
             try:
                 data = self._request("GET", "/version").json()
-                names = data.get("features") if isinstance(data, dict) else None
-                self._features = {str(name) for name in names} if isinstance(names, list) else set()
             except Exception:  # noqa: BLE001 — an unreachable /version is "no features", not an error
-                self._features = set()
+                return set()
+            names = data.get("features") if isinstance(data, dict) else None
+            self._features = {str(name) for name in names} if isinstance(names, list) else set()
         return self._features
 
     def supports(self, feature: str) -> bool:
@@ -898,7 +906,12 @@ class Lium:
         if resp.status_code == 404:
             raise LiumNotFoundError(f"Resource not found: {_response_error_message(resp)}", **context)
         if resp.status_code == 429:
-            raise LiumRateLimitError("Rate limit exceeded", **context)
+            exc = LiumRateLimitError("Rate limit exceeded", **context)
+            try:  # seconds only; the HTTP-date form is ignored
+                exc.retry_after = float((getattr(resp, "headers", None) or {}).get("Retry-After"))
+            except (TypeError, ValueError):
+                pass  # no or non-numeric Retry-After: the caller backs off on its own schedule
+            raise exc
         if resp.status_code == 402 and context.get("code") in CARD_TOPUP_ERROR_CODES:
             raise card_topup_error(resp, **context)
         if 500 <= resp.status_code < 600:
@@ -1064,6 +1077,12 @@ class Lium:
             gpu_power_limited=gpu_power_limited,
             gpu_power_limit_w=_int_or_none(executor_dict, "gpu_power_limit_w"),
             gpu_power_limit_default_w=_int_or_none(executor_dict, "gpu_power_limit_default_w"),
+            frequent_rent_failures=(
+                executor_dict["frequent_rent_failures"]
+                if isinstance(executor_dict.get("frequent_rent_failures"), bool) else None
+            ),
+            last_verified_at=executor_dict.get("last_verified_at"),
+            reliability_score=executor_dict.get("reliability_score"),
         )
 
     def list_ssh_keys(self) -> List[SSHKey]:
@@ -1191,6 +1210,9 @@ class Lium:
         gpu_count: Optional[int] = None,
         wait: bool = False,
         timeout: int = 600,
+        idempotency_key: Optional[str] = None,
+        confirmed_only: bool = False,
+        before_send: Optional[Callable[[Dict[str, Any]], None]] = None,
         termination_hours: Optional[int] = None,
     ) -> Union[Dict[str, Any], PodInfo]:
         """Start a new pod on a specific node.
@@ -1239,6 +1261,15 @@ class Lium:
                 takes every GPU that is free on the node right now (the whole node when
                 none of it is rented). The API rejects a count above the free GPUs, below
                 the provider's minimum, or on nodes that do not allow splitting.
+            idempotency_key: The ``Idempotency-Key`` the rent request carries (a new UUID when ``None``).
+                The API keeps a key only for a limited time and per account, so a key sent again later
+                can rent a second pod.
+            confirmed_only: Return only a pod the rent response named. A pod found by its name after a
+                lost answer is then not returned: :class:`LiumRentOutcomeUnknownError` is raised with its
+                id in ``candidates``, since a same-name pod may belong to another client.
+            before_send: Called with ``{"endpoint", "payload", "idempotency_key"}`` right before the first
+                rent request is sent, e.g. to journal it. If it raises, nothing is sent and the exception
+                propagates.
             termination_hours: Sent with the rent (1 to 720): the server removes the pod this
                 many hours after it starts, even if this process never gets to schedule it.
 
@@ -1261,6 +1292,9 @@ class Lium:
             backup_id=backup_id,
             restore_path=restore_path,
             gpu_count=gpu_count,
+            idempotency_key=idempotency_key,
+            confirmed_only=confirmed_only,
+            before_send=before_send,
             termination_hours=termination_hours,
         )
         if not wait:
@@ -1291,6 +1325,9 @@ class Lium:
         backup_id: Optional[str],
         restore_path: Optional[str],
         gpu_count: Optional[int] = None,
+        idempotency_key: Optional[str] = None,
+        confirmed_only: bool = False,
+        before_send: Optional[Callable[[Dict[str, Any]], None]] = None,
         termination_hours: Optional[int] = None,
         posted: Optional[List[bool]] = None,
         build_context_sha256: Optional[str] = None,
@@ -1358,24 +1395,43 @@ class Lium:
         # sending the request a second time. The Idempotency-Key lets a server
         # that honours it collapse the two requests; one that does not ignores it.
         rent_endpoint = f"/executors/{executor_info.id}/rent"
-        rent_headers = {**self.headers, "Idempotency-Key": str(uuid.uuid4())}
+        rent_headers = {**self.headers, "Idempotency-Key": idempotency_key or str(uuid.uuid4())}
+
+        def unconfirmed(message: str, candidates: List[str]) -> LiumRentOutcomeUnknownError:
+            return LiumRentOutcomeUnknownError(
+                message,
+                idempotency_key=rent_headers["Idempotency-Key"],
+                pod_name=name,
+                executor_id=executor_info.id,
+                candidates=candidates,
+                endpoint=rent_endpoint,
+                payload=payload,
+            )
         # Pods that exist before the rent can never be the one this call created.
         # With GPU splitting a node hosts several pods, and the default pod name
         # is the node huid, so a stale same-name pod on the same node would
         # otherwise be handed back for a rent the server never received.
         known_pod_ids = self._pod_ids_before_rent()
+        if before_send is not None:
+            before_send({"endpoint": rent_endpoint, "payload": payload, "idempotency_key": rent_headers["Idempotency-Key"]})
         if posted is not None:
             posted.append(True)
         try:
             response = self._request(
                 "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
             ).json()
-        except (requests.RequestException, LiumServerError, LiumRateLimitError):
+        except (requests.RequestException, LiumServerError, LiumRateLimitError) as first:
             # "Could not look" (the network that failed the POST fails ps() the
             # same way) must fall through to the second POST, not escape here.
             existing = self._find_pod_by_name(
                 name, executor_info.id, attempts=3, interval=3, exclude=known_pod_ids
             )
+            if existing and confirmed_only:
+                raise unconfirmed(
+                    f"The rent of pod {name!r} got no answer ({type(first).__name__}: {first}); a new pod with "
+                    f"that name is listed, but the name does not prove it is this rent's",
+                    [_pod_id_of(existing)],
+                ) from first
             if existing:
                 return existing
             time.sleep(1)
@@ -1383,16 +1439,35 @@ class Lium:
                 response = self._request(
                     "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
                 ).json()
-            except LiumError as exc:
-                # Any failure of the repeat (auth, permission, 429, 5xx, a plain refusal) does not undo
-                # the first POST, which may still be running.
+            except Exception as second:
+                if (
+                    isinstance(first, LiumRateLimitError)
+                    and isinstance(second, LiumError)
+                    and not isinstance(second, LiumServerError)
+                ):
+                    raise  # both attempts were refused outright: neither rented
+                # One attempt went unanswered (the first, or the second after a 429) and the server may
+                # still be working on it; the repeat being refused (409 idempotency_in_progress, 400 while
+                # the rent is pending) says nothing about it.
+                if isinstance(first, LiumRateLimitError):
+                    what = f"the first attempt was rate-limited and the second got no answer ({type(second).__name__}: {second})"
+                else:
+                    what = (
+                        f"the first attempt got no answer ({type(first).__name__}: {first}) and the repeat failed "
+                        f"({type(second).__name__}: {second})"
+                    )
                 raise LiumRentOutcomeUnknownError(
-                    f"The first rent request got no answer and its repeat was refused ({exc}); a pod may still appear. "
-                    "Run 'lium ps' before renting again.",
+                    f"The rent of pod {name!r} could not be confirmed: {what}; a pod may have been created and "
+                    f"be billing — check `lium ps` before renting again",
+                    idempotency_key=rent_headers["Idempotency-Key"],
+                    pod_name=name,
+                    executor_id=executor_info.id,
+                    endpoint=rent_endpoint,
+                    payload=payload,
                     code="rent_outcome_unknown",
                     hint="Do not rent again until 'lium ps' shows whether the first request created a pod.",
-                    request_id=exc.request_id,
-                ) from exc
+                    request_id=getattr(second, "request_id", None),
+                ) from second
 
         # API should return pod info
         if response and "id" in response:
@@ -1418,10 +1493,91 @@ class Lium:
         existing = self._find_pod_by_name(
             name, executor_info.id, attempts=2, interval=3, exclude=known_pod_ids
         )
+        if existing and confirmed_only:
+            raise unconfirmed(
+                f"The rent of pod {name!r} was answered without a pod id; a new pod with that name is listed, "
+                f"but the name does not prove it is this rent's",
+                [_pod_id_of(existing)],
+            )
         if existing:
             return existing
 
-        raise LiumError(f"Failed to create pod{' ' + name if name else ''}")
+        # A 2xx without a pod id, and no new pod listed: the rent may well have gone through.
+        raise LiumRentOutcomeUnknownError(
+            f"Failed to create pod{' ' + name if name else ''}: the API answered without a pod id and "
+            f"no new pod is listed yet; one may still appear — check `lium ps` before renting again",
+            idempotency_key=rent_headers["Idempotency-Key"],
+            pod_name=name,
+            executor_id=executor_info.id,
+            endpoint=rent_endpoint,
+            payload=payload,
+        )
+
+    def _replay_rent(self, error: LiumRentOutcomeUnknownError) -> Dict[str, Any]:
+        """Send the rent behind ``error`` once more with the same ``Idempotency-Key``.
+
+        Private: this checks neither the key's age nor the account. Past the API's retention of the key, or
+        under another account, the same key is a new rent; only the MCP server calls this, after its
+        ``_replay_blocker`` checks both.
+
+        The API answers a repeated key with the first request's stored outcome: the pod it created, or
+        its refusal. Only that one POST is sent (no node check, no lookup by name), so a node that our
+        own lost rent made busy cannot be mistaken for a refusal.
+
+        Only a refusal the API marks as the first request's stored answer (``Idempotent-Replayed: true``)
+        proves that request rented nothing. A fresh refusal of the replay (a balance or auth check that runs
+        before the key is looked up, say) says nothing about a first request that may still be running.
+
+        Returns:
+            ``{"id", "name", "executor_id"}`` of the pod the rent created.
+
+        Raises:
+            LiumRentOutcomeUnknownError: no answer, the first request is still running or its outcome is
+                unknown (``idempotency_in_progress``/``idempotency_outcome_unknown``, replayed or not), or a
+                refusal that is not the stored answer to the first request.
+            LiumError: the API's stored refusal of the first request: it rented nothing.
+        """
+        if not (error.endpoint and error.payload is not None):
+            raise ValueError("this error does not carry the rent request; it cannot be replayed")
+        headers = {**self.headers, "Idempotency-Key": error.idempotency_key}
+
+        def still_unknown(cause: Exception) -> LiumRentOutcomeUnknownError:
+            return LiumRentOutcomeUnknownError(
+                f"Replaying the rent of pod {error.pod_name!r} did not establish its outcome "
+                f"({type(cause).__name__}: {cause})",
+                idempotency_key=error.idempotency_key, pod_name=error.pod_name, executor_id=error.executor_id,
+                candidates=error.candidates, endpoint=error.endpoint, payload=error.payload,
+            )
+
+        url = f"{self.config.base_url}/{error.endpoint.lstrip('/')}"
+        try:
+            resp = request_same_origin(
+                lambda m, u, **kw: requests.request(m, u, headers=headers, timeout=30, **kw), "POST", url, json=error.payload
+            )
+        except requests.RequestException as e:
+            raise still_unknown(e) from e
+        replayed = str((getattr(resp, "headers", None) or {}).get("Idempotent-Replayed", "")).lower() == "true"
+        try:
+            self._raise_for_status(resp, key=self.config.api_key_description)
+        except LiumError as e:
+            # a stored 409 (price changed, rentals paused, no ports) is a refusal like any other. The in-progress and
+            # outcome-unknown 409s say nothing about the first request, even replayed: a backend release older than
+            # pending rows replays the stored pending answer (idempotency_outcome_unknown) for a rent that did rent
+            if (
+                replayed
+                and not isinstance(e, (LiumServerError, LiumRateLimitError))
+                and e.code not in ("idempotency_in_progress", "idempotency_outcome_unknown")
+            ):
+                raise
+            raise still_unknown(e) from e
+        try:
+            response = resp.json()
+        except ValueError as e:
+            raise still_unknown(e) from e
+        pod_id = (response or {}).get("id") or (response or {}).get("pod_id")
+        if not pod_id:
+            raise still_unknown(ValueError("the answer named no pod"))
+        return {"id": str(pod_id), "name": error.pod_name, "executor_id": error.executor_id}
 
     def _list_pods_or_none(self) -> Optional[List[PodInfo]]:
         """``ps()`` for the rent lookups: ``None`` when the listing itself failed,
@@ -2130,6 +2286,7 @@ class Lium:
         min_cpus: Optional[int] = None,
         nvlink: Optional[bool] = None,
         min_download_mbps: Optional[float] = None,
+        reliable: Optional[bool] = None,
         view: str = "summary",
     ) -> List[ExecutorInfo]:
         """List available nodes.
@@ -2151,6 +2308,9 @@ class Lium:
             min_download_mbps: Minimum Download in Mbps, judged on
                 :attr:`ExecutorInfo.effective_download_speed_mbps` (the figure ``lium ls`` shows as
                 Download). Nodes with no figure are excluded.
+            reliable: ``True`` hides nodes whose rents often fail to start: 2 or more failed starts in the
+                last 7 days, at least 30% of the node's rents (:attr:`ExecutorInfo.frequent_rent_failures`).
+                ``False``/``None`` do not filter.
             view: ``"summary"`` (default) asks the API for the fields a listing reads — price, GPU/CPU/RAM/disk
                 headline specs, location, tier, network; an API that does not know the parameter returns the
                 full row. ``"full"`` asks for the whole node-check scrape in :attr:`ExecutorInfo.specs` (docker
@@ -2168,6 +2328,8 @@ class Lium:
             params["nvlink"] = "true"
         if min_download_mbps is not None:
             params["min_download_mbps"] = min_download_mbps
+        if reliable:
+            params["reliable_only"] = "true"
         if gpu_type:
             # Try to map short GPU name to full machine name
             machine_name = self._resolve_machine_name(gpu_type)
@@ -2198,6 +2360,8 @@ class Lium:
             ]
         if nvlink:
             executors = [e for e in executors if e.nvlink is True]
+        if reliable:
+            executors = [e for e in executors if e.frequent_rent_failures is not True]
         if min_download_mbps is not None:
             executors = [
                 e for e in executors
@@ -2265,6 +2429,7 @@ class Lium:
                 api_key_id=_pod_api_key_id(d),
                 api_key_name=d.get("api_key_name"),
                 api_key_stamped="api_key_id" in d or "created_by_api_key_id" in d,
+                local_volume_path=d.get("local_volume_path"),
             ))
 
         return pods
@@ -2923,8 +3088,9 @@ class Lium:
         quotes the node's free GPUs, which is what ``lium up <node>`` rents without ``-c``), volume and backup storage per GB-hour, and an egress line with no amount (billed
         at what AWS charges). Returns the API's answer: ``price_per_hour``, ``lines`` (``item``,
         ``unit``, ``rate_usd``, ``quantity``, ``amount_usd``, ``note``), ``total_usd`` (egress not
-        included) and ``pod_balance_floor_usd`` (the balance a rent of this pod requires: 15 minutes of
-        ``price_per_hour``). Nothing is reserved. Returned as a :class:`JobQuote`.
+        included), ``pod_balance_floor_usd`` (this pod's part of the balance floor: 15 minutes of
+        ``price_per_hour``) and, when supplied by the server for a signed-in caller, ``rent_balance_required_usd`` (what the balance must be more than
+        for this rent: this pod plus 15 minutes of each open pod; 0 for an exempt account). Nothing is reserved. Returned as a :class:`JobQuote`.
 
         Args:
             executor: Node UUID, or the HUID ``lium ls`` prints for it.
@@ -3044,7 +3210,7 @@ class Lium:
         """Ask providers for a GPU type that is sold out (``POST /machine-requests``).
 
         ``gpu`` is a short type (``B300``, ``4090``) or a full catalog name. The providers who
-        list that type are told, and the request shows in ``lium.io/machine-requests``. A short
+        list that type may be notified, and the request shows in ``lium.io/machine-requests``. A short
         type that covers several catalog names must be given by one of them.
 
         Returns:
@@ -4227,16 +4393,31 @@ class Lium:
         history: List[str] = []
         last_seen: Optional[PodInfo] = None
         missing_polls = 0
+        throttled = 0  # consecutive 429s
         while True:
             elapsed = time.time() - start
             if timeout is not None and elapsed >= timeout:
-                if last_seen is None and missing_polls and elapsed >= self.MISSING_GRACE_SECONDS:
+                if last_seen is None and missing_polls and not throttled and elapsed >= self.MISSING_GRACE_SECONDS:
                     # The budget and the grace ran out together: an id that was never listed in
                     # 20 s is a missing pod, not a slow one — say so instead of answering None
                     # (wait_ready('00000000-…', timeout=20), the DAH-1942 audit case).
                     raise self._never_listed_error(pod_id, missing_polls, elapsed)
                 break
-            fresh_pods = self.ps()
+            try:
+                fresh_pods = self.ps()
+            except LiumRateLimitError as exc:
+                # A 429 says the API is busy, not that the pod is (the poll cap is 60/min per account, so a few
+                # parallel `lium up` exceed it, DAH-4993): back off (Retry-After when sent, else a doubling
+                # interval up to 30 s) and keep waiting inside the budget; when it runs out the loop ends as a
+                # still-starting pod.
+                throttled += 1
+                backoff = min(self.poll_delay(elapsed, poll_interval) * 2 ** throttled, 30)
+                delay = max(exc.retry_after or 0, backoff)
+                if timeout is not None:
+                    delay = min(delay, max(0.0, timeout - (time.time() - start)))
+                time.sleep(delay)
+                continue
+            throttled = 0
             current = next((p for p in fresh_pods if p.id == pod_id), None)
 
             if current is None:
@@ -4787,6 +4968,7 @@ class Lium:
             jupyter_url=None,
             enable_volume_encryption=response.get("enable_volume_encryption"),
             volume_encryption_status=response.get("volume_encryption_status"),
+            local_volume_path=response.get("local_volume_path"),
         )
 
     

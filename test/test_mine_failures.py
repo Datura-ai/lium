@@ -10,6 +10,7 @@
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -123,6 +124,157 @@ def test_prereqs_fail_without_a_sysbox_runc_runtime_and_print_the_official_insta
     assert mine._SYSBOX_SETUP_COMMAND in str(err.value)
 
 
+def _sysbox_install_host(monkeypatch, tmp_path, *, install_ok: bool, registers_before_failing: bool = False,
+                         toolkit_present: bool = True):
+    script = tmp_path / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("")
+    ran = []
+    installed = {"done": False}
+
+    def run(cmd, **kw):
+        ran.append(cmd)
+        if "sysbox_setup" in cmd:
+            installed["done"] = install_ok or registers_before_failing
+            if not install_ok:
+                raise RuntimeError("Command failed (1): kernel too old")
+        if "Runtimes" in cmd:
+            return ('{"sysbox-runc":{}}' if installed["done"] else '{"runc":{}}'), ""
+        return "", ""
+
+    # without a toolkit up front, only the installer puts it there
+    monkeypatch.setattr(mine, "_exists", lambda cmd: cmd != "nvidia-container-cli" or toolkit_present or installed["done"])
+    monkeypatch.setattr(mine, "_run", run)
+    return script, ran
+
+
+def test_prereqs_install_sysbox_from_the_checkout_without_asking(monkeypatch, tmp_path):
+    script, ran = _sysbox_install_host(monkeypatch, tmp_path, install_ok=True, toolkit_present=False)
+
+    mine._check_prereqs(tmp_path)
+
+    install = [cmd for cmd in ran if "sysbox_setup" in cmd]
+    assert len(install) == 1 and str(script) in install[0] and install[0].endswith("< /dev/null")
+
+
+def test_a_failed_sysbox_install_stops_with_the_manual_command_and_the_cause(monkeypatch, tmp_path):
+    _sysbox_install_host(monkeypatch, tmp_path, install_ok=False)
+
+    with pytest.raises(Exception) as err:
+        mine._check_prereqs(tmp_path)
+
+    assert mine._SYSBOX_SETUP_COMMAND in str(err.value) and "kernel too old" in str(err.value)
+
+
+def test_a_late_sysbox_installer_failure_with_the_runtime_present_is_printed_as_a_warning(monkeypatch, tmp_path):
+    _sysbox_install_host(monkeypatch, tmp_path, install_ok=False, registers_before_failing=True)
+    warnings = []
+    monkeypatch.setattr(mine.console, "warning", warnings.append)
+
+    mine._check_prereqs(tmp_path)
+
+    assert len(warnings) == 1 and "kernel too old" in warnings[0]
+
+
 def test_prereqs_pass_with_sysbox(monkeypatch):
     _prereq_host(monkeypatch, '{"runc":{"path":"runc"},"sysbox-runc":{"path":"/usr/bin/sysbox-runc"}}')
     mine._check_prereqs()
+
+
+def _storage_host(monkeypatch, *, root: bool = True, tty: bool = True, typed: str = "",
+                  plan_error: Exception | None = None, execute_error: Exception | None = None):
+    import lium.cli.mine.gpu_splitting as gs
+    import lium.cli.mine.storage as st
+    from rich.prompt import Prompt
+
+    from lium.cli.mine.models import BlockDevice, CandidateEvaluation
+
+    def disk(path, model):
+        return BlockDevice(path=path, name=path[5:], kernel_name=path[5:], type="disk", size_bytes=3576 * 1024**3,
+                           fstype=None, mountpoints=[], parent_kernel_name=None, model=model, serial="S6UK")
+
+    calls = []
+    preflight = SimpleNamespace(
+        block_devices=[disk("/dev/nvme1n1", "Samsung PM9A3"), disk("/dev/sdb", "WDC WD40EFRX"),
+                       disk("/dev/nvme0n1", "Micron 7450")],
+        root_mount=None, docker_mount=None, docker_state=SimpleNamespace(docker_root_dir="/var/lib/docker"),
+    )
+    candidates = [
+        CandidateEvaluation("/dev/nvme1n1", "disk", "blank_whole_disk", True, "blank whole disk"),
+        CandidateEvaluation("/dev/sdb", "disk", "blank_whole_disk", True, "blank whole disk"),
+        CandidateEvaluation("/dev/nvme0n1", "disk", "protected_root_or_docker", False, "protected root"),
+    ]
+    monkeypatch.setattr("os.geteuid", lambda: 0 if root else 1000)
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: tty))
+    monkeypatch.setattr(Prompt, "ask", lambda *a, **k: calls.append("asked") or typed)
+
+    def plan(pf, device):
+        calls.append(("plan", device))
+        if plan_error:
+            raise plan_error
+        return "plan"
+
+    def execute(p):
+        calls.append(("execute", p))
+        if execute_error:
+            raise execute_error
+
+    monkeypatch.setattr(gs, "_preflight", lambda: preflight)
+    monkeypatch.setattr(st, "evaluate_candidates", lambda *a: candidates)
+    monkeypatch.setattr(gs, "_build_setup_plan", plan)
+    monkeypatch.setattr(gs, "_execute_setup", execute)
+    return calls
+
+
+def test_storage_setup_never_formats_without_a_terminal_whatever_the_flags(monkeypatch, capsys):
+    # --auto and --register run without a person at the keyboard: no prompt, no plan, no format
+    calls = _storage_host(monkeypatch, tty=False)
+    mine._setup_docker_storage()
+    assert calls == []
+    assert "lium gpu-splitting setup --device" in capsys.readouterr().out
+
+
+def test_storage_setup_without_root_prints_the_sudo_command(monkeypatch, capsys):
+    calls = _storage_host(monkeypatch, root=False)
+    mine._setup_docker_storage()
+    assert calls == []
+    assert "sudo lium mine" in capsys.readouterr().out
+
+
+def test_storage_setup_lists_every_disk_and_enter_skips(monkeypatch, capsys):
+    calls = _storage_host(monkeypatch, typed="")
+    mine._setup_docker_storage()
+    out = capsys.readouterr().out
+    assert calls == ["asked"]
+    assert "Samsung PM9A3" in out and "WDC WD40EFRX" in out and "3576 GiB" in out
+    assert "Not offered" in out and "/dev/nvme0n1" in out and "Micron 7450" in out
+    assert "lium gpu-splitting setup --device" in out
+
+
+def test_storage_setup_formats_only_the_typed_listed_disk_with_no_second_prompt(monkeypatch):
+    calls = _storage_host(monkeypatch, typed="/dev/sdb")
+    mine._setup_docker_storage()
+    assert calls == ["asked", ("plan", "/dev/sdb"), ("execute", "plan")]
+
+
+@pytest.mark.parametrize("typed", ["/dev/nvme0n1", "yes", "/dev/sdz"])
+def test_storage_setup_anything_but_a_listed_disk_changes_nothing(monkeypatch, typed):
+    calls = _storage_host(monkeypatch, typed=typed)
+    mine._setup_docker_storage()
+    assert calls == ["asked"]
+
+
+def test_storage_setup_refusal_before_docker_stops_does_not_abort_the_install(monkeypatch, capsys):
+    calls = _storage_host(monkeypatch, typed="/dev/sdb", execute_error=RuntimeError("Containers are running on this host"))
+    mine._setup_docker_storage()
+    out = capsys.readouterr().out
+    assert calls == ["asked", ("plan", "/dev/sdb"), ("execute", "plan")]
+    assert "Containers are running" in out and "lium gpu-splitting setup --device" in out
+
+
+def test_storage_setup_target_check_refusal_names_the_manual_command(monkeypatch, capsys):
+    calls = _storage_host(monkeypatch, typed="/dev/sdb", plan_error=RuntimeError("Refusing /dev/sdb: it is a removable disk"))
+    mine._setup_docker_storage()
+    out = capsys.readouterr().out
+    assert calls == ["asked", ("plan", "/dev/sdb")]
+    assert "removable" in out and "lium gpu-splitting setup --device" in out

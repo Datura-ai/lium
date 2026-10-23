@@ -65,6 +65,7 @@ def _build_block_device(item: dict) -> BlockDevice:
         model=item.get("model"),
         serial=item.get("serial"),
         is_removable=bool(item.get("rm")),
+        transport=item.get("tran"),
         children=children,
     )
 
@@ -74,7 +75,7 @@ def load_block_devices(runner: Runner) -> list[BlockDevice]:
 
     Command run:
 
-    - `lsblk --json --bytes -o NAME,KNAME,PATH,TYPE,SIZE,FSTYPE,FSAVAIL,FSUSE%,MOUNTPOINTS,PKNAME,MODEL,SERIAL,RM`
+    - `lsblk --json --bytes -o NAME,KNAME,PATH,TYPE,SIZE,FSTYPE,FSAVAIL,FSUSE%,MOUNTPOINTS,PKNAME,MODEL,SERIAL,RM,TRAN`
 
     The result preserves tree structure so callers can reason about both whole
     disks and their child partitions.
@@ -86,10 +87,17 @@ def load_block_devices(runner: Runner) -> list[BlockDevice]:
             "--json",
             "--bytes",
             "-o",
-            "NAME,KNAME,PATH,TYPE,SIZE,FSTYPE,FSAVAIL,FSUSE%,MOUNTPOINTS,PKNAME,MODEL,SERIAL,RM",
+            "NAME,KNAME,PATH,TYPE,SIZE,FSTYPE,FSAVAIL,FSUSE%,MOUNTPOINTS,PKNAME,MODEL,SERIAL,RM,TRAN",
         ],
     )
-    return [_build_block_device(item) for item in data.get("blockdevices", [])]
+    devices = [_build_block_device(item) for item in data.get("blockdevices", [])]
+    for disk in devices:
+        family = flatten_devices([disk])
+        paths = frozenset({d.path for d in family} | {f"/dev/{d.kernel_name}" for d in family})
+        mounted = any(d.mountpoints for d in family)
+        for d in family:
+            d.family_paths, d.family_mounted = paths, mounted
+    return devices
 
 
 def flatten_devices(devices: list[BlockDevice]) -> list[BlockDevice]:
@@ -156,10 +164,18 @@ def _root_disk_name(root_source: str) -> str:
     return name
 
 
+def _mount_device(source: str) -> str:
+    """`/dev/sda2[/@]` (a btrfs subvolume) -> `/dev/sda2`."""
+    return source.split("[", 1)[0]
+
+
 def _is_protected_device(device: BlockDevice, root_mount: MountInfo, docker_mount: MountInfo) -> bool:
-    root_source = root_mount.source
-    docker_source = docker_mount.source
+    root_source = _mount_device(root_mount.source)
+    docker_source = _mount_device(docker_mount.source)
     if device.path in {root_source, docker_source}:
+        return True
+    # An LVM or md root (/dev/mapper/vg-root, /dev/md0) names no disk: protect every disk whose tree holds it.
+    if {root_source, docker_source, os.path.realpath(root_source), os.path.realpath(docker_source)} & device.family_paths:
         return True
 
     parent_name = device.parent_kernel_name or device.kernel_name
@@ -276,6 +292,9 @@ def _classify_disk(
     if not device.children and not device.fstype and not device.mountpoints:
         return "blank_whole_disk", True, extra
 
+    if device.family_mounted:
+        return "unsupported_or_ambiguous", False, extra
+
     free_regions = inspect_free_regions(runner, device.path)
     if len(free_regions) == 1:
         start, end = free_regions[0]
@@ -345,6 +364,8 @@ def explain_classification(
         details = "existing non-XFS filesystem"
     elif classification == "unsupported_or_ambiguous" and device.is_removable:
         details = "removable or ambiguous device"
+    elif classification == "unsupported_or_ambiguous" and device.type == "disk" and device.family_mounted:
+        details = "a partition on it is mounted"
     return CandidateEvaluation(
         path=device.path,
         device_type=device.type,
