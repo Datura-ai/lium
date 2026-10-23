@@ -72,6 +72,7 @@ class _SetupExecutionState:
     daemon_json_written: bool = False
     fstab_written: bool = False
     docker_root_mounted_on_target: bool = False
+    original_docker_root_unmounted: bool = False
     original_drop_in: Optional[_FileSnapshot] = None
     drop_in_written: bool = False
     original_udev_rule: Optional[_FileSnapshot] = None
@@ -854,12 +855,12 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
         unmounted = _rollback_attempt(errors, f"unmount {docker_root}", lambda: run_command(["umount", docker_root], True, True))
         if not unmounted:
             data_restored = False
-        elif state.original_docker_mount.target == docker_root and state.original_docker_mount.source != target_partition:
-            data_restored = _rollback_attempt(
-                errors,
-                f"remount original Docker root {state.original_docker_mount.source}",
-                lambda: run_command(_mount_command_for_mount_info(state.original_docker_mount, docker_root), True, True),
-            )
+    if unmounted and state.original_docker_root_unmounted:
+        data_restored = _rollback_attempt(
+            errors,
+            f"remount original Docker root {state.original_docker_mount.source}",
+            lambda: run_command(_mount_command_for_mount_info(state.original_docker_mount, docker_root), True, True),
+        )
 
     if state.docker_root_moved:
         if unmounted:
@@ -1113,7 +1114,7 @@ def _execute_setup(plan: SetupPlan):
             docker_root.mkdir(parents=True, exist_ok=True)
             current_mount = load_mount_info(run_command, str(docker_root))
             if current_mount.target == str(docker_root) and current_mount.source != target_partition:
-                run_command(["umount", str(docker_root)], False, True)
+                state.original_docker_root_unmounted = run_command(["umount", str(docker_root)], False, True).returncode == 0
             run_command(["mount", str(docker_root)], True, True)
             state.docker_root_mounted_on_target = True
             current_mount = load_mount_info(run_command, str(docker_root))

@@ -388,6 +388,27 @@ def test_execute_setup_rsync_branch_rollback_keeps_docker_down_until_the_origina
     assert ["mv", plan.backup_dir, docker_root] not in commands
 
 
+@pytest.mark.parametrize("remount_fails", [False, True])
+def test_execute_setup_rsync_branch_remounts_the_original_root_when_the_image_mount_fails(monkeypatch, tmp_path, remount_fails):
+    # the original partition is unmounted before the image mount; a failed image mount must not leave it off
+    own_mount = MountInfo(target=str(tmp_path / "docker"), source="/dev/sdc1", fstype="ext4", options=["rw"])
+    plan = _loop_file_plan(tmp_path, docker_mount=own_mount)
+    docker_root = plan.preflight.docker_state.docker_root_dir
+    remount = ["mount", "-t", "ext4", "-o", "rw", "/dev/sdc1", docker_root]
+    commands = _loop_file_host(monkeypatch, plan, fail_at=["mount", docker_root], and_fail=remount if remount_fails else None)
+
+    with pytest.raises(RuntimeError, match="mount failed") as exc_info:
+        gpu_splitting._execute_setup(plan)
+
+    assert commands.index(["umount", docker_root]) < commands.index(remount)
+    if remount_fails:
+        assert "start docker: skipped" in str(exc_info.value)
+        assert ["systemctl", "start", "docker"] not in commands
+    else:
+        assert commands.index(remount) < commands.index(["systemctl", "start", "docker"])
+    assert not Path(plan.target.resolved_target).exists()
+
+
 def test_execute_setup_rsync_branch_rollback_restarts_docker_on_the_original_root(monkeypatch, tmp_path):
     own_mount = MountInfo(target=str(tmp_path / "docker"), source="/dev/sdc1", fstype="ext4", options=["rw"])
     plan = _loop_file_plan(tmp_path, docker_mount=own_mount)
