@@ -143,11 +143,16 @@ def _clone_or_update_repo(target_dir: Path, branch: str):
         _run(f"git clone --branch {branch} https://github.com/Datura-ai/lium-io.git {target_dir}")
 
 
-def _check_prereqs():
+def _check_prereqs(compute_dir: Path | None = None):
     if not _exists("nvidia-smi"):
         raise Exception("NVIDIA GPU driver not found (nvidia-smi missing)")
 
     _run("nvidia-smi --query-gpu=name --format=csv,noheader")
+
+    # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
+    # provider learns it from the preflight or a validator cycle later. The installer also installs the
+    # NVIDIA Container Toolkit, so it runs before the toolkit check.
+    failure = _install_sysbox(compute_dir) if compute_dir and not _has_sysbox() else ""
 
     if not _exists("nvidia-container-cli"):
         raise Exception("NVIDIA Container Toolkit not found (required for Docker GPU access)")
@@ -157,14 +162,32 @@ def _check_prereqs():
 
     _run("docker info")
 
-    # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
-    # provider learns it from the preflight or a validator cycle later.
     if not _has_sysbox():
         raise Exception(
             "Sysbox runtime not found in Docker (required by validators).\n"
             f"Install it with: {_SYSBOX_SETUP_COMMAND}\n"
-            "then run `lium mine` again."
+            "then run `lium mine` again." + (f"\n{failure}" if failure else "")
         )
+    if failure:
+        # the installer registers the runtime before its GPU checks, so a late failure still leaves sysbox-runc
+        console.warning(f"The Sysbox installer reported a failure after installing the runtime:\n{failure}")
+
+
+def _install_sysbox(compute_dir: Path) -> str:
+    """Run the checkout's Sysbox installer once (DAH-4778: one manual step fewer). Same privilege rule as step 2's
+    install script: root, or passwordless sudo. No terminal input, so its one confirmation is skipped.
+    Returns the failure's tail, empty on success."""
+    import os
+
+    script = compute_dir / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh"
+    if not script.exists():
+        return ""
+    sudo = "" if os.geteuid() == 0 else "sudo -n "
+    try:
+        _run(f"{sudo}bash {shlex.quote(str(script))} < /dev/null")
+    except RuntimeError as exc:
+        return str(exc)[-2000:]
+    return ""
 
 
 # Validators are to score 0 a node whose Docker cannot cap a container's disk (STORAGE_LIMIT_REQUIRED): one renter
@@ -252,7 +275,7 @@ def _setup_docker_storage():
         console.warning(f"Docker storage was not set up: {exc}\n{manual}")
 
 
-# The printed command fetches the official installer, never the checkout's copy; the CLI does not run it (it needs sudo).
+# The printed command fetches the official installer, never the checkout's copy (what `lium mine` runs itself).
 _SYSBOX_SETUP_COMMAND = (
     "curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-io/main/neurons/executor/"
     "nvidia_docker_sysbox_setup.sh | sudo bash"
@@ -579,18 +602,22 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = F
     # recreate: an executor already running keeps its old .env, so a new MINER_ACCOUNT_CLAIM never reaches it;
     # a plain re-run leaves a running executor alone
     ps_cmd = "docker compose -f docker-compose.app.yml ps -q executor"
-    if recreate:
-        # a recreate restarts the executor under running rentals; the validator names rental pods pod_* (lium-io const.py)
-        names = _run("docker ps --filter status=created --filter status=running --format '{{.Names}}'", check=False)[0].split()
-        if rentals := [n for n in names if n.startswith("pod_")]:
-            console.warning(
-                f"{len(rentals)} rental(s) running on this node, so the executor was not restarted. "
-                "The new account claim is in .env and applies on its next restart; rerun this command once the rentals end."
-            )
-            recreate = False
+    # a restart under running rentals interrupts them; the validator names rental pods pod_* (lium-io const.py)
+    names = _run("docker ps --filter status=created --filter status=running --format '{{.Names}}'", check=False)[0].split()
+    rentals = [n for n in names if n.startswith("pod_")]
+    if rentals and recreate:
+        console.warning(
+            f"{len(rentals)} rental(s) running on this node, so the executor was not restarted. "
+            "The new account claim is in .env and applies on its next restart; rerun this command once the rentals end."
+        )
+        recreate = False
     # after --force-recreate the old container can still report healthy; wait for one with a new ID
     old_id = _run(ps_cmd, check=False, cwd=str(executor_dir))[0].strip() if recreate else ""
     command = "docker compose up -d --force-recreate" if recreate else "docker compose up -d"
+    if rentals:
+        # even a plain `up -d` recreates a runner whose config changed, and the runner force-recreates the executor;
+        # under rentals compose only starts what is missing
+        command = "docker compose up -d --no-recreate"
     _run(command, capture=True, cwd=str(executor_dir))
 
     # Wait for the executor service to be fully healthy
@@ -704,7 +731,7 @@ def _gather_inputs(
     return answers
 
 
-PREFLIGHT_IMAGE = "daturaai/lium-validator:latest"
+PREFLIGHT_IMAGE = "daturaai/compute-subnet-validator:preflight"
 
 
 class _StepMessage:
@@ -1026,7 +1053,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             _install_executor_tools(target_dir)
 
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
-            _check_prereqs()
+            _check_prereqs(target_dir)
             storage_ok = _docker_storage_limited()
         if not storage_ok:
             _setup_docker_storage()   # outside the spinner: it prints the plan and may ask to confirm

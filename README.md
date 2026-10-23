@@ -355,6 +355,9 @@ lium ls --format json          # machine-readable
 # differently on a PCIe box or a slow link that the price does not reveal
 lium ls --gpu H200 --nvlink --min-download 2000
 
+# Skip nodes whose rents often fail to start
+lium ls --gpu H100 --reliable
+
 # Create pod with node index
 lium up 1 --name my-pod --yes
 
@@ -504,7 +507,7 @@ lium fund --alpha -k <hotkey> -a 25 --netuid 64  # Any subnet Lium accepts
 
 ### `lium ls --format json` fields
 
-One object per node, sorted as the table is; the names are stable and pinned by `test/test_ls_speed.py`:
+One object per node, sorted as the table is; the names are stable:
 
 | field | meaning |
 |---|---|
