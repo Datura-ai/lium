@@ -515,7 +515,7 @@ GPU_RESET_MAY_STILL_RUN = "The reset may still finish; check the pod's GPUs (nvi
 
 def _gpu_reset_result(pod: PodInfo, body: Dict[str, Any]) -> GpuResetResult:
     """The final GPU reset answer as the result, or its error. An old backend's 200 has no ``status``."""
-    status = body.get("status") or "done"
+    status = body.get("status") or ("failed" if body.get("ok") is False else "done")
     error = body.get("error") or {}
     gpus = [_gpu_reset_outcome(g) for g in body.get("gpus") or []]
     if status == "timeout":

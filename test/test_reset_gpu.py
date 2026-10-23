@@ -363,3 +363,34 @@ def test_cli_read_timeout_on_polls_says_the_reset_may_still_run(monkeypatch, clo
 
     assert result.exit_code == EXIT_API_ERROR and envelope["error"]["code"] == "gpu_reset_timeout"
     assert "still" in envelope["error"]["hint"] and "eager-wolf-aa" in envelope["error"]["hint"]
+
+
+@responses.activate
+def test_sdk_legacy_200_with_ok_false_raises_like_a_failed_status(monkeypatch, clock):
+    legacy = {**OK, "ok": False, "gpus": [FAILED_GPU]}
+    responses.post(POST_URL, json=legacy)
+
+    with pytest.raises(LiumGpuOperationError) as exc:
+        _client(monkeypatch).reset_gpu(SimpleNamespace(id=POD_ID))
+
+    assert exc.value.code == "reset_not_supported" and exc.value.gpus == [GpuResetOutcome(**FAILED_GPU)]
+
+
+@responses.activate
+def test_sdk_legacy_200_with_ok_false_and_no_gpus_is_a_plain_error(monkeypatch, clock):
+    responses.post(POST_URL, json={**OK, "ok": False, "gpus": []})
+
+    with pytest.raises(LiumError) as exc:
+        _client(monkeypatch).reset_gpu(SimpleNamespace(id=POD_ID))
+
+    assert exc.value.code == "reset_not_supported" and not isinstance(exc.value, LiumGpuOperationError)
+
+
+@responses.activate
+def test_cli_legacy_200_with_ok_false_fails_like_a_failed_status(monkeypatch, clock):
+    responses.post(POST_URL, json={**OK, "ok": False, "gpus": [FAILED_GPU]})
+
+    result, envelope = _run_real_sdk(monkeypatch)
+
+    assert result.exit_code == EXIT_API_ERROR and envelope["error"]["code"] == "reset_not_supported"
+    assert envelope["data"]["gpus"] == [FAILED_GPU]
