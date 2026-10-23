@@ -93,6 +93,7 @@ from .utils import (
     parse_api_timestamp,
     request_same_origin,
     spend_cap_deadline,
+    TRANSIENT_ERRORS,
     with_retry,
 )
 from .api_keys import ApiKeysClient
@@ -506,6 +507,7 @@ def _gpu_reset_outcome(gpu: Dict[str, Any]) -> GpuResetOutcome:
 
 
 GPU_RESET_POLL_SECONDS = 3
+GPU_RESET_POLL_TIMEOUT_SECONDS = 30
 # the server marks a reset `timeout` after 300 s; wait past that to read its own answer
 GPU_RESET_CLIENT_DEADLINE_SECONDS = 330
 GPU_RESET_MAY_STILL_RUN = "The reset may still finish; check the pod's GPUs (nvidia-smi) before you reset again"
@@ -2617,27 +2619,40 @@ class Lium:
                 what happened to each GPU.
             LiumError: refusals with the API's ``code`` (``invalid_gpu_index``, ``mig_enabled``, ...).
             LiumServerError: ``gpu_reset_unavailable`` (the request was not sent, or the server gave up waiting)
-                or ``gpu_reset_timeout`` (this client gave up waiting); after both the reset may still finish.
+                or ``gpu_reset_timeout`` (this client gave up waiting or lost the connection); after both
+                the reset may still finish.
         """
         started = time.monotonic()
-        # sent once: a 429 is the 1/min limit and a second reset must not follow a lost answer;
-        # an old backend answers 200 with the result after up to 50 s, past the 30 s default timeout
+        deadline = started + GPU_RESET_CLIENT_DEADLINE_SECONDS
         try:
-            body = self._request(
-                "POST", f"/pods/{pod.id}/reset-gpu", json={"gpu_indices": gpu_indices}, retry=False, timeout=120,
-            ).json()
+            # sent once: a 429 is the 1/min limit and a second reset must not follow a lost answer;
+            # an old backend answers 200 with the result after up to 50 s, past the 30 s default timeout
+            try:
+                body = self._request(
+                    "POST", f"/pods/{pod.id}/reset-gpu", json={"gpu_indices": gpu_indices}, retry=False, timeout=120,
+                ).json()
+            except requests.RequestException as e:
+                raise LiumServerError(
+                    f"GPU reset: no answer from the server ({e})", code="gpu_reset_timeout", hint=GPU_RESET_MAY_STILL_RUN,
+                ) from e
+            request_id = body.get("request_id")
             while body.get("status") == "running":
-                elapsed = time.monotonic() - started
-                if elapsed >= GPU_RESET_CLIENT_DEADLINE_SECONDS:
+                if on_progress:
+                    on_progress(time.monotonic() - started)
+                time.sleep(GPU_RESET_POLL_SECONDS)
+                time_left = deadline - time.monotonic()
+                if time_left <= 0:
                     raise LiumServerError(
-                        f"GPU reset {body.get('request_id')} did not finish in {elapsed:.0f} s",
+                        f"GPU reset {request_id} did not finish in {GPU_RESET_CLIENT_DEADLINE_SECONDS} s",
                         code="gpu_reset_timeout", hint=GPU_RESET_MAY_STILL_RUN,
                     )
-                if on_progress:
-                    on_progress(elapsed)
-                time.sleep(GPU_RESET_POLL_SECONDS)
                 try:
-                    body = self._request("GET", f"/pods/{pod.id}/reset-gpu/{body['request_id']}").json()
+                    body = self._request(
+                        "GET", f"/pods/{pod.id}/reset-gpu/{request_id}",
+                        retry=False, timeout=min(GPU_RESET_POLL_TIMEOUT_SECONDS, time_left),
+                    ).json()
+                except TRANSIENT_ERRORS:
+                    continue  # 5xx, 429 or a lost connection: the reset runs on, poll again until the deadline
                 except LiumError as e:
                     e.hint = GPU_RESET_MAY_STILL_RUN  # the reset was sent: a "Retry" could start a second one
                     raise

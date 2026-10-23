@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import requests
 import responses
 from click.testing import CliRunner
 
@@ -243,14 +244,13 @@ def test_sdk_client_deadline_stops_polling_with_a_timeout_error(monkeypatch, clo
 
 @responses.activate
 def test_sdk_poll_failure_says_the_reset_may_still_run(monkeypatch, clock):
-    monkeypatch.setattr("lium.sdk.utils.time.sleep", lambda seconds: None)
     responses.post(POST_URL, status=202, json=RUNNING)
     responses.get(GET_URL, status=503, json={"detail": "unavailable"})
 
     with pytest.raises(LiumServerError) as exc:
         _client(monkeypatch).reset_gpu(SimpleNamespace(id=POD_ID))
 
-    assert "still" in exc.value.hint
+    assert exc.value.code == "gpu_reset_timeout" and "still" in exc.value.hint
 
 
 @responses.activate
@@ -276,3 +276,90 @@ def test_cli_client_timeout_says_the_reset_may_still_run(monkeypatch):
     assert result.exit_code == EXIT_API_ERROR and envelope["error"]["code"] == "gpu_reset_timeout"
     hint = envelope["error"]["hint"]
     assert "still" in hint and "eager-wolf-aa" in hint and "Retry" not in hint
+
+
+@responses.activate
+def test_sdk_keeps_polling_through_5xx_and_network_errors(monkeypatch, clock):
+    responses.post(POST_URL, status=202, json=RUNNING)
+    responses.get(GET_URL, status=503, json={"detail": "unavailable"})
+    responses.get(GET_URL, body=requests.ConnectionError("connection reset"))
+    responses.get(GET_URL, json=DONE)
+
+    result = _client(monkeypatch).reset_gpu(SimpleNamespace(id=POD_ID))
+
+    assert result == RESULT
+    assert [c.request.method for c in responses.calls] == ["POST", "GET", "GET", "GET"]
+    assert clock == [3, 3, 3]
+
+
+@responses.activate
+def test_sdk_poll_timeout_is_clamped_to_the_time_left(monkeypatch, clock):
+    responses.post(POST_URL, status=202, json=RUNNING)
+    responses.get(GET_URL, json=RUNNING)
+
+    with pytest.raises(LiumServerError):
+        _client(monkeypatch).reset_gpu(SimpleNamespace(id=POD_ID))
+
+    timeouts = [c.request.req_kwargs["timeout"] for c in responses.calls[1:]]
+    assert max(timeouts) <= 30 and timeouts[-1] <= 3
+
+
+@responses.activate
+def test_sdk_network_error_on_post_says_the_reset_may_still_run(monkeypatch, clock):
+    responses.post(POST_URL, body=requests.ConnectionError("connection reset"))
+
+    with pytest.raises(LiumServerError) as exc:
+        _client(monkeypatch).reset_gpu(SimpleNamespace(id=POD_ID))
+
+    assert exc.value.code == "gpu_reset_timeout" and "still" in exc.value.hint
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_sdk_read_timeouts_on_every_poll_end_in_a_timeout_error(monkeypatch, clock):
+    responses.post(POST_URL, status=202, json=RUNNING)
+    responses.get(GET_URL, body=requests.ReadTimeout("read timed out"))
+
+    with pytest.raises(LiumServerError) as exc:
+        _client(monkeypatch).reset_gpu(SimpleNamespace(id=POD_ID))
+
+    assert exc.value.code == "gpu_reset_timeout" and "still" in exc.value.hint
+
+
+def _run_real_sdk(monkeypatch):
+    pod = SimpleNamespace(id=POD_ID, huid="eager-wolf-aa", name="my-pod", executor=None, created_at="")
+
+    class _Lium(Lium):
+        def __init__(self, *a, **kw):
+            super().__init__(Config(api_key="test"))
+
+        def ps(self):
+            return [pod]
+
+        def _release_ssh(self, pod):
+            pass
+
+    monkeypatch.setattr(reset_gpu_module, "Lium", _Lium)
+    result = CliRunner().invoke(cli, ["reset-gpu", "my-pod", "--yes", "--json"])
+    return result, json.loads(result.stderr.strip().splitlines()[-1])
+
+
+@responses.activate
+def test_cli_network_error_on_post_says_the_reset_may_still_run(monkeypatch, clock):
+    responses.post(POST_URL, body=requests.ConnectionError("connection reset"))
+
+    result, envelope = _run_real_sdk(monkeypatch)
+
+    assert result.exit_code == EXIT_API_ERROR and envelope["error"]["code"] == "gpu_reset_timeout"
+    assert "still" in envelope["error"]["hint"] and "eager-wolf-aa" in envelope["error"]["hint"]
+
+
+@responses.activate
+def test_cli_read_timeout_on_polls_says_the_reset_may_still_run(monkeypatch, clock):
+    responses.post(POST_URL, status=202, json=RUNNING)
+    responses.get(GET_URL, body=requests.ReadTimeout("read timed out"))
+
+    result, envelope = _run_real_sdk(monkeypatch)
+
+    assert result.exit_code == EXIT_API_ERROR and envelope["error"]["code"] == "gpu_reset_timeout"
+    assert "still" in envelope["error"]["hint"] and "eager-wolf-aa" in envelope["error"]["hint"]

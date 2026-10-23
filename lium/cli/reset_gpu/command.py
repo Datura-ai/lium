@@ -1,11 +1,10 @@
 """Reset-gpu command implementation."""
 
 import json
-from typing import Tuple
 
 import click
 
-from lium.sdk import Lium, LiumGpuOperationError, LiumServerError
+from lium.sdk import GpuResetOutcome, Lium, LiumGpuOperationError, LiumServerError
 from lium.cli import ui
 from lium.cli.utils import (
     CliFailure,
@@ -31,7 +30,7 @@ from lium.cli.utils import (
 @click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON")
 @handle_errors
 @narrate_on_stderr_under_json
-def reset_gpu_command(target: str, gpus: Tuple[int, ...], yes: bool, json_output: bool):
+def reset_gpu_command(target: str, gpus: tuple[int, ...], yes: bool, json_output: bool):
     """Reset a pod's hung GPUs without recreating the pod.
 
     Stops every process in the pod (even when one GPU is named), resets the GPUs and
@@ -77,7 +76,7 @@ def reset_gpu_command(target: str, gpus: Tuple[int, ...], yes: bool, json_output
     except LiumGpuOperationError as e:
         # the reset ran and a GPU failed: show which, then fail with the API's code and every GPU's outcome
         if not json_output:
-            _table(e.gpus)
+            _print_gpu_reset_table(e.gpus)
             if e.container_restarted is False:
                 ui.warning(f"The container of {pod.huid} is still stopped.")
         raise sdk_error_failure(e, {"container_restarted": e.container_restarted, "gpus": [g.to_dict() for g in e.gpus]})
@@ -85,9 +84,9 @@ def reset_gpu_command(target: str, gpus: Tuple[int, ...], yes: bool, json_output
     if json_output:
         click.echo(json.dumps(result.to_dict(), sort_keys=True))
     else:
-        _table(result.gpus)
+        _print_gpu_reset_table(result.gpus)
         ui.success(f"GPU reset done for {pod.huid}")
 
 
-def _table(gpus) -> None:
+def _print_gpu_reset_table(gpus: list[GpuResetOutcome]) -> None:
     ui.table(["GPU", "UUID", "Result", "Detail"], [[str(g.index), g.uuid, g.result, g.detail or ""] for g in gpus])
