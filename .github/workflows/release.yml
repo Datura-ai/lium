@@ -247,10 +247,28 @@ jobs:
           dist/${{ matrix.asset_name }}.tar.gz
           dist/${{ matrix.asset_name }}.tar.gz.sha256
 
+  # PR CI no longer rents pods (ci.yml e2e-live), so a release ships only a commit whose full CI, live e2e
+  # included, went green from `gh workflow run ci.yml --ref main` before tagging (the daily cron skips pytest and the builds).
+  ci-green:
+    name: Full CI green on the release commit
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+    - env:
+        GH_TOKEN: ${{ github.token }}
+        SHA: ${{ github.sha }}
+      run: |
+        n=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&status=success" \
+          --jq '[.workflow_runs[] | select(.event == "workflow_dispatch")] | length')
+        [ "$n" -gt 0 ] || { echo "::error::no green workflow_dispatch ci.yml run on $SHA: run gh workflow run ci.yml --ref main, then re-run this workflow"; exit 1; }
+
   release-assets:
     name: Publish GitHub release assets
     if: github.event_name == 'release'
     needs:
+    - ci-green
     - build-python
     - validate-binary-targets
     - build-linux-binary
