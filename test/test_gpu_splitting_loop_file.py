@@ -128,15 +128,16 @@ class _Commands(list):
 
 
 def _loop_file_host(
-    monkeypatch, plan: SetupPlan, fail_at: list[str] | None = None, and_fail: list[str] | None = None
+    monkeypatch, plan: SetupPlan, fail_at: list[str] | None = None, and_fail: list[str] | None = None, and_fail_from: int = 1
 ) -> _Commands:
+    # and_fail fails from its and_fail_from-th run on: the rsync branch unmounts the original root once in the flow
     commands = _Commands()
     mounted = {"on_target": False}
     docker_root = plan.preflight.docker_state.docker_root_dir
 
     def run_command(args, check=True, capture=True):
         commands.append(args)
-        if args in ([fail_at] if fail_at else []) + ([and_fail] if and_fail else []):
+        if args == fail_at or (args == and_fail and commands.count(args) >= and_fail_from):
             raise RuntimeError(f"{args[0]} failed")
         if args[:2] == ["losetup", "-j"]:
             return CommandResult(args=args, stdout="/dev/loop5\n", stderr="", returncode=0)
@@ -196,14 +197,43 @@ def test_create_image_file_refuses_a_planted_path(tmp_path, planted):
     assert victim.read_text() == "keep me"
 
 
+def _directory_chain(monkeypatch, entries: dict[str, tuple[int, int]]):
+    # entries: directory -> (uid, st_mode); the image file's own path never exists
+    monkeypatch.setattr(gpu_splitting.os, "lstat", lambda path: SimpleNamespace(st_uid=entries[path][0], st_mode=entries[path][1]))
+    monkeypatch.setattr(gpu_splitting.os.path, "lexists", lambda path: False)
+
+
+ROOT_ONLY = (0, 0o40755)
+
+
 @pytest.mark.parametrize(
-    "uid, mode, match",
-    [(1000, 0o40755, "owned by root"), (0, 0o40777, "mode 777"), (0, 0o40775, "mode 775")],
+    "entries, match",
+    [
+        ({"/srv": ROOT_ONLY, "/srv/alice": (1000, 0o40755), "/srv/alice/pool": ROOT_ONLY}, "/srv/alice must be .*uid 1000"),
+        ({"/srv": ROOT_ONLY, "/srv/disk": (0, 0o120777), "/srv/disk/pool": ROOT_ONLY}, "/srv/disk must be .*symlink"),
+        ({"/srv": ROOT_ONLY, "/srv/shared": (0, 0o41777), "/srv/shared/pool": ROOT_ONLY}, "/srv/shared must be .*mode 777"),
+        ({"/srv": ROOT_ONLY, "/srv/group": (0, 0o40775)}, "/srv/group must be .*mode 775"),
+    ],
 )
-def test_image_file_parent_must_be_root_only(monkeypatch, tmp_path, uid, mode, match):
-    monkeypatch.setattr(gpu_splitting.os, "lstat", lambda path: SimpleNamespace(st_uid=uid, st_mode=mode))
+def test_image_file_parent_refuses_an_unsafe_ancestor(monkeypatch, entries, match):
+    _directory_chain(monkeypatch, entries)
+    parent = list(entries)[-1]
 
     with pytest.raises(RuntimeError, match=match):
+        gpu_splitting._check_image_file_parent(f"{parent}/lium-docker.xfs")
+
+
+def test_image_file_parent_chain_root_only_passes(monkeypatch):
+    _directory_chain(monkeypatch, {"/var": ROOT_ONLY, "/var/lib": ROOT_ONLY})
+
+    gpu_splitting._check_image_file_parent("/var/lib/lium-docker.xfs")
+
+
+def test_image_file_parent_refuses_an_existing_target(monkeypatch, tmp_path):
+    monkeypatch.setattr(gpu_splitting.os, "lstat", lambda path: SimpleNamespace(st_uid=0, st_mode=0o40755))
+    (tmp_path / "lium-docker.xfs").write_text("planted")
+
+    with pytest.raises(RuntimeError, match="already exists"):
         gpu_splitting._check_image_file_parent(str(tmp_path / "lium-docker.xfs"))
 
 
@@ -330,10 +360,46 @@ def test_execute_setup_image_file_rollback_keeps_the_image_and_docker_down_when_
         gpu_splitting._execute_setup(plan)
 
     assert "still mounted" in str(exc_info.value)
+    assert f"The XFS image file {plan.target.resolved_target} was kept" in str(exc_info.value)
     assert Path(plan.target.resolved_target).exists()
     assert Path(plan.backup_dir).exists()
     assert ["systemctl", "start", "docker"] not in commands
     assert not any(args[0] in {"rmdir", "mv"} and args[-1] == docker_root for args in commands)
+
+
+@pytest.mark.parametrize("also_fails, expected_error", [("umount", "still mounted"), ("remount", "remount original Docker root")])
+def test_execute_setup_rsync_branch_rollback_keeps_docker_down_until_the_original_root_is_back(
+    monkeypatch, tmp_path, also_fails, expected_error
+):
+    own_mount = MountInfo(target=str(tmp_path / "docker"), source="/dev/sdc1", fstype="ext4", options=["rw"])
+    plan = _loop_file_plan(tmp_path, docker_mount=own_mount)
+    docker_root = plan.preflight.docker_state.docker_root_dir
+    restore = ["rsync", "-aHAX", "--numeric-ids", f"{plan.backup_dir}/", f"{docker_root}/"]
+    remount = ["mount", "-t", "ext4", "-o", "rw", "/dev/sdc1", docker_root]
+    and_fail = ["umount", docker_root] if also_fails == "umount" else remount
+    commands = _loop_file_host(monkeypatch, plan, fail_at=restore, and_fail=and_fail, and_fail_from=2 if also_fails == "umount" else 1)
+
+    with pytest.raises(RuntimeError, match="rsync failed") as exc_info:
+        gpu_splitting._execute_setup(plan)
+
+    assert expected_error in str(exc_info.value)
+    assert "start docker: skipped" in str(exc_info.value)
+    assert ["systemctl", "start", "docker"] not in commands
+    assert ["mv", plan.backup_dir, docker_root] not in commands
+
+
+def test_execute_setup_rsync_branch_rollback_restarts_docker_on_the_original_root(monkeypatch, tmp_path):
+    own_mount = MountInfo(target=str(tmp_path / "docker"), source="/dev/sdc1", fstype="ext4", options=["rw"])
+    plan = _loop_file_plan(tmp_path, docker_mount=own_mount)
+    docker_root = plan.preflight.docker_state.docker_root_dir
+    restore = ["rsync", "-aHAX", "--numeric-ids", f"{plan.backup_dir}/", f"{docker_root}/"]
+    commands = _loop_file_host(monkeypatch, plan, fail_at=restore)
+
+    with pytest.raises(RuntimeError, match="The XFS image file was removed"):
+        gpu_splitting._execute_setup(plan)
+
+    assert commands.index(["mount", "-t", "ext4", "-o", "rw", "/dev/sdc1", docker_root]) < commands.index(["systemctl", "start", "docker"])
+    assert not Path(plan.target.resolved_target).exists()
 
 
 def test_pre_stop_checks_refuse_containers_left_in_the_containerd_store(monkeypatch, tmp_path):

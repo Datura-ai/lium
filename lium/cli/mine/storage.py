@@ -580,19 +580,32 @@ def load_mounted_filesystems(runner: Runner, devices: list[BlockDevice]) -> list
 
 
 def _source_disk_is_local(source: str, devices: list[BlockDevice]) -> bool:
-    # every ancestor counts: a USB disk stays a USB disk under a partition, LVM or md (lsblk shows a device with
-    # several parents once per parent; the walk follows the first)
-    device = get_device_by_path(devices, _mount_device(source))
-    if device is None:
-        # zfs and bind sources name no lsblk device; the filesystem type allowlist is the gate for those
-        return True
-    by_kernel_name = {item.kernel_name: item for item in flatten_devices(devices)}
-    seen: set[str] = set()
-    while device is not None and device.kernel_name not in seen:
-        seen.add(device.kernel_name)
-        if device.is_removable or (device.transport or "").lower() in NON_LOCAL_TRANSPORTS:
+    # every ancestor counts: a USB disk stays a USB disk under a partition, LVM or md; lsblk lists a device with
+    # several parents once per parent, so the parents are collected from every listing and all of them walked
+    source = _mount_device(source)
+    listings = flatten_devices(devices)
+    by_kernel_name = {item.kernel_name: item for item in listings}
+    parents: dict[str, set[str]] = {}
+    for item in listings:
+        if item.parent_kernel_name:
+            parents.setdefault(item.kernel_name, set()).add(item.parent_kernel_name)
+    start = next((item for item in listings if source in {item.path, f"/dev/{item.kernel_name}"}), None)
+    if start is None:
+        # zfs and bind sources name no lsblk device; the filesystem type allowlist is the gate for those.
+        # A /dev path lsblk does not list is not known to be local
+        return not source.startswith("/dev/")
+    pending, seen = [start.kernel_name], set()
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        item = by_kernel_name.get(name)
+        if item is None:
+            continue
+        if item.is_removable or (item.transport or "").lower() in NON_LOCAL_TRANSPORTS:
             return False
-        device = by_kernel_name.get(device.parent_kernel_name or "")
+        pending.extend(parents.get(name, ()))
     return True
 
 

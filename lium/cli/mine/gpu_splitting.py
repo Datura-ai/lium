@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from functools import wraps
 from datetime import datetime, timezone
 from pathlib import Path
+from stat import S_ISDIR, S_ISLNK
 from typing import Optional
 
 import click
@@ -77,6 +78,7 @@ class _SetupExecutionState:
     udev_rule_written: bool = False
     docker_root_moved: bool = False
     loop_file_created: bool = False
+    loop_file_removed: bool = False
 
 
 def run_command(args: list[str], check: bool = True, capture: bool = True) -> CommandResult:
@@ -602,14 +604,19 @@ def _same_filesystem(path_a: str, path_b: str) -> bool:
 
 
 def _check_image_file_parent(image_file: str):
-    # only root may rename or replace entries next to the image file, or the exclusive create above is not enough
+    # every directory from / down: O_EXCL guards the last component only, and the kernel reports the
+    # loop's backing file by its resolved path, so a symlink or a user-owned ancestor breaks the udev rule
     parent = os.path.dirname(image_file)
-    stat = os.lstat(parent)
-    if not os.path.isdir(parent) or os.path.islink(parent) or stat.st_uid != 0 or stat.st_mode & 0o022:
-        raise RuntimeError(
-            f"{parent} must be a directory owned by root and writable by root only (mode {stat.st_mode & 0o777:o}); "
-            f"the image file would otherwise be created where another user can replace it. Pass --file with a path under /var/lib"
-        )
+    directory = "/"
+    for component in parent.strip("/").split("/") if parent != "/" else []:
+        directory = os.path.join(directory, component)
+        stat = os.lstat(directory)
+        if not S_ISDIR(stat.st_mode) or stat.st_uid != 0 or stat.st_mode & 0o022:
+            raise RuntimeError(
+                f"{directory} must be a directory owned by root and writable by root only (mode {stat.st_mode & 0o777:o}, "
+                f"{'symlink' if S_ISLNK(stat.st_mode) else 'uid ' + str(stat.st_uid)}); the image file is reached through it. "
+                "Pass --file with a path under /var/lib"
+            )
     if os.path.lexists(image_file):
         raise RuntimeError(f"{image_file} already exists; remove it or choose another path")
 
@@ -841,17 +848,19 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
         _rollback_attempt(errors, "stop docker", lambda: run_command(["systemctl", "stop", "docker"], True, True))
         _rollback_attempt(errors, "stop docker.socket", lambda: run_command(["systemctl", "stop", "docker.socket"], False, True))
 
-    unmounted = True
+    # data_restored: the original data root is back under docker_root, whichever way the backup was taken
+    unmounted = data_restored = True
     if state.docker_root_mounted_on_target:
         unmounted = _rollback_attempt(errors, f"unmount {docker_root}", lambda: run_command(["umount", docker_root], True, True))
-        if unmounted and state.original_docker_mount.target == docker_root and state.original_docker_mount.source != target_partition:
-            _rollback_attempt(
+        if not unmounted:
+            data_restored = False
+        elif state.original_docker_mount.target == docker_root and state.original_docker_mount.source != target_partition:
+            data_restored = _rollback_attempt(
                 errors,
                 f"remount original Docker root {state.original_docker_mount.source}",
                 lambda: run_command(_mount_command_for_mount_info(state.original_docker_mount, docker_root), True, True),
             )
 
-    data_restored = True
     if state.docker_root_moved:
         if unmounted:
             data_restored = _rollback_attempt(errors, f"move Docker data back to {docker_root}", lambda: _move_docker_root_back(plan))
@@ -875,7 +884,7 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
 
     if state.loop_file_created:
         if unmounted:
-            _rollback_attempt(errors, f"remove {target_partition}", lambda: os.unlink(target_partition))
+            state.loop_file_removed = _rollback_attempt(errors, f"remove {target_partition}", lambda: os.unlink(target_partition))
         else:
             errors.append(f"remove {target_partition}: skipped, still mounted at {docker_root}")
 
@@ -883,7 +892,7 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
         if data_restored:
             _rollback_attempt(errors, "start docker", lambda: run_command(["systemctl", "start", "docker"], True, True))
         else:
-            errors.append(f"start docker: skipped, Docker data is not back at {docker_root} (it is at {plan.backup_dir})")
+            errors.append(f"start docker: skipped, Docker data is not back at {docker_root} (backup at {plan.backup_dir})")
 
     return errors
 
@@ -896,17 +905,21 @@ def _move_docker_root_back(plan: SetupPlan):
     run_command(["mv", plan.backup_dir, docker_root], True, True)
 
 
-def _irreversible_note(plan: SetupPlan) -> str:
+def _irreversible_note(plan: SetupPlan, state: _SetupExecutionState) -> str:
     if plan.target.classification == "loop_file":
-        return "The XFS image file was removed."
+        if state.loop_file_removed:
+            return "The XFS image file was removed."
+        if state.loop_file_created:
+            return f"The XFS image file {plan.target.resolved_target} was kept; see the rollback errors before removing it."
+        return "No XFS image file was created."
     return "Disk partitioning and filesystem formatting were not rolled back."
 
 
-def _setup_failure_message(plan: SetupPlan, exc: Exception, rollback_errors: list[str]) -> str:
+def _setup_failure_message(plan: SetupPlan, state: _SetupExecutionState, exc: Exception, rollback_errors: list[str]) -> str:
     lines = [
         f"GPU splitting setup failed: {exc}",
         "Rollback of reversible host changes was attempted.",
-        _irreversible_note(plan),
+        _irreversible_note(plan, state),
         f"Backup remains at {plan.backup_dir}",
     ]
     if rollback_errors:
@@ -934,7 +947,8 @@ def _pre_stop_checks(plan: SetupPlan):
         if existing:
             raise RuntimeError(
                 f"{len(existing)} containers exist in Docker's containerd image store; after the switch to overlay2 "
-                "Docker would no longer see them. Remove them (`docker rm`) and run setup again"
+                "Docker would no longer see them. Copy what you need out of them first (`docker save` keeps images "
+                "only, not a container's own files), remove them (`docker rm`) and run setup again"
             )
     docker_root = plan.preflight.docker_state.docker_root_dir
     used = int(run_command(["du", "-sxb", docker_root], True, True).stdout.split()[0])
@@ -1128,14 +1142,14 @@ def _execute_setup(plan: SetupPlan):
     except Exception as exc:
         console.error(f"Setup failed: {exc}")
         console.warning("Attempting rollback of reversible host changes.")
-        console.warning(_irreversible_note(plan))
         console.warning(f"Backup remains at {plan.backup_dir}")
         rollback_errors = _rollback_setup(plan, state, target_partition)
+        console.warning(_irreversible_note(plan, state))
         if rollback_errors:
             console.error("Rollback encountered additional errors.")
         else:
             console.success("Reversible host changes rolled back and Docker was restarted.")
-        raise RuntimeError(_setup_failure_message(plan, exc, rollback_errors)) from exc
+        raise RuntimeError(_setup_failure_message(plan, state, exc, rollback_errors)) from exc
 
 
 @click.group("gpu-splitting")

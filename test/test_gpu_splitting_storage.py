@@ -374,6 +374,11 @@ def _filesystem(target, avail_gib, size_gib=500, fstype="ext4", source="/dev/nvm
     )
 
 
+def _block(path, kernel_name, type, parent=None, transport=None, children=()):
+    return BlockDevice(path=path, name=path.rsplit("/", 1)[-1], kernel_name=kernel_name, type=type, size_bytes=1024**4, fstype=None,
+                       mountpoints=[], parent_kernel_name=parent, model=None, serial=None, transport=transport, children=list(children))
+
+
 def test_load_mounted_filesystems_marks_local_block_filesystems_only():
     gib = 1024**3
     findmnt = {
@@ -394,8 +399,11 @@ def test_load_mounted_filesystems_marks_local_block_filesystems_only():
                       mountpoints=[], parent_kernel_name=None, model=None, serial=None, transport="usb", children=[
                           BlockDevice(path="/dev/sdb1", name="sdb1", kernel_name="sdb1", type="part", size_bytes=2000 * gib,
                                       fstype="ext4", mountpoints=["/media/usb"], parent_kernel_name="sdb", model=None, serial=None)])
+    nvme = _block("/dev/nvme0n1", "nvme0n1", "disk", transport="nvme", children=[
+        _block("/dev/nvme0n1p1", "nvme0n1p1", "part", parent="nvme0n1"), _block("/dev/nvme0n1p2", "nvme0n1p2", "part", parent="nvme0n1")])
+    raid = _block("/dev/sda", "sda", "disk", transport="sata", children=[_block("/dev/md0", "md0", "raid1", parent="sda")])
 
-    filesystems = load_mounted_filesystems(runner, [usb])
+    filesystems = load_mounted_filesystems(runner, [usb, nvme, raid])
 
     assert {fs.target: fs.local for fs in filesystems} == {
         "/": True, "/raid": True, "/mnt/nfs": False, "/media/usb": False, "/boot/efi": False
@@ -491,6 +499,30 @@ def test_source_disk_is_local_walks_every_ancestor():
     assert _source_disk_is_local("/dev/mapper/vg-data", [usb, nvme]) is False
     assert _source_disk_is_local("/dev/sdb1", [usb, nvme]) is False
     assert _source_disk_is_local("/dev/nvme0n1p2", [usb, nvme]) is True
+
+
+@pytest.mark.parametrize("first_parent", ["sata", "usb"])
+def test_source_disk_is_local_walks_every_parent_of_a_multi_disk_volume(first_parent):
+    # lsblk lists the LV under each physical volume; a USB member makes it non-local whichever listing comes first
+    lv_under_sata = _block("/dev/mapper/vg-data", "dm-0", "lvm", parent="sda1")
+    lv_under_usb = _block("/dev/mapper/vg-data", "dm-0", "lvm", parent="sdb1")
+    sata = _block("/dev/sda", "sda", "disk", transport="sata", children=[_block("/dev/sda1", "sda1", "part", parent="sda", children=[lv_under_sata])])
+    usb = _block("/dev/sdb", "sdb", "disk", transport="usb", children=[_block("/dev/sdb1", "sdb1", "part", parent="sdb", children=[lv_under_usb])])
+    devices = [sata, usb] if first_parent == "sata" else [usb, sata]
+
+    assert _source_disk_is_local("/dev/mapper/vg-data", devices) is False
+    assert _source_disk_is_local("/dev/dm-0", devices) is False
+
+
+@pytest.mark.parametrize(
+    "source, local",
+    [("/dev/dm-0", False), ("/dev/mapper/vg-data", False), ("/dev/sdd1", False), ("/dev/sdd", False), ("tank/root", True), ("/dev/nvme0n1p2", True)],
+)
+def test_source_disk_is_local_matches_kernel_names_and_distrusts_unlisted_dev_paths(source, local):
+    usb = _block("/dev/sdb", "sdb", "disk", transport="usb", children=[_block("/dev/mapper/vg-data", "dm-0", "lvm", parent="sdb")])
+    nvme = _block("/dev/nvme0n1", "nvme0n1", "disk", transport="nvme", children=[_block("/dev/nvme0n1p2", "nvme0n1p2", "part", parent="nvme0n1")])
+
+    assert _source_disk_is_local(source, [usb, nvme]) is local
 
 
 def test_plan_loop_file_target_leaves_var_lib_when_var_is_its_own_filesystem():
