@@ -8,12 +8,100 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from click.testing import CliRunner
+
+from lium.cli.actions import ActionResult
 from lium.cli.up import actions as up_actions
+from lium.cli.up import command as up_command
 from lium.cli.utils import EXIT_GENERAL_ERROR
-from lium.sdk import LiumRateLimitError
+from lium.sdk import (
+    Config,
+    LiumRateLimitError,
+    PodInfo,
+)
 from lium.sdk.client import Lium
 
-from test_up_progress_timeout import _Client, _flat, _pod, _run_up
+
+# helpers from test/test_up_progress_timeout.py, inlined when that file was cut
+def _pod(status: str, ssh_cmd: str | None = "ssh user@pod.example -p 20299") -> PodInfo:
+    return PodInfo(
+        id="pod-1",
+        name="train",
+        status=status,
+        huid="eager-wolf-aa",
+        ssh_cmd=ssh_cmd,
+        ports={},
+        created_at="2026-09-05T10:00:00Z",
+        updated_at="2026-09-05T10:00:00Z",
+        executor=None,
+        template={},
+        removal_scheduled_at=None,
+        jupyter_installation_status=None,
+        jupyter_url=None,
+    )
+
+class _Client(Lium):
+    """A client whose `ps` replays a scripted sequence of pod lists and whose event log is fixed."""
+
+    def __init__(self, sequence, events=None, events_error=None):
+        super().__init__(Config(api_key="test"))
+        self.sequence = list(sequence)
+        self.events = events or []
+        self.events_error = events_error
+        self.event_requests = 0
+
+    def ps(self):
+        if not self.sequence:
+            return []
+        return self.sequence.pop(0) if len(self.sequence) > 1 else self.sequence[0]
+
+    def _request(self, method, endpoint, **kwargs):
+        assert (method, endpoint) == ("GET", "/pods/pod-1/events")
+        self.event_requests += 1
+        if self.events_error:
+            raise self.events_error
+        return SimpleNamespace(json=lambda: self.events)
+
+def _executor():
+    return SimpleNamespace(
+        id="exec-1", huid="brave-fox-3a", gpu_count=1, gpu_type="A6000",
+        price_per_hour=0.24, available_port_count=10, download_speed=1000,
+    )
+
+def _run_up(monkeypatch, *, resolve_action=None, rent_action=None, wait_action=None, args=()):
+    class _Lium:
+        workspaces = SimpleNamespace(current=lambda: None)  # a server without workspaces: `up` reads it for its workspace line
+
+        def get_deployment_estimate(self, *a, **k):
+            return {}
+
+    class _Resolve:
+        def execute(self, ctx):
+            return ActionResult(ok=True, data={"executor": _executor()})
+
+    class _Template:
+        def execute(self, ctx):
+            return ActionResult(ok=True, data={"template": SimpleNamespace(id="tmpl-1")})
+
+    class _Rent:
+        def execute(self, ctx):
+            return ActionResult(ok=True, data={"pod_info": {}, "pod_id": "pod-1", "pod_name": "train"})
+
+    class _Wait:
+        def execute(self, ctx):
+            return ActionResult(ok=True, data={"pod": _pod("RUNNING")})
+
+    monkeypatch.setattr(up_command, "ensure_config", lambda: None)
+    monkeypatch.setattr(up_command, "Lium", lambda **kwargs: _Lium())
+    monkeypatch.setattr(up_command, "ResolveExecutorAction", resolve_action or _Resolve)
+    monkeypatch.setattr(up_command, "ResolveTemplateAction", _Template)
+    monkeypatch.setattr(up_command, "RentPodAction", rent_action or _Rent)
+    monkeypatch.setattr(up_command, "WaitReadyAction", wait_action or _Wait)
+    return CliRunner().invoke(up_command.up_command, ["brave-fox-3a", "--yes", "--no-ssh", *args])
+
+def _flat(output: str) -> str:
+    return " ".join(output.split())
+
 
 
 class _Throttled(_Client):
