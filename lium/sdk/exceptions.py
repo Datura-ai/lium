@@ -28,7 +28,9 @@ class LiumSessionError(LiumAuthError):
 
 
 class LiumRateLimitError(LiumError):
-    """Rate limit exceeded."""
+    """Rate limit exceeded. ``retry_after`` is the response's ``Retry-After`` in seconds, ``None`` when absent."""
+
+    retry_after: float | None = None
 
 
 class LiumServerError(LiumError):

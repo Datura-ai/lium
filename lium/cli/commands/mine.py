@@ -143,11 +143,16 @@ def _clone_or_update_repo(target_dir: Path, branch: str):
         _run(f"git clone --branch {branch} https://github.com/Datura-ai/lium-io.git {target_dir}")
 
 
-def _check_prereqs():
+def _check_prereqs(compute_dir: Path | None = None):
     if not _exists("nvidia-smi"):
         raise Exception("NVIDIA GPU driver not found (nvidia-smi missing)")
 
     _run("nvidia-smi --query-gpu=name --format=csv,noheader")
+
+    # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
+    # provider learns it from the preflight or a validator cycle later. The installer also installs the
+    # NVIDIA Container Toolkit, so it runs before the toolkit check.
+    failure = _install_sysbox(compute_dir) if compute_dir and not _has_sysbox() else ""
 
     if not _exists("nvidia-container-cli"):
         raise Exception("NVIDIA Container Toolkit not found (required for Docker GPU access)")
@@ -157,14 +162,32 @@ def _check_prereqs():
 
     _run("docker info")
 
-    # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
-    # provider learns it from the preflight or a validator cycle later.
     if not _has_sysbox():
         raise Exception(
             "Sysbox runtime not found in Docker (required by validators).\n"
             f"Install it with: {_SYSBOX_SETUP_COMMAND}\n"
-            "then run `lium mine` again."
+            "then run `lium mine` again." + (f"\n{failure}" if failure else "")
         )
+    if failure:
+        # the installer registers the runtime before its GPU checks, so a late failure still leaves sysbox-runc
+        console.warning(f"The Sysbox installer reported a failure after installing the runtime:\n{failure}")
+
+
+def _install_sysbox(compute_dir: Path) -> str:
+    """Run the checkout's Sysbox installer once (DAH-4778: one manual step fewer). Same privilege rule as step 2's
+    install script: root, or passwordless sudo. No terminal input, so its one confirmation is skipped.
+    Returns the failure's tail, empty on success."""
+    import os
+
+    script = compute_dir / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh"
+    if not script.exists():
+        return ""
+    sudo = "" if os.geteuid() == 0 else "sudo -n "
+    try:
+        _run(f"{sudo}bash {shlex.quote(str(script))} < /dev/null")
+    except RuntimeError as exc:
+        return str(exc)[-2000:]
+    return ""
 
 
 # Validators are to score 0 a node whose Docker cannot cap a container's disk (STORAGE_LIMIT_REQUIRED): one renter
@@ -252,7 +275,7 @@ def _setup_docker_storage():
         console.warning(f"Docker storage was not set up: {exc}\n{manual}")
 
 
-# The printed command fetches the official installer, never the checkout's copy; the CLI does not run it (it needs sudo).
+# The printed command fetches the official installer, never the checkout's copy (what `lium mine` runs itself).
 _SYSBOX_SETUP_COMMAND = (
     "curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-io/main/neurons/executor/"
     "nvidia_docker_sysbox_setup.sh | sudo bash"
@@ -708,7 +731,7 @@ def _gather_inputs(
     return answers
 
 
-PREFLIGHT_IMAGE = "daturaai/lium-validator:latest"
+PREFLIGHT_IMAGE = "daturaai/compute-subnet-validator:preflight"
 
 
 class _StepMessage:
@@ -1030,7 +1053,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             _install_executor_tools(target_dir)
 
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
-            _check_prereqs()
+            _check_prereqs(target_dir)
             storage_ok = _docker_storage_limited()
         if not storage_ok:
             _setup_docker_storage()   # outside the spinner: it prints the plan and may ask to confirm
