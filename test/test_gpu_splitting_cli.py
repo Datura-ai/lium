@@ -162,7 +162,7 @@ def test_gpu_splitting_help_is_top_level():
 def test_gpu_splitting_check_prints_plan_without_prompt(monkeypatch):
     monkeypatch.setattr(gpu_splitting, "timed_step_status", _no_spinner)
     monkeypatch.setattr(gpu_splitting, "_preflight", _sample_preflight)
-    monkeypatch.setattr(gpu_splitting, "_build_setup_plan", lambda preflight, device: _sample_plan())
+    monkeypatch.setattr(gpu_splitting, "_build_setup_plan", lambda preflight, device, *_: _sample_plan())
     monkeypatch.setattr(
         gpu_splitting,
         "evaluate_candidates",
@@ -217,7 +217,7 @@ def test_gpu_splitting_verify_reports_failures(monkeypatch):
 def test_gpu_splitting_setup_aborts_on_negative_confirmation(monkeypatch):
     monkeypatch.setattr(gpu_splitting, "timed_step_status", _no_spinner)
     monkeypatch.setattr(gpu_splitting, "_preflight", _sample_preflight)
-    monkeypatch.setattr(gpu_splitting, "_build_setup_plan", lambda preflight, device: _sample_plan())
+    monkeypatch.setattr(gpu_splitting, "_build_setup_plan", lambda preflight, device, *_: _sample_plan())
     monkeypatch.setattr(gpu_splitting.sys, "stdin", SimpleNamespace(isatty=lambda: True))
     monkeypatch.setattr(gpu_splitting.Prompt, "ask", lambda *args, **kwargs: "")
     called = {"executed": False}
@@ -235,7 +235,7 @@ def test_gpu_splitting_setup_aborts_on_negative_confirmation(monkeypatch):
 def test_gpu_splitting_setup_yes_prints_plan_then_executes(monkeypatch):
     monkeypatch.setattr(gpu_splitting, "timed_step_status", _no_spinner)
     monkeypatch.setattr(gpu_splitting, "_preflight", _sample_preflight)
-    monkeypatch.setattr(gpu_splitting, "_build_setup_plan", lambda preflight, device: _sample_plan())
+    monkeypatch.setattr(gpu_splitting, "_build_setup_plan", lambda preflight, device, *_: _sample_plan())
     called = {"executed": False}
 
     def execute(plan):
@@ -259,7 +259,7 @@ def test_gpu_splitting_check_reports_precise_explicit_device_error(monkeypatch):
     monkeypatch.setattr(
         gpu_splitting,
         "_build_setup_plan",
-        lambda preflight, device: (_ for _ in ()).throw(RuntimeError("Unsafe or unsupported device /dev/sda: protected_root_or_docker")),
+        lambda preflight, device, *_: (_ for _ in ()).throw(RuntimeError("Unsafe or unsupported device /dev/sda: protected_root_or_docker")),
     )
 
     result = CliRunner().invoke(cli, ["gpu-splitting", "check", "--device", "/dev/null"])

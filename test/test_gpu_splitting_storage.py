@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from lium.cli.mine import storage
 from lium.cli.mine.docker_config import build_verification_result, inspect_docker_state, load_daemon_json, merge_overlay2
-from lium.cli.mine.models import BlockDevice, CommandResult, MountInfo
-from lium.cli.mine.storage import auto_select_target, load_mount_info, resolve_explicit_target
+from lium.cli.mine.models import BlockDevice, CommandResult, MountedFilesystem, MountInfo
+from lium.cli.mine.storage import (
+    NoSafeTargetError,
+    auto_select_target,
+    load_mounted_filesystems,
+    load_mount_info,
+    plan_loop_file_target,
+    resolve_explicit_target,
+)
 
 
 def _runner_factory(responses: dict[tuple[str, ...], CommandResult]):
@@ -348,3 +356,107 @@ def test_a_disk_with_a_mounted_partition_is_never_offered_for_a_new_partition():
         _dev("nvme1n1", "disk", [_dev("nvme1n1p1", "part", mount="/data", pkname="nvme1n1")]),
     ])
     assert _verdicts(runner, "/dev/nvme0n1p1")["/dev/nvme1n1"] == "unsupported_or_ambiguous"
+
+
+def test_auto_select_raises_no_safe_target_error_when_nothing_is_safe():
+    with pytest.raises(NoSafeTargetError):
+        auto_select_target(_runner_factory({}), [], _root_mount(), _docker_mount())
+
+
+def _filesystem(target, avail_gib, size_gib=500, fstype="ext4", source="/dev/nvme0n1p2", local=True) -> MountedFilesystem:
+    return MountedFilesystem(
+        target=target, source=source, fstype=fstype, size_bytes=size_gib * 1024**3, avail_bytes=avail_gib * 1024**3, local=local
+    )
+
+
+def test_load_mounted_filesystems_marks_local_block_filesystems_only():
+    gib = 1024**3
+    findmnt = {
+        "filesystems": [
+            {"target": "/", "source": "/dev/nvme0n1p2", "fstype": "ext4", "size": 500 * gib, "avail": 300 * gib},
+            {"target": "/raid", "source": "/dev/md0", "fstype": "xfs", "size": 4000 * gib, "avail": 3500 * gib},
+            {"target": "/mnt/nfs", "source": "nas:/export", "fstype": "nfs4", "size": 9000 * gib, "avail": 8000 * gib},
+            {"target": "/media/usb", "source": "/dev/sdb1", "fstype": "ext4", "size": 2000 * gib, "avail": 1900 * gib},
+            {"target": "/boot/efi", "source": "/dev/nvme0n1p1", "fstype": "vfat", "size": 1 * gib, "avail": 1 * gib},
+        ]
+    }
+    runner = _runner_factory({
+        ("findmnt", "--json", "--bytes", "--list", "--real", "-o", "TARGET,SOURCE,FSTYPE,SIZE,AVAIL"): CommandResult(
+            args=[], stdout=json.dumps(findmnt), stderr="", returncode=0
+        )
+    })
+    usb = BlockDevice(path="/dev/sdb", name="sdb", kernel_name="sdb", type="disk", size_bytes=2000 * gib, fstype=None,
+                      mountpoints=[], parent_kernel_name=None, model=None, serial=None, transport="usb", children=[
+                          BlockDevice(path="/dev/sdb1", name="sdb1", kernel_name="sdb1", type="part", size_bytes=2000 * gib,
+                                      fstype="ext4", mountpoints=["/media/usb"], parent_kernel_name="sdb", model=None, serial=None)])
+
+    filesystems = load_mounted_filesystems(runner, [usb])
+
+    assert {fs.target: fs.local for fs in filesystems} == {
+        "/": True, "/raid": True, "/mnt/nfs": False, "/media/usb": False, "/boot/efi": False
+    }
+    assert filesystems[1].avail_bytes == 3500 * gib
+
+
+def test_plan_loop_file_takes_the_filesystem_with_most_free_space_minus_the_reserve():
+    plan = plan_loop_file_target([_filesystem("/", 300), _filesystem("/raid", 3500, size_gib=4000, source="/dev/md0")], "/var/lib/docker")
+
+    assert plan.classification == "loop_file" and plan.selection_mode == "auto"
+    assert plan.resolved_target == "/raid/lium-docker.xfs" and plan.loop_file_filesystem == "/raid"
+    assert plan.loop_file_reserve_bytes == 400 * 1024**3   # 10% of 4000 GiB beats the 20 GiB floor
+    assert plan.loop_file_size_bytes == 3100 * 1024**3
+    assert plan.needs_format is True and plan.needs_partition_creation is False
+
+
+def test_plan_loop_file_on_root_goes_to_var_lib_and_keeps_at_least_20_gib():
+    plan = plan_loop_file_target([_filesystem("/", 150, size_gib=180)], "/var/lib/docker")
+
+    assert plan.resolved_target == "/var/lib/lium-docker.xfs"
+    assert plan.loop_file_reserve_bytes == 20 * 1024**3 and plan.loop_file_size_bytes == 130 * 1024**3
+
+
+def test_plan_loop_file_refuses_under_100_gib_with_the_numbers():
+    with pytest.raises(RuntimeError, match="would get 66 GiB \\(86 GiB free, 20 GiB kept"):
+        plan_loop_file_target([_filesystem("/", 86, size_gib=120)], "/var/lib/docker")
+
+
+def test_plan_loop_file_skips_a_docker_root_that_is_its_own_mount():
+    filesystems = [_filesystem("/", 150), _filesystem("/var/lib/docker", 900, source="/dev/sdc1")]
+
+    plan = plan_loop_file_target(filesystems, "/var/lib/docker")
+
+    assert plan.loop_file_filesystem == "/"
+
+
+def test_plan_loop_file_explicit_path_and_size(tmp_path):
+    filesystems = [_filesystem("/", 300), _filesystem("/raid", 3500, size_gib=4000, source="/dev/md0")]
+
+    plan = plan_loop_file_target(filesystems, "/var/lib/docker", "/raid/pool/docker.xfs", 500 * 1024**3)
+
+    assert plan.selection_mode == "explicit" and plan.loop_file_filesystem == "/raid"
+    assert plan.resolved_target == "/raid/pool/docker.xfs" and plan.loop_file_size_bytes == 500 * 1024**3
+
+
+@pytest.mark.parametrize(
+    "image_file, size_gib, match",
+    [
+        ("/var/lib/docker/pool.xfs", None, "inside /var/lib/docker"),
+        ("/raid/pool.xfs", 3200, "does not fit on /raid"),
+        ("/mnt/nfs/pool.xfs", None, "not on a local filesystem"),
+    ],
+)
+def test_plan_loop_file_refuses_bad_explicit_requests(image_file, size_gib, match):
+    filesystems = [
+        _filesystem("/", 300),
+        _filesystem("/raid", 3500, size_gib=4000, source="/dev/md0"),
+        _filesystem("/mnt/nfs", 8000, size_gib=9000, fstype="nfs4", source="nas:/export", local=False),
+    ]
+    with pytest.raises(RuntimeError, match=match):
+        plan_loop_file_target(filesystems, "/var/lib/docker", image_file, size_gib * 1024**3 if size_gib else None)
+
+
+def test_merge_overlay2_switches_off_the_containerd_snapshotter_when_asked():
+    merged, changed = merge_overlay2({"storage-driver": "overlay2", "features": {"buildkit": True}}, disable_containerd_snapshotter=True)
+
+    assert changed is True
+    assert merged["features"] == {"buildkit": True, "containerd-snapshotter": False}

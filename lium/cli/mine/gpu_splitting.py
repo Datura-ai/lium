@@ -22,24 +22,35 @@ from rich.table import Table
 
 from ..utils import console, timed_step_status
 from .docker_config import build_verification_result, inspect_docker_state, load_daemon_json, merge_overlay2
-from .models import CandidateEvaluation, CommandResult, MountInfo, PreflightResult, SetupPlan, VerificationResult
+from .models import (
+    DOCKER_DROP_IN_PATH,
+    CandidateEvaluation,
+    CommandResult,
+    MountInfo,
+    PreflightResult,
+    SetupPlan,
+    VerificationResult,
+)
 from .storage import (
+    MIN_TARGET_BYTES,
+    NON_LOCAL_TRANSPORTS,
+    NoSafeTargetError,
     auto_select_target,
     evaluate_candidates,
     get_device_by_path,
     has_project_quota_option,
     load_block_devices,
+    load_mounted_filesystems,
     load_mount_info,
+    plan_loop_file_target,
     resolve_explicit_target,
 )
 
 GPU_SPLITTING_DOC_URL = "https://docs.lium.io/providers/nodes/gpu-splitting"
 # fstab and the cutover mount the target at this path; another data-root would be left on the old disk
 DEFAULT_DOCKER_ROOT = "/var/lib/docker"
-# a few GPU images fill a smaller disk, and then the host stalls exactly as it would without the limit
-MIN_TARGET_BYTES = 100 * 1024**3
-# Docker storage must outlive a cable pull or a network blip
-NON_LOCAL_TRANSPORTS = {"usb", "iscsi", "fc", "mmc"}
+# the image file is mounted by path through a loop device; direct I/O is set by the docker.service drop-in
+LOOP_FILE_FSTAB_OPTIONS = "loop,pquota,noatime"
 
 
 @dataclass
@@ -59,6 +70,10 @@ class _SetupExecutionState:
     daemon_json_written: bool = False
     fstab_written: bool = False
     docker_root_mounted_on_target: bool = False
+    original_drop_in: Optional[_FileSnapshot] = None
+    drop_in_written: bool = False
+    docker_root_moved: bool = False
+    loop_file_created: bool = False
 
 
 def run_command(args: list[str], check: bool = True, capture: bool = True) -> CommandResult:
@@ -172,6 +187,8 @@ def _preflight() -> PreflightResult:
         "xfs_info",
         "wipefs",
         "du",
+        "fallocate",
+        "losetup",
     ]:
         _require_binary(binary)
 
@@ -197,7 +214,12 @@ def _preflight() -> PreflightResult:
     )
 
 
-def _build_setup_plan(preflight: PreflightResult, device: Optional[str]) -> SetupPlan:
+def _build_setup_plan(
+    preflight: PreflightResult,
+    device: Optional[str],
+    image_file: Optional[str] = None,
+    image_size_gib: Optional[int] = None,
+) -> SetupPlan:
     """Build the full destructive plan without mutating the host.
 
     Commands run directly here:
@@ -208,10 +230,13 @@ def _build_setup_plan(preflight: PreflightResult, device: Optional[str]) -> Setu
     Commands delegated through helpers:
 
     - explicit device validation / auto-selection from `storage.py`
+    - `findmnt --json --bytes --list --real ...` when the target is an XFS image file
     - `/etc/docker/daemon.json` load + merge from `docker_config.py`
 
-    The result is the exact plan that `check` prints and `setup` confirms
-    before the first host mutation.
+    With no spare disk or partition (or with `--file` / `--size`) the target is an XFS
+    image file on the local filesystem with the most free space, mounted through a loop
+    device. The result is the exact plan that `check` prints and `setup` confirms before
+    the first host mutation.
     """
     docker_root = preflight.docker_state.docker_root_dir
     if docker_root != DEFAULT_DOCKER_ROOT:
@@ -219,6 +244,8 @@ def _build_setup_plan(preflight: PreflightResult, device: Optional[str]) -> Setu
             f"Docker's data-root is {docker_root}; setup supports only {DEFAULT_DOCKER_ROOT}. "
             f"Set the storage up by hand: {GPU_SPLITTING_DOC_URL}"
         )
+    if device and (image_file or image_size_gib):
+        raise RuntimeError("--device formats a disk and --file/--size create an image file; pass one of them")
     if device:
         target = resolve_explicit_target(
             run_command,
@@ -227,47 +254,67 @@ def _build_setup_plan(preflight: PreflightResult, device: Optional[str]) -> Setu
             preflight.docker_mount,
             device,
         )
+    elif image_file or image_size_gib:
+        target = _loop_file_target(preflight, image_file, image_size_gib)
     else:
-        target = auto_select_target(
-            run_command,
-            preflight.block_devices,
-            preflight.root_mount,
-            preflight.docker_mount,
-        )
+        try:
+            target = auto_select_target(
+                run_command,
+                preflight.block_devices,
+                preflight.root_mount,
+                preflight.docker_mount,
+            )
+        except NoSafeTargetError:
+            target = _loop_file_target(preflight, None, None)
 
-    _check_target_device(preflight, target)
+    loop_file = target.classification == "loop_file"
+    if not loop_file:
+        _check_target_device(preflight, target)
 
     daemon_json_path = "/etc/docker/daemon.json"
     existing_daemon = load_daemon_json(daemon_json_path)
-    merged_daemon, daemon_changed = merge_overlay2(existing_daemon)
+    # the containerd image store reports its driver as `overlayfs`
+    leaves_containerd_store = preflight.docker_state.storage_driver == "overlayfs"
+    merged_daemon, daemon_changed = merge_overlay2(existing_daemon, disable_containerd_snapshotter=leaves_containerd_store)
     target_path = target.created_partition_path or target.resolved_target
-    uuid = ""
-    if not target.needs_partition_creation:
+    fstab_entry = ""
+    if loop_file:
+        fstab_entry = _fstab_entry(target_path, LOOP_FILE_FSTAB_OPTIONS)
+    elif not target.needs_partition_creation:
         try:
-            uuid = _get_uuid(target_path)
+            fstab_entry = _fstab_entry(f"UUID={_get_uuid(target_path)}", "defaults,pquota")
         except RuntimeError:
-            uuid = ""
+            fstab_entry = ""
 
+    gib = 1024**3
     destructive_actions = []
+    if loop_file:
+        destructive_actions.append(
+            f"create the XFS image file {target.resolved_target}: {target.loop_file_size_bytes // gib} GiB on "
+            f"{target.loop_file_filesystem}, {target.loop_file_reserve_bytes // gib} GiB stay free for the system"
+        )
     if target.needs_new_gpt:
         destructive_actions.append(f"create GPT label on {target.parent_disk}")
     if target.needs_partition_creation:
         destructive_actions.append(f"create partition on {target.parent_disk}")
-    if target.needs_format:
+    if target.needs_format and not loop_file:
         destructive_actions.append(f"format target as XFS: {target.resolved_target}")
     destructive_actions.extend(
         [
-            f"stop Docker services for {preflight.docker_state.docker_root_dir}",
-            "back up Docker data",
-            f"mount target at {preflight.docker_state.docker_root_dir} with pquota",
+            f"stop Docker services for {docker_root}",
+            "move Docker data aside (same filesystem, no copy)" if _backup_by_rename(preflight, target) else "back up Docker data",
+            f"mount target at {docker_root} with pquota",
             f"update {daemon_json_path}",
             "update /etc/fstab",
-            "restore Docker data",
-            "restart Docker",
         ]
     )
+    if leaves_containerd_store:
+        destructive_actions.append("switch Docker from the containerd image store to overlay2 (images are pulled again)")
+    if loop_file:
+        destructive_actions.append(f"add the docker.service drop-in {DOCKER_DROP_IN_PATH} (mount before Docker, direct I/O)")
+    destructive_actions.extend(["restore Docker data", "restart Docker"])
 
-    backup_dir = f"{preflight.docker_state.docker_root_dir}.lium-backup-{datetime.now(timezone.utc):%Y%m%d%H%M%S}"
+    backup_dir = f"{docker_root}.lium-backup-{datetime.now(timezone.utc):%Y%m%d%H%M%S}"
     return SetupPlan(
         preflight=preflight,
         target=target,
@@ -276,9 +323,26 @@ def _build_setup_plan(preflight: PreflightResult, device: Optional[str]) -> Setu
         daemon_json_changed=daemon_changed,
         daemon_json_merged=merged_daemon,
         fstab_path="/etc/fstab",
-        fstab_changed=_fstab_would_change("/etc/fstab", uuid) if uuid else True,
+        fstab_changed=_fstab_would_change("/etc/fstab", fstab_entry) if fstab_entry else True,
         destructive_actions=destructive_actions,
     )
+
+
+def _loop_file_target(preflight: PreflightResult, image_file: Optional[str], image_size_gib: Optional[int]):
+    """Plan the XFS image file; `findmnt --json --bytes --list --real ...` via `load_mounted_filesystems(...)`."""
+    filesystems = load_mounted_filesystems(run_command, preflight.block_devices)
+    return plan_loop_file_target(
+        filesystems,
+        preflight.docker_state.docker_root_dir,
+        image_file,
+        image_size_gib * 1024**3 if image_size_gib else None,
+    )
+
+
+def _backup_by_rename(preflight: PreflightResult, target) -> bool:
+    # the image file shares the filesystem with Docker's data, so the data root is renamed aside, not copied;
+    # a Docker root that is its own mount cannot be renamed off it and is copied as for a disk target
+    return target.classification == "loop_file" and preflight.docker_mount.target != preflight.docker_state.docker_root_dir
 
 
 def _target_disk(preflight: PreflightResult, target) -> tuple:
@@ -333,6 +397,10 @@ def _plan_table(plan: SetupPlan) -> Table:
     table.add_row("Selected target", plan.target.resolved_target)
     table.add_row("Selection mode", plan.target.selection_mode)
     table.add_row("Target classification", plan.target.classification)
+    if plan.target.classification == "loop_file":
+        table.add_row("Image file on", plan.target.loop_file_filesystem)
+        table.add_row("Image file size", f"{plan.target.loop_file_size_bytes // 1024**3} GiB")
+        table.add_row("Kept free for the system", f"{plan.target.loop_file_reserve_bytes // 1024**3} GiB")
     table.add_row("Create partition", "yes" if plan.target.needs_partition_creation else "no")
     table.add_row("Format target", "yes" if plan.target.needs_format else "no")
     table.add_row("Backup directory", plan.backup_dir)
@@ -395,7 +463,8 @@ def _print_gpu_splitting_requirements():
                     "- Ubuntu/Debian Linux host with systemd",
                     "- Run `check` and `setup` as root (`sudo`)",
                     "- Docker daemon must be running and reachable",
-                    "- Need one safe extra disk/partition (not root or current Docker backing device)",
+                    "- Need one safe extra disk/partition (not root or current Docker backing device), or free space "
+                    "on a local filesystem for an XFS image file (single-disk hosts)",
                     "- Final required state: Docker `overlay2`, `/var/lib/docker` on XFS with project quota (`pquota`/`prjquota`), `Supports d_type=true`",
                     f"- Docs link: {GPU_SPLITTING_DOC_URL}",
                 ]
@@ -437,7 +506,11 @@ def _restore_text_file(snapshot: _FileSnapshot):
         target.unlink()
 
 
-def _update_fstab(fstab_path: str, uuid: str):
+def _fstab_entry(source: str, options: str) -> str:
+    return f"{source} {DEFAULT_DOCKER_ROOT} xfs {options} 0 0"
+
+
+def _update_fstab(fstab_path: str, desired: str):
     """Insert or replace the `/var/lib/docker` mount entry in `/etc/fstab`.
 
     No external commands are run here. The function is intentionally limited to
@@ -449,15 +522,13 @@ def _update_fstab(fstab_path: str, uuid: str):
     """
     target = Path(fstab_path)
     existing_lines = target.read_text().splitlines() if target.exists() else []
-    mountpoint = "/var/lib/docker"
-    desired = f"UUID={uuid} {mountpoint} xfs defaults,pquota 0 0"
     output = []
     replaced = False
     for line in existing_lines:
         stripped = line.strip()
         if stripped and not stripped.startswith("#"):
             parts = stripped.split()
-            if len(parts) >= 2 and parts[1] == mountpoint:
+            if len(parts) >= 2 and parts[1] == DEFAULT_DOCKER_ROOT:
                 if not replaced:
                     output.append(desired)
                     replaced = True
@@ -468,9 +539,8 @@ def _update_fstab(fstab_path: str, uuid: str):
     target.write_text("\n".join(output) + "\n")
 
 
-def _fstab_would_change(fstab_path: str, uuid: str) -> bool:
+def _fstab_would_change(fstab_path: str, desired: str) -> bool:
     target = Path(fstab_path)
-    desired = f"UUID={uuid} /var/lib/docker xfs defaults,pquota 0 0"
     if not target.exists():
         return True
     for line in target.read_text().splitlines():
@@ -478,9 +548,26 @@ def _fstab_would_change(fstab_path: str, uuid: str) -> bool:
         if not stripped or stripped.startswith("#"):
             continue
         parts = stripped.split()
-        if len(parts) >= 2 and parts[1] == "/var/lib/docker":
+        if len(parts) >= 2 and parts[1] == DEFAULT_DOCKER_ROOT:
             return stripped != desired
     return True
+
+
+def _docker_drop_in(docker_root: str, image_file: str) -> str:
+    # without RequiresMountsFor Docker starts on the empty directory after a reboot and every pod "disappears";
+    # direct I/O cannot be set from fstab, and without it pod creation on the loop device is ~1.4x slower
+    return (
+        "[Unit]\n"
+        f"RequiresMountsFor={docker_root}\n"
+        "[Service]\n"
+        f'ExecStartPre=-/bin/sh -c "losetup --direct-io=on $(losetup -j {image_file} -n -O NAME)"\n'
+    )
+
+
+def _write_text_file(path: str, contents: str):
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(contents)
 
 
 def _get_uuid(path: str) -> str:
@@ -546,6 +633,33 @@ def _detect_new_partition(parent_disk: str, before_paths: set[str]) -> str:
     return new_paths[0]
 
 
+def _prepare_partition(plan: SetupPlan, existing_partition_paths: set[str]) -> str:
+    """Create the planned partition (`parted mklabel` / `mkpart`, `partprobe`) and return the target path."""
+    target_partition = _target_partition_path(plan)
+    if plan.target.needs_new_gpt:
+        console.dim(f"Creating GPT label on {plan.target.parent_disk}")
+        run_command(["parted", "-s", plan.target.parent_disk, "mklabel", "gpt"], True, True)
+    if plan.target.needs_partition_creation:
+        if plan.target.free_region_start_bytes and plan.target.free_region_end_bytes:
+            start = f"{plan.target.free_region_start_bytes}B"
+            end = f"{plan.target.free_region_end_bytes}B"
+        else:
+            start = "1MiB"
+            end = "100%"
+        console.dim(f"Creating partition on {plan.target.parent_disk} from {start} to {end}")
+        run_command(["parted", "-s", plan.target.parent_disk, "mkpart", "primary", "xfs", start, end], True, True)
+        run_command(["partprobe", plan.target.parent_disk], False, True)
+        plan.target.created_partition_path = _detect_new_partition(
+            plan.target.parent_disk,
+            existing_partition_paths,
+        )
+        target_partition = _target_partition_path(plan)
+        console.dim(f"Created partition: {target_partition}")
+    else:
+        console.dim(f"Skipping partition creation for {target_partition}")
+    return target_partition
+
+
 def _ensure_xfs_compliant(target_path: str):
     """Verify that a partition is XFS with `ftype=1`.
 
@@ -558,12 +672,12 @@ def _ensure_xfs_compliant(target_path: str):
         raise RuntimeError(f"{target_path} is not XFS with ftype=1")
 
 
-def _mount_validation(target_path: str, docker_root: str):
+def _mount_validation(target_path: str, docker_root: str, loop_file: bool = False):
     """Perform a temporary mount probe before cutting over Docker root.
 
     Commands run here:
 
-    - `mount -o pquota <target> /mnt/lium-docker-validate`
+    - `mount -o pquota <target> /mnt/lium-docker-validate` (`-o loop,pquota` for an image file)
     - `findmnt --json --target /mnt/lium-docker-validate` via `load_mount_info(...)`
     - `umount /mnt/lium-docker-validate`
 
@@ -574,7 +688,8 @@ def _mount_validation(target_path: str, docker_root: str):
     """
     validation_mount = Path("/mnt/lium-docker-validate")
     validation_mount.mkdir(parents=True, exist_ok=True)
-    run_command(["mount", "-o", "pquota", target_path, str(validation_mount)], True, True)
+    options = "loop,pquota" if loop_file else "pquota"
+    run_command(["mount", "-o", options, target_path, str(validation_mount)], True, True)
     try:
         mount_info = load_mount_info(run_command, str(validation_mount))
         if not has_project_quota_option(mount_info.options):
@@ -588,7 +703,13 @@ def _mount_validation(target_path: str, docker_root: str):
 def _print_action_details(plan: SetupPlan):
     console.print(_plan_table(plan))
     device = get_device_by_path(plan.preflight.block_devices, plan.target.parent_disk)
-    if device is not None:
+    if plan.target.classification == "loop_file":
+        console.print(
+            f"Image file {plan.target.resolved_target}: {plan.target.loop_file_size_bytes / 1024**3:.0f} GiB on "
+            f"{plan.target.loop_file_filesystem}, {plan.target.loop_file_reserve_bytes / 1024**3:.0f} GiB stay free "
+            "for the system"
+        )
+    elif device is not None:
         console.print(
             f"Target disk {device.path}: {device.model or 'unknown model'}, serial {device.serial or 'unknown'}, "
             f"{device.size_bytes / 1024**3:.0f} GiB"
@@ -608,17 +729,20 @@ def _confirm_plan(plan: SetupPlan, yes: bool, explicit_device: bool = False):
     No system commands run here. This is intentionally the last stop before the
     setup path starts issuing host-changing commands such as `systemctl stop`,
     `parted`, `mkfs.xfs`, and `mount`. Consent is the operator typing the target's
-    path at a terminal, or `--yes` with the disk named by `--device`.
+    path at a terminal, or `--yes` with the disk named by `--device`. An image file
+    formats nothing that exists, so `--yes` alone is enough for it.
     """
     _print_action_details(plan)
+    loop_file = plan.target.classification == "loop_file"
     if yes:
-        if not explicit_device:
+        if not explicit_device and not loop_file:
             raise RuntimeError("--yes formats a disk without asking, so it needs --device naming that disk")
         return
     if not sys.stdin.isatty():
         console.warning("Confirming needs an interactive terminal (or --device <disk> --yes).")
         raise click.Abort()
-    typed = Prompt.ask(f"Type the target device path to format it ({plan.target.resolved_target})", default="")
+    what = "image file path to create it" if loop_file else "target device path to format it"
+    typed = Prompt.ask(f"Type the {what} ({plan.target.resolved_target})", default="")
     if typed.strip() != plan.target.resolved_target:
         raise click.Abort()
 
@@ -658,11 +782,21 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
                 lambda: run_command(_mount_command_for_mount_info(state.original_docker_mount, docker_root), True, True),
             )
 
+    if state.docker_root_moved:
+        _rollback_attempt(errors, f"move Docker data back to {docker_root}", lambda: _move_docker_root_back(plan))
+
     if state.fstab_written:
         _rollback_attempt(errors, f"restore {plan.fstab_path}", lambda: _restore_text_file(state.original_fstab))
 
+    if state.drop_in_written:
+        _rollback_attempt(errors, f"restore {plan.drop_in_path}", lambda: _restore_text_file(state.original_drop_in))
+        _rollback_attempt(errors, "systemctl daemon-reload", lambda: run_command(["systemctl", "daemon-reload"], False, True))
+
     if state.daemon_json_written:
         _rollback_attempt(errors, f"restore {plan.daemon_json_path}", lambda: _restore_text_file(state.original_daemon_json))
+
+    if state.loop_file_created:
+        _rollback_attempt(errors, f"remove {target_partition}", lambda: os.unlink(target_partition))
 
     if state.docker_stopped:
         _rollback_attempt(errors, "start docker", lambda: run_command(["systemctl", "start", "docker"], True, True))
@@ -670,11 +804,24 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
     return errors
 
 
+def _move_docker_root_back(plan: SetupPlan):
+    # rmdir first: were the directory not empty, `mv` would put the backup inside it instead of in its place
+    docker_root = plan.preflight.docker_state.docker_root_dir
+    run_command(["rmdir", docker_root], True, True)
+    run_command(["mv", plan.backup_dir, docker_root], True, True)
+
+
+def _irreversible_note(plan: SetupPlan) -> str:
+    if plan.target.classification == "loop_file":
+        return "The XFS image file was removed."
+    return "Disk partitioning and filesystem formatting were not rolled back."
+
+
 def _setup_failure_message(plan: SetupPlan, exc: Exception, rollback_errors: list[str]) -> str:
     lines = [
         f"GPU splitting setup failed: {exc}",
         "Rollback of reversible host changes was attempted.",
-        "Disk partitioning and filesystem formatting were not rolled back.",
+        _irreversible_note(plan),
         f"Backup remains at {plan.backup_dir}",
     ]
     if rollback_errors:
@@ -694,6 +841,9 @@ def _pre_stop_checks(plan: SetupPlan):
         raise RuntimeError(f"Docker is not responding ({reason}); start it with `systemctl start docker` and run setup again")
     if (ps.stdout or "").strip():
         raise RuntimeError("Containers are running on this host; move Docker storage only while it runs none (no rentals)")
+    if _backup_by_rename(plan.preflight, plan.target):
+        # the data root is renamed, not copied, and the image file was sized from the free space
+        return
     docker_root = plan.preflight.docker_state.docker_root_dir
     used = int(run_command(["du", "-sxb", docker_root], True, True).stdout.split()[0])
     needed = int(used * 1.1) + 1024**3
@@ -716,15 +866,17 @@ def _execute_setup(plan: SetupPlan):
 
     2. Back up the current Docker root
        - `rsync -aHAX --numeric-ids <docker-root>/ <backup-dir>/`
+       - or `mv <docker-root> <backup-dir>` for an image file on the same filesystem
 
     3. Prepare the target partition
        - optional `parted -s <disk> mklabel gpt`
        - optional `parted -s <disk> mkpart primary xfs <start> <end>`
        - optional `partprobe <disk>`
        - `lsblk --json -o PATH,PKNAME,TYPE` before/after via helper
+       - or `fallocate -l <bytes> <image-file>` for an image file
 
     4. Format / validate filesystem metadata
-       - optional `mkfs.xfs -f <partition>`
+       - optional `mkfs.xfs -f <partition>` (`mkfs.xfs -f -K <image-file>`)
        - `xfs_info <partition>`
 
     5. Temporary mount validation
@@ -736,6 +888,7 @@ def _execute_setup(plan: SetupPlan):
        - rewrite `/etc/docker/daemon.json`
        - update `/etc/fstab`
        - `blkid -s UUID -o value <partition>`
+       - or, for an image file, the docker.service drop-in and `systemctl daemon-reload`
 
     7. Cut over Docker root and restore data
        - optional `umount /var/lib/docker`
@@ -753,56 +906,50 @@ def _execute_setup(plan: SetupPlan):
     """
     _pre_stop_checks(plan)
     total_steps = 10
+    loop_file = plan.target.classification == "loop_file"
+    rename_backup = _backup_by_rename(plan.preflight, plan.target)
+    docker_root = plan.preflight.docker_state.docker_root_dir
     target_partition = _target_partition_path(plan)
-    existing_partition_paths = _partition_paths_for_disk(plan.target.parent_disk)
+    existing_partition_paths = set() if loop_file else _partition_paths_for_disk(plan.target.parent_disk)
     state = _SetupExecutionState(
         original_daemon_json=_snapshot_text_file(plan.daemon_json_path),
         original_fstab=_snapshot_text_file(plan.fstab_path),
         original_docker_mount=plan.preflight.docker_mount,
+        original_drop_in=_snapshot_text_file(plan.drop_in_path),
     )
 
     try:
         with timed_step_status(1, total_steps, "Stopping Docker"):
-            console.dim(f"Stopping docker services for {plan.preflight.docker_state.docker_root_dir}")
+            console.dim(f"Stopping docker services for {docker_root}")
             run_command(["systemctl", "stop", "docker"], True, True)
             state.docker_stopped = True
             run_command(["systemctl", "stop", "docker.socket"], False, True)
 
-        with timed_step_status(2, total_steps, "Backing up Docker data"):
+        with timed_step_status(2, total_steps, "Moving Docker data aside" if rename_backup else "Backing up Docker data"):
             console.dim(f"Backup directory: {plan.backup_dir}")
-            Path(plan.backup_dir).mkdir(parents=True, exist_ok=True)
-            run_command(
-                ["rsync", "-aHAX", "--numeric-ids", f"{plan.preflight.docker_state.docker_root_dir}/", f"{plan.backup_dir}/"],
-                True,
-                True,
-            )
-
-        with timed_step_status(3, total_steps, "Preparing partition"):
-            if plan.target.needs_new_gpt:
-                console.dim(f"Creating GPT label on {plan.target.parent_disk}")
-                run_command(["parted", "-s", plan.target.parent_disk, "mklabel", "gpt"], True, True)
-            if plan.target.needs_partition_creation:
-                if plan.target.free_region_start_bytes and plan.target.free_region_end_bytes:
-                    start = f"{plan.target.free_region_start_bytes}B"
-                    end = f"{plan.target.free_region_end_bytes}B"
-                else:
-                    start = "1MiB"
-                    end = "100%"
-                console.dim(f"Creating partition on {plan.target.parent_disk} from {start} to {end}")
-                run_command(["parted", "-s", plan.target.parent_disk, "mkpart", "primary", "xfs", start, end], True, True)
-                run_command(["partprobe", plan.target.parent_disk], False, True)
-                plan.target.created_partition_path = _detect_new_partition(
-                    plan.target.parent_disk,
-                    existing_partition_paths,
-                )
-                target_partition = _target_partition_path(plan)
-                console.dim(f"Created partition: {target_partition}")
+            if rename_backup:
+                run_command(["mv", docker_root, plan.backup_dir], True, True)
+                state.docker_root_moved = True
             else:
-                console.dim(f"Skipping partition creation for {target_partition}")
+                Path(plan.backup_dir).mkdir(parents=True, exist_ok=True)
+                run_command(["rsync", "-aHAX", "--numeric-ids", f"{docker_root}/", f"{plan.backup_dir}/"], True, True)
+
+        with timed_step_status(3, total_steps, "Creating the image file" if loop_file else "Preparing partition"):
+            if loop_file:
+                console.dim(f"Preallocating {plan.target.loop_file_size_bytes // 1024**3} GiB at {target_partition}")
+                run_command(["fallocate", "-l", str(plan.target.loop_file_size_bytes), target_partition], True, True)
+                state.loop_file_created = True
+                os.chmod(target_partition, 0o600)
+            else:
+                target_partition = _prepare_partition(plan, existing_partition_paths)
 
         with timed_step_status(4, total_steps, "Formatting XFS"):
             target_partition = _target_partition_path(plan)
-            if plan.target.needs_format:
+            if loop_file:
+                console.dim(f"Formatting {target_partition} as XFS")
+                # -K: mkfs discards blocks by default, and on a file the discard punches holes in what fallocate reserved
+                run_command(["mkfs.xfs", "-f", "-K", target_partition], True, True)
+            elif plan.target.needs_format:
                 console.dim(f"Formatting {target_partition} as XFS")
                 run_command(["mkfs.xfs", "-f", target_partition], True, True)
             else:
@@ -810,18 +957,27 @@ def _execute_setup(plan: SetupPlan):
             _ensure_xfs_compliant(target_partition)
 
         with timed_step_status(5, total_steps, "Validating temporary mount"):
-            _mount_validation(target_partition, plan.preflight.docker_state.docker_root_dir)
+            _mount_validation(target_partition, docker_root, loop_file)
 
         with timed_step_status(6, total_steps, "Updating daemon.json"):
             console.dim(f"Writing Docker config to {plan.daemon_json_path}")
             _write_json_atomic(plan.daemon_json_path, plan.daemon_json_merged)
             state.daemon_json_written = True
 
-        with timed_step_status(7, total_steps, "Updating fstab"):
-            uuid = _get_uuid(target_partition)
-            console.dim(f"Using UUID={uuid} for /var/lib/docker")
-            _update_fstab(plan.fstab_path, uuid)
-            state.fstab_written = True
+        with timed_step_status(7, total_steps, "Updating fstab and docker.service" if loop_file else "Updating fstab"):
+            if loop_file:
+                console.dim(f"Mounting {target_partition} at {docker_root} with {LOOP_FILE_FSTAB_OPTIONS}")
+                _update_fstab(plan.fstab_path, _fstab_entry(target_partition, LOOP_FILE_FSTAB_OPTIONS))
+                state.fstab_written = True
+                console.dim(f"Writing {plan.drop_in_path}")
+                _write_text_file(plan.drop_in_path, _docker_drop_in(docker_root, target_partition))
+                state.drop_in_written = True
+                run_command(["systemctl", "daemon-reload"], True, True)
+            else:
+                uuid = _get_uuid(target_partition)
+                console.dim(f"Using UUID={uuid} for /var/lib/docker")
+                _update_fstab(plan.fstab_path, _fstab_entry(f"UUID={uuid}", "defaults,pquota"))
+                state.fstab_written = True
 
         with timed_step_status(8, total_steps, "Cutting over /var/lib/docker"):
             docker_root = Path(plan.preflight.docker_state.docker_root_dir)
@@ -855,7 +1011,7 @@ def _execute_setup(plan: SetupPlan):
     except Exception as exc:
         console.error(f"Setup failed: {exc}")
         console.warning("Attempting rollback of reversible host changes.")
-        console.warning("Disk partitioning and filesystem formatting are not rolled back.")
+        console.warning(_irreversible_note(plan))
         console.warning(f"Backup remains at {plan.backup_dir}")
         rollback_errors = _rollback_setup(plan, state, target_partition)
         if rollback_errors:
@@ -870,16 +1026,30 @@ def gpu_splitting_command():
     """Prepare Docker storage for LIUM GPU splitting."""
 
 
+_IMAGE_FILE_OPTION = click.option(
+    "--file", "image_file", type=click.Path(path_type=Path),
+    help="Create the XFS image file at this path instead of formatting a disk (single-disk hosts)",
+)
+_IMAGE_SIZE_OPTION = click.option(
+    "--size", "image_size_gib", type=int,
+    help="Size of the XFS image file in GiB (default: free space minus the system reserve)",
+)
+
+
 @gpu_splitting_command.command("check")
 @click.option("--device", type=click.Path(path_type=Path))
+@_IMAGE_FILE_OPTION
+@_IMAGE_SIZE_OPTION
 @gpu_command_errors
-def gpu_splitting_check_command(device: Optional[Path]):
+def gpu_splitting_check_command(device: Optional[Path], image_file: Optional[Path], image_size_gib: Optional[int]):
     """Inspect the host and print the plan without making changes."""
     _print_gpu_splitting_requirements()
     with timed_step_status(1, 2, "Running preflight inspection"):
         preflight = _preflight()
     with timed_step_status(2, 2, "Resolving target"):
-        plan = _build_setup_plan(preflight, str(device) if device else None)
+        plan = _build_setup_plan(
+            preflight, str(device) if device else None, str(image_file) if image_file else None, image_size_gib
+        )
 
     console.print(_docker_state_table(preflight))
     console.print(
@@ -916,15 +1086,21 @@ def gpu_splitting_verify_command():
 
 @gpu_splitting_command.command("setup")
 @click.option("--device", type=click.Path(path_type=Path))
+@_IMAGE_FILE_OPTION
+@_IMAGE_SIZE_OPTION
 @click.option("--yes", is_flag=True, help="Skip interactive confirmation")
 @gpu_command_errors
-def gpu_splitting_setup_command(device: Optional[Path], yes: bool):
+def gpu_splitting_setup_command(
+    device: Optional[Path], image_file: Optional[Path], image_size_gib: Optional[int], yes: bool
+):
     """Perform end-to-end Docker storage setup for GPU splitting."""
     _print_gpu_splitting_requirements()
     with timed_step_status(1, 2, "Running preflight inspection"):
         preflight = _preflight()
     with timed_step_status(2, 2, "Resolving target"):
-        plan = _build_setup_plan(preflight, str(device) if device else None)
+        plan = _build_setup_plan(
+            preflight, str(device) if device else None, str(image_file) if image_file else None, image_size_gib
+        )
 
     try:
         _confirm_plan(plan, yes, explicit_device=device is not None)
