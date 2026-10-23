@@ -182,24 +182,7 @@ class ProviderClient:
             self._http.post(LOGIN_FLEXIBLE, json_body=payload, auth=False)
         )
         if response.mfa_required:
-            if self.totp_code is None:
-                raise ProviderAuthError(
-                    "this account has an authenticator app: pass --totp-code, or run "
-                    "`lium provider portal login` in a terminal to be asked for the code",
-                    code=PORTAL_AUTH_TOTP_REQUIRED,
-                )
-            totp_payload = {"mfa_token": response.mfa_token, "code": self.totp_code().strip()}
-            try:
-                response = _login_response(
-                    self._http.post(LOGIN_TOTP, json_body=totp_payload, auth=False)
-                )
-            except ProviderAuthError as e:
-                # the portal answers a wrong code with 403, which elsewhere means a refused action
-                if e.code != PORTAL_FORBIDDEN:
-                    raise
-                raise ProviderAuthError(
-                    "wrong or expired authenticator code", code=PORTAL_AUTH_TOTP_INVALID, context=e.context
-                ) from e
+            response = self._finish_totp_sign_in(response)
         if not response.token:
             raise ProviderAuthError(
                 "portal sign-in returned no session token",
@@ -213,6 +196,27 @@ class ProviderClient:
             )
         )
         return response
+
+    def _finish_totp_sign_in(self, response: LoginResponse) -> LoginResponse:
+        """Send the authenticator code for a sign-in the portal answered with ``mfa_required``."""
+        if self.totp_code is None:
+            raise ProviderAuthError(
+                "this account has an authenticator app: pass --totp-code, or run "
+                "`lium provider portal login` in a terminal to be asked for the code",
+                code=PORTAL_AUTH_TOTP_REQUIRED,
+            )
+        totp_payload = {"mfa_token": response.mfa_token, "code": self.totp_code().strip()}
+        try:
+            return _login_response(
+                self._http.post(LOGIN_TOTP, json_body=totp_payload, auth=False)
+            )
+        except ProviderAuthError as e:
+            # the portal answers a wrong code with 403, which elsewhere means a refused action
+            if e.code != PORTAL_FORBIDDEN:
+                raise
+            raise ProviderAuthError(
+                "wrong or expired authenticator code", code=PORTAL_AUTH_TOTP_INVALID, context=e.context
+            ) from e
 
     def _session_ended(self, cached: CachedToken) -> bool:
         """True when the portal answers 401 to ``cached``; any other failure (offline, 5xx) keeps it, as before."""
