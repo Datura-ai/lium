@@ -681,9 +681,6 @@ def extract_executor_metrics(executor: ExecutorInfo) -> Dict[str, float]:
         'vram_gb': ((gpu_details.get("capacity") or 0) / 1024) if gpu_details else 0,  # MiB to GB
         'ram_gb': ((ram_data.get("total") or 0) / (1024 * 1024)) if ram_data else 0,  # KB to GB
         'disk_gb': ((disk_data.get("total") or 0) / (1024 * 1024)) if disk_data else 0,  # KB to GB
-        'pcie_speed': gpu_details.get("pcie_speed") or 0,
-        'memory_bandwidth': gpu_details.get("memory_speed") or 0,
-        'tflops': gpu_details.get("graphics_speed") or 0,
         'net_up': net_up,
         'net_down': net_down,
         'location_score': 1.0 if is_us else 0.0,  # US locations get higher score
