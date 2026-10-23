@@ -731,7 +731,7 @@ def _gather_inputs(
     return answers
 
 
-PREFLIGHT_IMAGE = "daturaai/lium-validator:latest"
+PREFLIGHT_IMAGE = "daturaai/compute-subnet-validator:preflight"
 
 
 class _StepMessage:

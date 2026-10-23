@@ -228,7 +228,7 @@ def test_provider_add_command_and_note() -> None:
 
 
 class _FakePreflight:
-    """Stands in for the `docker run … lium-validator` process: debug log on stderr, verdict on stdout."""
+    """Stands in for the `docker run … preflight` process: debug log on stderr, verdict on stdout."""
 
     last_cmd: str | None = None
 
