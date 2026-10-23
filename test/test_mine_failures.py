@@ -182,7 +182,7 @@ def test_prereqs_pass_with_sysbox(monkeypatch):
 
 
 def _storage_host(monkeypatch, *, root: bool = True, tty: bool = True, typed: str = "",
-                  plan_error: Exception | None = None, execute_error: Exception | None = None):
+                  plan_error: Exception | None = None, execute_error: Exception | None = None, spare_disk: bool = True):
     import lium.cli.mine.gpu_splitting as gs
     import lium.cli.mine.storage as st
     from rich.prompt import Prompt
@@ -200,10 +200,14 @@ def _storage_host(monkeypatch, *, root: bool = True, tty: bool = True, typed: st
         root_mount=None, docker_mount=None, docker_state=SimpleNamespace(docker_root_dir="/var/lib/docker"),
     )
     candidates = [
-        CandidateEvaluation("/dev/nvme1n1", "disk", "blank_whole_disk", True, "blank whole disk"),
-        CandidateEvaluation("/dev/sdb", "disk", "blank_whole_disk", True, "blank whole disk"),
+        CandidateEvaluation("/dev/nvme1n1", "disk", "blank_whole_disk", spare_disk, "blank whole disk"),
+        CandidateEvaluation("/dev/sdb", "disk", "blank_whole_disk", spare_disk, "blank whole disk"),
         CandidateEvaluation("/dev/nvme0n1", "disk", "protected_root_or_docker", False, "protected root"),
     ]
+    image_file_plan = SimpleNamespace(target=SimpleNamespace(
+        classification="loop_file", resolved_target="/var/lib/lium-docker.xfs", loop_file_filesystem="/",
+        loop_file_size_bytes=180 * 1024**3, loop_file_reserve_bytes=25 * 1024**3,
+    ), destructive_actions=["stop Docker services for /var/lib/docker", "move Docker data aside (same filesystem, no copy)"])
     monkeypatch.setattr("os.geteuid", lambda: 0 if root else 1000)
     monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: tty))
     monkeypatch.setattr(Prompt, "ask", lambda *a, **k: calls.append("asked") or typed)
@@ -212,7 +216,7 @@ def _storage_host(monkeypatch, *, root: bool = True, tty: bool = True, typed: st
         calls.append(("plan", device))
         if plan_error:
             raise plan_error
-        return "plan"
+        return "plan" if device else image_file_plan
 
     def execute(p):
         calls.append(("execute", p))
@@ -278,3 +282,35 @@ def test_storage_setup_target_check_refusal_names_the_manual_command(monkeypatch
     out = capsys.readouterr().out
     assert calls == ["asked", ("plan", "/dev/sdb")]
     assert "removable" in out and "lium gpu-splitting setup --device" in out
+
+
+def test_storage_setup_offers_the_image_file_when_no_disk_is_spare_and_enter_skips(monkeypatch, capsys):
+    calls = _storage_host(monkeypatch, spare_disk=False, typed="")
+    mine._setup_docker_storage()
+    out = capsys.readouterr().out
+    assert calls == [("plan", None), "asked"]
+    assert "/var/lib/lium-docker.xfs" in out and "180 GiB" in out and "25 GiB stay free" in out
+    assert "Skipped" in out and "lium gpu-splitting setup --device" in out
+
+
+def test_storage_setup_creates_the_image_file_only_when_file_is_typed(monkeypatch):
+    calls = _storage_host(monkeypatch, spare_disk=False, typed="file")
+    mine._setup_docker_storage()
+    assert calls[-1][0] == "execute" and calls[-1][1].target.classification == "loop_file"
+
+
+@pytest.mark.parametrize("typed", ["yes", "/dev/nvme0n1", "File"])
+def test_storage_setup_anything_but_file_leaves_the_single_disk_host_alone(monkeypatch, typed):
+    calls = _storage_host(monkeypatch, spare_disk=False, typed=typed)
+    mine._setup_docker_storage()
+    assert calls == [("plan", None), "asked"]
+
+
+def test_storage_setup_too_little_free_space_names_the_numbers_and_the_manual_command(monkeypatch, capsys):
+    calls = _storage_host(
+        monkeypatch, spare_disk=False, plan_error=RuntimeError("An XFS image file on / would get 61 GiB (86 GiB free")
+    )
+    mine._setup_docker_storage()
+    out = capsys.readouterr().out
+    assert calls == [("plan", None)]
+    assert "61 GiB" in out and "Not offered" in out and "lium gpu-splitting setup --device" in out

@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+# written by the loop-file setup: the drop-in mounts the image before Docker, the udev rule turns on direct I/O
+# and refuses discard on the loop device (fstrim would otherwise punch holes in the preallocated file)
+DOCKER_DROP_IN_PATH = "/etc/systemd/system/docker.service.d/lium-docker-storage.conf"
+LOOP_DEVICE_UDEV_RULE_PATH = "/etc/udev/rules.d/99-lium-docker-storage.rules"
+
 
 @dataclass
 class CommandResult:
@@ -37,6 +42,18 @@ class BlockDevice:
     # and whether anything in that tree is mounted: set by load_block_devices.
     family_paths: frozenset = frozenset()
     family_mounted: bool = False
+
+
+@dataclass
+class MountedFilesystem:
+    """One real mounted filesystem from findmnt; `local` ones may hold the XFS image file."""
+
+    target: str
+    source: str
+    fstype: str
+    size_bytes: int
+    avail_bytes: int
+    local: bool
 
 
 @dataclass
@@ -94,6 +111,10 @@ class TargetPlan:
     needs_new_gpt: bool = False
     free_region_start_bytes: Optional[int] = None
     free_region_end_bytes: Optional[int] = None
+    # loop_file targets only: the filesystem holding the image file, the file's size, what the host keeps free
+    loop_file_filesystem: Optional[str] = None
+    loop_file_size_bytes: Optional[int] = None
+    loop_file_reserve_bytes: Optional[int] = None
 
 
 @dataclass
@@ -109,6 +130,8 @@ class SetupPlan:
     fstab_path: str
     fstab_changed: bool
     destructive_actions: list[str]
+    drop_in_path: str = DOCKER_DROP_IN_PATH
+    udev_rule_path: str = LOOP_DEVICE_UDEV_RULE_PATH
 
 
 @dataclass

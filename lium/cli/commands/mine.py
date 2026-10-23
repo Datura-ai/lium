@@ -203,11 +203,11 @@ def _docker_storage_limited() -> bool:
     return build_verification_result(run_command, inspect_docker_state(run_command).docker_root_dir).passed
 
 
-def _setup_docker_storage():
+def _setup_docker_storage(auto: bool = False):
     """Offer to move Docker storage to an xfs pquota mount with `lium gpu-splitting setup`'s own plan and checks.
 
     One question is both the menu and the consent: every disk is listed and the person types the one to format, or
-    presses Enter to skip. `--auto` and `--register` never consent. Whatever stops the setup, the manual command is
+    presses Enter to skip. `--auto` and `--register` never consent (they print the manual command). Whatever stops the setup, the manual command is
     printed and the install carries on (validators do not require it yet).
     """
     import os
@@ -220,10 +220,11 @@ def _setup_docker_storage():
 
     reason = "Docker cannot limit a container's disk on this host (needs xfs with pquota)."
     manual = (
-        "Set it up with: sudo lium gpu-splitting setup --device <spare disk>\n"
+        "Set it up with: sudo lium gpu-splitting setup --device <spare disk>, or without --device for an XFS "
+        "image file on a single-disk host\n"
         f"Guide: {_STORAGE_GUIDE}"
     )
-    if not sys.stdin.isatty():
+    if auto or not sys.stdin.isatty():
         console.warning(f"{reason}\n{manual}")
         return
     if os.geteuid() != 0:
@@ -253,7 +254,7 @@ def _setup_docker_storage():
     if rejected:
         lines += ["", "Not offered:"] + [row(c, c.details) for c in rejected]
     if not offered:
-        console.warning("\n".join(lines) + f"\n\n{manual}")
+        _offer_image_file(preflight, lines, manual)
         return
     lines += [
         "",
@@ -272,6 +273,41 @@ def _setup_docker_storage():
         _execute_setup(_build_setup_plan(preflight, typed))
     except RuntimeError as exc:
         # a refusal (containers running, Docker down, no backup space, target checks) stops only the storage setup
+        console.warning(f"Docker storage was not set up: {exc}\n{manual}")
+
+
+def _offer_image_file(preflight, lines: list[str], manual: str):
+    """Single-disk host: offer Docker storage in an XFS image file (what `lium gpu-splitting setup` plans with no device).
+
+    Typing `file` is the consent; anything else leaves the host as it is.
+    """
+    from rich.prompt import Prompt
+
+    from ..mine.gpu_splitting import _build_setup_plan, _execute_setup
+
+    try:
+        plan = _build_setup_plan(preflight, None)
+    except RuntimeError as exc:
+        console.warning("\n".join(lines) + f"\n\n{exc}\n{manual}")
+        return
+    target = plan.target
+    gib = 1024**3
+    lines += [
+        "",
+        f"No spare disk. Docker storage can live in an XFS image file instead: {target.resolved_target}, "
+        f"{target.loop_file_size_bytes // gib} GiB on {target.loop_file_filesystem} "
+        f"({target.loop_file_reserve_bytes // gib} GiB stay free for the system).",
+        "Setup will:",
+        *(f"  - {action}" for action in plan.destructive_actions),
+    ]
+    console.info("\n".join(lines))
+    typed = Prompt.ask("Type `file` to create it, or press Enter to skip", default="").strip()
+    if typed != "file":
+        console.warning(f"Skipped. {manual}")
+        return
+    try:
+        _execute_setup(plan)
+    except RuntimeError as exc:
         console.warning(f"Docker storage was not set up: {exc}\n{manual}")
 
 
@@ -1056,7 +1092,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             _check_prereqs(target_dir)
             storage_ok = _docker_storage_limited()
         if not storage_ok:
-            _setup_docker_storage()   # outside the spinner: it prints the plan and may ask to confirm
+            _setup_docker_storage(auto)   # outside the spinner: it prints the plan and may ask to confirm
         _check_free_disk(target_dir / "neurons" / "executor")
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.

@@ -4,13 +4,31 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Callable, Optional
 
-from .models import BlockDevice, CandidateEvaluation, CommandResult, MountInfo, TargetPlan
+from .models import BlockDevice, CandidateEvaluation, CommandResult, MountedFilesystem, MountInfo, TargetPlan
 
 Runner = Callable[[list[str], bool, bool], CommandResult]
+
+# a few GPU images fill a smaller disk, and then the host stalls exactly as it would without the limit
+MIN_TARGET_BYTES = 100 * 1024**3
+# Docker storage must outlive a cable pull or a network blip
+NON_LOCAL_TRANSPORTS = {"usb", "iscsi", "fc", "mmc"}
+# filesystems that may hold the XFS image file: local ones on a block device, never network or overlay
+LOOP_FILE_HOST_FSTYPES = {"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "f2fs"}
+# the host keeps this much outside the image file for the OS, logs and apt
+LOOP_FILE_RESERVE_FRACTION = 0.10
+LOOP_FILE_MIN_RESERVE_BYTES = 20 * 1024**3
+LOOP_FILE_NAME = "lium-docker.xfs"
+# the path is written into fstab and a udev rule, and the udev rule is parsed as a quoted string
+IMAGE_FILE_PATH_PATTERN = re.compile(r"/[A-Za-z0-9_./-]+")
+
+
+class NoSafeTargetError(RuntimeError):
+    """No blank disk or empty partition to format; the caller may fall back to an XFS image file."""
 
 
 def run_json_command(runner: Runner, args: list[str]) -> dict:
@@ -528,4 +546,138 @@ def auto_select_target(
             raise RuntimeError("Multiple equally safe storage targets were found; rerun with --device")
         return items[0]
 
-    raise RuntimeError("No safe storage target found; rerun with --device or attach additional storage")
+    raise NoSafeTargetError("No safe storage target found; rerun with --device or attach additional storage")
+
+
+def load_mounted_filesystems(runner: Runner, devices: list[BlockDevice]) -> list[MountedFilesystem]:
+    """List the real mounted filesystems and mark the local ones that could hold the XFS image file.
+
+    Command run:
+
+    - `findmnt --json --bytes --list --real -o TARGET,SOURCE,FSTYPE,SIZE,AVAIL`
+
+    Network, overlay and pseudo filesystems are not local by type; removable disks and
+    disks attached over USB/iSCSI by their lsblk entry.
+    """
+    data = run_json_command(
+        runner, ["findmnt", "--json", "--bytes", "--list", "--real", "-o", "TARGET,SOURCE,FSTYPE,SIZE,AVAIL"]
+    )
+    filesystems = []
+    for item in data.get("filesystems") or []:
+        fstype = str(item.get("fstype") or "")
+        source = str(item.get("source") or "")
+        filesystems.append(
+            MountedFilesystem(
+                target=str(item.get("target") or ""),
+                source=source,
+                fstype=fstype,
+                size_bytes=_to_size_bytes(item.get("size")),
+                avail_bytes=_to_size_bytes(item.get("avail")),
+                local=fstype in LOOP_FILE_HOST_FSTYPES and _source_disk_is_local(source, devices),
+            )
+        )
+    return filesystems
+
+
+def _source_disk_is_local(source: str, devices: list[BlockDevice]) -> bool:
+    # every ancestor counts: a USB disk stays a USB disk under a partition, LVM or md; lsblk lists a device with
+    # several parents once per parent, so the parents are collected from every listing and all of them walked
+    source = _mount_device(source)
+    listings = flatten_devices(devices)
+    by_kernel_name = {item.kernel_name: item for item in listings}
+    parents: dict[str, set[str]] = {}
+    for item in listings:
+        if item.parent_kernel_name:
+            parents.setdefault(item.kernel_name, set()).add(item.parent_kernel_name)
+    start = next((item for item in listings if source in {item.path, f"/dev/{item.kernel_name}"}), None)
+    if start is None:
+        # zfs and bind sources name no lsblk device; the filesystem type allowlist is the gate for those.
+        # A /dev path lsblk does not list is not known to be local
+        return not source.startswith("/dev/")
+    pending, seen = [start.kernel_name], set()
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        item = by_kernel_name.get(name)
+        if item is None:
+            continue
+        if item.is_removable or (item.transport or "").lower() in NON_LOCAL_TRANSPORTS:
+            return False
+        pending.extend(parents.get(name, ()))
+    return True
+
+
+def _filesystem_holding(path: str, filesystems: list[MountedFilesystem]) -> Optional[MountedFilesystem]:
+    holders = [fs for fs in filesystems if path.startswith(fs.target.rstrip("/") + "/")]
+    return max(holders, key=lambda fs: len(fs.target), default=None)
+
+
+def plan_loop_file_target(
+    filesystems: list[MountedFilesystem],
+    docker_root: str,
+    image_file: Optional[str] = None,
+    image_size_bytes: Optional[int] = None,
+) -> TargetPlan:
+    """Plan an XFS image file on the local filesystem with the most free space, or on the one holding `image_file`.
+
+    No commands are run. The file takes the free space minus a reserve of max(10% of the
+    filesystem, 20 GiB) that stays with the host; under MIN_TARGET_BYTES the plan is refused
+    with the numbers, so the operator sees what to free or attach.
+    """
+    requested = bool(image_file) or image_size_bytes is not None
+    if image_file:
+        image_file = os.path.abspath(image_file)
+        if image_file.startswith(docker_root.rstrip("/") + "/"):
+            raise RuntimeError(f"{image_file} is inside {docker_root}, which the file will be mounted over; choose another path")
+        holder = _filesystem_holding(image_file, filesystems)
+        if holder is None or not holder.local or holder.target == docker_root:
+            raise RuntimeError(f"{image_file} is not on a local filesystem that can hold the image file")
+    else:
+        candidates = [fs for fs in filesystems if fs.local and fs.target != docker_root]
+        if not candidates:
+            raise RuntimeError("No local filesystem can hold an XFS image file")
+        holder = max(candidates, key=lambda fs: fs.avail_bytes)
+        image_file = os.path.join("/var/lib" if holder.target == "/" else holder.target, LOOP_FILE_NAME)
+        if _filesystem_holding(image_file, filesystems) is not holder:
+            # /var or /var/lib is its own filesystem: a file there would be sized from the wrong one
+            image_file = os.path.join(holder.target, LOOP_FILE_NAME)
+
+    if os.path.lexists(image_file):
+        raise RuntimeError(f"{image_file} already exists; remove it or choose another path")
+    if not IMAGE_FILE_PATH_PATTERN.fullmatch(image_file):
+        raise RuntimeError(
+            f"{image_file}: the image file path may only contain letters, digits, '_', '-', '.' and '/'; "
+            "it is written into fstab and a udev rule"
+        )
+
+    reserve = max(int(holder.size_bytes * LOOP_FILE_RESERVE_FRACTION), LOOP_FILE_MIN_RESERVE_BYTES)
+    room = holder.avail_bytes - reserve
+    size = room if image_size_bytes is None else image_size_bytes
+    gib = 1024**3
+    if size < MIN_TARGET_BYTES:
+        raise RuntimeError(
+            f"An XFS image file on {holder.target} would get {size // gib} GiB ({holder.avail_bytes // gib} GiB free, "
+            f"{reserve // gib} GiB kept for the system); it needs {MIN_TARGET_BYTES // gib} GiB. "
+            "Free space, attach a spare disk, or pass --size"
+        )
+    if size > room:
+        raise RuntimeError(
+            f"--size {size // gib} GiB does not fit on {holder.target}: {holder.avail_bytes // gib} GiB free minus "
+            f"{reserve // gib} GiB kept for the system leaves {room // gib} GiB"
+        )
+    return TargetPlan(
+        selection_mode="explicit" if requested else "auto",
+        requested_device=None,
+        resolved_target=image_file,
+        parent_disk=holder.source,
+        classification="loop_file",
+        needs_partition_creation=False,
+        needs_format=True,
+        existing_fs_type=None,
+        selection_reason=f"No spare disk or partition; XFS image file on {holder.target}",
+        loop_file_filesystem=holder.target,
+        loop_file_size_bytes=size,
+        loop_file_reserve_bytes=reserve,
+    )

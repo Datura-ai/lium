@@ -1,13 +1,26 @@
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
 import pytest
 
 from lium.cli.mine import storage
 from lium.cli.mine.docker_config import build_verification_result, inspect_docker_state, load_daemon_json, merge_overlay2
-from lium.cli.mine.models import BlockDevice, CommandResult, MountInfo
-from lium.cli.mine.storage import auto_select_target, load_mount_info, resolve_explicit_target
+from lium.cli.mine.models import BlockDevice, CommandResult, MountedFilesystem, MountInfo
+from lium.cli.mine.storage import (
+    NoSafeTargetError,
+    _source_disk_is_local,
+    auto_select_target,
+    load_mounted_filesystems,
+    load_mount_info,
+    plan_loop_file_target,
+    resolve_explicit_target,
+)
+
+
+GIB = 1024**3
 
 
 def _runner_factory(responses: dict[tuple[str, ...], CommandResult]):
@@ -348,3 +361,182 @@ def test_a_disk_with_a_mounted_partition_is_never_offered_for_a_new_partition():
         _dev("nvme1n1", "disk", [_dev("nvme1n1p1", "part", mount="/data", pkname="nvme1n1")]),
     ])
     assert _verdicts(runner, "/dev/nvme0n1p1")["/dev/nvme1n1"] == "unsupported_or_ambiguous"
+
+
+def test_auto_select_raises_no_safe_target_error_when_nothing_is_safe():
+    with pytest.raises(NoSafeTargetError):
+        auto_select_target(_runner_factory({}), [], _root_mount(), _docker_mount())
+
+
+def _filesystem(target, avail_gib, size_gib=500, fstype="ext4", source="/dev/nvme0n1p2", local=True) -> MountedFilesystem:
+    return MountedFilesystem(
+        target=target, source=source, fstype=fstype, size_bytes=size_gib * 1024**3, avail_bytes=avail_gib * 1024**3, local=local
+    )
+
+
+def _block(path, kernel_name, type, parent=None, transport=None, children=()):
+    return BlockDevice(path=path, name=path.rsplit("/", 1)[-1], kernel_name=kernel_name, type=type, size_bytes=1024**4, fstype=None,
+                       mountpoints=[], parent_kernel_name=parent, model=None, serial=None, transport=transport, children=list(children))
+
+
+def test_load_mounted_filesystems_marks_local_block_filesystems_only():
+    gib = 1024**3
+    findmnt = {
+        "filesystems": [
+            {"target": "/", "source": "/dev/nvme0n1p2", "fstype": "ext4", "size": 500 * gib, "avail": 300 * gib},
+            {"target": "/raid", "source": "/dev/md0", "fstype": "xfs", "size": 4000 * gib, "avail": 3500 * gib},
+            {"target": "/mnt/nfs", "source": "nas:/export", "fstype": "nfs4", "size": 9000 * gib, "avail": 8000 * gib},
+            {"target": "/media/usb", "source": "/dev/sdb1", "fstype": "ext4", "size": 2000 * gib, "avail": 1900 * gib},
+            {"target": "/boot/efi", "source": "/dev/nvme0n1p1", "fstype": "vfat", "size": 1 * gib, "avail": 1 * gib},
+        ]
+    }
+    runner = _runner_factory({
+        ("findmnt", "--json", "--bytes", "--list", "--real", "-o", "TARGET,SOURCE,FSTYPE,SIZE,AVAIL"): CommandResult(
+            args=[], stdout=json.dumps(findmnt), stderr="", returncode=0
+        )
+    })
+    usb = BlockDevice(path="/dev/sdb", name="sdb", kernel_name="sdb", type="disk", size_bytes=2000 * gib, fstype=None,
+                      mountpoints=[], parent_kernel_name=None, model=None, serial=None, transport="usb", children=[
+                          BlockDevice(path="/dev/sdb1", name="sdb1", kernel_name="sdb1", type="part", size_bytes=2000 * gib,
+                                      fstype="ext4", mountpoints=["/media/usb"], parent_kernel_name="sdb", model=None, serial=None)])
+    nvme = _block("/dev/nvme0n1", "nvme0n1", "disk", transport="nvme", children=[
+        _block("/dev/nvme0n1p1", "nvme0n1p1", "part", parent="nvme0n1"), _block("/dev/nvme0n1p2", "nvme0n1p2", "part", parent="nvme0n1")])
+    raid = _block("/dev/sda", "sda", "disk", transport="sata", children=[_block("/dev/md0", "md0", "raid1", parent="sda")])
+
+    filesystems = load_mounted_filesystems(runner, [usb, nvme, raid])
+
+    assert {fs.target: fs.local for fs in filesystems} == {
+        "/": True, "/raid": True, "/mnt/nfs": False, "/media/usb": False, "/boot/efi": False
+    }
+    assert filesystems[1].avail_bytes == 3500 * gib
+
+
+def test_plan_loop_file_takes_the_filesystem_with_most_free_space_minus_the_reserve():
+    plan = plan_loop_file_target([_filesystem("/", 300), _filesystem("/raid", 3500, size_gib=4000, source="/dev/md0")], "/var/lib/docker")
+
+    assert plan.classification == "loop_file" and plan.selection_mode == "auto"
+    assert plan.resolved_target == "/raid/lium-docker.xfs" and plan.loop_file_filesystem == "/raid"
+    assert plan.loop_file_reserve_bytes == 400 * 1024**3   # 10% of 4000 GiB beats the 20 GiB floor
+    assert plan.loop_file_size_bytes == 3100 * 1024**3
+    assert plan.needs_format is True and plan.needs_partition_creation is False
+
+
+def test_plan_loop_file_on_root_goes_to_var_lib_and_keeps_at_least_20_gib():
+    plan = plan_loop_file_target([_filesystem("/", 150, size_gib=180)], "/var/lib/docker")
+
+    assert plan.resolved_target == "/var/lib/lium-docker.xfs"
+    assert plan.loop_file_reserve_bytes == 20 * 1024**3 and plan.loop_file_size_bytes == 130 * 1024**3
+
+
+def test_plan_loop_file_refuses_under_100_gib_with_the_numbers():
+    with pytest.raises(RuntimeError, match="would get 66 GiB \\(86 GiB free, 20 GiB kept"):
+        plan_loop_file_target([_filesystem("/", 86, size_gib=120)], "/var/lib/docker")
+
+
+def test_plan_loop_file_skips_a_docker_root_that_is_its_own_mount():
+    filesystems = [_filesystem("/", 150), _filesystem("/var/lib/docker", 900, source="/dev/sdc1")]
+
+    plan = plan_loop_file_target(filesystems, "/var/lib/docker")
+
+    assert plan.loop_file_filesystem == "/"
+
+
+def test_plan_loop_file_explicit_path_and_size(tmp_path):
+    filesystems = [_filesystem("/", 300), _filesystem("/raid", 3500, size_gib=4000, source="/dev/md0")]
+
+    plan = plan_loop_file_target(filesystems, "/var/lib/docker", "/raid/pool/docker.xfs", 500 * 1024**3)
+
+    assert plan.selection_mode == "explicit" and plan.loop_file_filesystem == "/raid"
+    assert plan.resolved_target == "/raid/pool/docker.xfs" and plan.loop_file_size_bytes == 500 * 1024**3
+
+
+@pytest.mark.parametrize(
+    "image_file, size_gib, match",
+    [
+        ("/var/lib/docker/pool.xfs", None, "inside /var/lib/docker"),
+        ("/raid/pool.xfs", 3200, "does not fit on /raid"),
+        ("/mnt/nfs/pool.xfs", None, "not on a local filesystem"),
+    ],
+)
+def test_plan_loop_file_refuses_bad_explicit_requests(image_file, size_gib, match):
+    filesystems = [
+        _filesystem("/", 300),
+        _filesystem("/raid", 3500, size_gib=4000, source="/dev/md0"),
+        _filesystem("/mnt/nfs", 8000, size_gib=9000, fstype="nfs4", source="nas:/export", local=False),
+    ]
+    with pytest.raises(RuntimeError, match=match):
+        plan_loop_file_target(filesystems, "/var/lib/docker", image_file, size_gib * 1024**3 if size_gib else None)
+
+
+def test_merge_overlay2_switches_off_the_containerd_snapshotter_when_asked():
+    merged, changed = merge_overlay2({"storage-driver": "overlay2", "features": {"buildkit": True}}, disable_containerd_snapshotter=True)
+
+    assert changed is True
+    assert merged["features"] == {"buildkit": True, "containerd-snapshotter": False}
+
+
+@pytest.mark.parametrize("image_file", ["/data/$(reboot).xfs", "/data/lium docker.xfs", '/data/a"b.xfs'])
+def test_plan_loop_file_target_refuses_paths_unsafe_for_fstab_and_udev(image_file):
+    filesystems = [_filesystem("/", 100, size_gib=250), _filesystem("/data", 1500, size_gib=2000, source="/dev/sdb1")]
+
+    with pytest.raises(RuntimeError, match="may only contain letters, digits"):
+        plan_loop_file_target(filesystems, "/var/lib/docker", image_file=image_file)
+
+
+def test_source_disk_is_local_walks_every_ancestor():
+    gib = 1024**3
+    lvm = BlockDevice(path="/dev/mapper/vg-data", name="vg-data", kernel_name="dm-0", type="lvm", size_bytes=2000 * gib,
+                      fstype="ext4", mountpoints=["/data"], parent_kernel_name="sdb1", model=None, serial=None)
+    part = BlockDevice(path="/dev/sdb1", name="sdb1", kernel_name="sdb1", type="part", size_bytes=2000 * gib, fstype="LVM2_member",
+                       mountpoints=[], parent_kernel_name="sdb", model=None, serial=None, children=[lvm])
+    usb = BlockDevice(path="/dev/sdb", name="sdb", kernel_name="sdb", type="disk", size_bytes=2000 * gib, fstype=None,
+                      mountpoints=[], parent_kernel_name=None, model=None, serial=None, transport="usb", children=[part])
+    nvme_part = BlockDevice(path="/dev/nvme0n1p2", name="nvme0n1p2", kernel_name="nvme0n1p2", type="part", size_bytes=500 * gib,
+                            fstype="ext4", mountpoints=["/"], parent_kernel_name="nvme0n1", model=None, serial=None)
+    nvme = BlockDevice(path="/dev/nvme0n1", name="nvme0n1", kernel_name="nvme0n1", type="disk", size_bytes=500 * gib, fstype=None,
+                       mountpoints=[], parent_kernel_name=None, model=None, serial=None, transport="nvme", children=[nvme_part])
+
+    assert _source_disk_is_local("/dev/mapper/vg-data", [usb, nvme]) is False
+    assert _source_disk_is_local("/dev/sdb1", [usb, nvme]) is False
+    assert _source_disk_is_local("/dev/nvme0n1p2", [usb, nvme]) is True
+
+
+@pytest.mark.parametrize("first_parent", ["sata", "usb"])
+def test_source_disk_is_local_walks_every_parent_of_a_multi_disk_volume(first_parent):
+    # lsblk lists the LV under each physical volume; a USB member makes it non-local whichever listing comes first
+    lv_under_sata = _block("/dev/mapper/vg-data", "dm-0", "lvm", parent="sda1")
+    lv_under_usb = _block("/dev/mapper/vg-data", "dm-0", "lvm", parent="sdb1")
+    sata = _block("/dev/sda", "sda", "disk", transport="sata", children=[_block("/dev/sda1", "sda1", "part", parent="sda", children=[lv_under_sata])])
+    usb = _block("/dev/sdb", "sdb", "disk", transport="usb", children=[_block("/dev/sdb1", "sdb1", "part", parent="sdb", children=[lv_under_usb])])
+    devices = [sata, usb] if first_parent == "sata" else [usb, sata]
+
+    assert _source_disk_is_local("/dev/mapper/vg-data", devices) is False
+    assert _source_disk_is_local("/dev/dm-0", devices) is False
+
+
+@pytest.mark.parametrize(
+    "source, local",
+    [("/dev/dm-0", False), ("/dev/mapper/vg-data", False), ("/dev/sdd1", False), ("/dev/sdd", False), ("tank/root", True), ("/dev/nvme0n1p2", True)],
+)
+def test_source_disk_is_local_matches_kernel_names_and_distrusts_unlisted_dev_paths(source, local):
+    usb = _block("/dev/sdb", "sdb", "disk", transport="usb", children=[_block("/dev/mapper/vg-data", "dm-0", "lvm", parent="sdb")])
+    nvme = _block("/dev/nvme0n1", "nvme0n1", "disk", transport="nvme", children=[_block("/dev/nvme0n1p2", "nvme0n1p2", "part", parent="nvme0n1")])
+
+    assert _source_disk_is_local(source, [usb, nvme]) is local
+
+
+def test_plan_loop_file_target_leaves_var_lib_when_var_is_its_own_filesystem():
+    filesystems = [_filesystem("/", 800, size_gib=1000), _filesystem("/var", 120, size_gib=200, source="/dev/nvme0n1p3")]
+
+    plan = plan_loop_file_target(filesystems, "/var/lib/docker")
+
+    assert plan.resolved_target == "/lium-docker.xfs"
+    assert plan.loop_file_filesystem == "/"
+    assert plan.loop_file_size_bytes == 700 * GIB
+
+
+def test_plan_loop_file_target_refuses_an_existing_auto_path(monkeypatch):
+    monkeypatch.setattr(os.path, "lexists", lambda path: path == "/var/lib/lium-docker.xfs")
+
+    with pytest.raises(RuntimeError, match="/var/lib/lium-docker.xfs already exists"):
+        plan_loop_file_target([_filesystem("/", 300)], "/var/lib/docker")
