@@ -72,6 +72,9 @@ class ExecutorInfo(_Serializable):
     # The most reduced GPU's current and default power limit in watts; None with the verdict.
     gpu_power_limit_w: Optional[int] = None
     gpu_power_limit_default_w: Optional[int] = None
+    # The node's rents often fail to start (2+ failed starts in 7 days, >=30% of its rents); the nodes
+    # ``ls(reliable=True)`` hides. None = the API did not send it.
+    frequent_rent_failures: Optional[bool] = None
     # When a validator last passed the node, as the API's ISO 8601 UTC string; None = never passed.
     last_verified_at: Optional[str] = None
     # The platform's 0-100 reliability score for the node (uptime and rental history); None when not sent.

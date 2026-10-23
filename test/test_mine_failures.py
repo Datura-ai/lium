@@ -124,6 +124,58 @@ def test_prereqs_fail_without_a_sysbox_runc_runtime_and_print_the_official_insta
     assert mine._SYSBOX_SETUP_COMMAND in str(err.value)
 
 
+def _sysbox_install_host(monkeypatch, tmp_path, *, install_ok: bool, registers_before_failing: bool = False,
+                         toolkit_present: bool = True):
+    script = tmp_path / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("")
+    ran = []
+    installed = {"done": False}
+
+    def run(cmd, **kw):
+        ran.append(cmd)
+        if "sysbox_setup" in cmd:
+            installed["done"] = install_ok or registers_before_failing
+            if not install_ok:
+                raise RuntimeError("Command failed (1): kernel too old")
+        if "Runtimes" in cmd:
+            return ('{"sysbox-runc":{}}' if installed["done"] else '{"runc":{}}'), ""
+        return "", ""
+
+    # without a toolkit up front, only the installer puts it there
+    monkeypatch.setattr(mine, "_exists", lambda cmd: cmd != "nvidia-container-cli" or toolkit_present or installed["done"])
+    monkeypatch.setattr(mine, "_run", run)
+    return script, ran
+
+
+def test_prereqs_install_sysbox_from_the_checkout_without_asking(monkeypatch, tmp_path):
+    script, ran = _sysbox_install_host(monkeypatch, tmp_path, install_ok=True, toolkit_present=False)
+
+    mine._check_prereqs(tmp_path)
+
+    install = [cmd for cmd in ran if "sysbox_setup" in cmd]
+    assert len(install) == 1 and str(script) in install[0] and install[0].endswith("< /dev/null")
+
+
+def test_a_failed_sysbox_install_stops_with_the_manual_command_and_the_cause(monkeypatch, tmp_path):
+    _sysbox_install_host(monkeypatch, tmp_path, install_ok=False)
+
+    with pytest.raises(Exception) as err:
+        mine._check_prereqs(tmp_path)
+
+    assert mine._SYSBOX_SETUP_COMMAND in str(err.value) and "kernel too old" in str(err.value)
+
+
+def test_a_late_sysbox_installer_failure_with_the_runtime_present_is_printed_as_a_warning(monkeypatch, tmp_path):
+    _sysbox_install_host(monkeypatch, tmp_path, install_ok=False, registers_before_failing=True)
+    warnings = []
+    monkeypatch.setattr(mine.console, "warning", warnings.append)
+
+    mine._check_prereqs(tmp_path)
+
+    assert len(warnings) == 1 and "kernel too old" in warnings[0]
+
+
 def test_prereqs_pass_with_sysbox(monkeypatch):
     _prereq_host(monkeypatch, '{"runc":{"path":"runc"},"sysbox-runc":{"path":"/usr/bin/sysbox-runc"}}')
     mine._check_prereqs()
