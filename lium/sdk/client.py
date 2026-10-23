@@ -2636,7 +2636,11 @@ class Lium:
                 if on_progress:
                     on_progress(elapsed)
                 time.sleep(GPU_RESET_POLL_SECONDS)
-                body = self._request("GET", f"/pods/{pod.id}/reset-gpu/{body['request_id']}").json()
+                try:
+                    body = self._request("GET", f"/pods/{pod.id}/reset-gpu/{body['request_id']}").json()
+                except LiumError as e:
+                    e.hint = GPU_RESET_MAY_STILL_RUN  # the reset was sent: a "Retry" could start a second one
+                    raise
         finally:
             self._release_ssh(pod)  # a failed reset stops the container too; held connections are dead
         return _gpu_reset_result(pod, body)

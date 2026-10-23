@@ -242,6 +242,18 @@ def test_sdk_client_deadline_stops_polling_with_a_timeout_error(monkeypatch, clo
 
 
 @responses.activate
+def test_sdk_poll_failure_says_the_reset_may_still_run(monkeypatch, clock):
+    monkeypatch.setattr("lium.sdk.utils.time.sleep", lambda seconds: None)
+    responses.post(POST_URL, status=202, json=RUNNING)
+    responses.get(GET_URL, status=503, json={"detail": "unavailable"})
+
+    with pytest.raises(LiumServerError) as exc:
+        _client(monkeypatch).reset_gpu(SimpleNamespace(id=POD_ID))
+
+    assert "still" in exc.value.hint
+
+
+@responses.activate
 def test_sdk_legacy_200_is_the_result_without_polling(monkeypatch, clock):
     responses.post(POST_URL, json=OK)
 
