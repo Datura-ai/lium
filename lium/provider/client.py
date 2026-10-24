@@ -101,6 +101,8 @@ class ProviderClient:
         account: the ``miner_hotkey`` of an account made with e-mail or Google (an opaque account id, no key
             to sign with): the session cached by :meth:`login_email` is used and the account id stands in for
             the hotkey. Ignored when ``hotkey`` or ``signer`` is given.
+        api_token: a provider API token (``lpk_…``, minted in the portal) sent as the bearer; the account id
+            comes from ``GET /auth/me``. Works for any account, Google-only included. Ignored like ``account``.
     """
 
     def __init__(
@@ -113,12 +115,16 @@ class ProviderClient:
         http: PortalHTTP | None = None,
         signer: Signer | None = None,
         account: str | None = None,
+        api_token: str | None = None,
     ) -> None:
-        if signer is None and hotkey is None and account is None:
-            raise ValueError("ProviderClient requires either signer=, hotkey= or account=")
+        if signer is None and hotkey is None and account is None and api_token is None:
+            raise ValueError("ProviderClient requires signer=, hotkey=, account= or api_token=")
         self.coldkey = coldkey
         self.hotkey = hotkey
-        self.account = account if signer is None and hotkey is None else None
+        keyless = signer is None and hotkey is None
+        self.api_token = api_token if keyless else None
+        # with a token, the account id is read from /auth/me on first use (_safe_hotkey)
+        self.account = account if keyless and not self.api_token else None
         self.portal_url = (portal_url or DEFAULT_PORTAL_URL).rstrip("/")
         self._signer: Signer | None = signer
         self._token_store = token_store or TokenStore()
@@ -364,6 +370,11 @@ class ProviderClient:
         return out
 
     def _safe_hotkey(self) -> str | None:
+        if self.api_token and not self.account:
+            try:
+                self.account = self.whoami().get("miner_hotkey") or None
+            except ProviderError:
+                return None
         if self.account:
             return self.account
         try:
@@ -756,6 +767,8 @@ class ProviderClient:
         token when one is cached AND not expired -- expired tokens are
         treated as "no token" so the caller gets a clean 401 path.
         """
+        if self.api_token:
+            return self.api_token
         if self._cached_token is not None and not self._cached_token.expired():
             return self._cached_token.token
         # Try a cache load without a network round-trip. We need the signer's

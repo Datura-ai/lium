@@ -28,21 +28,22 @@ from lium.provider.errors import ARG_INVALID, ProviderError
 
 
 def require_hotkey(ctx: click.Context, *, group: str | None = None) -> None:
-    """Exit with a clear ARG_INVALID if neither a hotkey nor a signed-in e-mail account is configured.
+    """Exit with a clear ARG_INVALID if no hotkey, API token or signed-in e-mail account is configured.
 
     ``group`` (optional) is folded into the message so the user knows
     which subgroup needs it.
     """
     opts = (ctx.obj or {}).get("provider_opts") or {}
-    if opts.get("hotkey") or opts.get("account"):
+    if opts.get("hotkey") or opts.get("account") or opts.get("token"):
         return
     label = f"{group} commands" if group else "this command"
     fatal(
         ctx,
         ProviderError(
-            f"{label} require --hotkey (or LIUM_PROVIDER_HOTKEY), or a signed-in e-mail account",
+            f"{label} require --hotkey (or LIUM_PROVIDER_HOTKEY), a portal API token or a signed-in e-mail account",
             code=ARG_INVALID,
-            hint="Account made with e-mail on the portal (no key): run `lium provider portal login --email <address>`.",
+            hint="Account without a key (Google or e-mail): create an API token in the portal (Account settings, "
+            "API tokens) and `export LIUM_PROVIDER_TOKEN=lpk_...`, or run `lium provider portal login --email <address>`.",
         ),
     )
 

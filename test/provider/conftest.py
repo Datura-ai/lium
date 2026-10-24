@@ -54,5 +54,5 @@ def _isolate_user_config(tmp_path_factory, monkeypatch) -> None:
     fake_home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(fake_home))
     # Pop any LIUM_PROVIDER_* env so tests start from a clean slate.
-    for key in ("LIUM_PROVIDER_COLDKEY", "LIUM_PROVIDER_HOTKEY", "LIUM_PROVIDER_ACCOUNT", "LIUM_PORTAL_URL"):
+    for key in ("LIUM_PROVIDER_COLDKEY", "LIUM_PROVIDER_HOTKEY", "LIUM_PROVIDER_ACCOUNT", "LIUM_PROVIDER_TOKEN", "LIUM_PORTAL_URL"):
         monkeypatch.delenv(key, raising=False)

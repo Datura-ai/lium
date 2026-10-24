@@ -121,6 +121,8 @@ def provider_command(
         "hotkey": hotkey or cfg.get("provider.hotkey"),
         # an e-mail account's id, saved by `portal login --email`; used only when no hotkey is set
         "account": cfg.get("provider.account"),
+        # a portal API token (lpk_…): LIUM_PROVIDER_TOKEN or `portal login --token`; also used only without a hotkey
+        "token": cfg.get("provider.token"),
         "portal_url": portal_url or cfg.get("provider.portal_url"),
         "json": json_mode or json_output_requested(),
         "debug": debug,

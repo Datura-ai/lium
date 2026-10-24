@@ -35,10 +35,20 @@ def portal_command() -> None:
     help="Sign in to an account made with e-mail (no key). The password is read from "
     "LIUM_PROVIDER_PASSWORD or asked for.",
 )
+@click.option(
+    "--token",
+    "use_token",
+    is_flag=True,
+    help="Save a portal API token (lpk_..., Account settings > API tokens) for an account without a key, "
+    "Google included. Asked for, not passed on the command line.",
+)
 @with_provider_overrides
 @click.pass_context
-def login(ctx: click.Context, force: bool, email: str | None) -> None:
+def login(ctx: click.Context, force: bool, email: str | None, use_token: bool) -> None:
     opts = (ctx.obj or {}).get("provider_opts") or {}
+    if use_token:
+        _login_token(ctx, click.prompt("API token", hide_input=True).strip())
+        return
     if email:
         _login_email(ctx, email)
         return
@@ -103,17 +113,33 @@ def _login_email(ctx: click.Context, email: str) -> None:
     )
 
 
+def _login_token(ctx: click.Context, token: str) -> None:
+    opts = (ctx.obj or {}).get("provider_opts") or {}
+    client = ProviderClient(portal_url=opts.get("portal_url"), api_token=token)
+    try:
+        me = client.whoami()  # proves the token before it is saved
+    except ProviderError as e:
+        ctx.exit(emit_error(ctx, e))
+        return
+    ConfigManager().set("provider.token", token)
+    render(
+        ctx,
+        {"provider_id": me.get("provider_id") or me.get("id"), "account": me.get("miner_hotkey"), "token_present": True},
+        summary=f"API token saved for account {me.get('miner_hotkey')}",
+    )
+
+
 @portal_command.command("logout", short_help="Drop the cached JWT for this hotkey.")
 @with_provider_overrides
 @click.pass_context
 def logout(ctx: click.Context) -> None:
     opts = (ctx.obj or {}).get("provider_opts") or {}
-    if not (opts.get("hotkey") or opts.get("account")):
+    if not (opts.get("hotkey") or opts.get("account") or opts.get("token")):
         ctx.exit(
             emit_error(
                 ctx,
                 ProviderError(
-                    "portal logout requires --hotkey (or LIUM_PROVIDER_HOTKEY), or `portal login --email`",
+                    "portal logout requires --hotkey (or LIUM_PROVIDER_HOTKEY), LIUM_PROVIDER_TOKEN or `portal login --email`",
                     code=ARG_INVALID,
                 ),
             )
@@ -132,7 +158,9 @@ def logout(ctx: click.Context) -> None:
     except ProviderError as e:
         ctx.exit(emit_error(ctx, e))
         return
-    if client.account:
+    if client.api_token:
+        ConfigManager().unset("provider.token")  # an exported LIUM_PROVIDER_TOKEN stays set in the shell
+    elif client.account:
         ConfigManager().unset("provider.account")
     render(
         ctx,
@@ -146,12 +174,12 @@ def logout(ctx: click.Context) -> None:
 @click.pass_context
 def whoami(ctx: click.Context) -> None:
     opts = (ctx.obj or {}).get("provider_opts") or {}
-    if not (opts.get("hotkey") or opts.get("account")):
+    if not (opts.get("hotkey") or opts.get("account") or opts.get("token")):
         ctx.exit(
             emit_error(
                 ctx,
                 ProviderError(
-                    "portal whoami requires --hotkey (or LIUM_PROVIDER_HOTKEY), or `portal login --email`",
+                    "portal whoami requires --hotkey (or LIUM_PROVIDER_HOTKEY), LIUM_PROVIDER_TOKEN or `portal login --email`",
                     code=ARG_INVALID,
                 ),
             )
