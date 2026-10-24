@@ -67,6 +67,7 @@ __all__ = [
     "EXECUTOR_PODS",
     "EXECUTOR_VERIFICATION",
     "EXECUTORS",
+    "LOGIN_EMAIL",
     "LOGIN_FLEXIBLE",
     "LOGOUT",
     "MACHINE_REQUEST_BY_ID",

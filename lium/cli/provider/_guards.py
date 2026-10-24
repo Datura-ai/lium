@@ -27,16 +27,27 @@ from lium.cli.provider._render import emit_error, fatal, render
 from lium.provider.errors import ARG_INVALID, ProviderError
 
 
-def require_hotkey(ctx: click.Context, *, group: str | None = None) -> None:
+def require_hotkey(ctx: click.Context, *, group: str | None = None, signer: bool = False) -> None:
     """Exit with a clear ARG_INVALID if no hotkey, API token or signed-in e-mail account is configured.
 
     ``group`` (optional) is folded into the message so the user knows
-    which subgroup needs it.
+    which subgroup needs it. ``signer=True``: the command signs with the hotkey, so a token or account does not do.
     """
     opts = (ctx.obj or {}).get("provider_opts") or {}
+    label = f"{group} commands" if group else "this command"
+    if signer:
+        if not opts.get("hotkey"):
+            fatal(
+                ctx,
+                ProviderError(
+                    f"{label} sign with your hotkey: pass --hotkey (or LIUM_PROVIDER_HOTKEY)",
+                    code=ARG_INVALID,
+                    hint="An account without a key changes its e-mail and password in the portal (Account settings).",
+                ),
+            )
+        return
     if opts.get("hotkey") or opts.get("account") or opts.get("token"):
         return
-    label = f"{group} commands" if group else "this command"
     fatal(
         ctx,
         ProviderError(

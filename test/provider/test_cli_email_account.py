@@ -96,3 +96,13 @@ def test_no_identity_error_names_both_ways_in(portal) -> None:
     result = CliRunner().invoke(provider_command, ["billing", "list"])
     assert result.exit_code != 0
     assert "LIUM_PROVIDER_TOKEN" in result.output and "portal login --email" in result.output
+
+
+@pytest.mark.parametrize("args", [["config", "set-email", "b@example.com"], ["config", "set-password"]])
+def test_signing_config_commands_ask_for_the_hotkey_not_a_token(token_portal, monkeypatch, args) -> None:
+    # set-email / set-password sign with the hotkey: a token must get a clear error, not a traceback
+    monkeypatch.setenv("LIUM_PROVIDER_TOKEN", "lpk_abc")
+    result = CliRunner().invoke(provider_command, args, input="x\nx\n")
+    assert result.exit_code != 0
+    assert "--hotkey" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
