@@ -5791,6 +5791,57 @@ class Lium:
         body.setdefault("idempotency_key", key)
         return body
 
+    def transfer_credits(
+        self,
+        to: str,
+        amount: float,
+        description: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Move credit from this account's balance to another account (``POST /users/me/transfer-credits``).
+
+        The key must hold the ``billing`` scope (:class:`LiumScopeError` otherwise). The request is sent
+        once with an ``Idempotency-Key`` header — yours, or a fresh ``uuid4`` — so a repeat with the same
+        key moves the credit once (on a platform that honours the header).
+
+        Args:
+            to: The recipient's e-mail (anything with an ``@``) or account id.
+            amount: USD, at least $0.01.
+            description: A note the recipient sees.
+            idempotency_key: Repeat with the same key to get the first transfer back. Omitted: the SDK makes one.
+
+        Returns:
+            ``{"sender_balance", "transfer_id", "idempotency_key"}``.
+
+        Raises:
+            LiumError: ``code`` ``self_transfer`` (400), ``insufficient_balance`` (402) or
+                ``recipient_unavailable`` (409, a missing or deleted account).
+            LiumChargeOutcomeUnknownError: timeout, dropped connection or 5xx after the POST — the
+                transfer may have happened; repeat only with ``idempotency_key`` from the error.
+        """
+        if not math.isfinite(amount) or amount <= 0:
+            raise LiumError("amount must be a positive, finite number of dollars.", code="invalid_arguments")
+        key = idempotency_key or str(uuid.uuid4())
+        payload: Dict[str, Any] = {"receiver_email" if "@" in to else "receiver_id": to.strip(), "amount": amount}
+        if description:
+            payload["description"] = description
+        try:
+            body = self._request(
+                "POST", "/users/me/transfer-credits", json=payload, headers={**self.headers, "Idempotency-Key": key}
+            ).json()
+        except (LiumServerError, requests.RequestException) as exc:
+            # the debit may have committed before the answer was lost: never "nothing happened"
+            raise LiumChargeOutcomeUnknownError(
+                "The transfer may or may not have happened: the API did not answer after it was posted. "
+                "Check the balance before trying again; a repeat with the same idempotency_key moves the "
+                "credit once.",
+                idempotency_key=key,
+                code="transfer_outcome_unknown",
+                request_id=getattr(exc, "request_id", None),
+            ) from exc
+        body.setdefault("idempotency_key", key)
+        return body
+
     def topup_checkout_link(
         self,
         amount_usd: float,

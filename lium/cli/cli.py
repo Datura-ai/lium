@@ -40,6 +40,7 @@ from .request import request_command
 from .audit import audit_command
 from .fund import fund_command
 from .topup import topup_command
+from .transfer import transfer_command
 from .gpu_splitting import gpu_splitting_command
 from .bk import bk_command
 from .mine import mine_command
@@ -140,6 +141,7 @@ cli.add_command(request_command)
 cli.add_command(audit_command)
 cli.add_command(fund_command)
 cli.add_command(topup_command)
+cli.add_command(transfer_command)
 cli.add_command(gpu_splitting_command)
 cli.add_command(bk_command, name="bk")
 cli.add_command(mine_command)
