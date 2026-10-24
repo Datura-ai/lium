@@ -2,13 +2,20 @@
 
 import json
 
+import pytest
 from click.testing import CliRunner
 
 from lium.cli import interactive
 from lium.cli.cli import cli
 from lium.cli.clusters import command as clusters_command
 from lium.sdk import (
-    Cluster, ClusterOffer, ExecutorInfo, LiumNotFoundError, LiumPermissionError, LiumServerError, PodInfo,
+    Cluster,
+    ClusterOffer,
+    ExecutorInfo,
+    LiumNotFoundError,
+    LiumPermissionError,
+    LiumServerError,
+    PodInfo,
 )
 
 FABRIC = "hot:infiniband:0x3:0x7fff:NVIDIA H100 80GB HBM3:8"
@@ -139,6 +146,17 @@ def test_clusters_up_schedules_the_ttl_before_waiting(monkeypatch, tmp_path):
     assert result.exit_code != 0
     assert [p for p, _ in FakeLium.scheduled] == ["pod-0", "pod-1"]
     assert "terminates at" in _flat(result.output)
+
+
+@pytest.mark.parametrize("args, backups", [((), True), (("--no-backup",), False)])
+def test_clusters_up_says_backups_are_on_unless_no_backup_turns_them_off(monkeypatch, tmp_path, args, backups):
+    _patch(monkeypatch, tmp_path)
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--no-wait", *args)
+
+    assert result.exit_code == 0, result.output
+    assert FakeLium.up_calls[0][1]["enable_backups"] is backups
+    assert ("Backups on:" in _flat(result.output)) is backups
 
 
 def test_clusters_rm_reports_a_member_that_stayed(monkeypatch, tmp_path):

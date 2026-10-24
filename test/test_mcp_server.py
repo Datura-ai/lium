@@ -150,6 +150,17 @@ def test_rent_pod_waits_for_the_pod_and_returns_it(tools, fake):
     assert result["pod"]["name"] == "agent-job"
     assert fake.up_kwargs["executor_id"] == "cheap" and fake.up_kwargs["wait"] is False
     assert fake.wait_timeout == 600
+    assert fake.up_kwargs["enable_backups"] is True
+
+
+def test_rent_pod_can_turn_the_automatic_backup_off(tools, fake):
+    from lium.cli.mcp.tools import tool_functions
+
+    rent_pod = next(f for f in tool_functions(tools) if f.__name__ == "rent_pod")
+
+    asyncio.run(rent_pod("cheap", "job", enable_backups=False))
+
+    assert fake.up_kwargs["enable_backups"] is False
 
 
 @pytest.mark.parametrize("outcome", [None, TimeoutError("ssh probe timed out")])
