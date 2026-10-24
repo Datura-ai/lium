@@ -39,6 +39,8 @@ from lium.provider.errors import (
     PORTAL_AUTH_EXPIRED,
     PORTAL_AUTH_INVALID,
     PORTAL_AUTH_REFRESH_RACE,
+    PORTAL_AUTH_TOTP_INVALID,
+    PORTAL_AUTH_TOTP_REQUIRED,
     PORTAL_CONTRACT_DRIFT,
     PORTAL_FORBIDDEN,
     PORTAL_NOT_FOUND,
@@ -76,6 +78,8 @@ _EXIT_CODES: dict[str, int] = {
     # 2: auth errors, and a valid token refused for this hotkey
     PORTAL_AUTH_INVALID: 2,
     PORTAL_AUTH_EXPIRED: 2,
+    PORTAL_AUTH_TOTP_REQUIRED: 2,
+    PORTAL_AUTH_TOTP_INVALID: 2,
     WALLET_NOT_FOUND: 2,
     PORTAL_FORBIDDEN: 2,
     # 3: portal (server-side)
@@ -106,6 +110,8 @@ ERROR_CODES: dict[str, str] = {
     PORTAL_AUTH_EXPIRED: "auth.expired",
     PORTAL_AUTH_INVALID: "auth.invalid",
     PORTAL_AUTH_REFRESH_RACE: "auth.refresh_race",
+    PORTAL_AUTH_TOTP_REQUIRED: "auth.totp_required",
+    PORTAL_AUTH_TOTP_INVALID: "auth.totp_invalid",
     PORTAL_FORBIDDEN: "auth.forbidden",
     PORTAL_CONTRACT_DRIFT: "portal.contract_drift",
     PORTAL_NOT_FOUND: "portal.not_found",

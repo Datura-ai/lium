@@ -26,9 +26,15 @@ def portal_command() -> None:
     is_flag=True,
     help="Bypass the local token cache and re-authenticate.",
 )
+@click.option(
+    "--totp-code",
+    metavar="CODE",
+    help="Authenticator code or recovery code, for an account with an authenticator app "
+    "(asked for in a terminal when omitted).",
+)
 @with_provider_overrides
 @click.pass_context
-def login(ctx: click.Context, force: bool) -> None:
+def login(ctx: click.Context, force: bool, totp_code: str | None) -> None:
     opts = (ctx.obj or {}).get("provider_opts") or {}
     if not opts.get("hotkey"):
         ctx.exit(
@@ -41,7 +47,7 @@ def login(ctx: click.Context, force: bool) -> None:
             )
         )
 
-    client = build_client(ctx)
+    client = build_client(ctx, totp_code)
     try:
         response = client.login(force=force)
     except ProviderError as e:

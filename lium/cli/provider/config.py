@@ -105,12 +105,18 @@ def opt_out(ctx: click.Context) -> None:
 
 @config_command.command("set-email", short_help="Update contact email.")
 @click.argument("email", required=True)
+@click.option(
+    "--totp-code",
+    metavar="CODE",
+    help="Authenticator code or recovery code, for an account with an authenticator app "
+    "(asked for in a terminal when omitted).",
+)
 @with_provider_overrides
 @click.pass_context
-def set_email(ctx: click.Context, email: str) -> None:
+def set_email(ctx: click.Context, email: str, totp_code: str | None) -> None:
     require_hotkey(ctx, group="config")
     require_persona_ack(ctx)
-    client = build_client(ctx)
+    client = build_client(ctx, totp_code)
     try:
         body = client.set_email(email)
     except ProviderError as e:
