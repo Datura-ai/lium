@@ -119,6 +119,8 @@ def provider_command(
     ctx.obj["provider_opts"] = {
         "coldkey": coldkey or cfg.get("provider.coldkey"),
         "hotkey": hotkey or cfg.get("provider.hotkey"),
+        # an e-mail account's id, saved by `portal login --email`; used only when no hotkey is set
+        "account": cfg.get("provider.account"),
         "portal_url": portal_url or cfg.get("provider.portal_url"),
         "json": json_mode or json_output_requested(),
         "debug": debug,

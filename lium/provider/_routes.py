@@ -10,6 +10,7 @@ executor). Re-add only when a corresponding portal route is re-enabled.
 """
 
 # Auth
+LOGIN_EMAIL = "/auth/login-email"
 LOGIN_FLEXIBLE = "/auth/login-flexible"
 LOGOUT = "/auth/logout"
 ME = "/auth/me"

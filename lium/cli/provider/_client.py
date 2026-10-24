@@ -19,6 +19,7 @@ def build_client(ctx: click.Context) -> ProviderClient:
         coldkey=opts.get("coldkey"),
         hotkey=opts.get("hotkey"),
         portal_url=opts.get("portal_url"),
+        account=opts.get("account"),
     )
 
 

@@ -33,6 +33,7 @@ from lium.provider._routes import (
     EXECUTOR_PODS,
     EXECUTOR_VERIFICATION,
     EXECUTORS,
+    LOGIN_EMAIL,
     LOGIN_FLEXIBLE,
     MACHINE_REQUEST_BY_ID,
     MACHINE_REQUESTS,
@@ -97,6 +98,9 @@ class ProviderClient:
         signer: optional custom :class:`Signer`. v1 default is
             ``LocalKeypairSigner`` constructed lazily from the wallet at
             ``~/.bittensor/wallets/<coldkey>/hotkeys/<hotkey>``.
+        account: the ``miner_hotkey`` of an account made with e-mail or Google (an opaque account id, no key
+            to sign with): the session cached by :meth:`login_email` is used and the account id stands in for
+            the hotkey. Ignored when ``hotkey`` or ``signer`` is given.
     """
 
     def __init__(
@@ -108,11 +112,13 @@ class ProviderClient:
         token_store: TokenStore | None = None,
         http: PortalHTTP | None = None,
         signer: Signer | None = None,
+        account: str | None = None,
     ) -> None:
-        if signer is None and hotkey is None:
-            raise ValueError("ProviderClient requires either signer= or hotkey=")
+        if signer is None and hotkey is None and account is None:
+            raise ValueError("ProviderClient requires either signer=, hotkey= or account=")
         self.coldkey = coldkey
         self.hotkey = hotkey
+        self.account = account if signer is None and hotkey is None else None
         self.portal_url = (portal_url or DEFAULT_PORTAL_URL).rstrip("/")
         self._signer: Signer | None = signer
         self._token_store = token_store or TokenStore()
@@ -189,6 +195,27 @@ class ProviderClient:
         )
         return response
 
+    def login_email(self, email: str, password: str) -> LoginResponse:
+        """``POST /auth/login-email``: sign in to an account made with e-mail (no key of its own).
+
+        The session is cached under the account id (``miner_hotkey``), which then stands in for the hotkey.
+        """
+        body = self._http.post(LOGIN_EMAIL, json_body={"email": email, "password": password}, auth=False)
+        try:
+            response = LoginResponse.model_validate(body)
+        except Exception as e:
+            raise ProviderAuthError(
+                "portal returned an unexpected login response shape",
+                code=PORTAL_AUTH_INVALID,
+                cause=e,
+                context={"body": _summarise_body(body)},
+            ) from e
+        self.account = response.provider.miner_hotkey
+        self._cached_token = with_refresh_retry(
+            lambda: self._token_store.save(self.account, response.token, provider_id=response.provider.id)
+        )
+        return response
+
     def _session_ended(self, cached: CachedToken) -> bool:
         """True when the portal answers 401 to ``cached``; any other failure (offline, 5xx) keeps it, as before."""
         self._cached_token = cached
@@ -212,7 +239,7 @@ class ProviderClient:
         self._cached_token = None
         signer_addr: str | None
         try:
-            signer_addr = self.signer.ss58_address
+            signer_addr = self.account or self.signer.ss58_address
         except Exception:  # pragma: no cover - defensive
             signer_addr = None
         if signer_addr:
@@ -337,6 +364,8 @@ class ProviderClient:
         return out
 
     def _safe_hotkey(self) -> str | None:
+        if self.account:
+            return self.account
         try:
             return self.signer.ss58_address
         except Exception:  # pragma: no cover - defensive
@@ -736,7 +765,7 @@ class ProviderClient:
         # disk we can't derive ss58 -- return None and let the caller see a
         # clean 401.
         try:
-            ss58 = self.signer.ss58_address
+            ss58 = self.account or self.signer.ss58_address
         except Exception:
             return None
         try:

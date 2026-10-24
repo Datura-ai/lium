@@ -313,6 +313,8 @@ Teams share a workspace whose billing owner pays. An API key is bound to one wor
 
 Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, `--portal-url`, `--json`, `--debug`, `-y/--yes`, `--dry-run`. Persist wallet identity once with `lium config set provider.coldkey <NAME>` and `lium config set provider.hotkey <NAME>`. Spend-affecting subcommands run a persona prompt unless `--yes` or `LIUM_PROVIDER_ACK=1` is set.
 
+**Account made with e-mail (no key):** run `lium provider portal login --email <address>` once; later `lium provider` commands use that account without `--hotkey`.
+
 - `lium provider portal {login,logout,whoami}` - Manage the cached portal JWT
 - `lium provider status [--netuid 51]` - Aggregated provider snapshot (registration, portal session, nodes, validator weights)
 - `lium provider node list|get|add|rm|update-price|update-gpu|address` - Node lifecycle on the portal; `node list [--all | --miner-hotkey HK]` shows the active hotkey's nodes by default, `--all` every provider's
