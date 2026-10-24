@@ -2313,8 +2313,10 @@ class Lium:
                 ``False``/``None`` do not filter.
             view: ``"summary"`` (default) asks the API for the fields a listing reads — price, GPU/CPU/RAM/disk
                 headline specs, location, tier, network; an API that does not know the parameter returns the
-                full row. ``"full"`` asks for the whole node-check scrape in :attr:`ExecutorInfo.specs` (docker
-                info, verified ports, per-GPU telemetry, checksums).
+                full row. ``"full"`` asks for the whole public node-check scrape in :attr:`ExecutorInfo.specs` (verified
+                ports, checksums, per-GPU card fields). What the renters' pods are doing (docker containers, GPU
+                processes, per-GPU load, memory in use, current clocks and PCIe link) is not served; a renter reads
+                their own pod's load with :meth:`gpu_stats`.
 
         Returns:
             A list of :class:`ExecutorInfo` objects that satisfy the filters.
