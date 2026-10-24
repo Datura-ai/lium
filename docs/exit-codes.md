@@ -117,6 +117,8 @@ Codes raised by the shared error handler (any command can produce them) when the
 | `not_found` | 3 | The API returned 404 for a resource other than the target pod. | List it again and retry. |
 | `rate_limited` | 3 | The API returned 429. | Wait and retry with back-off. |
 | `server_error` | 3 | The API returned 5xx. | Retry; `LIUM_DEBUG=1` prints the traceback on stderr. |
+| `gpu_reset_timeout` | 3 | `lium reset-gpu` (`Lium.reset_gpu`) sent the reset and got no final status in 330 s, or lost the connection to the server while it sent the reset. | Do not reset again yet: the reset may still be running. In a minute check the GPUs with `lium exec <pod> nvidia-smi`. |
+| `gpu_reset_unavailable` | 3 | `lium reset-gpu` (`Lium.reset_gpu`): the server could not send the reset to the GPU host, or the host did not answer in time (status `timeout`). | The reset may still finish. Check the GPUs with `lium exec <pod> nvidia-smi` before you reset again. |
 | `rent_outcome_unknown` | 3 | A rent (`lium up`, `Lium.rent`) got no answer, its resend was refused (401/403), and no pod shows up in the listing: the first request may still have rented a pod. | Do not re-run the rent yet: `lium ps` shows whether the pod exists; `lium rm <pod>` removes it. |
 | `lium_error` | 3 | Any other API failure. | Retry; `LIUM_DEBUG=1` prints the traceback on stderr. |
 | `ssh_unavailable` | 4 | The pod has no SSH endpoint yet. | Wait for `lium ps` to show it RUNNING with an SSH command. |
