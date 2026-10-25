@@ -123,3 +123,11 @@ def test_volumes_rm_unknown_huid_deletes_nothing(monkeypatch, tmp_path) -> None:
     assert result.exit_code != 0
     assert "nope-1" in result.output
     assert fake.deleted == []
+
+
+def test_volumes_rm_shared_name_deletes_nothing() -> None:
+    from lium.cli.volumes.rm import parsing
+
+    live = [{'id': 'a', 'huid': 'cold-fox', 'name': 'data'}, {'id': 'b', 'huid': 'warm-owl', 'name': 'data'}]
+    parsed, error = parsing.parse("data", [], live)
+    assert parsed == {} and "matches 2 volumes" in error
