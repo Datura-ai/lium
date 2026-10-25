@@ -222,3 +222,20 @@ def test_split_rental_fewer_than_asked_is_a_mismatch():
 # node id, that the SDK sends `gpu_count` only when one was asked for, and that the rent action threads it.
 
 
+
+
+def test_up_partial_count_on_a_whole_host_only_node_is_refused_before_renting(monkeypatch):
+    """Listing min_gpu_count_for_rental null = whole host only: -c 2 of 8 fails with the full count."""
+    plain = _executor
+
+    def whole_host_only(*args, **kwargs):
+        executor = plain(*args, **kwargs)
+        executor.whole_host_only = True
+        return executor
+
+    monkeypatch.setitem(globals(), "_executor", whole_host_only)
+    result = _run_up(monkeypatch, "-c", "2", node_gpus=8, by_node=True)
+
+    assert result.exit_code != 0
+    assert "rents whole only. Request all 8 GPUs." in result.output
+    assert _FakeLium.up_kwargs == {}
