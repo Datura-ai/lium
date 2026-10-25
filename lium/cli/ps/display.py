@@ -206,8 +206,12 @@ def build_pods_table(pods: List[PodInfo], short: bool = False, show_index: bool 
         padding=(0, 1, 0, 0),  # one space between columns: an 80-column terminal needs every one
     )
 
-    # the fixed columns size to their content (a capped Spent is "$200.00/$480.00", DAH-2565), so an
-    # 80-column terminal or a pipe keeps the huid on one line
+    # the fixed columns size to their content, so an 80-column terminal or a pipe keeps the huid on
+    # one line; Rich still shrinks a no_wrap column, so Spent ("$200.00/$480.00", DAH-2565) gets a floor
+    spent_cells = [
+        _format_spent(pod.created_at, pod.removal_scheduled_at, pod.executor.price_per_hour if pod.executor else None)
+        for pod in pods
+    ]
 
     # Add columns
     if show_index:
@@ -217,7 +221,7 @@ def build_pods_table(pods: List[PodInfo], short: bool = False, show_index: bool 
     table.add_column("Config", justify="left", no_wrap=True)
     table.add_column("Template", justify="left", ratio=2, min_width=12, overflow="ellipsis")
     table.add_column("$/h", justify="right", no_wrap=True)
-    table.add_column("Spent", justify="right", no_wrap=True)
+    table.add_column("Spent", justify="right", no_wrap=True, min_width=max(map(len, spent_cells), default=5))
     table.add_column("Uptime", justify="right", no_wrap=True)
     if not short:
         table.add_column("Ports", justify="left", no_wrap=True)
@@ -250,7 +254,7 @@ def build_pods_table(pods: List[PodInfo], short: bool = False, show_index: bool 
             config,
             console.get_styled(template_name, 'info'),
             price_str,
-            _format_spent(pod.created_at, pod.removal_scheduled_at, price_per_hour),
+            spent_cells[position - 1],
             _format_uptime(pod.created_at),
         ]
 
