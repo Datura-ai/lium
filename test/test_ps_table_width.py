@@ -58,3 +58,25 @@ def test_ps_table_keeps_huids_and_amounts_whole(status, capped, short, width):
     assert "Name" in text and ("22:20301 +10" in text) is not short  # no column is cropped away
     for whole in ("noble-matrix-27", "eager-wolf-aa", "$8.00", "$0.24", "$200.00/$480.00" if capped else "$200.00"):
         assert whole in text, f"{whole!r} cut:\n{text}"
+
+
+def test_ps_pipe_draws_the_wide_layout_at_120_columns(monkeypatch):
+    # print(width=) is clamped to the console's own 80 for a pipe, so the console itself must widen
+    from lium.cli import ui
+    from lium.cli.ps import command
+    from lium.cli.themed_console import ThemedConsole
+
+    out = io.StringIO()
+    piped = ThemedConsole(file=out, force_terminal=False, width=80)
+    monkeypatch.setattr(command, "console", piped)
+    monkeypatch.setattr(ui, "console", piped)
+    created = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=25)
+    big = _pod("noble-matrix-27", price=8.0, gpu="RTXPRO6000", gpus=8, created_at=created.isoformat(),
+               removal=(created + timedelta(hours=60)).isoformat())
+    big.status = "REBOOT_FAILED"
+
+    command._render([big, _pod("eager-wolf-aa")], "table", wide=False, filtered=False, show_index=True)
+
+    text = out.getvalue()
+    for whole in ("noble-matrix-27", "REBOOT_FAILED", "$8.00", "$200.00/$480.00", "203.0.113.7", "22:20301 +10"):
+        assert whole in text, f"{whole!r} cut:\n{text}"
