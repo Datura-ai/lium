@@ -256,3 +256,18 @@ def test_up_whole_host_only_without_a_partial_count_leaves_the_count_to_the_back
     assert "rents whole only" not in str(_FakeLium.up_kwargs)
     assert _FakeLium.up_kwargs.get("gpu_count") is None
     assert _FakeLium.up_kwargs
+
+
+def test_up_whole_host_only_explicit_count_is_sent_as_given(monkeypatch):
+    """An explicit -c is never dropped: the API refuses it rather than billing a bigger rental."""
+    plain = _executor
+
+    def whole_host_only(*args, **kwargs):
+        executor = plain(*args, **kwargs)
+        executor.whole_host_only = True
+        return executor
+
+    monkeypatch.setitem(globals(), "_executor", whole_host_only)
+    _run_up(monkeypatch, "-c", "8", node_gpus=8, free=7, billed=8, visible=8, by_node=True)
+
+    assert _FakeLium.up_kwargs.get("gpu_count") == 8
