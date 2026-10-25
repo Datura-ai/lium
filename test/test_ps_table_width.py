@@ -60,9 +60,11 @@ def test_ps_table_keeps_huids_and_amounts_whole(status, capped, short, width):
         assert whole in text, f"{whole!r} cut:\n{text}"
 
 
+@pytest.mark.parametrize("term", ["xterm-256color", "dumb"])
 @pytest.mark.parametrize("terminal", [False, True])
 @pytest.mark.parametrize("wide", [False, True])
-def test_ps_render_at_80_columns_never_crops(monkeypatch, terminal, wide):
+def test_ps_render_at_80_columns_never_crops(monkeypatch, terminal, wide, term):
+    monkeypatch.setenv("TERM", term)  # Rich ignores a lone width override on a dumb terminal
     # print(width=) is clamped to the console's own width, so the wide layout widens the console itself
     from lium.cli import ui
     from lium.cli.ps import command
@@ -88,3 +90,25 @@ def test_ps_render_at_80_columns_never_crops(monkeypatch, terminal, wide):
     if not narrow:
         for whole in ("REBOOT_FAILED", "203.0.113.7", "22:20301 +10"):
             assert whole in text, f"{whole!r} cut:\n{text}"
+
+
+def test_ps_watch_follows_a_resize_after_the_wide_layout(monkeypatch):
+    # the widening is undone after each render, so a 140 -> 80 resize brings back the narrow layout
+    from lium.cli import ui
+    from lium.cli.ps import command
+    from lium.cli.themed_console import ThemedConsole
+
+    out = io.StringIO()
+    tty = ThemedConsole(file=out, force_terminal=True)
+    monkeypatch.setattr(command, "console", tty)
+    monkeypatch.setattr(ui, "console", tty)
+    pods = [_pod("noble-matrix-27"), _pod("eager-wolf-aa")]
+
+    monkeypatch.setenv("COLUMNS", "140")
+    command._render(pods, "table", wide=False, filtered=False, show_index=True)
+    assert "22:20301 +10" in out.getvalue()
+
+    out.seek(0), out.truncate()
+    monkeypatch.setenv("COLUMNS", "80")
+    command._render(pods, "table", wide=False, filtered=False, show_index=True)
+    assert "22:20301 +10" not in out.getvalue() and tty.width == 80
