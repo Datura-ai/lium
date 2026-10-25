@@ -1,6 +1,8 @@
 """`lium ps` stays readable at 80 columns and behind a pipe: one line per huid, ports collapsed (DAH-5148)."""
 
 import io
+
+import pytest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -39,14 +41,20 @@ def test_ps_table_at_80_columns_keeps_each_huid_on_one_line():
         assert ("22:20301 +10" in text) is not short
 
 
-def test_ps_table_at_80_columns_keeps_a_capped_spend_whole():
+@pytest.mark.parametrize("status", ["RUNNING", "REBOOT_FAILED"])
+@pytest.mark.parametrize("capped", [False, True])
+@pytest.mark.parametrize("short, width", [(True, 80), (False, 120)])  # narrow terminal; a pipe or --wide
+def test_ps_table_keeps_huids_and_amounts_whole(status, capped, short, width):
     # 8x RTXPRO6000 at $8/h, 25 hours old, removal at 60 hours: "$200.00/$480.00"
     created = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=25)
-    capped = _pod("noble-matrix-27", price=8.0, gpu="RTXPRO6000", gpus=8, created_at=created.isoformat(),
-                  removal=(created + timedelta(hours=60)).isoformat())
-    for pods in ([capped], [capped, _pod("eager-wolf-aa")]):
-        for short in (False, True):
-            table, _ = display.build_pods_table(pods, short=short)
-            out = io.StringIO()
-            Console(file=out, width=80, force_terminal=False).print(table)
-            assert "$200.00/$480.00" in out.getvalue()
+    big = _pod("noble-matrix-27", price=8.0, gpu="RTXPRO6000", gpus=8, created_at=created.isoformat(),
+               removal=(created + timedelta(hours=60)).isoformat() if capped else None)
+    big.status = status
+    table, _ = display.build_pods_table([big, _pod("eager-wolf-aa")], short=short)
+    out = io.StringIO()
+    Console(file=out, width=width, force_terminal=False).print(table)
+    text = out.getvalue()
+    assert max(len(line) for line in text.splitlines()) <= width
+    assert "Name" in text and ("22:20301 +10" in text) is not short  # no column is cropped away
+    for whole in ("noble-matrix-27", "eager-wolf-aa", "$8.00", "$0.24", "$200.00/$480.00" if capped else "$200.00"):
+        assert whole in text, f"{whole!r} cut:\n{text}"

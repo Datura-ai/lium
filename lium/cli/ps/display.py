@@ -206,26 +206,30 @@ def build_pods_table(pods: List[PodInfo], short: bool = False, show_index: bool 
         padding=(0, 1, 0, 0),  # one space between columns: an 80-column terminal needs every one
     )
 
-    # the fixed columns size to their content, so an 80-column terminal or a pipe keeps the huid on
-    # one line; Rich still shrinks a no_wrap column, so Spent ("$200.00/$480.00", DAH-2565) gets a floor
-    spent_cells = [
-        _format_spent(pod.created_at, pod.removal_scheduled_at, pod.executor.price_per_hour if pod.executor else None)
-        for pod in pods
-    ]
+    # an 80-column terminal cannot hold every cell on one line, so the huid, $/h, Spent ("$200.00/$480.00",
+    # DAH-2565) and Uptime keep floors at their longest cell (Rich crops even a no_wrap column below its
+    # floor) and the descriptive columns wrap instead
+    def floor(cells):
+        return max(map(len, cells), default=1)
+
+    prices = [f"${pod.executor.price_per_hour:.2f}" if pod.executor else "—" for pod in pods]
+    spent = [_format_spent(pod.created_at, pod.removal_scheduled_at, pod.executor.price_per_hour if pod.executor else None)
+             for pod in pods]
+    uptimes = [_format_uptime(pod.created_at) for pod in pods]
 
     # Add columns
     if show_index:
         table.add_column("#", justify="right", width=3, no_wrap=True)
-    table.add_column("Pod", justify="left", no_wrap=True)
-    table.add_column("Status", justify="left", no_wrap=True)
-    table.add_column("Config", justify="left", no_wrap=True)
-    table.add_column("Template", justify="left", ratio=2, min_width=12, overflow="ellipsis")
-    table.add_column("$/h", justify="right", no_wrap=True)
-    table.add_column("Spent", justify="right", no_wrap=True, min_width=max(map(len, spent_cells), default=5))
-    table.add_column("Uptime", justify="right", no_wrap=True)
+    table.add_column("Pod", justify="left", no_wrap=True, min_width=floor(pod.huid for pod in pods))
+    table.add_column("Status", justify="left", min_width=7, max_width=10 if short else None, overflow="fold")
+    table.add_column("Config", justify="left", min_width=6, max_width=10 if short else None, overflow="fold")
+    table.add_column("Template", justify="left", ratio=2, min_width=4, overflow="ellipsis")
+    table.add_column("$/h", justify="right", no_wrap=True, min_width=floor(prices))
+    table.add_column("Spent", justify="right", no_wrap=True, min_width=floor(spent))
+    table.add_column("Uptime", justify="right", no_wrap=True, min_width=floor(uptimes))
     if not short:
-        table.add_column("Ports", justify="left", no_wrap=True)
-    table.add_column("Name", justify="left", ratio=2, min_width=15, overflow="fold")
+        table.add_column("Ports", justify="left", min_width=12, overflow="fold")
+    table.add_column("Name", justify="left", ratio=2, min_width=6, overflow="fold")
 
     # Add rows
     for position, pod in enumerate(pods, start=1):
@@ -254,8 +258,8 @@ def build_pods_table(pods: List[PodInfo], short: bool = False, show_index: bool 
             config,
             console.get_styled(template_name, 'info'),
             price_str,
-            spent_cells[position - 1],
-            _format_uptime(pod.created_at),
+            spent[position - 1],
+            uptimes[position - 1],
         ]
 
         if not short:
