@@ -239,3 +239,20 @@ def test_up_partial_count_on_a_whole_host_only_node_is_refused_before_renting(mo
     assert result.exit_code != 0
     assert "rents whole only. Request all 8 GPUs." in result.output
     assert _FakeLium.up_kwargs == {}
+
+
+def test_up_whole_host_only_without_a_partial_count_leaves_the_count_to_the_backend(monkeypatch):
+    """Listed gpu_count can differ from the GPU rows the API counts: no refusal, no count sent."""
+    plain = _executor
+
+    def whole_host_only(*args, **kwargs):
+        executor = plain(*args, **kwargs)
+        executor.whole_host_only = True
+        return executor
+
+    monkeypatch.setitem(globals(), "_executor", whole_host_only)
+    _run_up(monkeypatch, node_gpus=8, free=7, billed=7, visible=7, by_node=True)
+
+    assert "rents whole only" not in str(_FakeLium.up_kwargs)
+    assert _FakeLium.up_kwargs.get("gpu_count") is None
+    assert _FakeLium.up_kwargs
