@@ -410,8 +410,8 @@ class CliFailure(Exception):
         self.message = message
         self.exit_code = exit_code
         self.data = data or {}
-        # every wrapper of the GPU-count 409 gets its next step, not only the SDK error paths
-        self.hint = hint or _gpu_count_hint(message) or default_hint(code, exit_code)
+        # every wrapper of the GPU-count 409 gets its next step, ahead of the server's generic hint
+        self.hint = _gpu_count_hint(message) or hint or default_hint(code, exit_code)
 
 
 def error_envelope(code: str, message: str, exit_code: int = EXIT_GENERAL_ERROR,
@@ -655,7 +655,7 @@ def handle_errors(func):
             # the API's own code, hint and request_id when it sent them (DAH-3057); the
             # class-derived code and the default hint otherwise — a server code this table does not
             # know (API_KEY_BUDGET_EXCEEDED) still gets its class's hint, not the exit family's
-            hint = (e.hint or _HINTS_BY_CODE.get(e.code or "") or _gpu_count_hint(str(e))
+            hint = (_gpu_count_hint(str(e)) or e.hint or _HINTS_BY_CODE.get(e.code or "")
                     or default_hint(code, exit_code))
             fail(e.code or code, str(e), exit_code, _api_error_data(e), hint,
                  request_id=e.request_id, prefix="Error: ")
