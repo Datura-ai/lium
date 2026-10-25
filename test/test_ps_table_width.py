@@ -60,14 +60,16 @@ def test_ps_table_keeps_huids_and_amounts_whole(status, capped, short, width):
         assert whole in text, f"{whole!r} cut:\n{text}"
 
 
-def test_ps_pipe_draws_the_wide_layout_at_120_columns(monkeypatch):
-    # print(width=) is clamped to the console's own 80 for a pipe, so the console itself must widen
+@pytest.mark.parametrize("terminal", [False, True])
+@pytest.mark.parametrize("wide", [False, True])
+def test_ps_render_at_80_columns_never_crops(monkeypatch, terminal, wide):
+    # print(width=) is clamped to the console's own width, so the wide layout widens the console itself
     from lium.cli import ui
     from lium.cli.ps import command
     from lium.cli.themed_console import ThemedConsole
 
     out = io.StringIO()
-    piped = ThemedConsole(file=out, force_terminal=False, width=80)
+    piped = ThemedConsole(file=out, force_terminal=terminal, width=80)
     monkeypatch.setattr(command, "console", piped)
     monkeypatch.setattr(ui, "console", piped)
     created = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=25)
@@ -75,8 +77,14 @@ def test_ps_pipe_draws_the_wide_layout_at_120_columns(monkeypatch):
                removal=(created + timedelta(hours=60)).isoformat())
     big.status = "REBOOT_FAILED"
 
-    command._render([big, _pod("eager-wolf-aa")], "table", wide=False, filtered=False, show_index=True)
+    command._render([big, _pod("eager-wolf-aa")], "table", wide=wide, filtered=False, show_index=True)
 
-    text = out.getvalue()
-    for whole in ("noble-matrix-27", "REBOOT_FAILED", "$8.00", "$200.00/$480.00", "203.0.113.7", "22:20301 +10"):
+    from rich.text import Text
+
+    text = Text.from_ansi(out.getvalue()).plain
+    narrow = terminal and not wide  # Ports hidden, Status may wrap
+    for whole in ("noble-matrix-27", "eager-wolf-aa", "$8.00", "$200.00/$480.00", "Name"):
         assert whole in text, f"{whole!r} cut:\n{text}"
+    if not narrow:
+        for whole in ("REBOOT_FAILED", "203.0.113.7", "22:20301 +10"):
+            assert whole in text, f"{whole!r} cut:\n{text}"

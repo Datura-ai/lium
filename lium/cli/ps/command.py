@@ -103,9 +103,10 @@ def _render(
     short = not wide and _terminal_width() < WIDE_TERMINAL_COLUMNS
     table, header = display.build_pods_table(pods, short=short, show_index=show_index)
     ui.info(header)
-    if not console.is_terminal:
-        # a pipe gets the wide layout's width: Rich draws a non-terminal at 80 and clamps print(width=)
-        # to that, which crops the huid, amounts and Ports. One-shot output, so the width can stay set.
+    if not short:
+        # the wide layout (a pipe or --wide) needs its width: Rich draws a pipe at 80, clamps print(width=)
+        # to the console and crops past it, losing Ports and Name; a terminal soft-wraps the longer lines.
+        # One-shot output, so the width can stay set.
         console.width = max(console.width, WIDE_TERMINAL_COLUMNS)
     ui.print(table)
     for line in display.pending_eta_lines(pods):
