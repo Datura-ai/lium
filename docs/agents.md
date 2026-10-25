@@ -105,7 +105,7 @@ lium ls --gpu H100 --count 1 --format json | jq -r '.[0].huid'
 
 ### Rent it
 
-`lium up --json` prints the ready pod as one JSON document on stdout, `{"pod": {…}}` with the keys of one `lium ps --format json` row (plus `termination_time` when `--ttl`, `--until` or `--budget` set one), and returns instead of opening a shell; progress lines go to stderr:
+`lium up --json` prints the ready pod as one JSON document on stdout, `{"pod": {…}}` with the keys of one `lium ps --format json` row (plus `termination_time` when `--ttl`, `--until` or `--budget` set one, and `gpu_verification` with `--verify-gpus`), and returns instead of opening a shell; progress lines go to stderr:
 
 ```bash
 POD=$(lium up "$NODE" --ttl 4h --yes --json | jq -r '.pod.huid')

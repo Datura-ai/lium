@@ -70,3 +70,17 @@ def test_job_run_budget_help_says_approximate():
     help_text = CliRunner().invoke(cli, ["job", "run", "--help"]).output
 
     assert "Approximate compute budget in USD" in help_text
+
+
+def test_job_run_gpu_count_refusal_names_the_counts_on_offer(fake, monkeypatch):
+    from lium.sdk import LiumError
+
+    def refuse(self, **kwargs):
+        raise LiumError("API error 409: gpu_count=1: none of the 2 node(s) matching the earlier "
+                        "constraints satisfies it; rentable GPU counts: 6, 8")
+
+    monkeypatch.setattr(_FakeLium, "run_job", refuse)
+    out = _run("nvidia-smi", "--gpu", "A4000", "--budget", "1", "--deadline", "10m")
+
+    assert out.exit_code != 0
+    assert "Use --count 6 (on offer: 6, 8), or another --gpu" in out.output

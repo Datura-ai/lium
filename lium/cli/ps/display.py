@@ -86,12 +86,14 @@ def _format_template_name(template: dict) -> str:
 
 
 def _format_ports(ports: dict) -> str:
-    """Format port mappings."""
+    """The SSH mapping and how many others (``22:20301 +10``): a pod maps many ports, and listing
+    them all made every row wrap. `ps --format json` and `describe` carry the full map."""
     if not ports:
         return "—"
 
-    port_pairs = [f"{k}:{v}" for k, v in ports.items()]
-    return ", ".join(port_pairs)
+    first = "22" if "22" in ports else next(iter(ports))
+    rest = len(ports) - 1
+    return f"{first}:{ports[first]}" + (f" +{rest}" if rest else "")
 
 
 def _gpu_config(pod: PodInfo) -> Optional[str]:
@@ -201,30 +203,24 @@ def build_pods_table(pods: List[PodInfo], short: bool = False, show_index: bool 
         box=None,
         pad_edge=False,
         expand=True,
-        padding=(0, 1),
+        padding=(0, 1, 0, 0),  # one space between columns: an 80-column terminal needs every one
     )
 
-    # the Spent cell is "$3.20" or, for a pod with a scheduled removal, "$200.00/$480.00" (15 chars) — spent against
-    # the cap (DAH-2565). The column grows only when a listed pod has a cap, so a narrow terminal keeps its Ports.
-    any_cap = any(
-        pod.executor is not None
-        and _spend_cap_usd(pod.created_at, pod.removal_scheduled_at, pod.executor.price_per_hour) is not None
-        for pod in pods
-    )
-    spent_width = 15 if any_cap else 8
+    # the fixed columns size to their content (a capped Spent is "$200.00/$480.00", DAH-2565), so an
+    # 80-column terminal or a pipe keeps the huid on one line
 
     # Add columns
     if show_index:
         table.add_column("#", justify="right", width=3, no_wrap=True)
-    table.add_column("Pod", justify="left", ratio=3, min_width=18, overflow="fold")
-    table.add_column("Status", justify="left", width=11, no_wrap=True)
-    table.add_column("Config", justify="left", width=12, no_wrap=True)
+    table.add_column("Pod", justify="left", no_wrap=True)
+    table.add_column("Status", justify="left", no_wrap=True)
+    table.add_column("Config", justify="left", no_wrap=True)
     table.add_column("Template", justify="left", ratio=2, min_width=12, overflow="ellipsis")
-    table.add_column("$/h", justify="right", width=6, no_wrap=True)
-    table.add_column("Spent", justify="right", width=spent_width, no_wrap=True)
-    table.add_column("Uptime", justify="right", width=7, no_wrap=True)
+    table.add_column("$/h", justify="right", no_wrap=True)
+    table.add_column("Spent", justify="right", no_wrap=True)
+    table.add_column("Uptime", justify="right", no_wrap=True)
     if not short:
-        table.add_column("Ports", justify="left", ratio=3, min_width=15, overflow="fold")
+        table.add_column("Ports", justify="left", no_wrap=True)
     table.add_column("Name", justify="left", ratio=2, min_width=15, overflow="fold")
 
     # Add rows

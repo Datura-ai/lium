@@ -255,3 +255,22 @@ def test_ssh_command_exits_4_on_an_unusable_ssh_cmd(tmp_path, monkeypatch):
     assert result.exit_code == EXIT_SSH_ERROR
     assert "Unexpected ssh command" in result.output
     assert calls == []
+
+
+@pytest.mark.parametrize("insecure, ssh_line_shown", [("", False), ("1", True)])
+def test_cli_hides_first_connection_pin_notices_but_not_the_insecure_one(monkeypatch, insecure, ssh_line_shown):
+    import warnings
+
+    from lium.cli.cli import quiet_host_key_pin_notices
+
+    monkeypatch.setenv("LIUM_SSH_INSECURE", insecure)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        quiet_host_key_pin_notices()
+        warnings.warn("Warning: Permanently added '[203.0.113.7]:20299' (ED25519) to the list of known hosts.")
+        warnings.warn("Pinning ssh-ed25519 host key SHA256:abc for [203.0.113.7]:20299 (first connection)")
+        warnings.warn("Accepting unverified ssh-ed25519 host key SHA256:abc for x: LIUM_SSH_INSECURE=1 ...")
+    shown = [str(w.message) for w in caught]
+    assert any("Permanently added" in m for m in shown) is ssh_line_shown
+    assert not any(m.startswith("Pinning") for m in shown)
+    assert any(m.startswith("Accepting unverified") for m in shown)

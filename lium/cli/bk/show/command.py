@@ -11,6 +11,7 @@ from lium.cli.utils import (
     handle_errors,
     ensure_config,
 )
+from lium.cli.bk.path_warning import pod_volume_path
 from . import validation, parsing
 from .actions import ShowBackupAction
 
@@ -65,7 +66,8 @@ def bk_show_command(pod_id: str):
         return
 
     # Display
-    backup_path = result.data.get("backup_path")
+    # the API returns an empty path for the default: the pod's whole volume
+    backup_path = result.data.get("backup_path") or pod_volume_path(pod)
     frequency_hours = result.data.get("frequency_hours")
     retention_days = result.data.get("retention_days")
 

@@ -1,5 +1,5 @@
 """`lium volumes`: new names the volume, an empty list says so and clears the index,
-rm names what it removes and refuses an old index, and `id:<HUID>` falls back to the live list."""
+rm names what it removes, refuses an old index and takes a HUID or id, and `id:<HUID>` falls back to the live list."""
 
 from __future__ import annotations
 
@@ -106,3 +106,20 @@ def test_resolve_volume_huid_falls_back_to_the_live_list(monkeypatch, tmp_path) 
     monkeypatch.setattr(utils.config, "config_dir", tmp_path)
     monkeypatch.setattr(utils, "Lium", lambda: _FakeLium([_volume("web-made-3c", vid="uuid-9")]))
     assert utils.resolve_volume_huid("web-made-3c") == "uuid-9"
+
+
+def test_volumes_rm_accepts_a_huid_or_id_without_a_cached_list(monkeypatch, tmp_path) -> None:
+    fake = _FakeLium([_volume("noble-matrix-27", vid="uuid-7"), _volume("calm-owl-2b", vid="uuid-8")])
+    _patch(monkeypatch, "rm", fake, tmp_path)
+    result = CliRunner().invoke(volumes_rm_command, ["noble-matrix-27,uuid-8", "-y"])
+    assert result.exit_code == 0, result.output
+    assert fake.deleted == ["uuid-7", "uuid-8"]
+
+
+def test_volumes_rm_unknown_huid_deletes_nothing(monkeypatch, tmp_path) -> None:
+    fake = _FakeLium([_volume("calm-owl-2b")])
+    _patch(monkeypatch, "rm", fake, tmp_path)
+    result = CliRunner().invoke(volumes_rm_command, ["calm-owl-2b,nope-1", "-y"])
+    assert result.exit_code != 0
+    assert "nope-1" in result.output
+    assert fake.deleted == []

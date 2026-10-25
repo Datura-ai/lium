@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Tuple, Optional, Callable, TypeVar
 import hashlib
 import json
 import os
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -557,6 +558,18 @@ def _classify_sdk_error(error: LiumError) -> tuple[str, int]:
     return "lium_error", EXIT_API_ERROR
 
 
+_GPU_COUNT_REFUSAL = re.compile(r"gpu_count=\d+: none of .*?rentable GPU counts: ([\d, ]+)")
+
+
+def _gpu_count_hint(message: str) -> str | None:
+    """A next step for the rent-by-spec refusal of a GPU count no matching node offers."""
+    match = _GPU_COUNT_REFUSAL.search(message)
+    if not match:
+        return None
+    counts = [c for c in re.split(r"[,\s]+", match.group(1)) if c]
+    return f"Use --count {counts[0]} (on offer: {', '.join(counts)}), or another --gpu"
+
+
 def sdk_error_failure(error: LiumError, data: dict | None = None, *, note: str = "") -> CliFailure:
     """The failure ``handle_errors`` raises for an SDK error, with ``data`` attached.
 
@@ -573,7 +586,8 @@ def sdk_error_failure(error: LiumError, data: dict | None = None, *, note: str =
     message = str(error)
     if note and not message.endswith((".", "!", "?")):
         message += "."  # API messages carry no full stop; the note is a sentence of its own
-    return CliFailure(error.code or code, message + note, exit_code, data=merged, hint=error.hint)
+    return CliFailure(error.code or code, message + note, exit_code, data=merged,
+                      hint=error.hint or _gpu_count_hint(message))
 
 
 def _api_error_data(e: LiumError) -> dict | None:
@@ -641,7 +655,8 @@ def handle_errors(func):
             # the API's own code, hint and request_id when it sent them (DAH-3057); the
             # class-derived code and the default hint otherwise — a server code this table does not
             # know (API_KEY_BUDGET_EXCEEDED) still gets its class's hint, not the exit family's
-            hint = e.hint or _HINTS_BY_CODE.get(e.code or "") or default_hint(code, exit_code)
+            hint = (e.hint or _HINTS_BY_CODE.get(e.code or "") or _gpu_count_hint(str(e))
+                    or default_hint(code, exit_code))
             fail(e.code or code, str(e), exit_code, _api_error_data(e), hint,
                  request_id=e.request_id, prefix="Error: ")
         except Exception as e:
