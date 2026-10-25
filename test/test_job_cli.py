@@ -84,3 +84,25 @@ def test_job_run_gpu_count_refusal_names_the_counts_on_offer(fake, monkeypatch):
 
     assert out.exit_code != 0
     assert "Use --count 6 (on offer: 6, 8), or another --gpu" in out.output
+
+
+def test_up_gpu_count_refusal_names_the_counts_on_offer():
+    # `lium up --gpu` takes the dry-run path, which wraps the 409 in an ActionResult, not an SDK error
+    from lium.sdk import LiumError
+    from lium.cli.up.actions import ResolveExecutorAction
+    from lium.cli.utils import CliFailure
+
+    class Refusing:
+        def supports(self, feature):
+            return True
+
+        def rent(self, **kwargs):
+            raise LiumError("API error 409: gpu_count=1: none of the 2 node(s) matching the earlier "
+                            "constraints satisfies it; rentable GPU counts: 6, 8")
+
+    result = ResolveExecutorAction().execute(dict(lium=Refusing(), executor_id=None, gpu="A4000", count=None,
+                                                  country=None, min_cpus=None, ports=None))
+
+    assert not result.ok
+    failure = CliFailure("node_selection_failed", result.error, hint=result.data.get("hint"))
+    assert failure.hint == "Use --count 6 (on offer: 6, 8), or another --gpu"

@@ -410,7 +410,8 @@ class CliFailure(Exception):
         self.message = message
         self.exit_code = exit_code
         self.data = data or {}
-        self.hint = hint or default_hint(code, exit_code)
+        # every wrapper of the GPU-count 409 gets its next step, not only the SDK error paths
+        self.hint = hint or _gpu_count_hint(message) or default_hint(code, exit_code)
 
 
 def error_envelope(code: str, message: str, exit_code: int = EXIT_GENERAL_ERROR,
@@ -586,8 +587,7 @@ def sdk_error_failure(error: LiumError, data: dict | None = None, *, note: str =
     message = str(error)
     if note and not message.endswith((".", "!", "?")):
         message += "."  # API messages carry no full stop; the note is a sentence of its own
-    return CliFailure(error.code or code, message + note, exit_code, data=merged,
-                      hint=error.hint or _gpu_count_hint(message))
+    return CliFailure(error.code or code, message + note, exit_code, data=merged, hint=error.hint)
 
 
 def _api_error_data(e: LiumError) -> dict | None:
