@@ -7,4 +7,4 @@ def test_8x_capability_code_title():
     (reason,) = fallback_reasons({}, [{"code": code}])
     assert reason["code"] == code
     assert normalise({"code": code})["code"] == code
-    assert reason["title"] == "Idle 8× H200 / B200 / B300 node offers no NCU profiling, GPU splitting or confidential computing"
+    assert reason["title"] == "Idle 8× H200 / B200 / B300 / GB300 node offers no NCU profiling, GPU splitting or confidential computing"

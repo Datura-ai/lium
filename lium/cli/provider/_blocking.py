@@ -191,7 +191,7 @@ def _idle_pay_entry(code: str, context: Mapping[str, Any], message: str | None, 
         required = "sysbox runtime"
         fix = "Install and enable sysbox on the host, then restart the executor (`docker compose up -d` in neurons/executor)."
     elif code == "flagship_without_ncu_or_split":
-        title = "Idle 8× H200 / B200 / B300 node offers no NCU profiling, GPU splitting or confidential computing"
+        title = "Idle 8× H200 / B200 / B300 / GB300 node offers no NCU profiling, GPU splitting or confidential computing"
         required = "NCU profiling, GPU splitting or confidential computing"
         fix = (
             f"Open the profiling counters: {DRAIN_FIRST[0].lower()}{DRAIN_FIRST[1:]} Then set "
