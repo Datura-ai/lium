@@ -35,7 +35,7 @@ LEGACY_GATING_CODES = frozenset(
         "nvidia_driver_below_minimum",
         "sysbox_not_enabled",
         "insufficient_disk_for_vram",
-        "full_8x_without_ncu_or_split",
+        "flagship_without_ncu_or_split",
         "cannot_apply_gpu_power_cap",
         "outdated_executor_image",
         "provider_discord_not_connected",
@@ -62,8 +62,6 @@ _ALIASES = {
     "price_above_p90": "price_above_market_p90_soft_limit",
     "gpu_model_not_eligible": "gpu_model_not_eligible_for_unrented_incentive",
     "no_unrented_capacity": "no_unrented_capacity_for_gpu_count",
-    # shortcut: legacy code from validators before DAH-5197, drop once lio validator emits full_8x_* and old rows age out
-    "flagship_without_ncu_or_split": "full_8x_without_ncu_or_split",
 }
 
 # The validator's ``get_min_driver_multiplier``: the lowest driver that earns idle pay.
@@ -77,7 +75,7 @@ FALLBACK_REQUIRES: dict[str, tuple[str, ...]] = {
     "nvidia_driver_below_minimum": _HOST_DOWNTIME,
     "sysbox_not_enabled": _DOCKER_RESTART,
     "insufficient_disk_for_vram": _DOCKER_RESTART,
-    "full_8x_without_ncu_or_split": _HOST_DOWNTIME,
+    "flagship_without_ncu_or_split": _HOST_DOWNTIME,
     "cannot_apply_gpu_power_cap": (),   # _DOCKER_RESTART when the node container runs under sysbox
     "outdated_executor_image": (),
     "provider_discord_not_connected": (),
@@ -192,7 +190,7 @@ def _idle_pay_entry(code: str, context: Mapping[str, Any], message: str | None, 
         measured = ctx.get("sysbox_runtime") or "not enabled"
         required = "sysbox runtime"
         fix = "Install and enable sysbox on the host, then restart the executor (`docker compose up -d` in neurons/executor)."
-    elif code == "full_8x_without_ncu_or_split":
+    elif code == "flagship_without_ncu_or_split":
         title = "Idle 8× H200 / B200 / B300 node offers no NCU profiling, GPU splitting or confidential computing"
         required = "NCU profiling, GPU splitting or confidential computing"
         fix = (
