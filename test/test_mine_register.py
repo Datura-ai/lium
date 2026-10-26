@@ -329,6 +329,10 @@ _PROBE = "/executors/00000000-0000-0000-0000-000000000000"
 
 @pytest.mark.parametrize("resp, refused", [
     (_Resp(404, {"detail": "Not found node"}), None),
+    (_Resp(404, {"detail": {"message": "Not found node", "code": "node_not_found"}}), None),
+    (_Resp(404, {"detail": {"code": "node_not_found"}}), None),
+    (_Resp(404, {"detail": {"message": "Not found node"}}), None),
+    (_Resp(404, {"detail": {"message": "Not Found", "code": "route_not_found"}}), "did not answer as the portal"),
     (_Resp(401, {"detail": "Invalid or expired token"}), "The portal refused the register token (Invalid or expired token)"),
     (_Resp(404, {"detail": "Not Found"}), "did not answer as the portal"),
     (_Resp(200, {"id": "x"}), "did not answer as the portal"),

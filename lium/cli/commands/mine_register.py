@@ -215,6 +215,16 @@ def _unknown_gpu_message(gpu_type: str, known: list[str]) -> str:
 _NO_SUCH_NODE = "00000000-0000-0000-0000-000000000000"
 _NOT_FOUND_NODE = "Not found node"
 """What the portal's ``GET /executors/{id}`` answers for an id no node has (``executor_service.find_by_executor_id``)."""
+_NOT_FOUND_NODE_CODE = "node_not_found"
+
+
+def _is_not_found_node(e: ProviderError) -> bool:
+    """The portal's unknown-node 404: the bare string, or the coded ``{message, code}`` detail newer portals send."""
+    body = (e.context or {}).get("body")
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, dict):
+        return detail.get("code") == _NOT_FOUND_NODE_CODE or detail.get("message") == _NOT_FOUND_NODE
+    return detail == _NOT_FOUND_NODE
 
 _NOT_THE_PORTAL = (
     "Could not confirm the register token: the portal address did not answer as the portal. "
@@ -233,7 +243,7 @@ def confirm_register_token(http: PortalHTTP) -> None:
     try:
         http.get(EXECUTOR_BY_ID.format(id=_NO_SUCH_NODE))
     except ProviderNotFoundError as e:
-        if _detail(e) == _NOT_FOUND_NODE:
+        if _is_not_found_node(e):
             return
         raise RegisterError(_NOT_THE_PORTAL) from e
     except ProviderError as e:
