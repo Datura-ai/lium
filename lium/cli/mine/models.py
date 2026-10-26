@@ -112,7 +112,7 @@ class TargetPlan:
     free_region_start_bytes: Optional[int] = None
     free_region_end_bytes: Optional[int] = None
     # loop_file targets only: the filesystem holding the image file, the file's size, what the host keeps free
-    loop_file_filesystem: Optional[str] = None
+    loop_file_mountpoint: Optional[str] = None
     loop_file_size_bytes: Optional[int] = None
     loop_file_reserve_bytes: Optional[int] = None
 

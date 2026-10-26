@@ -205,7 +205,7 @@ def _storage_host(monkeypatch, *, root: bool = True, tty: bool = True, typed: st
         CandidateEvaluation("/dev/nvme0n1", "disk", "protected_root_or_docker", False, "protected root"),
     ]
     image_file_plan = SimpleNamespace(target=SimpleNamespace(
-        classification="loop_file", resolved_target="/var/lib/lium-docker.xfs", loop_file_filesystem="/",
+        classification="loop_file", resolved_target="/var/lib/lium-docker.xfs", loop_file_mountpoint="/",
         loop_file_size_bytes=180 * 1024**3, loop_file_reserve_bytes=25 * 1024**3,
     ), destructive_actions=["stop Docker services for /var/lib/docker", "move Docker data aside (same filesystem, no copy)"])
     monkeypatch.setattr("os.geteuid", lambda: 0 if root else 1000)

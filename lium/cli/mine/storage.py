@@ -17,8 +17,9 @@ Runner = Callable[[list[str], bool, bool], CommandResult]
 MIN_TARGET_BYTES = 100 * 1024**3
 # Docker storage must outlive a cable pull or a network blip
 NON_LOCAL_TRANSPORTS = {"usb", "iscsi", "fc", "mmc"}
-# filesystems that may hold the XFS image file: local ones on a block device, never network or overlay
-LOOP_FILE_HOST_FSTYPES = {"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "f2fs"}
+# filesystems that may hold the XFS image file: local ones on a block device, never network or overlay;
+# never btrfs or zfs, where copy-on-write makes posix_fallocate reserve no blocks
+LOOP_FILE_HOST_FSTYPES = {"ext2", "ext3", "ext4", "xfs", "f2fs"}
 # the host keeps this much outside the image file for the OS, logs and apt
 LOOP_FILE_RESERVE_FRACTION = 0.10
 LOOP_FILE_MIN_RESERVE_BYTES = 20 * 1024**3
@@ -591,7 +592,7 @@ def _source_disk_is_local(source: str, devices: list[BlockDevice]) -> bool:
             parents.setdefault(item.kernel_name, set()).add(item.parent_kernel_name)
     start = next((item for item in listings if source in {item.path, f"/dev/{item.kernel_name}"}), None)
     if start is None:
-        # zfs and bind sources name no lsblk device; the filesystem type allowlist is the gate for those.
+        # bind sources name no lsblk device; the filesystem type allowlist is the gate for those.
         # A /dev path lsblk does not list is not known to be local
         return not source.startswith("/dev/")
     pending, seen = [start.kernel_name], set()
@@ -677,7 +678,7 @@ def plan_loop_file_target(
         needs_format=True,
         existing_fs_type=None,
         selection_reason=f"No spare disk or partition; XFS image file on {holder.target}",
-        loop_file_filesystem=holder.target,
+        loop_file_mountpoint=holder.target,
         loop_file_size_bytes=size,
         loop_file_reserve_bytes=reserve,
     )

@@ -415,7 +415,7 @@ def test_plan_loop_file_takes_the_filesystem_with_most_free_space_minus_the_rese
     plan = plan_loop_file_target([_filesystem("/", 300), _filesystem("/raid", 3500, size_gib=4000, source="/dev/md0")], "/var/lib/docker")
 
     assert plan.classification == "loop_file" and plan.selection_mode == "auto"
-    assert plan.resolved_target == "/raid/lium-docker.xfs" and plan.loop_file_filesystem == "/raid"
+    assert plan.resolved_target == "/raid/lium-docker.xfs" and plan.loop_file_mountpoint == "/raid"
     assert plan.loop_file_reserve_bytes == 400 * 1024**3   # 10% of 4000 GiB beats the 20 GiB floor
     assert plan.loop_file_size_bytes == 3100 * 1024**3
     assert plan.needs_format is True and plan.needs_partition_creation is False
@@ -438,7 +438,7 @@ def test_plan_loop_file_skips_a_docker_root_that_is_its_own_mount():
 
     plan = plan_loop_file_target(filesystems, "/var/lib/docker")
 
-    assert plan.loop_file_filesystem == "/"
+    assert plan.loop_file_mountpoint == "/"
 
 
 def test_plan_loop_file_explicit_path_and_size(tmp_path):
@@ -446,7 +446,7 @@ def test_plan_loop_file_explicit_path_and_size(tmp_path):
 
     plan = plan_loop_file_target(filesystems, "/var/lib/docker", "/raid/pool/docker.xfs", 500 * 1024**3)
 
-    assert plan.selection_mode == "explicit" and plan.loop_file_filesystem == "/raid"
+    assert plan.selection_mode == "explicit" and plan.loop_file_mountpoint == "/raid"
     assert plan.resolved_target == "/raid/pool/docker.xfs" and plan.loop_file_size_bytes == 500 * 1024**3
 
 
@@ -531,7 +531,7 @@ def test_plan_loop_file_target_leaves_var_lib_when_var_is_its_own_filesystem():
     plan = plan_loop_file_target(filesystems, "/var/lib/docker")
 
     assert plan.resolved_target == "/lium-docker.xfs"
-    assert plan.loop_file_filesystem == "/"
+    assert plan.loop_file_mountpoint == "/"
     assert plan.loop_file_size_bytes == 700 * GIB
 
 

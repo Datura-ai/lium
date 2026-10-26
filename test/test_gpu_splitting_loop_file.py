@@ -36,7 +36,7 @@ def _loop_file_plan(tmp_path, docker_mount: MountInfo | None = None) -> SetupPla
             selection_mode="auto", requested_device=None, resolved_target=str(tmp_path / "lium-docker.xfs"),
             parent_disk="/dev/nvme0n1p2", classification="loop_file", needs_partition_creation=False, needs_format=True,
             existing_fs_type=None, selection_reason="No spare disk or partition; XFS image file on /",
-            loop_file_filesystem="/", loop_file_size_bytes=180 * GIB, loop_file_reserve_bytes=25 * GIB,
+            loop_file_mountpoint="/", loop_file_size_bytes=180 * GIB, loop_file_reserve_bytes=25 * GIB,
         ),
         backup_dir=str(tmp_path / "docker.lium-backup-20261023120000"),
         daemon_json_path=str(tmp_path / "daemon.json"),
@@ -83,6 +83,36 @@ def test_plan_falls_back_to_an_image_file_when_no_disk_is_safe(monkeypatch, tmp_
     assert any(action.startswith("switch Docker from the containerd image store to overlay2") for action in plan.destructive_actions)
     assert any(action.startswith("add the udev rule /etc/udev/rules.d/99-lium-docker-storage.rules") for action in plan.destructive_actions)
     assert any("docker.service drop-in" in action for action in plan.destructive_actions)
+
+
+def test_plan_skips_the_image_file_fallback_when_docker_has_its_own_disk(monkeypatch):
+    preflight = _sample_preflight()
+    preflight.docker_mount = MountInfo(target="/var/lib/docker", source="/dev/sdc1", fstype="ext4", options=["rw"])
+    monkeypatch.setattr(gpu_splitting, "auto_select_target", lambda *a: (_ for _ in ()).throw(NoSafeTargetError("none")))
+    monkeypatch.setattr(gpu_splitting, "load_mounted_filesystems", lambda *a: pytest.fail("planned an image file"))
+
+    with pytest.raises(RuntimeError, match=r"its own disk \(/dev/sdc1\); format a spare disk with --device"):
+        gpu_splitting._build_setup_plan(preflight, None)
+
+
+def test_harden_loop_device_only_warns_when_direct_io_is_refused(monkeypatch):
+    warnings = []
+
+    def run_command(args, check=True, capture=True):
+        if args[:2] == ["losetup", "-j"]:
+            return CommandResult(args, "/dev/loop5\n", "", 0)
+        if args[:2] == ["losetup", "--direct-io=on"]:
+            assert check is False
+            return CommandResult(args, "", "losetup: /dev/loop5: set direct io failed: Invalid argument", 1)
+        return CommandResult(args, "", "", 0)
+
+    monkeypatch.setattr(gpu_splitting, "run_command", run_command)
+    monkeypatch.setattr(gpu_splitting, "_write_sysfs", lambda *a: None)
+    monkeypatch.setattr(gpu_splitting.console, "warning", warnings.append)
+
+    gpu_splitting._harden_loop_device("/var/lib/lium-docker.xfs")
+
+    assert len(warnings) == 1 and "Direct I/O could not be turned on for /dev/loop5" in warnings[0]
 
 
 def test_plan_refuses_device_together_with_file(monkeypatch):

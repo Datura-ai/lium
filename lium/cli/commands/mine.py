@@ -254,7 +254,7 @@ def _setup_docker_storage(auto: bool = False):
     if rejected:
         lines += ["", "Not offered:"] + [row(c, c.details) for c in rejected]
     if not offered:
-        _offer_image_file(preflight, lines, manual)
+        _offer_and_run_image_file_setup(preflight, lines, manual)
         return
     lines += [
         "",
@@ -276,7 +276,7 @@ def _setup_docker_storage(auto: bool = False):
         console.warning(f"Docker storage was not set up: {exc}\n{manual}")
 
 
-def _offer_image_file(preflight, lines: list[str], manual: str):
+def _offer_and_run_image_file_setup(preflight, lines: list[str], manual: str):
     """Single-disk host: offer Docker storage in an XFS image file (what `lium gpu-splitting setup` plans with no device).
 
     Typing `file` is the consent; anything else leaves the host as it is.
@@ -295,7 +295,7 @@ def _offer_image_file(preflight, lines: list[str], manual: str):
     lines += [
         "",
         f"No spare disk. Docker storage can live in an XFS image file instead: {target.resolved_target}, "
-        f"{target.loop_file_size_bytes // gib} GiB on {target.loop_file_filesystem} "
+        f"{target.loop_file_size_bytes // gib} GiB on {target.loop_file_mountpoint} "
         f"({target.loop_file_reserve_bytes // gib} GiB stay free for the system).",
         "Setup will:",
         *(f"  - {action}" for action in plan.destructive_actions),

@@ -270,7 +270,13 @@ def _build_setup_plan(
                 preflight.root_mount,
                 preflight.docker_mount,
             )
-        except NoSafeTargetError:
+        except NoSafeTargetError as exc:
+            if preflight.docker_mount.target == docker_root:
+                # an image file elsewhere would move Docker off its own disk and leave that disk unused
+                raise RuntimeError(
+                    f"{exc}. {docker_root} is its own disk ({preflight.docker_mount.source}); format a spare disk "
+                    "with --device, or pass --file/--size to use an image file anyway"
+                ) from exc
             target = _loop_file_target(preflight, None, None)
 
     loop_file = target.classification == "loop_file"
@@ -292,12 +298,33 @@ def _build_setup_plan(
         except RuntimeError:
             fstab_entry = ""
 
+    destructive_actions = _destructive_actions(preflight, target, loop_file)
+
+    backup_dir = f"{docker_root}.lium-backup-{datetime.now(timezone.utc):%Y%m%d%H%M%S}"
+    return SetupPlan(
+        preflight=preflight,
+        target=target,
+        backup_dir=backup_dir,
+        daemon_json_path=daemon_json_path,
+        daemon_json_changed=daemon_changed,
+        daemon_json_merged=merged_daemon,
+        fstab_path="/etc/fstab",
+        fstab_changed=_fstab_would_change("/etc/fstab", fstab_entry) if fstab_entry else True,
+        destructive_actions=destructive_actions,
+    )
+
+
+def _destructive_actions(preflight: PreflightResult, target, loop_file: bool) -> list[str]:
+    """The host changes `setup` makes, in order, as printed by `check` and confirmed by `setup`."""
+    docker_root = preflight.docker_state.docker_root_dir
+    daemon_json_path = "/etc/docker/daemon.json"
+    leaves_containerd_store = preflight.docker_state.storage_driver == "overlayfs"
     gib = 1024**3
     destructive_actions = []
     if loop_file:
         destructive_actions.append(
             f"create the XFS image file {target.resolved_target}: {target.loop_file_size_bytes // gib} GiB on "
-            f"{target.loop_file_filesystem}, {target.loop_file_reserve_bytes // gib} GiB stay free for the system"
+            f"{target.loop_file_mountpoint}, {target.loop_file_reserve_bytes // gib} GiB stay free for the system"
         )
     if target.needs_new_gpt:
         destructive_actions.append(f"create GPT label on {target.parent_disk}")
@@ -326,19 +353,7 @@ def _build_setup_plan(
             "cannot punch holes in the file)"
         )
     destructive_actions.extend(["restore Docker data", "restart Docker"])
-
-    backup_dir = f"{docker_root}.lium-backup-{datetime.now(timezone.utc):%Y%m%d%H%M%S}"
-    return SetupPlan(
-        preflight=preflight,
-        target=target,
-        backup_dir=backup_dir,
-        daemon_json_path=daemon_json_path,
-        daemon_json_changed=daemon_changed,
-        daemon_json_merged=merged_daemon,
-        fstab_path="/etc/fstab",
-        fstab_changed=_fstab_would_change("/etc/fstab", fstab_entry) if fstab_entry else True,
-        destructive_actions=destructive_actions,
-    )
+    return destructive_actions
 
 
 def _loop_file_target(preflight: PreflightResult, image_file: Optional[str], image_size_gib: Optional[int]):
@@ -411,7 +426,7 @@ def _plan_table(plan: SetupPlan) -> Table:
     table.add_row("Selection mode", plan.target.selection_mode)
     table.add_row("Target classification", plan.target.classification)
     if plan.target.classification == "loop_file":
-        table.add_row("Image file on", plan.target.loop_file_filesystem)
+        table.add_row("Image file on", plan.target.loop_file_mountpoint)
         table.add_row("Image file size", f"{plan.target.loop_file_size_bytes // 1024**3} GiB")
         table.add_row("Kept free for the system", f"{plan.target.loop_file_reserve_bytes // 1024**3} GiB")
     table.add_row("Create partition", "yes" if plan.target.needs_partition_creation else "no")
@@ -633,7 +648,9 @@ def _harden_loop_device(image_file: str):
     run_command(["udevadm", "trigger", "--action=change", name], False, True)
     run_command(["udevadm", "settle"], False, True)
     _write_sysfs(f"/sys/block/{os.path.basename(name)}/queue/discard_max_bytes", "0")
-    run_command(["losetup", "--direct-io=on", name], True, True)
+    # the kernel refuses direct I/O when the backing disk has 4K logical sectors; it is only a speed option
+    if run_command(["losetup", "--direct-io=on", name], False, True).returncode != 0:
+        console.warning(f"Direct I/O could not be turned on for {name}; the image file works without it, a bit slower")
 
 
 def _write_text_file(path: str, contents: str):
@@ -778,7 +795,7 @@ def _print_action_details(plan: SetupPlan):
     if plan.target.classification == "loop_file":
         console.print(
             f"Image file {plan.target.resolved_target}: {plan.target.loop_file_size_bytes / 1024**3:.0f} GiB on "
-            f"{plan.target.loop_file_filesystem}, {plan.target.loop_file_reserve_bytes / 1024**3:.0f} GiB stay free "
+            f"{plan.target.loop_file_mountpoint}, {plan.target.loop_file_reserve_bytes / 1024**3:.0f} GiB stay free "
             "for the system"
         )
     elif device is not None:
@@ -968,7 +985,7 @@ def _pre_stop_checks(plan: SetupPlan):
     needed = int(used * 1.1) + 1024**3
     what = f"The backup of {docker_root}"
     backup_parent = str(Path(plan.backup_dir).parent)
-    if plan.target.classification == "loop_file" and _same_filesystem(backup_parent, plan.target.loop_file_filesystem):
+    if plan.target.classification == "loop_file" and _same_filesystem(backup_parent, plan.target.loop_file_mountpoint):
         # the copy and the image file exist side by side until the restore step
         needed += plan.target.loop_file_size_bytes
         what += " and the image file"
