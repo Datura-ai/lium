@@ -529,7 +529,7 @@ One object per node, sorted as the table is; the names are stable:
 | `interconnect` | the node's topology object: pair and link counts, `pcie_class`, `p2p`; on the listing it has no `matrix` (the GPU x GPU table is in `lium describe <pod>`) |
 | `gpu_power_limited`, `gpu_power_limit_w`, `gpu_power_limit_default_w` | the table's ↓W mark as a field: `true` when a GPU's power limit is set under 95 % of the card's default (expect somewhat lower peak performance), `false` at stock power, `null` when the platform cannot judge the node; the most reduced GPU's current and default limit in watts |
 
-The listing asks for `GET /executors?view=summary`, about 1 KB per node instead of about 8.6 KB. The summary view carries the `nvlink` and `interconnect` keys that `link`, `nvlink`, `p2p` and `interconnect` read. `Lium.ls(view="full")` returns the whole node scrape in `ExecutorInfo.specs`.
+The listing asks for `GET /executors?view=summary`, about 1 KB per node instead of about 8.6 KB. The summary view carries the `nvlink` and `interconnect` keys that `link`, `nvlink`, `p2p` and `interconnect` read. `Lium.ls(view="full")` returns the whole public node scrape in `ExecutorInfo.specs`, without what the renters' pods are doing (docker containers, GPU processes, per-GPU load, memory in use, current clocks and PCIe link); read your own pod's load with `Lium.gpu_stats`.
 
 ## Features
 
