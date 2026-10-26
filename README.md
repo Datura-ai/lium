@@ -409,6 +409,9 @@ lium up 1 --ttl 6h                    # Terminate after 6 hours
 lium up 1 --budget 12.50              # Terminate once $12.50 has been spent
 lium up 1 --until "today 23:00"       # Terminate at 11 PM today
 
+# Create pod without the automatic volume backup
+lium up 1 --no-backup
+
 # Create pod with Jupyter
 lium up 1 --jupyter --yes
 
@@ -656,7 +659,7 @@ Without installing anything, with [uv](https://docs.astral.sh/uv/):
 ```
 
 `rent_pod` with `dry_run: true` quotes a node first (tier, reliability, cost per hour, your balance) and rents
-nothing. A rented pod is billed per second until `remove_pod`. The hosted MCP server at https://docs.lium.io/mcp
+nothing, and `enable_backups: false` rents without the automatic backup. A rented pod is billed per second until `remove_pod`. The hosted MCP server at https://docs.lium.io/mcp
 (no key, read-only) is separate: it searches the docs and gives live GPU prices and availability; `rent_pod` takes
 the node ids its `search_gpus` returns.
 

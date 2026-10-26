@@ -194,6 +194,10 @@ def _post_rent_failure(exc: Exception, billing_pod: dict, doing: str, note: str 
 )
 @click.option("--restore-backup", "restore_backup_id", help="Backup ID to restore after the pod starts")
 @click.option("--restore-to", "restore_path", help="New or empty subdirectory for the startup restore")
+@click.option(
+    "--no-backup", "no_backup", is_flag=True,
+    help="Do not back up the pod's volume. Default: Lium backs it up automatically",
+)
 @click.option("--image", help="Docker image to run (e.g., pytorch/pytorch:2.0, nvidia/cuda:12.0)")
 @click.option("--internal-ports", help="Internal ports to expose (comma-separated, e.g., 22,8000,8080)")
 @click.option("--dockerfile", type=click.Path(exists=True, dir_okay=False, readable=True), help="Path to a Dockerfile to build the pod image from (custom build; mutually exclusive with --image/--template_id)")
@@ -235,6 +239,7 @@ def up_command(
     strict_gpus: bool,
     restore_backup_id: Optional[str],
     restore_path: Optional[str],
+    no_backup: bool,
     image: Optional[str],
     internal_ports: Optional[str],
     dockerfile: Optional[str],
@@ -620,6 +625,9 @@ def up_command(
             "with no refund, or run its GPUs at a reduced power limit."
         )
 
+    if not no_backup:
+        ui.dim("Backups on: Lium backs up this pod's data automatically. Turn off with --no-backup.")
+
     if not yes:
         confirm_msg = (
             f"Acquire pod on {executor.huid} "
@@ -724,6 +732,7 @@ def up_command(
                 "enable_volume_encryption": volume_encryption,
                 "backup_id": restore_backup_id,
                 "restore_path": restore_path,
+                "enable_backups": not no_backup,
                 "gpu_count": requested_gpu_count,
             })
         )
