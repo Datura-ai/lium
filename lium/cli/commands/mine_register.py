@@ -25,7 +25,7 @@ import jwt as pyjwt
 
 from lium.provider._routes import EXECUTOR_BY_ID, EXECUTORS
 from lium.provider._shared_config import default_price_for_gpu, fetch_shared_config
-from lium.provider.errors import ProviderError, ProviderNotFoundError
+from lium.provider.errors import PORTAL_RATE_LIMIT, ProviderError, ProviderNotFoundError
 from lium.provider.portal_http import DEFAULT_PORTAL_URL, PortalHTTP
 
 LISTED_STATUSES = frozenset({"AVAILABLE", "RENTED"})
@@ -335,27 +335,38 @@ def register_node(
                 "(another account may hold it). Remove it there first, or contact support if that account is not yours."
             )
         return NodeRecord(node_id=node_id, already_registered=True)
-    node_id = find_node_id_after_add(http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port)
+    try:
+        node_id = find_node_id_after_add(http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port)
+    except ProviderError:  # rate limited: the add went through, only the list read did not
+        node_id = None
     return NodeRecord(node_id=node_id, already_registered=False)
 
 
 FIND_NODE_ATTEMPTS = 6
 FIND_NODE_RETRY_S = 5.0
+FIND_NODE_MAX_WAIT_S = 30.0  # bounds a portal Retry-After
 
 
 def find_node_id_after_add(
     http: PortalHTTP, *, miner_hotkey: str, ip_address: str, port: int, sleep: Callable[[float], None] = time.sleep
 ) -> str | None:
-    """``find_node_id`` with retries: the list can lag the write, and a portal hiccup must not fail an add that succeeded."""
+    """``find_node_id`` with retries: the list can lag the write, and a portal hiccup must not fail an add that succeeded.
+
+    A 429 that outlasts the retries is raised, never read as "not in the list" (DAH-5161)."""
     for attempt in range(FIND_NODE_ATTEMPTS):
+        wait = FIND_NODE_RETRY_S
         try:
             node_id = find_node_id(http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port)
-        except ProviderError:
+        except ProviderError as e:
+            if e.code == PORTAL_RATE_LIMIT:
+                if attempt == FIND_NODE_ATTEMPTS - 1:
+                    raise
+                wait = max(wait, min((e.context or {}).get("retry_after") or 0, FIND_NODE_MAX_WAIT_S))
             node_id = None
         if node_id is not None:
             return node_id
         if attempt < FIND_NODE_ATTEMPTS - 1:
-            sleep(FIND_NODE_RETRY_S)
+            sleep(wait)
     return None
 
 
