@@ -757,10 +757,25 @@ def _start_preflight_pull():
     return subprocess.Popen(
         f"docker pull {PREFLIGHT_IMAGE}",
         shell=True,
+        text=True,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,  # only errors land here, small enough not to fill the pipe
         env=_subprocess_env(),
     )
+
+
+def _finish_preflight_pull(pull) -> None:
+    """Wait for the pull and raise on a failure.
+
+    A failed pull must not fall through to a cached older image: it would refuse
+    GPUs supported since it was built (RTX PRO 6000 Max-Q, 23 Oct 2026).
+    """
+    if pull.wait() != 0:
+        err = (pull.stderr.read() if pull.stderr else "").strip()
+        raise Exception(
+            f"Could not pull the preflight image {PREFLIGHT_IMAGE}: {err[-500:] or 'docker pull failed'}. "
+            f"Check that this host can reach Docker Hub (try `docker pull {PREFLIGHT_IMAGE}`), then rerun."
+        )
 
 
 def _validate_executor(extra_args=None, on_check=None):
@@ -1101,7 +1116,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
         with timed_step_status(6, TOTAL_STEPS, step6):
             if preflight_pull.poll() is None:
                 step6.detail = "pulling preflight image"
-                preflight_pull.wait()
+            _finish_preflight_pull(preflight_pull)
 
             def _show_check(name: str) -> None:
                 step6.detail = name

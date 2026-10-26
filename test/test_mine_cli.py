@@ -241,3 +241,12 @@ def test_start_executor_does_not_recreate_containers_under_rentals_when_starting
     mine._start_executor(tmp_path)
 
     assert [c for c in calls if c.startswith("docker compose up")] == ["docker compose up -d --no-recreate"]
+
+
+def test_failed_preflight_pull_stops_with_its_error() -> None:
+    import subprocess
+
+    pull = subprocess.Popen("echo 'toomanyrequests: rate limit' >&2; exit 1", shell=True, text=True, stderr=subprocess.PIPE)
+    with pytest.raises(Exception, match="toomanyrequests: rate limit"):
+        mine._finish_preflight_pull(pull)
+    mine._finish_preflight_pull(subprocess.Popen("true", shell=True, text=True, stderr=subprocess.PIPE))

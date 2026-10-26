@@ -20,8 +20,14 @@ def build_client(ctx: click.Context, totp_code: str | None = None) -> ProviderCl
         coldkey=opts.get("coldkey"),
         hotkey=opts.get("hotkey"),
         portal_url=opts.get("portal_url"),
+        account=opts.get("account"),
+        api_token=opts.get("token"),
     )
-    # an account with an authenticator app signs in with a code; only an interactive terminal can be asked
+    return attach_totp_code(client, totp_code)
+
+
+def attach_totp_code(client: ProviderClient, totp_code: str | None) -> ProviderClient:
+    """An account with an authenticator app signs in with a code; only an interactive terminal can be asked."""
     if totp_code:
         client.totp_code = lambda: totp_code
     elif is_interactive():
@@ -31,4 +37,4 @@ def build_client(ctx: click.Context, totp_code: str | None = None) -> ProviderCl
     return client
 
 
-__all__ = ["build_client"]
+__all__ = ["attach_totp_code", "build_client"]

@@ -161,3 +161,24 @@ def test_a_wrong_authenticator_code_is_its_own_error_not_a_forbidden_action(
 
     assert excinfo.value.code == "PORTAL_AUTH_TOTP_INVALID"
     assert tmp_token_store.load(fake_signer.ss58_address) is None
+
+
+def test_email_sign_in_sends_the_authenticator_code_too(
+    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
+) -> None:
+    """The portal asks every sign-in route for the code (DAH-4455), /auth/login-email included."""
+    token = _make_jwt(int(time.time()) + 3600)
+    portal = _SequencedPortal([_mfa_challenge_body("acct-1"), _login_response_body(token, "acct-1")])
+    client = ProviderClient(
+        portal_url="https://portal.example.com",
+        account="me@example.com",
+        token_store=tmp_token_store,
+        http=portal,  # type: ignore[arg-type]
+    )
+    client.totp_code = lambda: "123456"
+
+    response = client.login_email("me@example.com", "pw")
+
+    assert response.token == token
+    assert portal.posts[1] == ("/auth/login-totp", {"mfa_token": "challenge-1", "code": "123456"}, False)
+    assert tmp_token_store.load("acct-1").token == token

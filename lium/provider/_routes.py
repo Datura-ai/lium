@@ -10,6 +10,7 @@ executor). Re-add only when a corresponding portal route is re-enabled.
 """
 
 # Auth
+LOGIN_EMAIL = "/auth/login-email"
 LOGIN_FLEXIBLE = "/auth/login-flexible"
 # second step for an account with an authenticator app (portal DAH-4455)
 LOGIN_TOTP = "/auth/login-totp"
@@ -68,6 +69,7 @@ __all__ = [
     "EXECUTOR_PODS",
     "EXECUTOR_VERIFICATION",
     "EXECUTORS",
+    "LOGIN_EMAIL",
     "LOGIN_FLEXIBLE",
     "LOGIN_TOTP",
     "LOGOUT",
