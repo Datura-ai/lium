@@ -357,3 +357,43 @@ def test_mine_register_refuses_a_token_the_portal_rejects_before_touching_the_ho
     monkeypatch.setattr(reg, "build_http", lambda url, token: _http(portal))
     result = CliRunner().invoke(mine.mine_command, ["--register", _token(exp=int(time.time()) + 3600)])
     assert result.exit_code == 1 and "refused the register token" in result.output and calls == []
+
+
+def _rate_limited(retry_after: str = "7") -> _Resp:
+    resp = _Resp(429, {"detail": "rate_limited"})
+    resp.headers = {"Retry-After": retry_after}
+    return resp
+
+
+def test_a_429_on_the_node_list_is_rate_limiting_not_a_missing_node() -> None:
+    portal = _Portal()
+    portal.on("GET", "/executors", _rate_limited())
+    slept: list[float] = []
+    with pytest.raises(reg.ProviderError, match=r"rate limit, retry in 7 s") as err:
+        reg.find_node_id_after_add(_http(portal), miner_hotkey=HOTKEY, ip_address="203.0.113.7", port=8080,
+                                   sleep=slept.append)
+    assert err.value.code == "PORTAL_RATE_LIMIT"
+    assert slept == [7.0] * (reg.FIND_NODE_ATTEMPTS - 1)  # waits out Retry-After (>= the 5 s default) between tries
+
+
+def test_a_429_then_the_listing_finds_the_node() -> None:
+    portal = _Portal()
+    portal.on("GET", "/executors", _rate_limited("120"), _listing())
+    slept: list[float] = []
+    assert reg.find_node_id_after_add(_http(portal), miner_hotkey=HOTKEY, ip_address="203.0.113.7", port=8080,
+                                      sleep=slept.append) == "node-1"
+    assert slept == [reg.FIND_NODE_MAX_WAIT_S]  # a long Retry-After is bounded
+
+
+def test_an_already_registered_node_behind_a_429_is_not_reported_as_another_accounts(monkeypatch) -> None:
+    monkeypatch.setattr(reg, "FIND_NODE_ATTEMPTS", 1)
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(400, {"detail": reg._ALREADY_EXISTS}))
+    portal.on("GET", "/executors", _rate_limited())
+    with pytest.raises(reg.ProviderError, match="rate limit"):
+        reg.register_node(_http(portal), miner_hotkey=HOTKEY, gpu_type="NVIDIA L4", gpu_count=1,
+                          ip_address="203.0.113.7", port=8080, price_per_gpu=0.11)
+    portal.queues[("POST", "/executors")] = [_Resp(200, {"success": True, "data": {"message": "queued"}})]
+    record = reg.register_node(_http(portal), miner_hotkey=HOTKEY, gpu_type="NVIDIA L4", gpu_count=1,
+                               ip_address="203.0.113.7", port=8080, price_per_gpu=0.11)
+    assert record == reg.NodeRecord(node_id=None, already_registered=False)  # added; the list read is what failed
