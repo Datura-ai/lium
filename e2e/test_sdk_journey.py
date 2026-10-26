@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import paramiko
 import pytest
 
-from conftest import API_KEY, API_URL, MAX_PRICE, MAX_UP_TRIES, MIN_RELIABILITY, keep_pod, refusal_note, reliability_scores, rentable
+from conftest import API_KEY, API_URL, MAX_PRICE, MAX_UP_TRIES, MIN_RELIABILITY, delete_registered_keys, keep_pod, refusal_note, reliability_scores, rentable
 from lium.sdk.exceptions import (
     LiumAuthError,
     LiumError,
@@ -108,7 +108,8 @@ def lium(session, tmp_path_factory):  # `session` only for the skip when no key 
     os.environ["LIUM_BASE_URL"] = API_URL
     from lium.sdk import Lium
 
-    return Lium()
+    yield Lium()
+    delete_registered_keys(home)   # after sdk_pod removed the pod (it depends on this fixture)
 
 
 @pytest.fixture(scope="module")

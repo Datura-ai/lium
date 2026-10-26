@@ -203,8 +203,8 @@ def _post_rent_failure(exc: Exception, billing_pod: dict, doing: str, note: str 
 @click.option("--ssh-name", default=None, help="Name to register a new SSH key under (default: cli-<user>@<hostname>)")
 @click.option(
     "--volume-encryption/--no-volume-encryption",
-    default=True,
-    help="Encrypt the local volume when supported (enabled by default)",
+    default=None,
+    help="Encrypt the local volume. Default: on when the template supports it, off otherwise",
 )
 @click.option(
     "--json", "json_output", is_flag=True,
@@ -242,7 +242,7 @@ def up_command(
     entrypoint: Optional[str],
     cmd: Optional[str],
     ssh_name: Optional[str],
-    volume_encryption: bool,
+    volume_encryption: bool | None,
     json_output: bool,
 ):
     """\b
@@ -816,7 +816,7 @@ def up_command(
     except Exception as exc:
         ui.error(f"Pod {pod_name} (id: {pod_id}) was created but did not become ready")
         if isinstance(exc, (LiumError, requests.RequestException)):
-            # The API failed mid-wait (5xx, 429, a revoked key) or stopped answering (`Lium.ps()`
+            # The API failed mid-wait (5xx, a revoked key; a 429 is waited out inside Lium.wait_ready) or stopped answering (`Lium.ps()`
             # re-raises the transport error after its retries); the pod may well be up and bills.
             raise _post_rent_failure(exc, billing_pod, "waiting for it to become ready")
         raise

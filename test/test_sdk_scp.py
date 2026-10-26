@@ -60,7 +60,7 @@ def _client_with(sftp, monkeypatch):
             return sftp
 
     @contextmanager
-    def fake_connection(self, pod, timeout=30):
+    def fake_connection(self, pod, timeout=30, deadline=None):
         yield FakeSSH()
 
     monkeypatch.setattr(Lium, "ssh_connection", fake_connection)

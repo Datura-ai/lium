@@ -61,7 +61,8 @@ and `test_sdk_journey.py` each under a hard timeout (`T_SUITE` 25m), and always 
 `timings.txt`, `summary.md`, `<suite>-junit.xml`, `commands.json` (every CLI call with exit code, duration and the
 head of its output — the key is never written anywhere). Every `lium` call runs with `HOME` set to a temp dir, so
 `up` mints its SSH key there and the first-run completion hook touches no real shell rc; the key travels only as
-`LIUM_API_KEY`, the target only as `LIUM_BASE_URL`.
+`LIUM_API_KEY`, the target only as `LIUM_BASE_URL`. Teardown deletes that SSH key from the account again (an account
+holds at most 50 keys).
 
 Without `E2E_API_KEY` every test skips and `run.sh` exits 0 — nothing to run against is not a failure.
 

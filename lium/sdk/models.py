@@ -72,6 +72,13 @@ class ExecutorInfo(_Serializable):
     # The most reduced GPU's current and default power limit in watts; None with the verdict.
     gpu_power_limit_w: Optional[int] = None
     gpu_power_limit_default_w: Optional[int] = None
+    # The node's rents often fail to start (2+ failed starts in 7 days, >=30% of its rents); the nodes
+    # ``ls(reliable=True)`` hides. None = the API did not send it.
+    frequent_rent_failures: Optional[bool] = None
+    # When a validator last passed the node, as the API's ISO 8601 UTC string; None = never passed.
+    last_verified_at: Optional[str] = None
+    # The platform's 0-100 reliability score for the node (uptime and rental history); None when not sent.
+    reliability_score: Optional[float] = None
 
     @property
     def link(self) -> Optional[str]:
@@ -196,6 +203,9 @@ class PodInfo(_Serializable):
     # `created_by_api_key_id`, which prod sends as null for a browser rental). False only from a
     # server before per-key pods — the one case `ps --key` cannot tell one key's pods apart.
     api_key_stamped: bool = False
+    # Where the validator mounted the rental volume (`local_volume_path` on the /pods row); None before
+    # the pod has started or from an older server. It can differ from the template's volume.
+    local_volume_path: Optional[str] = None
 
     def eta_hint(self) -> Optional[str]:
         """One line for a pod that is still starting, e.g. ``est. ready in ~18 s (phase: pulling image)``.
@@ -240,7 +250,9 @@ class PodInfo(_Serializable):
 
     @property
     def volume_path(self) -> str:
-        """Return the pod's local volume mount path."""
+        """Return the pod's volume mount path: where the validator mounted it, else the template's."""
+        if self.local_volume_path:
+            return self.local_volume_path
         volumes = self.template.get("volumes", []) if self.template else []
         return volumes[0] if volumes else "/root"
 
@@ -370,6 +382,8 @@ class Template(_Serializable):
     docker_image_tag: str
     category: str
     status: str
+    # The template's image can mount an encrypted local volume; set by the API.
+    supports_volume_encryption: bool = False
 
 
 @dataclass
@@ -658,3 +672,45 @@ __all__ = [
     "ApiKeyInfo",
     "ApiKeyRefusal",
 ]
+
+
+@dataclass
+class JobQuoteLine(_Serializable):
+    """One charge of a :class:`JobQuote`; ``rate_usd`` and ``amount_usd`` are None for egress (billed at AWS cost)."""
+
+    item: str
+    unit: str
+    rate_usd: Optional[float]
+    quantity: float
+    amount_usd: Optional[float]
+    note: str
+
+
+@dataclass
+class JobQuote(_Serializable):
+    """What :meth:`Lium.quote` returns: a job's cost on a node, line by line."""
+
+    executor_id: str
+    gpu_count: int
+    hours: float
+    price_per_hour: float
+    lines: List[JobQuoteLine]
+    total_usd: float  # egress not included
+    pod_balance_floor_usd: float
+    allocation: Optional[Dict[str, Any]] = None  # CPU, RAM and disk inside the pod, as the API sends it
+    # signed in: what the balance must be more than for this rent, this pod plus the payer's open pods
+    rent_balance_required_usd: Optional[float] = None
+
+    @classmethod
+    def from_api(cls, data: Dict[str, Any]) -> "JobQuote":
+        return cls(
+            executor_id=data["executor_id"],
+            gpu_count=data["gpu_count"],
+            hours=data["hours"],
+            price_per_hour=data["price_per_hour"],
+            lines=[JobQuoteLine(**{f.name: line[f.name] for f in fields(JobQuoteLine)}) for line in data["lines"]],
+            total_usd=data["total_usd"],
+            pod_balance_floor_usd=data["pod_balance_floor_usd"],
+            allocation=data.get("allocation"),
+            rent_balance_required_usd=data.get("rent_balance_required_usd"),
+        )

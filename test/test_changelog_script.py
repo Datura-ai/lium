@@ -134,3 +134,10 @@ def test_no_fragments_is_an_error_not_an_empty_release(tmp_path):
     assert r.returncode != 0
     assert "no fragments" in r.stderr
     assert (root / "CHANGELOG.md").read_text(encoding="utf-8") == RELEASED
+
+
+def test_fold_stamps_the_release_version_into_server_json(tmp_path):
+    root = _repo(tmp_path, fragments={"DAH-1.md": "### Fixed\n- one\n"})
+    (root / "server.json").write_text('{"version": "0.0.1", "packages": [{"version": "0.0.1"}]}', encoding="utf-8")
+    subprocess.run([sys.executable, str(SCRIPT), "--version", "0.0.38", "--root", str(root)], check=True)
+    assert (root / "server.json").read_text(encoding="utf-8") == '{"version": "0.0.38", "packages": [{"version": "0.0.38"}]}'

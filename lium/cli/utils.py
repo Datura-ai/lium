@@ -219,7 +219,7 @@ def loading_status(message: str, success_message: str = ""):
     status = Status(f"{console.get_styled(message + '...', 'info')}", console=console)
     status.start()
     try:
-        yield
+        yield status
         if success_message:
             console.success(f"✓ {success_message}")
     finally:
