@@ -590,6 +590,18 @@ def up_command(
                 f"-c {rent_count}: {executor.huid} has {executor.gpu_count} GPU(s).",
                 EXIT_CONFIGURATION_ERROR,
             )
+        if getattr(executor, "whole_host_only", None):
+            # The backend counts the GPU rows and is the authority on "whole"; the listed
+            # gpu_count can differ from them. Refuse only a count clearly below what the listing
+            # says is free. Any other explicit -c is sent as given (the API refuses it if it is
+            # not the whole host); never drop it, that would bill more than was asked for.
+            free = executor.available_gpu_count or executor.gpu_count
+            if requested_gpu_count and requested_gpu_count < free:
+                raise CliFailure(
+                    "invalid_arguments",
+                    f"{executor.huid} rents whole only. Request all {free} GPUs.",
+                    EXIT_CONFIGURATION_ERROR,
+                )
         rent_price = executor.price_per_gpu * rent_count if rent_count != executor.gpu_count else price_per_hour
 
     # renters wrote "I didn't even know it was a spot" and "throttled to 410 W, not shown before rental":

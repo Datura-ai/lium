@@ -1072,6 +1072,11 @@ class Lium:
             max_cuda_version=executor_dict.get("max_cuda_version"),
             tier=executor_dict.get("tier"),
             available_gpu_count=_int_or_none(executor_dict, "available_gpu_count"),
+            whole_host_only=(
+                executor_dict["min_gpu_count_for_rental"] is None
+                if "min_gpu_count_for_rental" in executor_dict
+                else None
+            ),
             interconnect=interconnect,
             nvlink=nvlink,
             gpu_power_limited=gpu_power_limited,

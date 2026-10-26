@@ -222,3 +222,52 @@ def test_split_rental_fewer_than_asked_is_a_mismatch():
 # node id, that the SDK sends `gpu_count` only when one was asked for, and that the rent action threads it.
 
 
+
+
+def test_up_partial_count_on_a_whole_host_only_node_is_refused_before_renting(monkeypatch):
+    """Listing min_gpu_count_for_rental null = whole host only: -c 2 of 8 fails with the full count."""
+    plain = _executor
+
+    def whole_host_only(*args, **kwargs):
+        executor = plain(*args, **kwargs)
+        executor.whole_host_only = True
+        return executor
+
+    monkeypatch.setitem(globals(), "_executor", whole_host_only)
+    result = _run_up(monkeypatch, "-c", "2", node_gpus=8, by_node=True)
+
+    assert result.exit_code != 0
+    assert "rents whole only. Request all 8 GPUs." in result.output
+    assert _FakeLium.up_kwargs == {}
+
+
+def test_up_whole_host_only_without_a_partial_count_leaves_the_count_to_the_backend(monkeypatch):
+    """Listed gpu_count can differ from the GPU rows the API counts: no refusal, no count sent."""
+    plain = _executor
+
+    def whole_host_only(*args, **kwargs):
+        executor = plain(*args, **kwargs)
+        executor.whole_host_only = True
+        return executor
+
+    monkeypatch.setitem(globals(), "_executor", whole_host_only)
+    _run_up(monkeypatch, node_gpus=8, free=7, billed=7, visible=7, by_node=True)
+
+    assert "rents whole only" not in str(_FakeLium.up_kwargs)
+    assert _FakeLium.up_kwargs.get("gpu_count") is None
+    assert _FakeLium.up_kwargs
+
+
+def test_up_whole_host_only_explicit_count_is_sent_as_given(monkeypatch):
+    """An explicit -c is never dropped: the API refuses it rather than billing a bigger rental."""
+    plain = _executor
+
+    def whole_host_only(*args, **kwargs):
+        executor = plain(*args, **kwargs)
+        executor.whole_host_only = True
+        return executor
+
+    monkeypatch.setitem(globals(), "_executor", whole_host_only)
+    _run_up(monkeypatch, "-c", "8", node_gpus=8, free=7, billed=8, visible=8, by_node=True)
+
+    assert _FakeLium.up_kwargs.get("gpu_count") == 8
