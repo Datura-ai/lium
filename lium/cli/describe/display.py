@@ -186,7 +186,8 @@ def build_manifest(pod: PodInfo, detail: Optional[dict] = None) -> dict:
         } if executor else None,
         "machine": {
             "executor_id": executor.id,
-            "ip": executor.ip,
+            # the platform sends a node's IP only to whoever may see it; no key at all otherwise (DAH-4807)
+            **({"ip": executor.ip} if executor.ip else {}),
             "location": executor.location,
             "tier": executor.tier,
             "docker_in_docker": executor.docker_in_docker,
@@ -300,7 +301,8 @@ def build_manifest_table(manifest: dict) -> Table:
             if topology:
                 table.add_row("Topology", topology)
     if machine:
-        table.add_row("IP", machine["ip"] or "—")
+        if machine.get("ip"):
+            table.add_row("IP", machine["ip"])
         table.add_row("Tier", machine["tier"] or "—")
         table.add_row("Net", _format_net(machine))
     if template:
