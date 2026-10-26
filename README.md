@@ -251,7 +251,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 
 - `lium volumes list` - List all volumes
 - `lium volumes new <NAME>` - Create a new volume
-- `lium volumes rm <INDICES>` - Remove volumes by their row numbers in the last `lium volumes` list (`1` or `1,3`); the list must come from the same shell and be under 10 minutes old, or the command asks you to list again
+- `lium volumes rm <TARGETS>` - Remove volumes by HUID or id, or by their row numbers in the last `lium volumes` list (`1` or `1,3`); row numbers need a list from the same shell under 10 minutes old, or the command asks you to list again
 
 ### Cluster Commands
 
@@ -461,6 +461,7 @@ lium update my-pod --jupyter 8888
 lium volumes list
 lium volumes new mydata --desc "My dataset"
 lium volumes rm 1                              # row 1 of the list above (same shell, under 10 minutes old)
+lium volumes rm noble-matrix-27                # or by HUID / id
 
 # Multi-node clusters
 lium clusters                                  # fabrics with free nodes

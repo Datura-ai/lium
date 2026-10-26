@@ -928,6 +928,7 @@ def up_command(
         result = ui.load("Verifying GPU count", lambda: action.execute(verify_ctx))
     else:
         result = action.execute(verify_ctx)
+    gpu_check = result.data
     if not result.ok:
         ui.error(result.error)
         if strict_gpus and result.data.get("mismatch"):
@@ -1013,6 +1014,9 @@ def up_command(
             # `--ttl`, `--until` or the `--budget` cap: the time the backend was given. Present only
             # when one was set, as `rm --format json` carries `termination_time` only for a schedule.
             payload["termination_time"] = termination_time.isoformat()
+        if verify_gpus:
+            # the passed check's counts; a failed one is the error envelope instead
+            payload["gpu_verification"] = {k: gpu_check.get(k) for k in ("expected", "billed", "visible")}
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
         return
 

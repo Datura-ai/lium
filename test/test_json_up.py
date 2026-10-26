@@ -123,7 +123,7 @@ def _run_up(monkeypatch, args=(), *, wait="ready", rent_error=None, gpus="match"
     class _Verify:
         def execute(self, ctx):
             if gpus == "match":
-                return ActionResult(ok=True, data={})
+                return ActionResult(ok=True, data={"expected": 1, "billed": 1, "visible": 1, "mismatch": False})
             data = {"expected": 1, "billed": 1, "visible": 0, "executor_id": "exec-1", "mismatch": gpus == "mismatch"}
             return ActionResult(ok=False, data=data, error="GPU count mismatch" if gpus == "mismatch" else "could not check")
 
@@ -194,6 +194,13 @@ def test_up_json_carries_the_ttl_as_termination_time(monkeypatch):
     assert before + timedelta(hours=2) <= scheduled <= after + timedelta(hours=2)
     # The time the backend was given, not a second reading of the clock.
     assert payload["termination_time"] == next(c[2] for c in calls if c[0] == "schedule")
+
+
+def test_up_json_carries_the_passed_gpu_verification(monkeypatch):
+    result, _ = _run_up(monkeypatch, ["--verify-gpus"])
+
+    assert result.exit_code == 0, result.output
+    assert _one_document(result.stdout)["gpu_verification"] == {"expected": 1, "billed": 1, "visible": 1}
 
 
 @pytest.mark.parametrize(
