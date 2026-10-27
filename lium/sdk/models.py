@@ -211,6 +211,9 @@ class PodInfo(_Serializable):
     # Where the validator mounted the rental volume (`local_volume_path` on the /pods row); None before
     # the pod has started or from an older server. It can differ from the template's volume.
     local_volume_path: Optional[str] = None
+    # Set by ``Lium.up(wait=True)`` when backups were asked for but the account cannot have one yet:
+    # the pod rented without it. Never on a /pods row.
+    backup_notice: Optional[str] = None
 
     def eta_hint(self) -> Optional[str]:
         """One line for a pod that is still starting, e.g. ``est. ready in ~18 s (phase: pulling image)``.

@@ -121,6 +121,8 @@ ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # checked with fullmatch: `$` 
 DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 
 IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# The rent answer's backup_notice repeated as a header (same text as the body field)
+BACKUP_NOTICE_HEADER = "X-Lium-Backup-Notice"
 # `request_same_origin` in `.utils` follows redirects for the credential-bearing HTTP paths of this package — renter SDK,
 # provider portal, signup (DAH-3543); `_MAX_REDIRECTS` stays as the name the tests read.
 _MAX_REDIRECTS = MAX_REDIRECTS
@@ -1368,6 +1370,7 @@ class Lium:
                 f"did not become ready within {timeout}s; it is still billing — "
                 f"check 'lium ps' and remove it if unwanted"
             )
+        ready.backup_notice = created.get("backup_notice")  # wait_ready re-reads the pod from /pods, which has no notice
         return ready
 
     def _rent(
@@ -1480,9 +1483,8 @@ class Lium:
         if posted is not None:
             posted.append(True)
         try:
-            response = self._request(
-                "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
-            ).json()
+            rent_reply = self._request("POST", rent_endpoint, json=payload, headers=rent_headers, retry=False)
+            response = rent_reply.json()
         except (requests.RequestException, LiumServerError, LiumRateLimitError) as first:
             # "Could not look" (the network that failed the POST fails ps() the
             # same way) must fall through to the second POST, not escape here.
@@ -1499,9 +1501,8 @@ class Lium:
                 return existing
             time.sleep(1)
             try:
-                response = self._request(
-                    "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
-                ).json()
+                rent_reply = self._request("POST", rent_endpoint, json=payload, headers=rent_headers, retry=False)
+                response = rent_reply.json()
             except Exception as second:
                 if (
                     isinstance(first, LiumRateLimitError)
@@ -1532,9 +1533,13 @@ class Lium:
                     request_id=getattr(second, "request_id", None),
                 ) from second
 
+        # Set when backups were asked for but the account cannot have one yet: the pod rents without it.
+        # The body field first; the server sends the same text as a header.
+        notice = (response or {}).get("backup_notice") or (getattr(rent_reply, "headers", None) or {}).get(BACKUP_NOTICE_HEADER)
+
         # API should return pod info
         if response and "id" in response:
-            return response
+            return {**response, "backup_notice": notice} if notice else response
 
         # The rent route answers {"success": true, "pod_id": ...}: the id is
         # exact, so the pod is read back by it rather than guessed by name. If
@@ -1551,9 +1556,8 @@ class Lium:
                 "ssh_cmd": None,
                 "executor_id": executor_info.id,
             }
-            # set when backups were asked for but the account cannot have one yet: the pod rents without it
-            if response.get("backup_notice"):
-                pod["backup_notice"] = response["backup_notice"]
+            if notice:
+                pod["backup_notice"] = notice
             return pod
 
         # Fallback: find pod by name after creation
@@ -2237,6 +2241,7 @@ class Lium:
             attempts=0 if dry_run else 1,
             dry_run=dry_run,
             server_side=False,
+            backup_notice=(pod or {}).get("backup_notice"),
         )
 
     def pod(

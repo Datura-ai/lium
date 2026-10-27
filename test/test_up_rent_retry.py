@@ -123,6 +123,21 @@ def test_the_backup_notice_rides_on_the_rented_pod(client, monkeypatch):
     assert result["id"] == "pod-uuid-new" and result["backup_notice"] == "no backup"
 
 
+def test_the_backup_notice_survives_waiting_for_the_pod(client, monkeypatch):
+    """DAH-5023: up(wait=True) returns wait_ready's PodInfo; the notice (here only in the header) rides on it."""
+    reply = _Resp({"success": True, "pod_id": "pod-uuid-new"})
+    reply.headers = {"X-Lium-Backup-Notice": "no backup"}
+    _rent.outcomes = [reply]
+    monkeypatch.setattr(
+        client_module.requests, "request", _rent(client, pods_after_failure=[_pod(pod_id="pod-uuid-new")]),
+    )
+    monkeypatch.setattr(client, "wait_ready", lambda pod, timeout: SimpleNamespace(id=pod["id"]))
+
+    ready = client.up(executor_id=EXECUTOR_ID, name=POD_NAME, template_id="tpl-1", ssh_keys=["k"], wait=True)
+
+    assert ready.id == "pod-uuid-new" and ready.backup_notice == "no backup"
+
+
 def test_a_timed_out_rent_is_not_repeated_when_the_pod_exists(client, monkeypatch):
     """The pod the server created during the timeout is the result; no second POST."""
     _rent.outcomes = [requests.Timeout("read timed out")]
