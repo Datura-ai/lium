@@ -607,6 +607,8 @@ class LiumTools:
                 self._save(rental)
             with rental.lock:
                 rental.reported = True  # every result from here on names pod_id
+            # the rent went through without the backup the account cannot have yet: say so in every result below
+            notice = {"backup_notice": created["backup_notice"]} if isinstance(created, dict) and created.get("backup_notice") else {}
             pending = {
                 "ok": True,
                 "status": "pending",
@@ -614,6 +616,7 @@ class LiumTools:
                 "name": name,
                 "next": "The pod is rented and billing. Do NOT call rent_pod again: call list_pods until its status is "
                 "RUNNING, then run_command; or remove_pod with this pod_id to stop billing.",
+                **notice,
             }
 
             def stop_if_cancelled(*_):
@@ -637,7 +640,7 @@ class LiumTools:
                 return {**pending, "warning": f"Could not confirm the pod is ready: {type(e).__name__}: {e}"}
             if ready is None:
                 return {**pending, "warning": f"Not running after {timeout_seconds}s; some nodes take longer to start."}
-            return {"ok": True, "pod": _pod(ready), "next": "run_command on this pod; remove_pod when done (billing stops)"}
+            return {"ok": True, "pod": _pod(ready), "next": "run_command on this pod; remove_pod when done (billing stops)", **notice}
 
         result = _guarded(call)
         if direct:

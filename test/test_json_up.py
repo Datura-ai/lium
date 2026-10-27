@@ -46,7 +46,7 @@ def _one_document(stdout: str) -> dict:
 # --- lium up --json ---------------------------------------------------------------------------
 
 def _run_up(monkeypatch, args=(), *, wait="ready", rent_error=None, gpus="match", jupyter="ok", rm_error=None,
-            volume_takes=0, schedule_error=None, yes=True, input=None):
+            volume_takes=0, schedule_error=None, yes=True, input=None, backup_notice=None):
     """`lium up brave-fox-3a --yes --json <args>` against fakes; returns (result, calls).
 
     ``wait``: ``"ready"`` | ``"timeout"`` (still starting) | ``"failed"`` (dead pod) | ``"api_error"`` (503 while
@@ -102,7 +102,9 @@ def _run_up(monkeypatch, args=(), *, wait="ready", rent_error=None, gpus="match"
             calls.append(("rent",))
             if rent_error is not None:
                 raise rent_error
-            return ActionResult(ok=True, data={"pod_info": {"id": "pod-1"}, "pod_id": "pod-1", "pod_name": "train"})
+            return ActionResult(ok=True, data={
+                "pod_info": {"id": "pod-1"}, "pod_id": "pod-1", "pod_name": "train", "backup_notice": backup_notice,
+            })
 
     class _Wait:
         def execute(self, ctx):
@@ -173,6 +175,16 @@ def test_up_json_is_one_document_with_the_pod_and_the_narration_on_stderr(monkey
     # Moved, not dropped: a person tailing stderr still sees what happened.
     assert "created; waiting for it to become ready" in result.stderr
     assert "created; waiting" not in result.stdout
+
+
+def test_up_says_when_the_pod_rented_without_its_backup(monkeypatch):
+    """DAH-5023: an account that cannot fund backup storage yet rents without one; the API's notice is shown."""
+    notice = "Backups need a paid deposit: this pod rents without a backup."
+    result, _ = _run_up(monkeypatch, backup_notice=notice)
+
+    assert result.exit_code == 0, result.output
+    assert _one_document(result.stdout)["backup_notice"] == notice
+    assert notice in result.stderr
 
 
 def test_up_json_ends_after_the_pod_is_ready_without_an_ssh_session(monkeypatch):

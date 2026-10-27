@@ -212,6 +212,7 @@ def clusters_up_command(
         if exc.confirmed:
             raise CliFailure("cluster_rented_not_listed", str(exc), EXIT_API_ERROR, hint=RENTED_NOT_LISTED_HINT) from exc
         raise CliFailure("cluster_rent_uncertain", str(exc), EXIT_API_ERROR, hint=RENT_UNCERTAIN_HINT) from exc
+    backup_notice = cluster.backup_notice  # --wait below re-reads the cluster
 
     # The TTL is scheduled before any waiting: a --wait timeout must not leave N
     # nodes billing with nothing scheduled. Unlike `lium up --ttl` (lium#247), a member whose
@@ -269,6 +270,8 @@ def clusters_up_command(
     if output_format == "json":
         data = cluster_to_dict(cluster)
         data["removal_scheduled_at"] = scheduled.isoformat() if scheduled else None
+        if backup_notice:
+            data["backup_notice"] = backup_notice
         click.echo(json.dumps(data, indent=2, ensure_ascii=False))
         return
 
@@ -279,6 +282,8 @@ def clusters_up_command(
     ui.info(f"MASTER_ADDR={escape(str(cluster.master_addr))}   hostfile: lium clusters show {escape(cluster.id[:8])} --hostfile")
     if scheduled:
         ui.info(f"Every member terminates at {escape(scheduled.strftime('%Y-%m-%d %H:%M UTC'))}")
+    if backup_notice:
+        ui.warning(escape(backup_notice))
 
 
 # -- ps ----------------------------------------------------------------------------------------

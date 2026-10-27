@@ -108,6 +108,19 @@ def test_the_real_rent_payload_is_resolved_by_pod_id(client, monkeypatch):
     assert result["id"] == "pod-uuid-new"
     assert result["executor_id"] == EXECUTOR_ID
     assert len(_rent.calls) == 1
+    assert "backup_notice" not in result
+
+
+def test_the_backup_notice_rides_on_the_rented_pod(client, monkeypatch):
+    """DAH-5023: the rent answer says the pod rented without the backup the account cannot fund yet."""
+    _rent.outcomes = [_Resp({"success": True, "pod_id": "pod-uuid-new", "backup_notice": "no backup"})]
+    monkeypatch.setattr(
+        client_module.requests, "request", _rent(client, pods_after_failure=[_pod(pod_id="pod-uuid-new")]),
+    )
+
+    result = client.up(executor_id=EXECUTOR_ID, name=POD_NAME, template_id="tpl-1", ssh_keys=["k"])
+
+    assert result["id"] == "pod-uuid-new" and result["backup_notice"] == "no backup"
 
 
 def test_a_timed_out_rent_is_not_repeated_when_the_pod_exists(client, monkeypatch):

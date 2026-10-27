@@ -157,6 +157,8 @@ class RentResult:
     attempts: int = 0
     dry_run: bool = False
     server_side: bool = False
+    # set when backups were asked for but the account cannot have one yet: the pod rents without it
+    backup_notice: Optional[str] = None
 
 
 @dataclass
@@ -323,6 +325,8 @@ class Cluster:
 
     id: str
     pods: List[PodInfo]
+    # set on the cluster up_cluster returns when backups were asked for but the account cannot have one yet
+    backup_notice: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.pods = sorted(self.pods, key=lambda p: (p.cluster_node_index is None, p.cluster_node_index or 0))

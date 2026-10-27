@@ -1543,7 +1543,7 @@ class Lium:
         pod_id = (response or {}).get("pod_id")
         if pod_id:
             existing = self._find_pod_by_id(str(pod_id), executor_info.id, attempts=3, interval=2)
-            return existing or {
+            pod = existing or {
                 "id": str(pod_id),
                 "name": name,
                 "status": "PENDING",
@@ -1551,6 +1551,10 @@ class Lium:
                 "ssh_cmd": None,
                 "executor_id": executor_info.id,
             }
+            # set when backups were asked for but the account cannot have one yet: the pod rents without it
+            if response.get("backup_notice"):
+                pod["backup_notice"] = response["backup_notice"]
+            return pod
 
         # Fallback: find pod by name after creation
         existing = self._find_pod_by_name(
@@ -2159,6 +2163,7 @@ class Lium:
             attempts=int(data.get("attempts") or 0),
             dry_run=bool(data.get("dry_run", dry_run)),
             server_side=True,
+            backup_notice=data.get("backup_notice"),
         )
 
     def _rented_pod_result(
@@ -2865,6 +2870,7 @@ class Lium:
             )
         if wait:
             cluster = self.wait_cluster_ready(cluster, timeout=timeout)
+        cluster.backup_notice = (response or {}).get("backup_notice")
         return cluster
 
     def _cluster_ids_now(self) -> frozenset:

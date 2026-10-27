@@ -780,6 +780,7 @@ def up_command(
     # a split of a larger node), else the node's count from the dry run. Kept here because
     # `result` is reused by the actions below, and the GPU-count check needs it.
     rented_gpus = result.data.get("gpu_count") or gpu_count
+    backup_notice = result.data.get("backup_notice")
     if rented.id != executor.id:
         # The confirmed node was taken between the dry run and the rent; the server took the
         # next candidate at or below the confirmed $/GPU·h.
@@ -1007,6 +1008,8 @@ def up_command(
     # Always state what was created: a caller that only gets an SSH banner or a
     # log stream has no way to name the pod it is now paying for.
     ui.info(f"{pod_label} ready")
+    if backup_notice:
+        ui.warning(escape(backup_notice))
 
     if restore_backup_id:
         ui.warning(
@@ -1019,6 +1022,8 @@ def up_command(
         # no `ok` wrapper (success is exit 0; a failure is the envelope on stderr). The SSH
         # session and the log stream are for a person, so --json ends here.
         payload = {"pod": compact_pod(pod)}
+        if backup_notice:
+            payload["backup_notice"] = backup_notice
         if termination_time:
             # `--ttl`, `--until` or the `--budget` cap: the time the backend was given. Present only
             # when one was set, as `rm --format json` carries `termination_time` only for a schedule.
