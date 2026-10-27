@@ -1220,6 +1220,7 @@ class Lium:
         before_send: Optional[Callable[[Dict[str, Any]], None]] = None,
         termination_hours: Optional[int] = None,
         enable_backups: bool = True,
+        enable_jupyter: bool = False,
     ) -> Union[Dict[str, Any], PodInfo]:
         """Start a new pod on a specific node.
 
@@ -1305,6 +1306,7 @@ class Lium:
             before_send=before_send,
             termination_hours=termination_hours,
             enable_backups=enable_backups,
+            enable_jupyter=enable_jupyter,
         )
         if not wait:
             return created
@@ -1341,6 +1343,7 @@ class Lium:
         posted: Optional[List[bool]] = None,
         build_context_sha256: Optional[str] = None,
         enable_backups: bool = True,
+        enable_jupyter: bool = False,
     ) -> Dict[str, Any]:
         """The rent call itself; :meth:`up` adds the optional wait on top.
 
@@ -1394,6 +1397,10 @@ class Lium:
             "restore_path": restore_path,
             "enable_backups": enable_backups,
         }
+        if enable_jupyter:
+            # the server installs Jupyter and holds a second port for it at rent (DAH-3698: a tight split node
+            # gives a pod without it the SSH port only)
+            payload["enable_jupyter"] = True
         if gpu_count is not None:
             payload["gpu_count"] = gpu_count
         if termination_hours is not None:
@@ -1900,6 +1907,7 @@ class Lium:
         dry_run: bool = False,
         termination_hours: Optional[int] = None,
         enable_backups: bool = True,
+        enable_jupyter: bool = False,
     ) -> RentResult:
         """Rent the cheapest available node that satisfies a spec, without listing the fleet.
 
@@ -1995,6 +2003,7 @@ class Lium:
             "restore_path": restore_path,
             "termination_hours": termination_hours,
             "enable_backups": enable_backups,
+            "enable_jupyter": enable_jupyter,
         }
         if self.supports(RENT_BY_SPEC):
             return self._rent_on_server(spec, rental, dry_run)
@@ -2037,6 +2046,8 @@ class Lium:
         }
         if rental["termination_hours"] is not None:
             payload["termination_hours"] = rental["termination_hours"]
+        if rental.get("enable_jupyter"):
+            payload["enable_jupyter"] = True
         gpu_count = int(spec.get("gpu_count") or 1)
         # A rent is billable and a lost response may have succeeded server-side, so it is never
         # retried blindly; a dry run rents nothing and keeps the retries. Pods that exist before
@@ -2168,6 +2179,7 @@ class Lium:
                 restore_path=rental["restore_path"],
                 termination_hours=rental["termination_hours"],
                 enable_backups=rental["enable_backups"],
+                enable_jupyter=rental["enable_jupyter"],
             )
         return RentResult(
             executor=executor,

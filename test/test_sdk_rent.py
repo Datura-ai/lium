@@ -572,3 +572,32 @@ def test_a_definite_refusal_of_the_resend_propagates_without_another_look(client
     urls = [c.request.url for c in responses.calls]
     assert urls.count(f"{BASE}/executors/rent-by-spec") == 2
     assert urls.count(f"{BASE}/pods") == 1 + 3
+
+
+@responses.activate
+def test_rent_by_spec_asks_the_server_for_jupyter_only_when_wanted(client):
+    """DAH-3698: a tight split node gives a pod the SSH port only unless the rent says Jupyter, which holds its port."""
+    _version(["rent_by_spec"])
+    responses.add(responses.GET, f"{BASE}/pods", json=[])
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", json=RENTED)
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", json=RENTED)
+
+    client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY], enable_jupyter=True)
+    assert json.loads(responses.calls[-1].request.body)["enable_jupyter"] is True
+    client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY])
+    assert "enable_jupyter" not in json.loads(responses.calls[-1].request.body)
+
+
+@responses.activate
+def test_a_rent_by_id_asks_the_server_for_jupyter(client):
+    _version(None)
+    _template()
+    _fleet()
+    responses.add(responses.POST, f"{BASE}/executors/cheap/rent", json={"id": "pod-uuid-9", "name": "train-1"})
+
+    client.rent(
+        gpu_type="H100", gpu_count=1, name="train-1", template_id="22222222-2222-4222-8222-222222222222", min_cpus=16, min_download_mbps=100,
+        ssh_keys=[KEY], enable_jupyter=True,
+    )
+
+    assert json.loads(responses.calls[-1].request.body)["enable_jupyter"] is True

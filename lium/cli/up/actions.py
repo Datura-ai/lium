@@ -242,6 +242,7 @@ class RentPodAction:
         backup_id: Optional[str] = ctx.get("backup_id")
         restore_path: Optional[str] = ctx.get("restore_path")
         enable_backups: bool = ctx.get("enable_backups", True)
+        enable_jupyter: bool = ctx.get("jupyter", False)
         # `lium up <node> -c N`: the node path only. On the spec path the count is part of the
         # spec the server selects on, so it is not sent twice.
         requested_gpu_count: Optional[int] = ctx.get("gpu_count")
@@ -260,6 +261,7 @@ class RentPodAction:
             backup_id=backup_id,
             restore_path=restore_path,
             enable_backups=enable_backups,
+            enable_jupyter=enable_jupyter,
         )
         if build_context_sha256:
             rental["build_context_sha256"] = build_context_sha256
@@ -548,21 +550,24 @@ class InstallJupyterAction:
         pod: PodInfo = ctx["pod"]
         ui = ctx.get("ui")
 
-        if not pod.ports:
-            return ActionResult(ok=False, data={}, error="No ports allocated to pod for Jupyter installation")
+        jupyter_port = None
+        # rented with enable_jupyter: the server already installs it on the port it held back, so only wait
+        if not getattr(pod, "jupyter_installation_status", None):
+            if not pod.ports:
+                return ActionResult(ok=False, data={}, error="No ports allocated to pod for Jupyter installation")
 
-        available_ports = [int(port) for port in pod.ports.keys() if int(port) != 22]
+            available_ports = [int(port) for port in pod.ports.keys() if int(port) != 22]
 
-        if not available_ports:
-            return ActionResult(
-                ok=False,
-                data={},
-                error="No suitable ports available for Jupyter (only SSH port 22 found)"
-            )
+            if not available_ports:
+                return ActionResult(
+                    ok=False,
+                    data={},
+                    error="No suitable ports available for Jupyter (only SSH port 22 found)"
+                )
 
-        jupyter_port = available_ports[0]
+            jupyter_port = available_ports[0]
 
-        lium.install_jupyter(pod, jupyter_internal_port=jupyter_port)
+            lium.install_jupyter(pod, jupyter_internal_port=jupyter_port)
 
         max_wait = 120
         wait_interval = 3
