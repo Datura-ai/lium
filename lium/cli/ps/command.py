@@ -103,7 +103,16 @@ def _render(
     short = not wide and _terminal_width() < WIDE_TERMINAL_COLUMNS
     table, header = display.build_pods_table(pods, short=short, show_index=show_index)
     ui.info(header)
-    ui.print(table)
+    # the wide layout (a pipe or --wide) needs its width: Rich draws a pipe at 80, clamps print(width=)
+    # to the console and crops past it, losing Ports and Name; a terminal soft-wraps the longer lines.
+    # Both dimensions are set (a dumb TERM ignores a lone width) and restored, so `--watch` follows a resize.
+    previous = (console._width, console._height)
+    if not short:
+        console.size = (max(console.width, WIDE_TERMINAL_COLUMNS), console.height)
+    try:
+        ui.print(table)
+    finally:
+        console._width, console._height = previous
     for line in display.pending_eta_lines(pods):
         ui.dim(escape(line))
     if short:

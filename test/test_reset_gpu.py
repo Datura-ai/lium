@@ -127,6 +127,12 @@ def test_409_exits_non_zero_with_the_code(monkeypatch):
     assert json.loads(result.stderr)["error"]["code"] == "mig_enabled"
 
 
+def test_an_invalid_gpu_index_does_not_say_retry(monkeypatch):
+    result, _ = _run(monkeypatch, ["my-pod", "--gpu", "5", "--yes", "--json"],
+                     LiumError("API error 400: GPU indices must be between 0 and 0", code="invalid_gpu_index"))
+    assert "nvidia-smi" in json.loads(result.stderr)["error"]["hint"]
+
+
 def test_a_failed_gpu_shows_the_gpus_and_exits_non_zero(monkeypatch):
     failed = LiumGpuOperationError("API error 409: GPU 0 failed", code="reset_not_supported",
                                    container_restarted=True, gpus=[GpuResetOutcome(**FAILED_GPU)])

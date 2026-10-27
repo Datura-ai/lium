@@ -8,7 +8,7 @@ import click
 from lium.sdk import Lium
 from lium.sdk.bounded_job import FAILED, SUCCEEDED, TIMED_OUT, BUDGET_EXHAUSTED
 from lium.cli import ui
-from lium.cli.utils import handle_errors, resolve_output_format
+from lium.cli.utils import _gpu_count_hint, handle_errors, resolve_output_format
 
 _DURATION = re.compile(r"^(\d+(?:\.\d+)?)([smh]?)$")
 _SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600}
@@ -108,6 +108,10 @@ def run_command(command, gpu_type, gpu_count, max_cost_usd, deadline, inputs, ou
         (ui.info if result.ok else ui.warning)(summary)
         if result.error:
             ui.dim(result.error)
+            # run_job returns a refused rent as rent_failed, so the GPU-count next step is added here
+            hint = _gpu_count_hint(result.error)
+            if hint:
+                ui.dim(hint)
         for remote, local in result.outputs.items():
             ui.dim(f"copied {remote} -> {local}")
         for remote, reason in result.missing_outputs.items():

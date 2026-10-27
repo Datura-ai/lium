@@ -1135,6 +1135,11 @@ class Lium:
             max_cuda_version=executor_dict.get("max_cuda_version"),
             tier=executor_dict.get("tier"),
             available_gpu_count=_int_or_none(executor_dict, "available_gpu_count"),
+            whole_host_only=(
+                executor_dict["min_gpu_count_for_rental"] is None
+                if "min_gpu_count_for_rental" in executor_dict
+                else None
+            ),
             interconnect=interconnect,
             nvlink=nvlink,
             gpu_power_limited=gpu_power_limited,
@@ -1277,6 +1282,7 @@ class Lium:
         confirmed_only: bool = False,
         before_send: Optional[Callable[[Dict[str, Any]], None]] = None,
         termination_hours: Optional[int] = None,
+        enable_backups: bool = True,
     ) -> Union[Dict[str, Any], PodInfo]:
         """Start a new pod on a specific node.
 
@@ -1335,6 +1341,8 @@ class Lium:
                 propagates.
             termination_hours: Sent with the rent (1 to 720): the server removes the pod this
                 many hours after it starts, even if this process never gets to schedule it.
+            enable_backups: Lium backs up a new pod's volume automatically by default;
+                ``False`` turns that off for this pod.
 
         Returns:
             Pod metadata as returned by the rent API (id, name, status, ssh command,
@@ -1359,6 +1367,7 @@ class Lium:
             confirmed_only=confirmed_only,
             before_send=before_send,
             termination_hours=termination_hours,
+            enable_backups=enable_backups,
         )
         if not wait:
             return created
@@ -1394,6 +1403,7 @@ class Lium:
         termination_hours: Optional[int] = None,
         posted: Optional[List[bool]] = None,
         build_context_sha256: Optional[str] = None,
+        enable_backups: bool = True,
     ) -> Dict[str, Any]:
         """The rent call itself; :meth:`up` adds the optional wait on top.
 
@@ -1445,6 +1455,7 @@ class Lium:
             "enable_volume_encryption": enable_volume_encryption,
             "backup_log_id": backup_id,
             "restore_path": restore_path,
+            "enable_backups": enable_backups,
         }
         if gpu_count is not None:
             payload["gpu_count"] = gpu_count
@@ -1785,7 +1796,7 @@ class Lium:
         rent_args = dict(
             name="Your Pod", template_id=None, image=None, dockerfile_content=None, volume_id=None,
             ports=None, ssh_keys=None, ssh_name=None, enable_volume_encryption=None,
-            backup_id=None, restore_path=None, gpu_count=None,
+            backup_id=None, restore_path=None, gpu_count=None, enable_backups=True,
         )
         unknown = set(up_kwargs) - set(rent_args)
         if unknown:
@@ -1951,6 +1962,7 @@ class Lium:
         restore_path: Optional[str] = None,
         dry_run: bool = False,
         termination_hours: Optional[int] = None,
+        enable_backups: bool = True,
     ) -> RentResult:
         """Rent the cheapest available node that satisfies a spec, without listing the fleet.
 
@@ -1979,7 +1991,7 @@ class Lium:
                 Client-side only: a rent-by-spec backend has no such field, so the call is
                 refused there rather than sent with a constraint the server would not check.
             volume_id, ports, ssh_keys, ssh_name, enable_volume_encryption, backup_id,
-                restore_path, termination_hours: as in :meth:`up`.
+                restore_path, termination_hours, enable_backups: as in :meth:`up`.
             dry_run: Choose and price only; nothing is rented and no SSH key is registered
                 with the account. Against a rent-by-spec backend the request still carries
                 your SSH public key (``ssh_keys`` or the configured key: the server validates
@@ -2045,6 +2057,7 @@ class Lium:
             "backup_id": backup_id,
             "restore_path": restore_path,
             "termination_hours": termination_hours,
+            "enable_backups": enable_backups,
         }
         if self.supports(RENT_BY_SPEC):
             return self._rent_on_server(spec, rental, dry_run)
@@ -2081,6 +2094,7 @@ class Lium:
             ),
             "backup_log_id": rental["backup_id"],
             "restore_path": rental["restore_path"],
+            "enable_backups": rental["enable_backups"],
             "dry_run": dry_run,
             **({"build_context_sha256": rental["build_context_sha256"]} if rental["build_context_sha256"] else {}),
         }
@@ -2216,6 +2230,7 @@ class Lium:
                 backup_id=rental["backup_id"],
                 restore_path=rental["restore_path"],
                 termination_hours=rental["termination_hours"],
+                enable_backups=rental["enable_backups"],
             )
         return RentResult(
             executor=executor,
@@ -2376,8 +2391,10 @@ class Lium:
                 ``False``/``None`` do not filter.
             view: ``"summary"`` (default) asks the API for the fields a listing reads — price, GPU/CPU/RAM/disk
                 headline specs, location, tier, network; an API that does not know the parameter returns the
-                full row. ``"full"`` asks for the whole node-check scrape in :attr:`ExecutorInfo.specs` (docker
-                info, verified ports, per-GPU telemetry, checksums).
+                full row. ``"full"`` asks for the whole public node-check scrape in :attr:`ExecutorInfo.specs` (verified
+                ports, checksums, per-GPU card fields). What the renters' pods are doing (docker containers, GPU
+                processes, per-GPU load, memory in use, current clocks and PCIe link) is not served; a renter reads
+                their own pod's load with :meth:`gpu_stats`.
 
         Returns:
             A list of :class:`ExecutorInfo` objects that satisfy the filters.
@@ -2765,6 +2782,7 @@ class Lium:
         enable_volume_encryption: bool | None = True,
         wait: bool = False,
         timeout: int = 900,
+        enable_backups: bool = True,
     ) -> Cluster:
         """Rent several nodes of one fabric as a single all-or-nothing cluster.
 
@@ -2780,6 +2798,7 @@ class Lium:
             ports: Ports to expose per node.
             enable_volume_encryption: As for :meth:`up`.
             wait: Block until every member is RUNNING with SSH (``timeout`` seconds).
+            enable_backups: As for :meth:`up`; applies to every member.
 
         Raises:
             ValueError: fewer than two nodes, or no SSH key.
@@ -2810,6 +2829,7 @@ class Lium:
             "user_public_key": ssh_material,
             "initial_port_count": ports,
             "enable_volume_encryption": enable_volume_encryption,
+            "enable_backups": enable_backups,
         }
         # Not retried blindly: a timeout may have rented the group anyway. A backend that honours
         # the Idempotency-Key (RENT_IDEMPOTENCY) gets the order once more with the same key and

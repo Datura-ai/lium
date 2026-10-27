@@ -4,7 +4,6 @@
 // This app wraps Lium's REST API (https://lium.io/api), the same API the `lium` CLI and SDK use.
 const { version } = require('./package.json');
 const { version: platformVersion, errors } = require('zapier-platform-core');
-const { createHash } = require('node:crypto');
 
 const API = 'https://lium.io/api';
 const NODES_FEED = `${API}/public/v1/nodes`; // public, no API key needed
@@ -127,81 +126,36 @@ const podStatusChanged = {
 
 // ---- Actions ----
 
-// The node fields both rent paths can fill: a fresh rental's catalogue node and a replayed pod's executor. The per-GPU
-// price is the charged $/h over the rented GPUs on both, not the catalogue's (which can differ from the charge).
-const nodeOut = (e, pricePerHour, gpus) => ({ id: e.id, machine_name: e.machine_name, gpu_count: e.gpu_count,
-  price_per_gpu: pricePerHour == null ? null : pricePerHour / gpus });
-
+// Hidden, and never rents: Zapier publishes no integration that makes financial transactions, and an action cannot be
+// removed (C011) while old Zaps reference it.
 const rentPod = {
   key: 'rent_gpu_pod',
   noun: 'Pod',
   display: {
-    label: 'Rent GPU Pod',
-    description:
-      'Rents the cheapest available Lium GPU server that matches the GPU model, GPU count and max price, and starts a pod you can SSH into. Billed per second at the hourly price until you terminate it.',
+    label: 'Rent GPU Pod (removed)',
+    description: 'Removed: renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.',
+    hidden: true,
   },
   operation: {
+    // the 1.0.4 fields stay so Zapier can migrate Zaps that use them (C002)
     inputFields: [
-      { key: 'gpu_type', label: 'GPU Model', required: true, helpText: 'GPU to rent, e.g. `H100`, `H200`, `B200`, `A100`, `RTX4090`.' },
-      { key: 'gpu_count', label: 'GPU Count', type: 'integer', required: false, default: '1', helpText: 'Number of GPUs. Default 1.' },
-      { key: 'max_price_per_gpu_hour', label: 'Max Price per GPU-Hour (USD)', type: 'number', required: false, helpText: 'Do not rent above this hourly price per GPU.' },
-      { key: 'ssh_public_key', label: 'SSH Public Key', required: true, helpText: 'Your SSH public key (the line starting `ssh-ed25519` or `ssh-rsa`). It is installed on the pod so you can log in.' },
-      { key: 'pod_name', label: 'Pod Name', required: false, helpText: 'A name prefix for the pod. Default `zap`. The action appends a code derived from the Idempotency Key and the rental (e.g. `zap-1a2b3c4d5e6f`) so a late replay can find the pod it already rented.' },
+      { key: 'gpu_type', label: 'GPU Model', required: true, helpText: 'Unused: renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.' },
+      { key: 'gpu_count', label: 'GPU Count', type: 'integer', required: false, default: '1', helpText: 'Unused: renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.' },
+      { key: 'max_price_per_gpu_hour', label: 'Max Price per GPU-Hour (USD)', type: 'number', required: false, helpText: 'Unused: renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.' },
+      { key: 'ssh_public_key', label: 'SSH Public Key', required: true, helpText: 'Unused: renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.' },
+      { key: 'pod_name', label: 'Pod Name', required: false, helpText: 'Unused: renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.' },
       {
         key: 'idempotency_key',
         label: 'Idempotency Key',
         required: true,
-        helpText:
-          'A value that stays the same if Zapier replays this step, so a retry returns the first pod instead of renting a second one. Map a stable value from the trigger step, e.g. the trigger item\'s ID; do not use a timestamp or a random value. Use a different key for each pod, e.g. `{{id}}-2` for a second Rent step. Lium remembers a key for 24 hours; after that, a replay still finds and returns the pod this key rented as long as that pod exists under the same name, marked `replayed: true`. Replaying a rent by hand more than 24 hours later, after renaming or deleting its pod, rents a new pod.',
+        helpText: 'Unused: renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.',
       },
-      { key: 'template_id', label: 'Template ID', required: false, helpText: 'Optional Lium template (docker image) ID. Empty: the server\'s recommended PyTorch image.' },
+      { key: 'template_id', label: 'Template ID', required: false, helpText: 'Unused: renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.' },
     ],
-    perform: async (z, bundle) => {
-      const d = bundle.inputData;
-      const key = String(d.idempotency_key || '').trim();
-      if (!key) throw new errors.Error('Idempotency Key is required: map a stable value from the trigger step.');
-      const keyHash = createHash('sha256').update(key).digest('hex');
-      const gpuCount = Number(d.gpu_count || 1);
-      const sshKey = d.ssh_public_key.trim();
-      // The name carries the key and the rental, so a replay after the backend's 24 h key window still finds the pod
-      // and the same key on another rental does not (the max price is left out: editing the cap keeps replays matching).
-      const nameCode = createHash('sha256')
-        .update(JSON.stringify([key, d.gpu_type, gpuCount, sshKey, d.template_id || null])).digest('hex').slice(0, 12);
-      const body = {
-        gpu_type: d.gpu_type,
-        gpu_count: gpuCount,
-        pod_name: `${d.pod_name || 'zap'}-${nameCode}`,
-        user_public_key: [sshKey],
-      };
-      if (present(d.max_price_per_gpu_hour)) {
-        const cap = Number(d.max_price_per_gpu_hour);
-        if (!Number.isFinite(cap) || cap <= 0) throw new errors.Error('Max Price per GPU-Hour must be a number above 0.');
-        body.max_price_per_gpu_hour = cap;
-      }
-      if (d.template_id) body.template_id = d.template_id;
-      const existing = ((await z.request({ url: `${API}/pods` })).data || []).find((p) => p.pod_name === body.pod_name);
-      if (existing) {
-        // same output fields as a fresh rental; /pods carries the charged total $/h as `price`
-        const e = existing.executor || {};
-        return { ...existing, id: existing.id, pod_id: existing.id, replayed: true, price_per_hour: existing.price,
-          template_id: (existing.template || {}).id,
-          node: nodeOut(e, existing.price, gpuCount) };
-      }
-      // The backend accepts 1-255 of [A-Za-z0-9-_.:]; any other value is hashed, which is just as replay-stable.
-      const headers = { 'Idempotency-Key': /^[A-Za-z0-9._:-]{1,255}$/.test(key) ? key : keyHash };
-      const res = await z.request({ method: 'POST', url: `${API}/executors/rent-by-spec`, headers, body, skipThrowForStatus: true });
-      if (res.status === 409 && /idempotency_(in_progress|outcome_unknown)/.test(JSON.stringify(res.data))) {
-        throw new errors.Error(
-          'Lium is still processing, or could not confirm, an earlier rental with this Idempotency Key. It may already have rented a pod: check your pods at https://lium.io before retrying. Retrying with the same key is refused; use a new key only once you know no pod was rented.',
-          'idempotency_conflict',
-          409,
-        );
-      }
-      if (res.throwForStatus) res.throwForStatus();
-      const r = res.data;
-      return { id: r.pod_id, pod_id: r.pod_id, pod_name: body.pod_name, replayed: false, status: 'PENDING', price_per_hour: r.price_per_hour, template_id: r.template_id, node: nodeOut(r.selected_executor || {}, r.price_per_hour, gpuCount) };
+    perform: async () => {
+      throw new errors.Error('Renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.', 'RentRemoved', 400);
     },
-    sample: { id: podSample.pod_id, pod_id: podSample.pod_id, pod_name: 'zap-1a2b3c4d5e6f', replayed: false, status: 'PENDING', price_per_hour: 2.0 },
+    sample: { id: 'removed' },
   },
 };
 
@@ -215,7 +169,7 @@ const terminatePod = {
   },
   operation: {
     inputFields: [
-      { key: 'pod_id', label: 'Pod ID', required: true, dynamic: 'pod_status_changed.pod_id.pod_name', helpText: 'The pod to terminate (its ID from Rent GPU Pod or the pod trigger).' },
+      { key: 'pod_id', label: 'Pod ID', required: true, dynamic: 'pod_status_changed.pod_id.pod_name', helpText: 'The pod to terminate (its ID from the New Pod trigger).' },
     ],
     perform: async (z, bundle) => {
       const id = encodeURIComponent(bundle.inputData.pod_id);
