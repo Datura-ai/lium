@@ -696,6 +696,21 @@ def test_reboot_reports_a_failed_item_after_finishing_the_batch(monkeypatch):
     assert result.exit_code == EXIT_GENERAL_ERROR
 
 
+def test_reset_gpu_of_a_missing_pod_fails(monkeypatch):
+    """reset-gpu names one pod — a miss fails like reboot's, before any reset is sent."""
+    from lium.cli.reset_gpu import command as reset_gpu_module
+
+    class _ResetLium(_FakeLium):
+        def reset_gpu(self, pod, gpu_indices=None):
+            raise AssertionError("no reset for a pod that does not exist")
+
+    monkeypatch.setattr(reset_gpu_module, "Lium", _ResetLium)
+
+    result = CliRunner().invoke(cli, ["reset-gpu", "no-such-pod-zz", "--yes"])
+
+    assert result.exit_code == EXIT_POD_NOT_FOUND
+
+
 def test_bk_show_of_a_missing_pod_fails(monkeypatch):
     """The whole bk family names one pod — a miss is a miss, not a silent skip."""
     from lium.cli.bk.show import command as bk_show_module
