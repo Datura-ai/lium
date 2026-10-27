@@ -147,17 +147,17 @@ def test_up_cluster_sends_an_idempotency_key(monkeypatch):
         ps_sequence=[_pods([_pod_payload(0), _pod_payload(1)])],
     )
     monkeypatch.setattr(client, "cluster_template", lambda: _template("0.0.7"))
-    sent_headers = []
+    sent = []
     record = client._request
-    monkeypatch.setattr(
-        client, "_request", lambda method, endpoint, **kw: sent_headers.append(kw.get("headers")) or record(method, endpoint, **kw)
-    )
+    monkeypatch.setattr(client, "_request", lambda method, endpoint, **kw: sent.append(kw) or record(method, endpoint, **kw))
 
     client.up_cluster(["exec-0", "exec-1"], name="job")
 
-    [headers] = [h for h in sent_headers if h is not None]
-    uuid.UUID(headers["Idempotency-Key"])
-    assert headers["X-API-KEY"] == "test"
+    [order] = [kw for kw in sent if kw.get("headers") is not None]
+    uuid.UUID(order["headers"]["Idempotency-Key"])
+    assert order["headers"]["X-API-KEY"] == "test"
+    # said, so no member holds a Jupyter port (DAH-3698)
+    assert order["json"]["enable_jupyter"] is False
 
 
 def test_up_cluster_resends_once_with_the_same_key_when_the_backend_honours_it(monkeypatch):

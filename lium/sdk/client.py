@@ -2675,6 +2675,8 @@ class Lium:
             "initial_port_count": ports,
             "enable_volume_encryption": enable_volume_encryption,
             "enable_backups": enable_backups,
+            # said, so a member holds no Jupyter port: an unsaid rent holds one (DAH-3698)
+            "enable_jupyter": False,
         }
         # Not retried blindly: a timeout may have rented the group anyway. A backend that honours
         # the Idempotency-Key (RENT_IDEMPOTENCY) gets the order once more with the same key and

@@ -83,7 +83,7 @@ test('rent posts a rent-by-spec request and returns the pod id', async () => {
     inputData: { gpu_type: 'H100', ssh_public_key: ' ssh-ed25519 AAAA me ', max_price_per_gpu_hour: '3', idempotency_key: 'evt-1' },
   });
   assert.deepStrictEqual(sent, {
-    gpu_type: 'H100', gpu_count: 1, pod_name: `zap-${code('evt-1', 'H100', 1, 'ssh-ed25519 AAAA me')}`, user_public_key: ['ssh-ed25519 AAAA me'], max_price_per_gpu_hour: 3,
+    gpu_type: 'H100', gpu_count: 1, pod_name: `zap-${code('evt-1', 'H100', 1, 'ssh-ed25519 AAAA me')}`, user_public_key: ['ssh-ed25519 AAAA me'], enable_jupyter: false, max_price_per_gpu_hour: 3,
   });
   assert.strictEqual(out.id, 'p9');
   assert.strictEqual(out.replayed, false);

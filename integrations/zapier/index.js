@@ -172,6 +172,8 @@ const rentPod = {
         gpu_count: gpuCount,
         pod_name: `${d.pod_name || 'zap'}-${nameCode}`,
         user_public_key: [sshKey],
+        // said, so the pod holds the SSH port only: an unsaid rent also holds a Jupyter port (DAH-3698)
+        enable_jupyter: false,
       };
       if (present(d.max_price_per_gpu_hour)) {
         const cap = Number(d.max_price_per_gpu_hour);
