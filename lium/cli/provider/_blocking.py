@@ -47,17 +47,20 @@ LEGACY_GATING_CODES = frozenset(
 )
 
 # Idle-pay codes Secure does not require: shown as "Not eligible for idle pay: …" with a "No action: …" line,
-# never in the BLOCKING panel and never counted as blocked (``gating: false``). The CLI prints its own words for these two, not the portal's `fix`.
+# never in the BLOCKING panel and never counted as blocked (``gating: false``). The CLI prints its own words for the model code; the size code keeps the portal's `fix` (GPU Splitting).
 NOT_GATED: dict[str, tuple[str, str]] = {
     "gpu_model_not_eligible_for_unrented_incentive": (
         "This GPU model is not in the idle-pay program",
         "No action: this model earns from rentals only.",
     ),
     "no_unrented_capacity_for_gpu_count": (
-        "No idle-pay room for this node size right now",
-        "No action: room for this size is full. Rentals still pay, and room opens as the market moves.",
+        "No idle pay for this node size",
+        "If GPU Splitting says Not supported, complete Docker Storage Setup first. Then turn on GPU Splitting with a "
+        "minimum of 1 GPU: its free GPUs are paid at the 1-GPU size. Rentals still pay.",
     ),
 }
+# The one not-gated code with something to do (GPU Splitting): the portal's served fix is printed as is.
+SPLIT_TO_EARN_CODE = "no_unrented_capacity_for_gpu_count"
 _ALIASES = {
     "price_above_p90": "price_above_market_p90_soft_limit",
     "gpu_model_not_eligible": "gpu_model_not_eligible_for_unrented_incentive",
@@ -191,7 +194,7 @@ def _idle_pay_entry(code: str, context: Mapping[str, Any], message: str | None, 
         required = "sysbox runtime"
         fix = "Install and enable sysbox on the host, then restart the executor (`docker compose up -d` in neurons/executor)."
     elif code == "flagship_without_ncu_or_split":
-        title = "Idle flagship node offers no NCU profiling, GPU splitting or confidential computing"
+        title = "Idle 8× H200 / B200 / B300 / GB300 node offers no NCU profiling, GPU splitting or confidential computing"
         required = "NCU profiling, GPU splitting or confidential computing"
         fix = (
             f"Open the profiling counters: {DRAIN_FIRST[0].lower()}{DRAIN_FIRST[1:]} Then set "
@@ -551,6 +554,8 @@ def _no_action(reason: Mapping[str, Any]) -> str:
     fix = str(reason.get("fix") or "")
     if fix.startswith("No action"):
         return fix
+    if reason.get("code") == SPLIT_TO_EARN_CODE:
+        return fix or NOT_GATED[SPLIT_TO_EARN_CODE][1]
     if reason.get("code") in NOT_GATED:
         return NOT_GATED[reason["code"]][1]
     return f"No action: {fix}" if fix else ""
@@ -572,7 +577,12 @@ def print_not_eligible(rows: Iterable[Any], *, short: bool) -> int:
         if short:
             node_id = str(row.get("id") or row.get("executor_id") or "?")
             words = "; ".join(_lower_first(str(r["title"])) for r in reasons)
-            console.print(Text(f"  ◦ {node_id}: not eligible for idle pay ({words}); no action needed", style="dim"))
+            action = (
+                "turn on GPU Splitting"
+                if any(r.get("code") == SPLIT_TO_EARN_CODE for r in reasons)
+                else "no action needed"
+            )
+            console.print(Text(f"  ◦ {node_id}: not eligible for idle pay ({words}); {action}", style="dim"))
             continue
         for reason in reasons:
             console.print(Text.from_markup(f"[bold]Not eligible for idle pay:[/] {escape(_lower_first(str(reason['title'])))}"))

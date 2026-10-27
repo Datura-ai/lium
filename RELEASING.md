@@ -3,13 +3,15 @@
 The version is the git tag. Publishing a GitHub release on a tag `vX.Y.Z` runs `.github/workflows/release.yml`, which
 builds the wheel and the binaries from that tag and uploads them; `publish-pypi.yml` then publishes the tag to PyPI
 if it is on `main`. Nothing in the tree is bumped. Create the release with `--prerelease` so `latest` moves
-only once the assets are up. The `lium` CLI and the
+only once the assets are up. Before tagging, run `gh workflow run ci.yml --ref main` and wait for it to go green:
+PR CI skips the live e2e, so `release.yml` publishes nothing until a `gh workflow run ci.yml` run passed
+on the release commit. The `lium` CLI and the
 `lium.sdk` Python SDK ship in the same `lium.io` package, so one tag versions both.
 
 ## Choosing the version
 
 1. Run `make next-version` on the commit you are about to tag; it prints the smallest version the changelog allows and which entries ask for it.
-2. Two sources count, both read since the previous `vX.Y.Z` tag: the `changelog.d/` fragments still in the tree, and the `## [X.Y.Z]` sections that `python scripts/changelog.py --version X.Y.Z` folded into `CHANGELOG.md` (that fold deletes the fragments, so the folded section is what remains of them). `changelog.d/README.md` is documentation, not a fragment.
+2. Two sources count, both read since the previous `vX.Y.Z` tag: the `changelog.d/` fragments still in the tree, and the `## [X.Y.Z]` sections that `python scripts/changelog.py --version X.Y.Z` folded into `CHANGELOG.md` (that fold deletes the fragments, so the folded section is what remains of them). The fold also writes X.Y.Z into `server.json` (the MCP Registry entry; the registry job stamps the PyPI version at publish either way). `changelog.d/README.md` is documentation, not a fragment.
 3. The headers decide: `### Added` (someone can do something new) needs a minor bump; `### Changed`, `### Fixed`, `### Security`, `### Deprecated` a patch. A fragment with no header, or a header not in that list, counts as `### Added` and is named in a warning — give every fragment a header.
 4. `### Removed` or a bullet that starts with `BREAKING` needs a major bump once we are past 1.0, a minor bump before that.
 5. No entry from either source means the next patch — unless files under `lium/`, `lium_entry.py` or `pyproject.toml` changed since the previous tag. Code with no changelog entry is refused: add a fragment to the release commit, or use the skip line below when there is nothing to tell (a dependency pin, say).

@@ -1,12 +1,12 @@
 # Lium for agents and scripts
 
-One page for an LLM agent (or any unattended script) that has to rent a GPU pod, run work on it, collect the results and give the pod back, without a human at the keyboard. Everything here is a shell command plus `jq`, or the Python SDK; nothing needs a terminal. Every `lium …` line on this page, and the list of `--json` commands in §2, is resolved against this version's command tree by `test/test_agent_docs.py`; check `lium <command> --help` for anything not covered here.
+One page for an LLM agent (or any unattended script) that has to rent a GPU pod, run work on it, collect the results and give the pod back, without a human at the keyboard. Everything here is a shell command plus `jq`, or the Python SDK; nothing needs a terminal. Check `lium <command> --help` for anything not covered here.
 
 The rules of the road:
 
 1. **Authenticate from the environment.** `LIUM_API_KEY` wins over `~/.lium/config.ini`. Never run `lium init` from an agent.
 2. **Ask for JSON.** `--format json` on `ls`/`ps`, `--json` on `exec`/`describe`/`balance`: the result is on stdout and the exit code says whether it worked. On any of them a runtime error is one JSON object on stderr, the last line of stderr under `--wait` (`LIUM_OUTPUT=json` switches that on for every renter command); `lium provider` prints its error envelope on stdout under `--json` or `LIUM_OUTPUT=json` (§7). A usage error is click's plain text with exit 2 (§2).
-3. **Never let a command wait for a human.** Pass `--yes` to anything that would confirm (`up`, `rm`); `reboot` never asks.
+3. **Never let a command wait for a human.** Pass `--yes` to anything that would confirm (`up`, `rm`, `reset-gpu`); `reboot` never asks.
 4. **Always give a pod a lifetime** (`--ttl`) and always remove it when finished, including on failure.
 
 ## 0. Start from nothing
@@ -48,7 +48,7 @@ SSH: the CLI and SDK use `LIUM_SSH_KEY_PATH` if set, else `[ssh] key_path` in `~
 
 Success: the JSON result is on **stdout**, exit code 0.
 
-Failure on a renter command that takes `--json` (`up`, `exec`, `describe`, `balance`, `request`, `whoami`, `audit`, `cp`, `init`; `fund`, `signup`, `topup currencies`, `topup create`, `topup link`, `topup wait`, `topup card`, `transfer`, `keys create`, `keys list`, `keys show`, `keys scopes`, `keys budget`, `workspaces list` and `workspaces members` too): stdout is empty, the error is one JSON object on **stderr**, the exit code is non-zero. Under `--wait` (`topup link`, `topup create`, `topup card`) stderr may first carry the progress line (`"event": "handoff"`, `"invoice_created"` or `"charged"`, once the page, invoice or charge exists); the error object is always the **last line**: parse the last line of stderr, not the whole stream. After a card charge that timed out (`credit_not_seen`, exit 6, `data.charged: true`) the card was charged: do not run the charge again, keep waiting with `lium topup wait --above <data.balance_before>`. A repeat of `topup card` must carry that last line's `data.idempotency_key` and the same amount (`data.amount_usd`) within 24 h; the same key with a different amount is a new charge:
+Failure on a renter command that takes `--json` (`up`, `exec`, `describe`, `balance`, `request`, `whoami`, `audit`, `cp`, `init`; `fund`, `reset-gpu`, `signup`, `topup currencies`, `topup create`, `topup link`, `topup wait`, `topup card`, `transfer`, `keys create`, `keys list`, `keys show`, `keys scopes`, `keys budget`, `workspaces list` and `workspaces members` too): stdout is empty, the error is one JSON object on **stderr**, the exit code is non-zero. Under `--wait` (`topup link`, `topup create`, `topup card`) stderr may first carry the progress line (`"event": "handoff"`, `"invoice_created"` or `"charged"`, once the page, invoice or charge exists); the error object is always the **last line**: parse the last line of stderr, not the whole stream. After a card charge that timed out (`credit_not_seen`, exit 6, `data.charged: true`) the card was charged: do not run the charge again, keep waiting with `lium topup wait --above <data.balance_before>`. A repeat of `topup card` must carry that last line's `data.idempotency_key` and the same amount (`data.amount_usd`) within 24 h; the same key with a different amount is a new charge:
 
 ```json
 {"ok": false, "error": {"code": "pod_not_found", "message": "No pods match targets: train-1", "hint": "Run 'lium ps' to list pods; a name, huid, id or 1-based index is accepted", "exit_code": 5}}
@@ -107,7 +107,7 @@ lium ls --gpu H100 --count 1 --format json | jq -r '.[0].huid'
 
 ### Rent it
 
-`lium up --json` prints the ready pod as one JSON document on stdout, `{"pod": {…}}` with the keys of one `lium ps --format json` row (plus `termination_time` when `--ttl`, `--until` or `--budget` set one), and returns instead of opening a shell; progress lines go to stderr:
+`lium up --json` prints the ready pod as one JSON document on stdout, `{"pod": {…}}` with the keys of one `lium ps --format json` row (plus `termination_time` when `--ttl`, `--until` or `--budget` set one, and `gpu_verification` with `--verify-gpus`), and returns instead of opening a shell; progress lines go to stderr:
 
 ```bash
 POD=$(lium up "$NODE" --ttl 4h --yes --json | jq -r '.pod.huid')
@@ -240,6 +240,51 @@ lium exec "$POD" --json "cd /root/project && python -m venv .venv && . .venv/bin
 lium exec "$POD" --json "cd /root/project && . .venv/bin/activate && python train.py --epochs 1"
 lium exec "$POD" --json "tar czf /root/out.tgz -C /root/project out" >/dev/null
 lium scp "$POD" /root/out.tgz ./out.tgz -d
+```
+
+The same run in one SDK call, bounded by an approximate budget and a deadline. `run_job` schedules the pod's removal
+server-side for the earlier of the two right after the rent, deletes the pod and waits until it is gone before it
+returns, and never raises for the job's outcome:
+
+```python
+from lium.sdk import Lium
+
+r = Lium().run_job(
+    command="cd /root && python train.py --epochs 1",
+    gpu_type="H100", max_cost_usd=5, deadline_s=1800,
+    inputs={"train.py": "/root/train.py"}, outputs={"/root/out.tgz": "out.tgz"},
+)
+print(r.to_dict())  # status, exit_code, outputs, missing_outputs, cleanup, cost_usd, estimated_cost_usd
+```
+
+`status` is `succeeded`, `failed`, `timed_out`, `budget_exhausted`, `rent_failed`, `boot_failed` or `error`;
+`cleanup` is `removed` once the pod is confirmed gone from the pod list, `scheduled` when that was not confirmed and the
+acknowledged server-side removal at `removal_scheduled_at` stands, or `unknown` when neither was confirmed, or when a rent
+whose answer was lost may still have created a pod named `name` (check `lium ps`). `cost_usd` is read from the billing statement only after a confirmed removal; otherwise use
+`estimated_cost_usd`.
+
+After server-side scheduling succeeds, removal survives caller exit. A Ctrl-C during the rent still finds the pod by name
+and removes it before re-raising; a hard kill (SIGKILL, a lost machine) during rent or scheduling leaves the pod to the
+removal sent with the rent (`termination_hours`): the deadline rounded up to whole hours, at most 720, from boot. Captured stdout and stderr keep their last `output_tail_bytes` (16 MiB) each, and an output
+file past `max_download_bytes` (10 GiB) is refused into `missing_outputs`; every transfer is cut at the time left.
+
+From the shell, `lium job run` makes the same call. Its exit code follows the job: 0 on success, the command's own
+code when it failed, 124 when the budget or deadline stopped it, and 1 otherwise:
+
+```bash
+lium job run "cd /root && python train.py --epochs 1" --gpu H100 --budget 5 --deadline 30m \
+  --input train.py:/root/train.py --output /root/out.tgz:out.tgz --format json
+```
+
+The budget estimates compute spend from the initial hourly price. Scheduled removal is processed periodically, so
+actual charges can exceed it. A budgeted API key also requests removal on a billing pass; neither mechanism provides
+an exact dollar ceiling. To bound spend server-side even when the client dies, run the job under its own API key with
+a lifetime budget: past the budget the server deletes the key's pods (on its next billing pass, every 5 minutes) and
+refuses further rents through the key:
+
+```bash
+lium keys create job-train --scope read --scope rent --max-budget 5   # prints the key once
+LIUM_API_KEY=<that key> lium job run "python train.py" --gpu H100 --budget 5 --deadline 1h
 ```
 
 ## 7. Provider nodes (`lium provider`)

@@ -143,11 +143,16 @@ def _clone_or_update_repo(target_dir: Path, branch: str):
         _run(f"git clone --branch {branch} https://github.com/Datura-ai/lium-io.git {target_dir}")
 
 
-def _check_prereqs():
+def _check_prereqs(compute_dir: Path | None = None):
     if not _exists("nvidia-smi"):
         raise Exception("NVIDIA GPU driver not found (nvidia-smi missing)")
 
     _run("nvidia-smi --query-gpu=name --format=csv,noheader")
+
+    # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
+    # provider learns it from the preflight or a validator cycle later. The installer also installs the
+    # NVIDIA Container Toolkit, so it runs before the toolkit check.
+    failure = _install_sysbox(compute_dir) if compute_dir and not _has_sysbox() else ""
 
     if not _exists("nvidia-container-cli"):
         raise Exception("NVIDIA Container Toolkit not found (required for Docker GPU access)")
@@ -157,17 +162,120 @@ def _check_prereqs():
 
     _run("docker info")
 
-    # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
-    # provider learns it from the preflight or a validator cycle later.
     if not _has_sysbox():
         raise Exception(
             "Sysbox runtime not found in Docker (required by validators).\n"
             f"Install it with: {_SYSBOX_SETUP_COMMAND}\n"
-            "then run `lium mine` again."
+            "then run `lium mine` again." + (f"\n{failure}" if failure else "")
         )
+    if failure:
+        # the installer registers the runtime before its GPU checks, so a late failure still leaves sysbox-runc
+        console.warning(f"The Sysbox installer reported a failure after installing the runtime:\n{failure}")
 
 
-# The printed command fetches the official installer, never the checkout's copy; the CLI does not run it (it needs sudo).
+def _install_sysbox(compute_dir: Path) -> str:
+    """Run the checkout's Sysbox installer once (DAH-4778: one manual step fewer). Same privilege rule as step 2's
+    install script: root, or passwordless sudo. No terminal input, so its one confirmation is skipped.
+    Returns the failure's tail, empty on success."""
+    import os
+
+    script = compute_dir / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh"
+    if not script.exists():
+        return ""
+    sudo = "" if os.geteuid() == 0 else "sudo -n "
+    try:
+        _run(f"{sudo}bash {shlex.quote(str(script))} < /dev/null")
+    except RuntimeError as exc:
+        return str(exc)[-2000:]
+    return ""
+
+
+# Validators are to score 0 a node whose Docker cannot cap a container's disk (STORAGE_LIMIT_REQUIRED): one renter
+# filling an uncapped disk fills /var/lib/docker and takes the host and every pod on it down (18 Oct 2026).
+_STORAGE_GUIDE = "https://docs.lium.io/providers/nodes/docker-storage"
+
+
+def _docker_storage_limited() -> bool:
+    """True when Docker is overlay2 on xfs mounted with pquota, so `--storage-opt size=` caps a container."""
+    from ..mine.docker_config import build_verification_result, inspect_docker_state
+    from ..mine.gpu_splitting import run_command
+
+    return build_verification_result(run_command, inspect_docker_state(run_command).docker_root_dir).passed
+
+
+def _setup_docker_storage():
+    """Offer to move Docker storage to an xfs pquota mount with `lium gpu-splitting setup`'s own plan and checks.
+
+    One question is both the menu and the consent: every disk is listed and the person types the one to format, or
+    presses Enter to skip. `--auto` and `--register` never consent. Whatever stops the setup, the manual command is
+    printed and the install carries on (validators do not require it yet).
+    """
+    import os
+    import sys
+
+    from rich.prompt import Prompt
+
+    from ..mine.gpu_splitting import _build_setup_plan, _execute_setup, _preflight, run_command
+    from ..mine.storage import evaluate_candidates, get_device_by_path
+
+    reason = "Docker cannot limit a container's disk on this host (needs xfs with pquota)."
+    manual = (
+        "Set it up with: sudo lium gpu-splitting setup --device <spare disk>\n"
+        f"Guide: {_STORAGE_GUIDE}"
+    )
+    if not sys.stdin.isatty():
+        console.warning(f"{reason}\n{manual}")
+        return
+    if os.geteuid() != 0:
+        console.warning(f"{reason}\n" + manual.replace("Set it up with", "Run `sudo lium mine`, or set it up with"))
+        return
+    try:
+        preflight = _preflight()
+        candidates = evaluate_candidates(
+            run_command, preflight.block_devices, preflight.root_mount, preflight.docker_mount
+        )
+    except RuntimeError as exc:
+        console.warning(f"{reason}\n{manual}\nCould not list the disks: {exc}")
+        return
+
+    def row(candidate, note):
+        device = get_device_by_path(preflight.block_devices, candidate.path)
+        model = (device.model or "").strip() if device else ""
+        serial = (device.serial or "").strip() if device else ""
+        size = f"{device.size_bytes // 1024**3} GiB" if device else ""
+        return f"  {candidate.path:<16} {model:<20} {serial:<16} {size:>10}   {note}"
+
+    offered = [c for c in candidates if c.allowed]
+    lines = [reason, f"Validators will soon score such nodes 0. Guide: {_STORAGE_GUIDE}", ""]
+    lines += ["Disks that can be formatted for Docker storage:"]
+    lines += [row(c, c.details) for c in offered] or ["  (none)"]
+    rejected = [c for c in candidates if not c.allowed]
+    if rejected:
+        lines += ["", "Not offered:"] + [row(c, c.details) for c in rejected]
+    if not offered:
+        console.warning("\n".join(lines) + f"\n\n{manual}")
+        return
+    lines += [
+        "",
+        f"Setup will stop Docker, format the chosen disk, copy {preflight.docker_state.docker_root_dir} to it "
+        "and start Docker again.",
+    ]
+    console.info("\n".join(lines))
+    typed = Prompt.ask("Type the disk path to format it, or press Enter to skip", default="").strip()
+    if not typed:
+        console.warning(f"Skipped. {manual}")
+        return
+    if typed not in {c.path for c in offered}:
+        console.warning(f"{typed} is not one of the disks listed above; nothing was changed.\n{manual}")
+        return
+    try:
+        _execute_setup(_build_setup_plan(preflight, typed))
+    except RuntimeError as exc:
+        # a refusal (containers running, Docker down, no backup space, target checks) stops only the storage setup
+        console.warning(f"Docker storage was not set up: {exc}\n{manual}")
+
+
+# The printed command fetches the official installer, never the checkout's copy (what `lium mine` runs itself).
 _SYSBOX_SETUP_COMMAND = (
     "curl -fsSL https://raw.githubusercontent.com/Datura-ai/lium-io/main/neurons/executor/"
     "nvidia_docker_sysbox_setup.sh | sudo bash"
@@ -267,6 +375,9 @@ def _setup_executor_env(
         if not _valid_port(p):
             raise Exception(f"Invalid port {name}={p} (must be 1-65535)")
 
+    # a re-run without --register rebuilds .env from the template; keep the claim the earlier --register wrote
+    old_claim = _env_value(env_f, "MINER_ACCOUNT_CLAIM")
+
     # read, rewrite, preserve
     src_lines = env_t.read_text().splitlines()
     out_lines = []
@@ -295,6 +406,8 @@ def _setup_executor_env(
             # DAH-3075: blank means "same as SSH_PORT" (the documented meaning); keeping the template's
             # hard-coded 2200 while SSH_PORT changed sent the validator to a port nothing listens on
             put(k, ssh_public_port or ssh_port)
+        elif k == "MINER_ACCOUNT_CLAIM" and old_claim:
+            put(k, old_claim)
         elif k == "RENTING_PORT_RANGE":
             if port_range:
                 put(k, port_range)
@@ -310,6 +423,8 @@ def _setup_executor_env(
         "EXTERNAL_PORT": external_port,
         "SSH_PORT": ssh_port,
     }
+    if old_claim:
+        required["MINER_ACCOUNT_CLAIM"] = old_claim
     for k, v in required.items():
         if k not in seen and not any(l.startswith(f"{k}=") for l in out_lines):
             out_lines.append(f"{k}={v}")
@@ -465,17 +580,53 @@ def _compose_diagnostics(executor_dir: Path, tail: int = 30) -> str:
     return "\n".join(parts)
 
 
-def _start_executor(executor_dir: Path, wait_secs: int = 180):
+def _env_value(env_f: Path, key: str) -> str:
+    try:
+        lines = env_f.read_text().splitlines()
+    except FileNotFoundError:
+        return ""
+    return next((line.split("=", 1)[1].strip() for line in lines if line.startswith(f"{key}=")), "")
+
+
+def _executor_env_value(executor_dir: Path, key: str) -> Optional[str]:
+    """``key`` in the environment the executor container was created with; None when there is no executor container."""
+    cid = _run("docker compose -f docker-compose.app.yml ps -aq executor", check=False, cwd=str(executor_dir))[0].strip()
+    if not cid:
+        return None
+    env = _run(f"docker inspect --format '{{{{range .Config.Env}}}}{{{{println .}}}}{{{{end}}}}' {cid}", check=False)[0]
+    return next((line.split("=", 1)[1].strip() for line in env.splitlines() if line.startswith(f"{key}=")), "")
+
+
+def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = False):
     # Start using the default docker-compose.yml
-    _run("docker compose up -d", capture=True, cwd=str(executor_dir))
+    # recreate: an executor already running keeps its old .env, so a new MINER_ACCOUNT_CLAIM never reaches it;
+    # a plain re-run leaves a running executor alone
+    ps_cmd = "docker compose -f docker-compose.app.yml ps -q executor"
+    # a restart under running rentals interrupts them; the validator names rental pods pod_* (lium-io const.py)
+    names = _run("docker ps --filter status=created --filter status=running --format '{{.Names}}'", check=False)[0].split()
+    rentals = [n for n in names if n.startswith("pod_")]
+    if rentals and recreate:
+        console.warning(
+            f"{len(rentals)} rental(s) running on this node, so the executor was not restarted. "
+            "The new account claim is in .env and applies on its next restart; rerun this command once the rentals end."
+        )
+        recreate = False
+    # after --force-recreate the old container can still report healthy; wait for one with a new ID
+    old_id = _run(ps_cmd, check=False, cwd=str(executor_dir))[0].strip() if recreate else ""
+    command = "docker compose up -d --force-recreate" if recreate else "docker compose up -d"
+    if rentals:
+        # even a plain `up -d` recreates a runner whose config changed, and the runner force-recreates the executor;
+        # under rentals compose only starts what is missing
+        command = "docker compose up -d --no-recreate"
+    _run(command, capture=True, cwd=str(executor_dir))
 
     # Wait for the executor service to be fully healthy
     start = time.time()
     
     while time.time() - start < wait_secs:
         # Get the container name/ID for the executor service
-        out, _ = _run("docker compose -f docker-compose.app.yml ps -q executor", cwd=str(executor_dir))
-        if not out.strip():
+        out, _ = _run(ps_cmd, cwd=str(executor_dir))
+        if not out.strip() or out.strip() == old_id:
             time.sleep(2)
             continue
             
@@ -498,7 +649,7 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180):
 
 def _apply_env_overrides(
     executor_dir: Path,
-    internal: str, external: str, ssh: str, ssh_pub: str, rng: str
+    internal: str, external: str, ssh: str, ssh_pub: str, rng: str, account_claim: str | None = None
 ):
     env_f = executor_dir / ".env"
     content = env_f.read_text().splitlines()
@@ -519,6 +670,8 @@ def _apply_env_overrides(
     set_or_append("SSH_PUBLIC_PORT", ssh_pub or ssh)
     if rng:
         set_or_append("RENTING_PORT_RANGE", rng)
+    if account_claim:
+        set_or_append("MINER_ACCOUNT_CLAIM", account_claim)
     env_f.write_text("\n".join(content) + "\n")
 
 def _gather_inputs(
@@ -578,7 +731,7 @@ def _gather_inputs(
     return answers
 
 
-PREFLIGHT_IMAGE = "daturaai/lium-validator:latest"
+PREFLIGHT_IMAGE = "daturaai/compute-subnet-validator:preflight"
 
 
 class _StepMessage:
@@ -604,10 +757,25 @@ def _start_preflight_pull():
     return subprocess.Popen(
         f"docker pull {PREFLIGHT_IMAGE}",
         shell=True,
+        text=True,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,  # only errors land here, small enough not to fill the pipe
         env=_subprocess_env(),
     )
+
+
+def _finish_preflight_pull(pull) -> None:
+    """Wait for the pull and raise on a failure.
+
+    A failed pull must not fall through to a cached older image: it would refuse
+    GPUs supported since it was built (RTX PRO 6000 Max-Q, 23 Oct 2026).
+    """
+    if pull.wait() != 0:
+        err = (pull.stderr.read() if pull.stderr else "").strip()
+        raise Exception(
+            f"Could not pull the preflight image {PREFLIGHT_IMAGE}: {err[-500:] or 'docker pull failed'}. "
+            f"Check that this host can reach Docker Hub (try `docker pull {PREFLIGHT_IMAGE}`), then rerun."
+        )
 
 
 def _validate_executor(extra_args=None, on_check=None):
@@ -868,6 +1036,14 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 "❌ --hotkey differs from what the register token says this node reports under; drop -k, the token decides."
             )
             raise SystemExit(1)
+        # the claims were read without the portal's secret: the portal checks them before anything is installed
+        try:
+            reg.confirm_register_token(reg.build_http(portal_url, token.token))
+        except reg.RegisterError as e:
+            from rich.markup import escape
+
+            console.error(f"❌ {escape(str(e))}")
+            raise SystemExit(1)
         # what the executor reports under: the account's own key, or the portal's for an account without one
         # (lium-platform#294) — the SS58 check in _setup_executor_env applies to this value, not to the account id
         hotkey = token.node_hotkey
@@ -892,8 +1068,11 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             _install_executor_tools(target_dir)
 
         with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
-            _check_prereqs()
-            _check_free_disk(target_dir / "neurons" / "executor")
+            _check_prereqs(target_dir)
+            storage_ok = _docker_storage_limited()
+        if not storage_ok:
+            _setup_docker_storage()   # outside the spinner: it prints the plan and may ask to confirm
+        _check_free_disk(target_dir / "neurons" / "executor")
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.
         preflight_pull = _start_preflight_pull()
@@ -915,6 +1094,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 ssh=answers["ssh_port"],
                 ssh_pub=answers["ssh_public_port"],
                 rng=answers["port_range"],
+                account_claim=token.account_claim if token else None,
             )
 
             # A taken host port makes `docker compose up` loop on
@@ -923,7 +1103,10 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             _check_ports_free(_host_ports_from_answers(answers), executor_dir)
 
         with timed_step_status(5, TOTAL_STEPS, "Starting node"):
-            _start_executor(executor_dir)
+            # recreate only an executor whose claim differs from .env: a repeat run leaves it alone, and a rerun after
+            # a restart skipped under rentals still delivers the claim .env already holds
+            running_claim = _executor_env_value(executor_dir, "MINER_ACCOUNT_CLAIM")
+            _start_executor(executor_dir, recreate=running_claim not in (None, _env_value(executor_dir / ".env", "MINER_ACCOUNT_CLAIM")))
 
         console.dim(
             "Validation runs the validator's preflight image: GPU check, matrix "
@@ -933,7 +1116,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
         with timed_step_status(6, TOTAL_STEPS, step6):
             if preflight_pull.poll() is None:
                 step6.detail = "pulling preflight image"
-                preflight_pull.wait()
+            _finish_preflight_pull(preflight_pull)
 
             def _show_check(name: str) -> None:
                 step6.detail = name

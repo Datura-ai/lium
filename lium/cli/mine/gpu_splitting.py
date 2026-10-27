@@ -7,6 +7,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from functools import wraps
 from datetime import datetime, timezone
@@ -16,7 +17,7 @@ from typing import Optional
 import click
 from rich.box import SIMPLE_HEAVY
 from rich.panel import Panel
-from rich.prompt import Confirm
+from rich.prompt import Prompt
 from rich.table import Table
 
 from ..utils import console, timed_step_status
@@ -25,6 +26,7 @@ from .models import CandidateEvaluation, CommandResult, MountInfo, PreflightResu
 from .storage import (
     auto_select_target,
     evaluate_candidates,
+    get_device_by_path,
     has_project_quota_option,
     load_block_devices,
     load_mount_info,
@@ -32,6 +34,12 @@ from .storage import (
 )
 
 GPU_SPLITTING_DOC_URL = "https://docs.lium.io/providers/nodes/gpu-splitting"
+# fstab and the cutover mount the target at this path; another data-root would be left on the old disk
+DEFAULT_DOCKER_ROOT = "/var/lib/docker"
+# a few GPU images fill a smaller disk, and then the host stalls exactly as it would without the limit
+MIN_TARGET_BYTES = 100 * 1024**3
+# Docker storage must outlive a cable pull or a network blip
+NON_LOCAL_TRANSPORTS = {"usb", "iscsi", "fc", "mmc"}
 
 
 @dataclass
@@ -162,6 +170,8 @@ def _preflight() -> PreflightResult:
         "partprobe",
         "mkfs.xfs",
         "xfs_info",
+        "wipefs",
+        "du",
     ]:
         _require_binary(binary)
 
@@ -203,6 +213,12 @@ def _build_setup_plan(preflight: PreflightResult, device: Optional[str]) -> Setu
     The result is the exact plan that `check` prints and `setup` confirms
     before the first host mutation.
     """
+    docker_root = preflight.docker_state.docker_root_dir
+    if docker_root != DEFAULT_DOCKER_ROOT:
+        raise RuntimeError(
+            f"Docker's data-root is {docker_root}; setup supports only {DEFAULT_DOCKER_ROOT}. "
+            f"Set the storage up by hand: {GPU_SPLITTING_DOC_URL}"
+        )
     if device:
         target = resolve_explicit_target(
             run_command,
@@ -218,6 +234,8 @@ def _build_setup_plan(preflight: PreflightResult, device: Optional[str]) -> Setu
             preflight.root_mount,
             preflight.docker_mount,
         )
+
+    _check_target_device(preflight, target)
 
     daemon_json_path = "/etc/docker/daemon.json"
     existing_daemon = load_daemon_json(daemon_json_path)
@@ -261,6 +279,44 @@ def _build_setup_plan(preflight: PreflightResult, device: Optional[str]) -> Setu
         fstab_changed=_fstab_would_change("/etc/fstab", uuid) if uuid else True,
         destructive_actions=destructive_actions,
     )
+
+
+def _target_disk(preflight: PreflightResult, target) -> tuple:
+    device = get_device_by_path(preflight.block_devices, target.resolved_target)
+    disk = get_device_by_path(preflight.block_devices, target.parent_disk) or device
+    if device is None:
+        raise RuntimeError(f"{target.resolved_target} is not in the lsblk inventory")
+    return device, disk
+
+
+def _target_size_bytes(device, target) -> int:
+    if target.free_region_start_bytes is not None and target.free_region_end_bytes is not None:
+        return target.free_region_end_bytes - target.free_region_start_bytes
+    return device.size_bytes
+
+
+def _check_target_device(preflight: PreflightResult, target):
+    """Refuse a target that is removable, not local, too small or carries a signature lsblk did not name.
+
+    Command run: `wipefs --no-act --noheadings -O TYPE <target>` for a blank disk or a partition without a filesystem.
+    """
+    device, disk = _target_disk(preflight, target)
+    path = target.resolved_target
+    if device.is_removable or disk.is_removable:
+        raise RuntimeError(f"Refusing {path}: it is a removable disk")
+    if (disk.transport or "").lower() in NON_LOCAL_TRANSPORTS:
+        raise RuntimeError(f"Refusing {path}: it is attached over {disk.transport}, not a local disk")
+    size = _target_size_bytes(device, target)
+    if size < MIN_TARGET_BYTES:
+        raise RuntimeError(f"Refusing {path}: {size // 1024**3} GiB is below the {MIN_TARGET_BYTES // 1024**3} GiB minimum")
+    if target.classification in {"blank_whole_disk", "unused_partition_no_fs"}:
+        found = run_command(["wipefs", "--no-act", "--noheadings", "-O", "TYPE", path], False, True)
+        signatures = (found.stdout or "").split()
+        if found.returncode != 0 or signatures:
+            raise RuntimeError(
+                f"Refusing {path}: it carries a signature lsblk did not report ({', '.join(signatures) or 'wipefs failed'}); "
+                "if it really is spare, wipe it yourself and run setup again"
+            )
 
 
 def _format_bool(value: Optional[bool]) -> str:
@@ -531,6 +587,12 @@ def _mount_validation(target_path: str, docker_root: str):
 
 def _print_action_details(plan: SetupPlan):
     console.print(_plan_table(plan))
+    device = get_device_by_path(plan.preflight.block_devices, plan.target.parent_disk)
+    if device is not None:
+        console.print(
+            f"Target disk {device.path}: {device.model or 'unknown model'}, serial {device.serial or 'unknown'}, "
+            f"{device.size_bytes / 1024**3:.0f} GiB"
+        )
     console.print(
         Panel(
             "\n".join(f"- {action}" for action in plan.destructive_actions),
@@ -540,17 +602,24 @@ def _print_action_details(plan: SetupPlan):
     )
 
 
-def _confirm_plan(plan: SetupPlan, yes: bool):
+def _confirm_plan(plan: SetupPlan, yes: bool, explicit_device: bool = False):
     """Print the destructive plan and gate execution behind confirmation.
 
     No system commands run here. This is intentionally the last stop before the
     setup path starts issuing host-changing commands such as `systemctl stop`,
-    `parted`, `mkfs.xfs`, and `mount`.
+    `parted`, `mkfs.xfs`, and `mount`. Consent is the operator typing the target's
+    path at a terminal, or `--yes` with the disk named by `--device`.
     """
     _print_action_details(plan)
     if yes:
+        if not explicit_device:
+            raise RuntimeError("--yes formats a disk without asking, so it needs --device naming that disk")
         return
-    if not Confirm.ask("Proceed?", default=False):
+    if not sys.stdin.isatty():
+        console.warning("Confirming needs an interactive terminal (or --device <disk> --yes).")
+        raise click.Abort()
+    typed = Prompt.ask(f"Type the target device path to format it ({plan.target.resolved_target})", default="")
+    if typed.strip() != plan.target.resolved_target:
         raise click.Abort()
 
 
@@ -614,6 +683,28 @@ def _setup_failure_message(plan: SetupPlan, exc: Exception, rollback_errors: lis
     return "\n".join(lines)
 
 
+def _pre_stop_checks(plan: SetupPlan):
+    """Refuse before the first host change: Docker down, containers running, or no room for the backup.
+
+    Commands run: `docker ps -q`, `du -sxb <docker-root>`.
+    """
+    ps = run_command(["docker", "ps", "-q"], False, True)
+    if ps.returncode != 0:
+        reason = (ps.stderr or "").strip() or "docker ps failed"
+        raise RuntimeError(f"Docker is not responding ({reason}); start it with `systemctl start docker` and run setup again")
+    if (ps.stdout or "").strip():
+        raise RuntimeError("Containers are running on this host; move Docker storage only while it runs none (no rentals)")
+    docker_root = plan.preflight.docker_state.docker_root_dir
+    used = int(run_command(["du", "-sxb", docker_root], True, True).stdout.split()[0])
+    needed = int(used * 1.1) + 1024**3
+    free = shutil.disk_usage(Path(plan.backup_dir).parent).free
+    if free < needed:
+        raise RuntimeError(
+            f"The backup of {docker_root} needs {needed / 1024**3:.1f} GiB free next to it, "
+            f"only {free / 1024**3:.1f} GiB is; free space and run setup again"
+        )
+
+
 def _execute_setup(plan: SetupPlan):
     """Run the full host-mutation sequence for GPU-splitting storage setup.
 
@@ -660,6 +751,7 @@ def _execute_setup(plan: SetupPlan):
     The sequence is intentionally linear and verbose because a partial failure
     here affects real host storage state.
     """
+    _pre_stop_checks(plan)
     total_steps = 10
     target_partition = _target_partition_path(plan)
     existing_partition_paths = _partition_paths_for_disk(plan.target.parent_disk)
@@ -758,6 +850,8 @@ def _execute_setup(plan: SetupPlan):
             console.print(_verification_table(verification, "Final Verification"))
             if not verification.passed:
                 raise RuntimeError(f"Verification failed. Backup remains at {plan.backup_dir}")
+            # the data is restored and verified on the new mount; the copy would only hold the old disk's space
+            shutil.rmtree(plan.backup_dir, ignore_errors=True)
     except Exception as exc:
         console.error(f"Setup failed: {exc}")
         console.warning("Attempting rollback of reversible host changes.")
@@ -833,7 +927,7 @@ def gpu_splitting_setup_command(device: Optional[Path], yes: bool):
         plan = _build_setup_plan(preflight, str(device) if device else None)
 
     try:
-        _confirm_plan(plan, yes)
+        _confirm_plan(plan, yes, explicit_device=device is not None)
     except click.Abort:
         console.warning("Aborted before making changes")
         return

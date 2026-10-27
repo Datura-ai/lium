@@ -35,6 +35,8 @@ _WHAT = {
     "worker-pod-delete.success": "deleted by the platform",
     "pod-reboot.success": "reboot requested",
     "pod-reboot.failed": "reboot failed",
+    "pod-gpu-reset.success": "GPU reset",
+    "pod-gpu-reset.failed": "GPU reset failed",
     "pod-edit.success": "edited",
     "pod-switch-template.success": "template switched",
     "pod-add-ssh-key.success": "ssh key added",

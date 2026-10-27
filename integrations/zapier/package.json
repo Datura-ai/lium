@@ -1,0 +1,19 @@
+{
+  "name": "lium-zapier",
+  "version": "1.0.5",
+  "description": "Zapier integration for Lium, the GPU cloud: find GPU servers and manage your Lium pods.",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "zapier-platform-core": "19.2.1"
+  },
+  "devDependencies": {
+    "nock": "^14.0.0"
+  }
+}

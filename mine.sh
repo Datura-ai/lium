@@ -146,15 +146,19 @@ main() {
         exit 1
     fi
 
+    # Upgrade an installed lium on every run: an older one runs an older preflight image, which refuses
+    # GPU models supported since (RTX PRO 6000 Max-Q, 23 Oct 2026), and may not know --register.
+    if command_exists uv; then
+        # soft: a pip/pipx-installed lium is not uv's to upgrade; the --register refusal below is then what the provider reads
+        echo -e "${BLUE}▸${NC} Updating lium-cli..."
+        uv tool upgrade lium.io >/dev/null 2>&1 || true
+        hash -r
+        LIUM_BIN=$(find_lium) || LIUM_BIN="$LIUM_BIN"
+    fi
+
     # --register needs a lium that knows the flag: an older one would treat the token as a stray argument
-    # (`lium mine` passes unknown options on to the preflight image). Upgrade an installed lium once, then refuse.
-    if [[ " ${LIUM_ARGS[*]} " == *" --register "* || " ${LIUM_ARGS[*]} " == *" --register="* ]] && ! "$LIUM_BIN" mine --help 2>/dev/null | grep -q -- '--register'; then
-        if command_exists uv; then
-            # soft: a pip/pipx-installed lium is not uv's to upgrade; the refusal below is then what the provider reads
-            uv tool upgrade lium.io >/dev/null 2>&1 || true
-            hash -r
-            LIUM_BIN=$(find_lium) || LIUM_BIN="$LIUM_BIN"
-        fi
+    # (`lium mine` passes unknown options on to the preflight image).
+    if [[ " ${LIUM_ARGS[*]} " == *" --register "* || " ${LIUM_ARGS[*]} " == *" --register="* ]]; then
         if ! "$LIUM_BIN" mine --help 2>/dev/null | grep -q -- '--register'; then
             log_err "This lium ($("$LIUM_BIN" --version 2>/dev/null)) has no 'mine --register'. Upgrade it (uv tool upgrade lium.io) and re-run."
             exit 1

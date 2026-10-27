@@ -155,12 +155,13 @@ def clusters_list_command(output_format: str, json_output: bool):
 @click.option("--ttl", help="Auto-terminate every member after a duration (e.g. 6h, 45m, 2d)")
 @click.option("--wait/--no-wait", default=True, show_default=True, help="Wait until every member is RUNNING with SSH")
 @click.option("--timeout", type=int, default=900, show_default=True, help="Seconds to wait with --wait")
+@click.option("--no-backup", "no_backup", is_flag=True, help="Do not back up the members' volumes. Default: Lium backs them up automatically")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @FORMAT_OPTION
 @handle_errors
 def clusters_up_command(
     fabric: str, node_count: int, name: str, template_id: Optional[str], ports: Optional[int], ttl: Optional[str],
-    wait: bool, timeout: int, yes: bool, output_format: str, json_output: bool,
+    wait: bool, timeout: int, yes: bool, output_format: str, json_output: bool, no_backup: bool,
 ):
     """Rent N whole nodes of one fabric as a single all-or-nothing cluster.
 
@@ -187,6 +188,8 @@ def clusters_up_command(
                          hint="Run 'lium clusters' for the free-node count per fabric, then lower --nodes or pick another fabric") from exc
 
     hourly = sum(n.price_per_hour for n in chosen)
+    if not no_backup and output_format == "table":
+        ui.dim("Backups on: Lium backs up each member's data automatically. Turn off with --no-backup.")
     # money is spent only after -y or an answered prompt, in every output mode — as `lium up` does
     if not yes:
         summary = (
@@ -197,7 +200,10 @@ def clusters_up_command(
             return
 
     def rent() -> Cluster:
-        return lium.up_cluster([n.id for n in chosen], name=name, template_id=template_id, ports=ports, wait=False)
+        return lium.up_cluster(
+            [n.id for n in chosen], name=name, template_id=template_id, ports=ports, wait=False,
+            enable_backups=not no_backup,
+        )
 
     try:
         cluster = ui.load(f"Renting {node_count}-node cluster", rent) if output_format == "table" else rent()

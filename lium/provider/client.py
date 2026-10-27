@@ -23,8 +23,6 @@ import time
 from typing import Any
 
 from lium.provider._routes import (
-    BILLING,
-    BILLING_BY_MINER,
     DISCORD_OAUTH_URL,
     ESTIMATED_REWARDS,
     EXECUTOR_BY_ID,
@@ -35,6 +33,7 @@ from lium.provider._routes import (
     EXECUTOR_PODS,
     EXECUTOR_VERIFICATION,
     EXECUTORS,
+    LOGIN_EMAIL,
     LOGIN_FLEXIBLE,
     MACHINE_REQUEST_BY_ID,
     MACHINE_REQUESTS,
@@ -42,6 +41,7 @@ from lium.provider._routes import (
     ME,
     MINER_OPT_IN,
     MINERS_OVERVIEW,
+    PROVIDER_LEDGER_DAILY,
     SET_EMAIL,
     SET_MACHINE_REQUEST_SUBSCRIPTION,
     SET_PASSWORD,
@@ -98,6 +98,11 @@ class ProviderClient:
         signer: optional custom :class:`Signer`. v1 default is
             ``LocalKeypairSigner`` constructed lazily from the wallet at
             ``~/.bittensor/wallets/<coldkey>/hotkeys/<hotkey>``.
+        account: the ``miner_hotkey`` of an account made with e-mail or Google (an opaque account id, no key
+            to sign with): the session cached by :meth:`login_email` is used and the account id stands in for
+            the hotkey. Ignored when ``hotkey`` or ``signer`` is given.
+        api_token: a provider API token (``lpk_…``, minted in the portal) sent as the bearer; the account id
+            comes from ``GET /auth/me``. Works for any account, Google-only included. Ignored like ``account``.
     """
 
     def __init__(
@@ -109,11 +114,17 @@ class ProviderClient:
         token_store: TokenStore | None = None,
         http: PortalHTTP | None = None,
         signer: Signer | None = None,
+        account: str | None = None,
+        api_token: str | None = None,
     ) -> None:
-        if signer is None and hotkey is None:
-            raise ValueError("ProviderClient requires either signer= or hotkey=")
+        if signer is None and hotkey is None and account is None and api_token is None:
+            raise ValueError("ProviderClient requires signer=, hotkey=, account= or api_token=")
         self.coldkey = coldkey
         self.hotkey = hotkey
+        keyless = signer is None and hotkey is None
+        self.api_token = api_token if keyless else None
+        # with a token, the account id is read from /auth/me on first use (_safe_hotkey)
+        self.account = account if keyless and not self.api_token else None
         self.portal_url = (portal_url or DEFAULT_PORTAL_URL).rstrip("/")
         self._signer: Signer | None = signer
         self._token_store = token_store or TokenStore()
@@ -190,6 +201,27 @@ class ProviderClient:
         )
         return response
 
+    def login_email(self, email: str, password: str) -> LoginResponse:
+        """``POST /auth/login-email``: sign in to an account made with e-mail (no key of its own).
+
+        The session is cached under the account id (``miner_hotkey``), which then stands in for the hotkey.
+        """
+        body = self._http.post(LOGIN_EMAIL, json_body={"email": email, "password": password}, auth=False)
+        try:
+            response = LoginResponse.model_validate(body)
+        except Exception as e:
+            raise ProviderAuthError(
+                "portal returned an unexpected login response shape",
+                code=PORTAL_AUTH_INVALID,
+                cause=e,
+                context={"body": _summarise_body(body)},
+            ) from e
+        self.account = response.provider.miner_hotkey
+        self._cached_token = with_refresh_retry(
+            lambda: self._token_store.save(self.account, response.token, provider_id=response.provider.id)
+        )
+        return response
+
     def _session_ended(self, cached: CachedToken) -> bool:
         """True when the portal answers 401 to ``cached``; any other failure (offline, 5xx) keeps it, as before."""
         self._cached_token = cached
@@ -213,7 +245,7 @@ class ProviderClient:
         self._cached_token = None
         signer_addr: str | None
         try:
-            signer_addr = self.signer.ss58_address
+            signer_addr = self.account or self.signer.ss58_address
         except Exception:  # pragma: no cover - defensive
             signer_addr = None
         if signer_addr:
@@ -292,8 +324,7 @@ class ProviderClient:
         # would otherwise report other providers' nodes as ours.
         if out.portal_session_active and not out.hotkey:
             # Without the ss58 the only listing available is the portal's global one, which
-            # would count every provider's nodes as ours (the same refusal `node list` and
-            # `billing list` make with ARG_INVALID).
+            # would count every provider's nodes as ours (the same refusal `node list` makes with ARG_INVALID).
             warnings.append(
                 f"nodes: the ss58 address of hotkey {self.hotkey!r} is not resolvable (no local wallet), "
                 "so the node count is skipped; `lium provider node list --miner-hotkey <ss58>` lists them"
@@ -339,6 +370,13 @@ class ProviderClient:
         return out
 
     def _safe_hotkey(self) -> str | None:
+        if self.api_token and not self.account:
+            try:
+                self.account = self.whoami().get("miner_hotkey") or None
+            except ProviderError:
+                return None
+        if self.account:
+            return self.account
         try:
             return self.signer.ss58_address
         except Exception:  # pragma: no cover - defensive
@@ -681,35 +719,14 @@ class ProviderClient:
     # ------------------------------------------------------------------
     # Read-only queries
 
-    def billing_history(
-        self,
-        *,
-        miner_hotkey: str | None = None,
-        page: int | None = None,
-        limit: int | None = None,
-        all_miners: bool = False,
-    ) -> dict[str, Any]:
-        """``GET /billing`` (paginated) or ``/billing/{miner_hotkey}``.
+    def billing_history(self, *, start_day: str | None = None, end_day: str | None = None) -> dict[str, Any]:
+        """``GET /provider-ledger/daily``: the signed-in provider's earnings, one row per UTC day and kind.
 
-        Like ``list_nodes``, the paginated portal endpoint is global; the
-        default scopes it to this provider's hotkey. ``all_miners=True``
-        returns every provider's history, ``miner_hotkey`` one provider's
-        (unpaginated ``/billing/{hotkey}`` when no page/limit is given).
+        The account comes from the session, so there is no hotkey to pass (DAH-4627: the public ``/billing``
+        reads that took one are being retired). The portal defaults to the last 30 days; at most 90.
         """
-        if miner_hotkey is not None and page is None and limit is None:
-            return self._http.get(
-                BILLING_BY_MINER.format(miner_hotkey=_safe_hotkey_segment(miner_hotkey))
-            )
-        params: dict[str, Any] = {}
-        if miner_hotkey is None and not all_miners:
-            miner_hotkey = self._own_hotkey_or_fail()
-        if miner_hotkey is not None:
-            params["miner_hotkey"] = _safe_hotkey_segment(miner_hotkey)
-        if page is not None:
-            params["page"] = page
-        if limit is not None:
-            params["limit"] = limit
-        return self._http.get(BILLING, params=params or None)
+        params = {key: value for key, value in (("from", start_day), ("to", end_day)) if value is not None}
+        return self._http.get(PROVIDER_LEDGER_DAILY, params=params or None)
 
     def list_machine_requests(self) -> dict[str, Any]:
         """``GET /machine-requests`` -- pending tenant capacity asks.
@@ -750,6 +767,8 @@ class ProviderClient:
         token when one is cached AND not expired -- expired tokens are
         treated as "no token" so the caller gets a clean 401 path.
         """
+        if self.api_token:
+            return self.api_token
         if self._cached_token is not None and not self._cached_token.expired():
             return self._cached_token.token
         # Try a cache load without a network round-trip. We need the signer's
@@ -759,7 +778,7 @@ class ProviderClient:
         # disk we can't derive ss58 -- return None and let the caller see a
         # clean 401.
         try:
-            ss58 = self.signer.ss58_address
+            ss58 = self.account or self.signer.ss58_address
         except Exception:
             return None
         try:

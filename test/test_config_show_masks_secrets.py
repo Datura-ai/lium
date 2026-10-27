@@ -5,13 +5,16 @@ workspace's ``api_key`` and ``[session] token`` landed in full in whatever kept 
 an agent transcript), while ``config get`` and ``config set`` masked the same values.
 """
 
+import json
 import re
+from types import SimpleNamespace
 
 from click.testing import CliRunner
 
 from lium.cli import settings
 from lium.cli.cli import cli
 from lium.cli.config.show.actions import mask_config_text
+from lium.sdk import Config
 
 API_KEY = "lium-test-key-0123456789abcdefghijklmnop"
 WORKSPACE_KEY = "sk_ws_zyxwvutsrqponmlkjihgfedcba9876"
@@ -122,3 +125,49 @@ def test_mask_config_text_masks_the_default_section_and_refuses_duplicates():
         "[DEFAULT]\napi_key = lium-tes...ghij\n"
     )
     assert mask_config_text("[api]\napi_key = a-0123456789abcdefghij\napi_key = b-0123456789abcdefghij\n") is None
+
+
+# `balance --json`, `config get api.api_key` and `ps` never print the full key either
+ENV_KEY = "env-key-0123456789abcdef-tail"  # gitleaks:allow (fake fixture)
+
+
+class _FakeLium:
+    pods = []
+    workspaces = SimpleNamespace(current=lambda: None)  # `ps` reads it for its workspace line
+
+    def __init__(self, *args, **kwargs):
+        self.config = Config(api_key=ENV_KEY, api_key_source="env:LIUM_API_KEY")
+
+    def balance(self):
+        return 42.5
+
+    def ps(self):
+        return list(self.pods)
+
+
+def test_balance_json_does_not_print_the_full_key(monkeypatch):
+    from lium.cli import balance as balance_module
+
+    monkeypatch.setattr(balance_module, "Lium", _FakeLium)
+    result = CliRunner().invoke(cli, ["balance", "--json"])
+    assert json.loads(result.stdout)["api_key_fingerprint"] == "env-ke…tail"
+    assert ENV_KEY not in result.output
+
+
+def test_config_get_api_key_does_not_print_the_full_key(monkeypatch):
+    monkeypatch.setenv("LIUM_API_KEY", ENV_KEY)
+    monkeypatch.delenv("LIUM_API_API_KEY", raising=False)
+    result = CliRunner().invoke(cli, ["config", "get", "api.api_key"])
+    assert result.exit_code == 0, result.output
+    assert ENV_KEY not in result.output
+
+
+def test_ps_does_not_print_the_full_key(monkeypatch):
+    from lium.cli.ps import command as ps_module
+
+    monkeypatch.setattr(ps_module, "Lium", _FakeLium)
+    monkeypatch.setattr(ps_module, "ensure_config", lambda: None)
+    result = CliRunner().invoke(cli, ["ps"])
+    assert result.exit_code == 0, result.output
+    assert "key env-ke…tail from env:LIUM_API_KEY" in result.output
+    assert ENV_KEY not in result.output

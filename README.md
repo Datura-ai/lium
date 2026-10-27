@@ -54,6 +54,9 @@ lium balance
 # List available nodes (GPU machines)
 lium ls
 
+# Price a job on node #1 before renting it (no API key needed)
+lium quote 1 --hours 2
+
 # Create a pod using node index
 lium up 1  # Use node #1 from previous ls
 
@@ -221,6 +224,8 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium up [NODE_ID]` - Create a pod (NODE_ID is the HUID or UUID from `lium ls`, or its row number; or use filters like `--gpu`, `--count`, `--country`; cap it with `--ttl 6h` or `--budget 12.50`; `--json` prints the ready pod as JSON instead of opening SSH)
 - `lium ps [--sort KEY] [--filter KEY=VALUE] [--key NAME|ID] [--watch N] [--wide] [--format json]` - List active pods; the `#` column is the row number `rm`/`ssh`/`exec`/`scp` accept in the same shell, for 10 minutes, and only while the pod shown on that row is still listed — the rows of the last listing, in the order shown (sorted or filtered). Use the huid in scripts. A PENDING pod gets a line under the table with the backend's start estimate and phase, worded as `lium up` words it (`eager-wolf-aa PENDING · est. ready in ~18 s (phase: pulling image)`); its `--format json` row carries the same text as `eta_hint` (`null` when the backend sent neither).
 - `lium spend [--format json]` - Hourly burn, estimated spend per pod, balance and runway
+- `lium record <pod> [--format json]` - What a run ran on (GPU, image, driver/CUDA, interconnect) and what it cost; works after removal with the pod UUID
+- `lium quote <node> --hours N [--gpus N] [--volume-gb N] [--backup-gb N] [--format json]` - A job's compute, volume and backup cost on a node at billing's rates, before renting
 - `lium describe <POD>` - Full manifest of one pod: ports, GPU, template, billing, last lifecycle event (why it is REBOOT_FAILED/BROKEN) and the node's disk health (add `--json` for machine-readable output). A deleted pod can still be described by its id: you get the events the backend kept for it and the reason it went away.
 - `lium ssh <POD>` - SSH into a pod
 - `lium exec <POD> <COMMAND>` - Execute command on pod (`--json` for stdout/stderr/exit_code; `-d/--detach` starts it in the background and returns immediately; `--max-output-bytes N` sets the output limit, default 64 MiB)
@@ -231,6 +236,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium cp <SRC_POD>:<PATH> <DST_POD>:<PATH>` - Copy files from one pod to another over SSH
 - `lium rm <POD>` - Remove/stop a pod (`--name-only` to refuse `lium ps` row numbers in scripts; `--format json` prints what was removed with its estimated spend; `--rating 1-5 --feedback "..."` rates the node in the same call)
 - `lium reboot <POD>` - Reboot a pod
+- `lium reset-gpu <POD> [--gpu N ...]` - Reset a pod's hung GPUs; stops the pod's processes, keeps its files; waits 1-2 min for the result
 - `lium audit [--pod POD] [--since 24h] [--key ID]` - Who did what to the account's pods, and when: every rent, reboot, edit and delete with the session or API key that requested it (add `--json` for machine-readable output)
 - `lium audit --account [--action pod.] [--source cli] [--since 7d] [--cursor <next_cursor>]` - The account audit log: every request that changed something (pods, keys, logins, balance, settings, team members) with the client and IP it came from; your own IPs only, 90 days (`--json` prints the page with `next_cursor`)
 - `lium update <POD> --jupyter <PORT>` - Install Jupyter Notebook on a pod, served on that internal port (`--jupyter` is the only update; without it the command prints `No updates specified`)
@@ -247,7 +253,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 
 - `lium volumes list` - List all volumes
 - `lium volumes new <NAME>` - Create a new volume
-- `lium volumes rm <INDICES>` - Remove volumes by their row numbers in the last `lium volumes` list (`1` or `1,3`); the list must come from the same shell and be under 10 minutes old, or the command asks you to list again
+- `lium volumes rm <TARGETS>` - Remove volumes by HUID or id, or by their row numbers in the last `lium volumes` list (`1` or `1,3`); row numbers need a list from the same shell under 10 minutes old, or the command asks you to list again
 
 ### Cluster Commands
 
@@ -309,6 +315,8 @@ Teams share a workspace whose billing owner pays. An API key is bound to one wor
 
 Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, `--portal-url`, `--json`, `--debug`, `-y/--yes`, `--dry-run`. Persist wallet identity once with `lium config set provider.coldkey <NAME>` and `lium config set provider.hotkey <NAME>`. Spend-affecting subcommands run a persona prompt unless `--yes` or `LIUM_PROVIDER_ACK=1` is set.
 
+**Account without a key (Google or e-mail):** create an API token in the portal (Account settings, API tokens; not released yet), then `export LIUM_PROVIDER_TOKEN=lpk_...` (or save it with `lium provider portal login --token`); `lium provider` commands then run without `--hotkey`. An e-mail account can also run `lium provider portal login --email <address>`.
+
 - `lium provider portal {login,logout,whoami}` - Manage the cached portal JWT
 - `lium provider status [--netuid 51]` - Aggregated provider snapshot (registration, portal session, nodes, validator weights)
 - `lium provider node list|get|add|rm|update-price|update-gpu|address` - Node lifecycle on the portal; `node list [--all | --miner-hotkey HK]` shows the active hotkey's nodes by default, `--all` every provider's
@@ -321,7 +329,7 @@ Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, 
 - `lium provider node notify-added <NODE_ID> --request-id <REQ>` - Mark a tenant machine request fulfilled
 - `lium provider config show|opt-in|opt-out|set-email|set-subscriptions` - Portal-account configuration (incl. lium.io central miner server toggle)
 - `lium provider sync from-miner-server|to-miner-server` - Batch node-state sync between portal and the central miner server
-- `lium provider billing list [--all | --miner-hotkey HK] [--page N] [--limit N]` - Paginated billing history (active hotkey by default; `--all` for every provider's)
+- `lium provider billing list [--from YYYY-MM-DD] [--to YYYY-MM-DD]` - Your daily earnings ledger (the signed-in provider's own rows; last 30 days by default, at most 90)
 - `lium provider machine-request list|get` - Pending tenant machine requests (per-request detail only once one of your nodes is verified by a validator; before that `list` returns counts per GPU class and hourly budget band, and `get` exits 2 with `PORTAL_FORBIDDEN`)
 - `lium provider machine list|estimate` - Machine catalogue + reward estimates
 
@@ -329,6 +337,7 @@ Full reference with every flag and runnable examples: <https://docs.lium.io/deve
 
 ### Other Commands
 
+- `lium mcp` - Serve Lium as an MCP server over stdio for agent hosts (`pip install "lium.io[mcp]"`; see [MCP server for agent hosts](#mcp-server-for-agent-hosts))
 - `lium theme dark|light` - Set the CLI colour theme (the argument is required; there is no `auto`; the value is stored as `[ui] theme` — `lium config get ui.theme` reads it back)
 - `lium mine` - Set up this host as a provider node
 - `lium mine --register <TOKEN>` - Same, then add the node to your portal account from what the host reports and wait until it is listed (token from the portal's Add Node page; the account, and what the node reports under, come from the token — no `-k`)
@@ -349,6 +358,9 @@ lium ls --format json          # machine-readable
 # the Download (Mbps) column — tensor parallelism and 700 GB checkpoints behave very
 # differently on a PCIe box or a slow link that the price does not reveal
 lium ls --gpu H200 --nvlink --min-download 2000
+
+# Skip nodes whose rents often fail to start
+lium ls --gpu H100 --reliable
 
 # Create pod with node index
 lium up 1 --name my-pod --yes
@@ -398,6 +410,9 @@ lium up 1 --volume new:name=mydata,desc="My dataset"
 lium up 1 --ttl 6h                    # Terminate after 6 hours
 lium up 1 --budget 12.50              # Terminate once $12.50 has been spent
 lium up 1 --until "today 23:00"       # Terminate at 11 PM today
+
+# Create pod without the automatic volume backup
+lium up 1 --no-backup
 
 # Create pod with Jupyter
 lium up 1 --jupyter --yes
@@ -451,6 +466,7 @@ lium update my-pod --jupyter 8888
 lium volumes list
 lium volumes new mydata --desc "My dataset"
 lium volumes rm 1                              # row 1 of the list above (same shell, under 10 minutes old)
+lium volumes rm noble-matrix-27                # or by HUID / id
 
 # Multi-node clusters
 lium clusters                                  # fabrics with free nodes
@@ -496,7 +512,7 @@ lium fund --alpha -k <hotkey> -a 25 --netuid 64  # Any subnet Lium accepts
 
 ### `lium ls --format json` fields
 
-One object per node, sorted as the table is; the names are stable and pinned by `test/test_ls_speed.py`:
+One object per node, sorted as the table is; the names are stable:
 
 | field | meaning |
 |---|---|
@@ -519,7 +535,7 @@ One object per node, sorted as the table is; the names are stable and pinned by 
 | `interconnect` | the node's topology object: pair and link counts, `pcie_class`, `p2p`; on the listing it has no `matrix` (the GPU x GPU table is in `lium describe <pod>`) |
 | `gpu_power_limited`, `gpu_power_limit_w`, `gpu_power_limit_default_w` | the table's ↓W mark as a field: `true` when a GPU's power limit is set under 95 % of the card's default (expect somewhat lower peak performance), `false` at stock power, `null` when the platform cannot judge the node; the most reduced GPU's current and default limit in watts |
 
-The listing asks for `GET /executors?view=summary`, about 1 KB per node instead of about 8.6 KB. The summary view carries the `nvlink` and `interconnect` keys that `link`, `nvlink`, `p2p` and `interconnect` read. `Lium.ls(view="full")` returns the whole node scrape in `ExecutorInfo.specs`.
+The listing asks for `GET /executors?view=summary`, about 1 KB per node instead of about 8.6 KB. The summary view carries the `nvlink` and `interconnect` keys that `link`, `nvlink`, `p2p` and `interconnect` read. `Lium.ls(view="full")` returns the whole public node scrape in `ExecutorInfo.specs`, without what the renters' pods are doing (docker containers, GPU processes, per-GPU load, memory in use, current clocks and PCIe link); read your own pod's load with `Lium.gpu_stats`.
 
 ## Features
 
@@ -621,6 +637,33 @@ lium up --gpu H100 -y --no-ssh     # -y: rent without the confirmation prompt
 lium rm my-pod -y                  # -y on every destructive command; a piped rm without it exits 2 and removes nothing
 lium fund -w default -a 1.5 -y     # values that would be prompted for must be passed as options
 ```
+
+### MCP server for agent hosts
+
+<!-- mcp-name: io.github.Datura-ai/lium -->
+
+`lium mcp` serves Lium as a Model Context Protocol server over stdio, so Claude Desktop, Claude Code, Cursor or any
+MCP host can rent and use GPUs itself. Tools: `list_gpus`, `rent_pod`, `list_pods`, `run_command`, `remove_pod`,
+`get_balance`. It uses the API key `lium init` saved, or `LIUM_API_KEY`.
+
+```bash
+pip install "lium.io[mcp]"
+```
+
+```json
+{"mcpServers": {"lium": {"command": "lium", "args": ["mcp"]}}}
+```
+
+Without installing anything, with [uv](https://docs.astral.sh/uv/):
+
+```json
+{"mcpServers": {"lium": {"command": "uvx", "args": ["--from", "lium.io[mcp]", "lium.io", "mcp"]}}}
+```
+
+`rent_pod` with `dry_run: true` quotes a node first (tier, reliability, cost per hour, your balance) and rents
+nothing, and `enable_backups: false` rents without the automatic backup. A rented pod is billed per second until `remove_pod`. The hosted MCP server at https://docs.lium.io/mcp
+(no key, read-only) is separate: it searches the docs and gives live GPU prices and availability; `rent_pod` takes
+the node ids its `search_gpus` returns.
 
 ### Crash reporting (opt-in, off by default)
 

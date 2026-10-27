@@ -11,7 +11,7 @@ import uuid
 import pytest
 import responses
 
-from lium.sdk import Config, Lium, LiumError, LiumServerError, RentResult
+from lium.sdk import Config, Lium, LiumError, LiumServerError, RentResult, Template
 from lium.sdk import client as client_module
 from lium.sdk import utils as sdk_utils
 
@@ -130,7 +130,7 @@ def test_rent_posts_the_spec_once_and_maps_the_pick(client):
         "min_download_mbps": 100,
         "pod_name": "train-1", "template_id": None, "dockerfile_content": None, "volume_id": None,
         "user_public_key": [KEY], "initial_port_count": 3, "enable_volume_encryption": True,
-        "backup_log_id": None, "restore_path": None, "dry_run": False,
+        "backup_log_id": None, "restore_path": None, "enable_backups": True, "dry_run": False,
     }
     assert [c.request.url for c in responses.calls] == [f"{BASE}/version", f"{BASE}/pods", f"{BASE}/executors/rent-by-spec"]
     assert isinstance(result, RentResult) and result.server_side is True and result.gpu_count == 1
@@ -281,6 +281,11 @@ def test_a_rent_by_spec_backend_refuses_interconnect_before_any_call(client):
 # --- the client-side path (older backend) ------------------------------------------------------
 
 
+def _template():
+    # the template offers no volume encryption: rent() looks it up to decide what to ask for
+    responses.add(responses.GET, f"{BASE}/templates/22222222-2222-4222-8222-222222222222", json={"id": "22222222-2222-4222-8222-222222222222", "supports_volume_encryption": False})
+
+
 def _fleet():
     responses.add(responses.GET, f"{BASE}/machines", json=[{"name": "NVIDIA H100 NVL"}, {"name": "NVIDIA H100 80GB HBM3"}])
     fleet = [
@@ -297,11 +302,12 @@ def _fleet():
 @responses.activate
 def test_older_backend_lists_filters_picks_the_cheapest_and_rents_by_id(client):
     _version(None)
+    _template()
     _fleet()
     responses.add(responses.POST, f"{BASE}/executors/cheap/rent", json={"id": "pod-uuid-9", "name": "train-1"})
 
     result = client.rent(
-        gpu_type="H100", gpu_count=1, name="train-1", template_id="tpl-1", min_cpus=16, min_download_mbps=100,
+        gpu_type="H100", gpu_count=1, name="train-1", template_id="22222222-2222-4222-8222-222222222222", min_cpus=16, min_download_mbps=100,
         ssh_keys=[KEY],
     )
 
@@ -310,15 +316,32 @@ def test_older_backend_lists_filters_picks_the_cheapest_and_rents_by_id(client):
     assert result.candidates == 2 and [a["id"] for a in result.alternatives] == ["dear"]
     assert result.pod == {"id": "pod-uuid-9", "name": "train-1"}
     assert responses.calls[-1].request.url == f"{BASE}/executors/cheap/rent"
-    assert json.loads(responses.calls[-1].request.body)["template_id"] == "tpl-1"
+    assert json.loads(responses.calls[-1].request.body)["template_id"] == "22222222-2222-4222-8222-222222222222"
+    assert json.loads(responses.calls[-1].request.body)["enable_backups"] is True
+
+
+@responses.activate
+def test_a_rent_by_id_can_turn_the_automatic_backup_off(client):
+    _version(None)
+    _template()
+    _fleet()
+    responses.add(responses.POST, f"{BASE}/executors/cheap/rent", json={"id": "pod-uuid-9", "name": "train-1"})
+
+    client.rent(
+        gpu_type="H100", gpu_count=1, name="train-1", template_id="22222222-2222-4222-8222-222222222222", min_cpus=16, min_download_mbps=100,
+        ssh_keys=[KEY], enable_backups=False,
+    )
+
+    assert json.loads(responses.calls[-1].request.body)["enable_backups"] is False
 
 
 @responses.activate
 def test_older_backend_dry_run_only_lists(client):
     _version(None)
+    _template()
     _fleet()
 
-    result = client.rent(gpu_type="H100", template_id="tpl-1", ssh_keys=[KEY], dry_run=True)
+    result = client.rent(gpu_type="H100", template_id="22222222-2222-4222-8222-222222222222", ssh_keys=[KEY], dry_run=True)
 
     assert result.dry_run is True and result.pod is None and result.attempts == 0
     # no floors asked: the three $1.20 nodes tie on price, 900 Mbps beats 50, then the id decides
@@ -340,12 +363,13 @@ def test_older_backend_reads_interconnect_from_the_node_specs(client):
     # the one constraint the server path refuses is checked here: a node that does not report
     # NVLink does not qualify, so the dearer node that does is the pick
     _version(None)
+    _template()
     responses.add(responses.GET, f"{BASE}/machines", json=[{"name": "NVIDIA H100 NVL"}])
     linked = _node("linked", price=1.5)
     linked["specs"]["interconnect"] = {"nvlink": True}
     responses.add(responses.GET, f"{BASE}/executors", json=[_node("plain", price=1.2), linked])
 
-    result = client.rent(gpu_type="H100", interconnect="nvlink", template_id="tpl-1", ssh_keys=[KEY], dry_run=True)
+    result = client.rent(gpu_type="H100", interconnect="nvlink", template_id="22222222-2222-4222-8222-222222222222", ssh_keys=[KEY], dry_run=True)
 
     assert result.executor.id == "linked" and result.candidates == 1
 
@@ -355,6 +379,7 @@ def test_older_backend_reads_the_nvlink_verdict_off_a_summary_row(client):
     # `ls()` asks for `view=summary`, whose rows carry the verdict at the top level and no `specs.interconnect`
     # (lium-platform#522); a check that read only specs.interconnect matched no node on that view
     _version(None)
+    _template()
     responses.add(responses.GET, f"{BASE}/machines", json=[{"name": "NVIDIA H100 NVL"}])
     linked = _node("linked", price=1.5)
     linked["nvlink"] = True
@@ -363,10 +388,84 @@ def test_older_backend_reads_the_nvlink_verdict_off_a_summary_row(client):
     plain["nvlink"] = False
     responses.add(responses.GET, f"{BASE}/executors", json=[plain, linked])
 
-    result = client.rent(gpu_type="H100", interconnect="nvlink", template_id="tpl-1", ssh_keys=[KEY], dry_run=True)
+    result = client.rent(gpu_type="H100", interconnect="nvlink", template_id="22222222-2222-4222-8222-222222222222", ssh_keys=[KEY], dry_run=True)
 
     assert result.executor.id == "linked" and result.candidates == 1
     assert "interconnect" not in linked["specs"]
+
+
+@pytest.mark.parametrize("reserve_gib, should_match", [(None, True), (4, False)])
+def test_the_client_side_ram_floor_counts_the_host_reserve_like_the_server(reserve_gib, should_match):
+    # DAH-4487: rent-by-spec compares the RAM a pod gets (host total less the published reserve);
+    # the client-side pick for older backends reads the same figure, so 254 GiB fails on 256 - 4
+    from types import SimpleNamespace
+
+    row = _node("exec-1")
+    row["specs"]["ram"]["pod_reserve"] = None if reserve_gib is None else reserve_gib * GIB_KB
+    executor = SimpleNamespace(
+        specs=row["specs"], gpu_count=1, effective_download_speed_mbps=900.0, available_port_count=10,
+        price_per_gpu=1.2, location=row["location"], docker_in_docker=False, nvlink=None,
+    )
+
+    assert client_module._satisfies_spec(executor, {"gpu_count": 1, "min_ram_gb": 254}) is should_match
+
+
+@responses.activate
+def test_rent_by_spec_with_a_dockerfile_does_not_request_encryption(client):
+    _version(["rent_by_spec"])
+    responses.add(responses.GET, f"{BASE}/pods", json=[])
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", json=RENTED)
+
+    client.rent(gpu_type="H100", name="train-1", dockerfile_content="FROM busybox", ssh_keys=[KEY])
+
+    assert json.loads(responses.calls[-1].request.body)["enable_volume_encryption"] is False
+
+
+@responses.activate
+def test_rent_by_spec_can_turn_the_automatic_backup_off(client):
+    _version(["rent_by_spec"])
+    responses.add(responses.GET, f"{BASE}/pods", json=[])
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", json=RENTED)
+
+    client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY], enable_backups=False)
+
+    assert json.loads(responses.calls[-1].request.body)["enable_backups"] is False
+
+
+@pytest.mark.parametrize("server_side", [True, False])
+@pytest.mark.parametrize("template_supports", [True, False])
+@pytest.mark.parametrize("asked", [None, True, False])
+@responses.activate
+def test_rent_without_a_template_asks_for_encryption_only_where_it_can_get_it(
+    client, monkeypatch, server_side, template_supports, asked
+):
+    # The server picks Lium's recommended template, which supports it; the client-side path
+    # leaves the choice to up(), which reads the default template it picks for the node.
+    monkeypatch.setattr(
+        Lium, "default_docker_template",
+        lambda self, executor_id: Template(
+            id="tpl-default", name="default", huid="d", docker_image="img", docker_image_tag="t",
+            category="", status="READY", supports_volume_encryption=template_supports,
+        ),
+    )
+    if server_side:
+        _version(["rent_by_spec"])
+        responses.add(responses.GET, f"{BASE}/pods", json=[])
+        responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", json=RENTED)
+        expected = True if asked is None else asked
+    else:
+        _version(None)
+        _fleet()
+        responses.add(responses.POST, f"{BASE}/executors/cheap/rent", json={"id": "pod-uuid-9", "name": "train-1"})
+        expected = template_supports if asked is None else asked
+
+    client.rent(
+        gpu_type="H100", name="train-1", min_cpus=16, min_download_mbps=100, ssh_keys=[KEY],
+        enable_volume_encryption=asked,
+    )
+
+    assert responses.calls[-1].request.method == "POST"
+    assert json.loads(responses.calls[-1].request.body)["enable_volume_encryption"] is expected
 
 
 @responses.activate

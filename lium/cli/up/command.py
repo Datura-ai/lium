@@ -194,6 +194,10 @@ def _post_rent_failure(exc: Exception, billing_pod: dict, doing: str, note: str 
 )
 @click.option("--restore-backup", "restore_backup_id", help="Backup ID to restore after the pod starts")
 @click.option("--restore-to", "restore_path", help="New or empty subdirectory for the startup restore")
+@click.option(
+    "--no-backup", "no_backup", is_flag=True,
+    help="Do not back up the pod's volume. Default: Lium backs it up automatically",
+)
 @click.option("--image", help="Docker image to run (e.g., pytorch/pytorch:2.0, nvidia/cuda:12.0)")
 @click.option("--internal-ports", help="Internal ports to expose (comma-separated, e.g., 22,8000,8080)")
 @click.option("--dockerfile", type=click.Path(exists=True, dir_okay=False, readable=True), help="Path to a Dockerfile to build the pod image from (custom build; mutually exclusive with --image/--template_id)")
@@ -203,8 +207,8 @@ def _post_rent_failure(exc: Exception, billing_pod: dict, doing: str, note: str 
 @click.option("--ssh-name", default=None, help="Name to register a new SSH key under (default: cli-<user>@<hostname>)")
 @click.option(
     "--volume-encryption/--no-volume-encryption",
-    default=True,
-    help="Encrypt the local volume when supported (enabled by default)",
+    default=None,
+    help="Encrypt the local volume. Default: on when the template supports it, off otherwise",
 )
 @click.option(
     "--json", "json_output", is_flag=True,
@@ -235,6 +239,7 @@ def up_command(
     strict_gpus: bool,
     restore_backup_id: Optional[str],
     restore_path: Optional[str],
+    no_backup: bool,
     image: Optional[str],
     internal_ports: Optional[str],
     dockerfile: Optional[str],
@@ -242,7 +247,7 @@ def up_command(
     entrypoint: Optional[str],
     cmd: Optional[str],
     ssh_name: Optional[str],
-    volume_encryption: bool,
+    volume_encryption: bool | None,
     json_output: bool,
 ):
     """\b
@@ -590,6 +595,18 @@ def up_command(
                 f"-c {rent_count}: {executor.huid} has {executor.gpu_count} GPU(s).",
                 EXIT_CONFIGURATION_ERROR,
             )
+        if getattr(executor, "whole_host_only", None):
+            # The backend counts the GPU rows and is the authority on "whole"; the listed
+            # gpu_count can differ from them. Refuse only a count clearly below what the listing
+            # says is free. Any other explicit -c is sent as given (the API refuses it if it is
+            # not the whole host); never drop it, that would bill more than was asked for.
+            free = executor.available_gpu_count or executor.gpu_count
+            if requested_gpu_count and requested_gpu_count < free:
+                raise CliFailure(
+                    "invalid_arguments",
+                    f"{executor.huid} rents whole only. Request all {free} GPUs.",
+                    EXIT_CONFIGURATION_ERROR,
+                )
         rent_price = executor.price_per_gpu * rent_count if rent_count != executor.gpu_count else price_per_hour
 
     # renters wrote "I didn't even know it was a spot" and "throttled to 410 W, not shown before rental":
@@ -607,6 +624,9 @@ def up_command(
             "Selection is repeated when renting. The rented node may be Spot, reclaimable at any time "
             "with no refund, or run its GPUs at a reduced power limit."
         )
+
+    if not no_backup:
+        ui.dim("Backups on: Lium backs up this pod's data automatically. Turn off with --no-backup.")
 
     if not yes:
         confirm_msg = (
@@ -712,6 +732,7 @@ def up_command(
                 "enable_volume_encryption": volume_encryption,
                 "backup_id": restore_backup_id,
                 "restore_path": restore_path,
+                "enable_backups": not no_backup,
                 "gpu_count": requested_gpu_count,
             })
         )
@@ -816,7 +837,7 @@ def up_command(
     except Exception as exc:
         ui.error(f"Pod {pod_name} (id: {pod_id}) was created but did not become ready")
         if isinstance(exc, (LiumError, requests.RequestException)):
-            # The API failed mid-wait (5xx, 429, a revoked key) or stopped answering (`Lium.ps()`
+            # The API failed mid-wait (5xx, a revoked key; a 429 is waited out inside Lium.wait_ready) or stopped answering (`Lium.ps()`
             # re-raises the transport error after its retries); the pod may well be up and bills.
             raise _post_rent_failure(exc, billing_pod, "waiting for it to become ready")
         raise
@@ -916,6 +937,7 @@ def up_command(
         result = ui.load("Verifying GPU count", lambda: action.execute(verify_ctx))
     else:
         result = action.execute(verify_ctx)
+    gpu_check = result.data
     if not result.ok:
         ui.error(result.error)
         if strict_gpus and result.data.get("mismatch"):
@@ -1001,6 +1023,9 @@ def up_command(
             # `--ttl`, `--until` or the `--budget` cap: the time the backend was given. Present only
             # when one was set, as `rm --format json` carries `termination_time` only for a schedule.
             payload["termination_time"] = termination_time.isoformat()
+        if verify_gpus:
+            # the passed check's counts; a failed one is the error envelope instead
+            payload["gpu_verification"] = {k: gpu_check.get(k) for k in ("expected", "billed", "visible")}
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
         return
 

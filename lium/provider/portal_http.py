@@ -229,8 +229,13 @@ def _parse_response(
             context=context,
         )
     if status == 429:
+        try:
+            context["retry_after"] = float((getattr(response, "headers", None) or {}).get("Retry-After"))
+        except (TypeError, ValueError):
+            pass  # no or non-numeric Retry-After
+        wait = context.get("retry_after")
         raise ProviderServerError(
-            "portal rate limit",
+            f"portal rate limit, retry in {wait:g} s" if wait is not None else "portal rate limit",
             code=PORTAL_RATE_LIMIT,
             context=context,
         )

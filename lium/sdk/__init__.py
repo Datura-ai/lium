@@ -11,6 +11,7 @@ from .exceptions import (
     LiumChargeOutcomeUnknownError,
     LiumRentOutcomeUnknownError,
     LiumError,
+    LiumGpuOperationError,
     LiumHostKeyError,
     LiumInsufficientBalanceError,
     LiumNotFoundError,
@@ -24,6 +25,7 @@ from .exceptions import (
     PodStartError,
     RemoteExecutionError,
 )
+from .bounded_job import JobResult
 from .jobs import Job
 from .models import (
     ApiKeyInfo,
@@ -35,6 +37,10 @@ from .models import (
     ClusterOffer,
     ExecutorInfo,
     GpuStats,
+    GpuResetOutcome,
+    GpuResetResult,
+    JobQuote,
+    JobQuoteLine,
     PodInfo,
     RentResult,
     RestoreLog,
@@ -50,6 +56,8 @@ from .result_codec import ResultEncodingError
 
 __all__ = [
     "Lium",
+    "JobQuote",
+    "JobQuoteLine",
     "ApiKeysClient",
     "ApiKeyInfo",
     "ApiKeyScope",
@@ -68,7 +76,10 @@ __all__ = [
     "ClusterOffer",
     "Template",
     "GpuStats",
+    "GpuResetOutcome",
+    "GpuResetResult",
     "Job",
+    "JobResult",
     "VolumeInfo",
     "BackupConfig",
     "BackupLog",
@@ -90,6 +101,7 @@ __all__ = [
     "LiumInsufficientBalanceError",
     "LiumScopeError",
     "LiumBudgetExceededError",
+    "LiumGpuOperationError",
     "LiumSessionError",
     "OutputLimitExceeded",
     "RemoteExecutionError",

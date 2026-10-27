@@ -21,11 +21,11 @@ from .actions import RemoveVolumesAction
 
 
 @click.command("rm")
-@click.argument("indices")
+@click.argument("indices", metavar="TARGETS")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @handle_errors
 def volumes_rm_command(indices: str, yes: bool):
-    """Remove volumes by index from last 'lium volumes' list."""
+    """Remove volumes by index from the last 'lium volumes' list, or by HUID or id (comma-separated)."""
     ensure_config()
 
     # Validate
@@ -33,29 +33,36 @@ def volumes_rm_command(indices: str, yes: bool):
     if not valid:
         raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
 
-    # Get cached volumes
-    last_selection = get_last_volume_selection()
-    if not last_selection or not last_selection.get('volumes', []):
-        raise CliFailure(
-            "no_volumes_cached",
-            "No volumes cached. Run 'lium volumes' first.",
-            EXIT_GENERAL_ERROR,
-        )
+    targets = parsing.split_targets(indices)
+    volumes_data: list = []
+    if any(t.isdigit() for t in targets):
+        # Row numbers only mean something against this shell's recent `lium volumes` list
+        last_selection = get_last_volume_selection()
+        if not last_selection or not last_selection.get('volumes', []):
+            raise CliFailure(
+                "no_volumes_cached",
+                "No volumes cached. Run 'lium volumes' first, or name the volume by its HUID.",
+                EXIT_GENERAL_ERROR,
+            )
 
-    age = _snapshot_age_seconds(last_selection, datetime.now(timezone.utc))
-    if age is None or age < 0 or age > POD_INDEX_TTL_SECONDS:
-        # same rule as pod indexes: never delete by a row number the caller saw too long ago
-        raise CliFailure(
-            "stale_volume_index",
-            f"The last 'lium volumes' list is older than {POD_INDEX_TTL_SECONDS // 60} minutes. "
-            "Run 'lium volumes' and retry.",
-            EXIT_CONFIGURATION_ERROR,
-        )
+        age = _snapshot_age_seconds(last_selection, datetime.now(timezone.utc))
+        if age is None or age < 0 or age > POD_INDEX_TTL_SECONDS:
+            # same rule as pod indexes: never delete by a row number the caller saw too long ago
+            raise CliFailure(
+                "stale_volume_index",
+                f"The last 'lium volumes' list is older than {POD_INDEX_TTL_SECONDS // 60} minutes. "
+                "Run 'lium volumes' and retry.",
+                EXIT_CONFIGURATION_ERROR,
+            )
+        volumes_data = last_selection.get('volumes', [])
 
-    volumes_data = last_selection.get('volumes', [])
+    live_volumes = None
+    if not all(t.isdigit() for t in targets):
+        # HUIDs/ids/names resolve against the live list, so no prior `lium volumes` is needed
+        live_volumes = [{'id': v.id, 'huid': v.huid, 'name': v.name} for v in Lium().volumes()]
 
     # Parse
-    parsed, error = parsing.parse(indices, volumes_data)
+    parsed, error = parsing.parse(indices, volumes_data, live_volumes)
     if error:
         raise CliFailure("invalid_arguments", error, EXIT_CONFIGURATION_ERROR)
 

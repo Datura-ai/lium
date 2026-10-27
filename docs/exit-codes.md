@@ -49,7 +49,7 @@ When a command is run for a machine reader, every failure is one JSON object:
 - `code` is a stable `snake_case` identifier to branch on; `message` is for people and may change wording. When the API refused with its own `error.code` (`insufficient_balance`, `pod_not_found`, …) that code is the one you get; the CLI's code for the failure class (table below) otherwise. `exit_code` is always the CLI's, by class.
 - `hint` is always present: the next command or option to try. When the API sent a hint with its refusal, that is the one you get; the CLI's own hint for the code otherwise.
 - `exit_code` repeats the process exit status for readers that only see the streams.
-- `data` (optional) carries anything the caller must not lose along with the failure — `lium signup --json`, for one, returns the credentials it generated; an API refusal puts the server's `request_id` here (also printed as `request_id: …` in the text rendering) to quote to support; `lium up` puts the pod it rented in `data.pod_id` / `data.pod_name` on the failures it raises after the rent (`pod_not_ready`, `pod_start_failed`, `gpu_count_mismatch` with `data.pod_removed` true or false under `--strict-gpus`, `gpu_verification_failed`, `jupyter_install_failed`, `ssh_connection_failed` with `data.ssh_port_answered` / `data.ssh_wait`, `ssh_wait_interrupted`) and on an API error (`server_error`, `rate_limited`, …) or an API that stops answering (`api_timeout`: the transport error `Lium.ps()` and `schedule_termination` re-raise once their retries run out, `install_jupyter` on the first lost connection) during the wait, the `--ttl` retry or the Jupyter install, because that pod exists and bills; a lost connection on the `--strict-gpus` removal is `gpu_count_mismatch` with `data.pod_removed` false; when `--volume new:…` created a volume, `lium up` puts it in `data.volume_id` (the API id) and `data.volume_huid` (what `--volume id:<HUID>` takes) on `timeout_before_rent` and on the failures at the rent itself (`api_timeout`, `rent_rejected`, and an API error such as `server_error`), because the volume exists and is kept.
+- `data` (optional) carries anything the caller must not lose along with the failure — `lium signup --json`, for one, returns the credentials it generated; an API refusal puts the server's `request_id` here (also printed as `request_id: …` in the text rendering) to quote to support; `lium up` puts the pod it rented in `data.pod_id` / `data.pod_name` on the failures it raises after the rent (`pod_not_ready`, `pod_start_failed`, `gpu_count_mismatch` with `data.pod_removed` true or false under `--strict-gpus`, `gpu_verification_failed`, `jupyter_install_failed`, `ssh_connection_failed` with `data.ssh_port_answered` / `data.ssh_wait`, `ssh_wait_interrupted`) and on an API error (`server_error`, `rate_limited`, …) or an API that stops answering (`api_timeout`: the transport error `Lium.ps()` and `schedule_termination` re-raise once their retries run out, `install_jupyter` on the first lost connection) during the wait, the `--ttl` retry or the Jupyter install, because that pod exists and bills (429s during pod-readiness polling back off within the remaining `--timeout` budget, capped by `--ready-timeout`; Jupyter status polling uses a separate wait); a lost connection on the `--strict-gpus` removal is `gpu_count_mismatch` with `data.pod_removed` false; when `--volume new:…` created a volume, `lium up` puts it in `data.volume_id` (the API id) and `data.volume_huid` (what `--volume id:<HUID>` takes) on `timeout_before_rent` and on the failures at the rent itself (`api_timeout`, `rent_rejected`, and an API error such as `server_error`), because the volume exists and is kept.
 
 The envelope goes to **stderr**, stdout is left empty, and the process exits
 with `exit_code`. On success stdout carries the result JSON. Read both streams;
@@ -81,7 +81,9 @@ json` print theirs (no `ok` wrapper: exit 0 says it worked):
 `up --json` implies `--no-ssh`: the command ends once the pod is ready, and `pod`
 has the keys of one row of `lium ps --format json`. `termination_time` is the
 time the backend was given by `--ttl`, `--until` or the `--budget` cap, and is
-absent when none was set. Pair `--json` with `--yes`: behind a pipe the price
+absent when none was set. With `--verify-gpus`, `gpu_verification` holds the
+counts the passed check saw (`{"expected": 8, "billed": 8, "visible": 8}`;
+`visible` is the `nvidia-smi` count); a failed check is the error envelope. Pair `--json` with `--yes`: behind a pipe the price
 prompt cannot be asked and the command fails with `confirmation_required`
 before anything is rented. The teardown is `lium rm … --format json` (its
 `{"removed": […], "failed": […]}` payload carries each pod's uptime and
@@ -89,7 +91,7 @@ estimated spend); `rm --json` is a hidden alias for it.
 
 Machine mode is on when any of these holds:
 
-- `--format json` (list commands: `ls`, `ps`, `templates`, `balance`, `describe`, `spend`, and every `clusters` command; and `rm`);
+- `--format json` (list commands: `ls`, `ps`, `templates`, `balance`, `describe`, `spend`, `record`, and every `clusters` command; and `rm`);
 - `--json` (accepted everywhere `--format json` is, and on `up`, `exec`, `describe`, `whoami`, `cp`, `fund`, `signup`, `init`, `audit`, `topup`, `keys`, `workspaces`);
 - the environment variable `LIUM_OUTPUT=json` — this switches *failures* to the envelope on every command; success output is JSON only on commands that take `--format json`/`--json`, so pass the flag as well when you need to parse the result.
 
@@ -117,6 +119,8 @@ Codes raised by the shared error handler (any command can produce them) when the
 | `not_found` | 3 | The API returned 404 for a resource other than the target pod. | List it again and retry. |
 | `rate_limited` | 3 | The API returned 429. | Wait and retry with back-off. |
 | `server_error` | 3 | The API returned 5xx. | Retry; `LIUM_DEBUG=1` prints the traceback on stderr. |
+| `gpu_reset_timeout` | 3 | `lium reset-gpu` (`Lium.reset_gpu`) sent the reset and got no final status in 330 s, or lost the connection to the server while it sent the reset. | Do not reset again yet: the reset may still be running. In a minute check the GPUs with `lium exec <pod> nvidia-smi`. |
+| `gpu_reset_unavailable` | 3 | `lium reset-gpu` (`Lium.reset_gpu`): the server could not send the reset to the GPU host, or the host did not answer in time (status `timeout`). | The reset may still finish. Check the GPUs with `lium exec <pod> nvidia-smi` before you reset again. |
 | `rent_outcome_unknown` | 3 | A rent (`lium up`, `Lium.rent`) got no answer, its resend was refused (401/403), and no pod shows up in the listing: the first request may still have rented a pod. | Do not re-run the rent yet: `lium ps` shows whether the pod exists; `lium rm <pod>` removes it. |
 | `lium_error` | 3 | Any other API failure. | Retry; `LIUM_DEBUG=1` prints the traceback on stderr. |
 | `ssh_unavailable` | 4 | The pod has no SSH endpoint yet. | Wait for `lium ps` to show it RUNNING with an SSH command. |

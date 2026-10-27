@@ -3,7 +3,7 @@ import re
 import time
 
 from lium.cli.actions import ActionResult
-from lium.sdk import ExecutorInfo, Template, PodInfo, Lium, LiumError
+from lium.sdk import ExecutorInfo, Template, PodInfo, Lium, LiumError, LiumRateLimitError
 from lium.sdk.client import RENT_BY_SPEC
 from lium.sdk.client import paramiko  # the lazy stand-in (DAH-3053): `paramiko.SSHException` below resolves when the except runs, not at import
 from lium.cli.utils import (
@@ -241,6 +241,7 @@ class RentPodAction:
         enable_volume_encryption: bool | None = ctx.get("enable_volume_encryption")
         backup_id: Optional[str] = ctx.get("backup_id")
         restore_path: Optional[str] = ctx.get("restore_path")
+        enable_backups: bool = ctx.get("enable_backups", True)
         # `lium up <node> -c N`: the node path only. On the spec path the count is part of the
         # spec the server selects on, so it is not sent twice.
         requested_gpu_count: Optional[int] = ctx.get("gpu_count")
@@ -258,6 +259,7 @@ class RentPodAction:
             enable_volume_encryption=enable_volume_encryption,
             backup_id=backup_id,
             restore_path=restore_path,
+            enable_backups=enable_backups,
         )
         if build_context_sha256:
             rental["build_context_sha256"] = build_context_sha256
@@ -564,14 +566,21 @@ class InstallJupyterAction:
 
         max_wait = 120
         wait_interval = 3
-        elapsed = 0
+        deadline = time.monotonic() + max_wait  # time inside ps() and its retries counts too (DAH-4993 review)
         pod_id = pod.id
 
-        while elapsed < max_wait:
-            time.sleep(wait_interval)
-            elapsed += wait_interval
+        while time.monotonic() < deadline:
+            time.sleep(min(wait_interval, max(0.0, deadline - time.monotonic())))
+            if time.monotonic() >= deadline:
+                break
 
-            all_pods = lium.ps()
+            try:
+                all_pods = lium.ps()
+            except LiumRateLimitError as exc:
+                # the API is busy, not the install: poll less often (never before Retry-After), still inside max_wait (DAH-4993)
+                wait_interval = max(exc.retry_after or 0, min(wait_interval * 2, 30))
+                continue
+            wait_interval = 3  # the API answered: back to the normal poll
             updated_pod = next((p for p in all_pods if p.id == pod_id or p.huid == pod_id or p.name == pod_id), None)
 
             if updated_pod and hasattr(updated_pod, 'jupyter_installation_status'):
