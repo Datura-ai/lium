@@ -40,8 +40,8 @@ def loading(message: str):
         with ui.loading("Loading pods"):
             pods = lium.ps()
     """
-    with loading_status(message, ""):
-        yield
+    with loading_status(message, "") as status:
+        yield status
 
 
 def load(message: str, fn: Callable[[], T]) -> T:

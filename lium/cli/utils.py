@@ -220,7 +220,7 @@ def loading_status(message: str, success_message: str = ""):
     status = Status(f"{console.get_styled(message + '...', 'info')}", console=console)
     status.start()
     try:
-        yield
+        yield status
         if success_message:
             console.success(f"✓ {success_message}")
     finally:
@@ -361,6 +361,7 @@ _HINTS_BY_CODE: Dict[str, str] = {
     # so the exit-3 "Retry" would rent a second pod (lium#328)
     "rent_outcome_unknown": "Do not re-run the rent yet: the pod may be rented and billing. "
                             "'lium ps' shows whether it exists; 'lium rm <pod>' removes it",
+    "invalid_gpu_index": "Pass a GPU index that 'nvidia-smi' shows inside the pod, or omit --gpu to reset all",
     "rate_limited": "Wait a few seconds and retry; back off if it repeats",
     "server_error": "Retry; if it persists, re-run with LIUM_DEBUG=1 and report the request",
     # Raised by the non-interactive guard (lium/cli/ui.py confirm/prompt, DAH-2883).
