@@ -397,3 +397,16 @@ def test_an_already_registered_node_behind_a_429_is_not_reported_as_another_acco
     record = reg.register_node(_http(portal), miner_hotkey=HOTKEY, gpu_type="NVIDIA L4", gpu_count=1,
                                ip_address="203.0.113.7", port=8080, price_per_gpu=0.11)
     assert record == reg.NodeRecord(node_id=None, already_registered=False)  # added; the list read is what failed
+
+
+def test_an_unknown_nvidia_model_without_price_asks_for_price_and_keeps_its_name(monkeypatch):
+    monkeypatch.setattr(reg, "fetch_shared_config", lambda: type("S", (), {"machine_prices": {"NVIDIA A100 80GB PCIe": 1.0}})())
+
+    with pytest.raises(reg.RegisterError) as e:
+        reg.resolve_price("NVIDIA A100-SXM4-40GB", None)
+
+    assert "--price" in str(e.value) and "--gpu-type" not in str(e.value)
+
+
+def test_an_unknown_nvidia_model_with_price_resolves_to_it():
+    assert reg.resolve_price("NVIDIA A100-SXM4-40GB", 0.30) == 0.30
