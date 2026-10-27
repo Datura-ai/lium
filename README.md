@@ -310,11 +310,11 @@ Teams share a workspace whose billing owner pays. An API key is bound to one wor
 
 ### Provider Commands
 
-`lium provider …` is the provider-side CLI — full automation parity with the portal frontend at lium.io/portal: portal authentication, node lifecycle, central-miner-server configuration, batch sync, billing, and machine-request queries. Hotkey registration is still handled separately via `btcli subnet register`.
+`lium provider …` is the provider-side CLI — full automation parity with the provider portal at https://provider.lium.io: portal authentication, node lifecycle, central-miner-server configuration, batch sync, billing, and machine-request queries. Hotkey registration is still handled separately via `btcli subnet register`.
 
 Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, `--portal-url`, `--json`, `--debug`, `-y/--yes`, `--dry-run`. Persist wallet identity once with `lium config set provider.coldkey <NAME>` and `lium config set provider.hotkey <NAME>`. Spend-affecting subcommands run a persona prompt unless `--yes` or `LIUM_PROVIDER_ACK=1` is set.
 
-**Account without a key (Google or e-mail):** create an API token in the portal (Profile Settings, API tokens), then `export LIUM_PROVIDER_TOKEN=lpk_...` (or save it with `lium provider portal login --token`); `lium provider` commands then run without `--hotkey`. An e-mail account can also run `lium provider portal login --email <address>`.
+**Account without a key (Google or e-mail):** create an API token at https://provider.lium.io/settings (API tokens), then `export LIUM_PROVIDER_TOKEN=lpk_...` (or save it with `lium provider portal login --token`); `lium provider` commands then run without `--hotkey`. An e-mail account can also run `lium provider portal login --email <address>`.
 
 - `lium provider portal {login,logout,whoami}` - Manage the cached portal JWT
 - `lium provider status [--netuid 51]` - Aggregated provider snapshot (registration, portal session, nodes, validator weights)
