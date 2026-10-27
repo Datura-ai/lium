@@ -78,3 +78,11 @@ test('terminate: accepted, pending and repeated deletion report deletion_request
     assert.notStrictEqual(out.terminated, true);
   }
 });
+
+test('rent is hidden and refuses without calling Lium', async () => {
+  const rent = App.creates.rent_gpu_pod;
+  assert.strictEqual(rent.display.hidden, true);
+  let called = false;
+  await assert.rejects(rent.operation.perform({ request: async () => { called = true; } }, { inputData: {} }), /not available from Zapier/);
+  assert.strictEqual(called, false);
+});

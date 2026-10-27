@@ -1,6 +1,6 @@
 ## 1.0.5
 
-- Removed the Rent GPU Pod action: Zapier does not publish integrations that make financial transactions. Find GPU Offers, the triggers and Terminate Pod stay.
+- Rent GPU Pod no longer rents: the action is hidden and returns an error pointing to lium.io, the lium CLI or the API, because Zapier does not publish integrations that make financial transactions (Zapier refuses to delete an action that existing Zaps use). Find GPU Offers, the triggers and Terminate Pod stay.
 
 ## 1.0.4
 
