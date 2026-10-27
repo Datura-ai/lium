@@ -82,6 +82,8 @@ test('terminate: accepted, pending and repeated deletion report deletion_request
 test('rent is hidden and refuses without calling Lium', async () => {
   const rent = App.creates.rent_gpu_pod;
   assert.strictEqual(rent.display.hidden, true);
+  // a migrated step still shows its fields: none may promise a rental
+  for (const f of rent.operation.inputFields) assert.match(f.helpText, /^Unused: renting is not available/);
   let called = false;
   await assert.rejects(rent.operation.perform({ request: async () => { called = true; } }, { inputData: {} }), /not available from Zapier/);
   assert.strictEqual(called, false);
