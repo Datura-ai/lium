@@ -573,6 +573,7 @@ class InstallJupyterAction:
         wait_interval = 3
         deadline = time.monotonic() + max_wait  # time inside ps() and its retries counts too (DAH-4993 review)
         pod_id = pod.id
+        no_url = False
 
         while time.monotonic() < deadline:
             time.sleep(min(wait_interval, max(0.0, deadline - time.monotonic())))
@@ -589,19 +590,26 @@ class InstallJupyterAction:
             updated_pod = next((p for p in all_pods if p.id == pod_id or p.huid == pod_id or p.name == pod_id), None)
 
             if updated_pod and hasattr(updated_pod, 'jupyter_installation_status'):
-                if updated_pod.jupyter_installation_status == "SUCCESS":
-                    jupyter_url = getattr(updated_pod, 'jupyter_url', None)
+                jupyter_url = getattr(updated_pod, 'jupyter_url', None)
+                # a rent-time install is stamped SUCCESS from the intent even when no port was mapped for it:
+                # only a SUCCESS with a URL is a reachable Jupyter (DAH-3698)
+                if updated_pod.jupyter_installation_status == "SUCCESS" and jupyter_url:
                     return ActionResult(
                         ok=True,
                         data={"jupyter_url": jupyter_url, "jupyter_port": jupyter_port}
                     )
-                elif updated_pod.jupyter_installation_status == "FAILED":
+                if updated_pod.jupyter_installation_status == "FAILED":
                     error_details = getattr(updated_pod, 'jupyter_error', '')
                     error_msg = f"Jupyter installation failed"
                     if error_details:
                         error_msg += f": {error_details}"
                     return ActionResult(ok=False, data={}, error=error_msg)
+                no_url = updated_pod.jupyter_installation_status == "SUCCESS"
 
+        if no_url:
+            return ActionResult(
+                ok=False, data={}, error="Jupyter has no URL: the node mapped no port for it. Run 'lium ps' to check status"
+            )
         return ActionResult(
             ok=False,
             data={},
