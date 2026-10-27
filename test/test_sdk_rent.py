@@ -130,7 +130,7 @@ def test_rent_posts_the_spec_once_and_maps_the_pick(client):
         "min_download_mbps": 100,
         "pod_name": "train-1", "template_id": None, "dockerfile_content": None, "volume_id": None,
         "user_public_key": [KEY], "initial_port_count": 3, "enable_volume_encryption": True,
-        "backup_log_id": None, "restore_path": None, "enable_backups": True, "dry_run": False,
+        "backup_log_id": None, "restore_path": None, "enable_backups": True, "dry_run": False, "enable_jupyter": False,
     }
     assert [c.request.url for c in responses.calls] == [f"{BASE}/version", f"{BASE}/pods", f"{BASE}/executors/rent-by-spec"]
     assert isinstance(result, RentResult) and result.server_side is True and result.gpu_count == 1
@@ -585,7 +585,7 @@ def test_rent_by_spec_asks_the_server_for_jupyter_only_when_wanted(client):
     client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY], enable_jupyter=True)
     assert json.loads(responses.calls[-1].request.body)["enable_jupyter"] is True
     client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY])
-    assert "enable_jupyter" not in json.loads(responses.calls[-1].request.body)
+    assert json.loads(responses.calls[-1].request.body)["enable_jupyter"] is False
 
 
 @responses.activate

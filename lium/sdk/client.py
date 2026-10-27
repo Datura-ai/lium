@@ -1397,10 +1397,9 @@ class Lium:
             "restore_path": restore_path,
             "enable_backups": enable_backups,
         }
-        if enable_jupyter:
-            # the server installs Jupyter and holds a second port for it at rent (DAH-3698: a tight split node
-            # gives a pod without it the SSH port only)
-            payload["enable_jupyter"] = True
+        # said either way: the server installs Jupyter and holds its port when True, and a request that does not say
+        # gets that port held too (DAH-3698), which an SSH-only pod should not pay for
+        payload["enable_jupyter"] = bool(enable_jupyter)
         if gpu_count is not None:
             payload["gpu_count"] = gpu_count
         if termination_hours is not None:
@@ -2046,8 +2045,7 @@ class Lium:
         }
         if rental["termination_hours"] is not None:
             payload["termination_hours"] = rental["termination_hours"]
-        if rental.get("enable_jupyter"):
-            payload["enable_jupyter"] = True
+        payload["enable_jupyter"] = bool(rental.get("enable_jupyter"))
         gpu_count = int(spec.get("gpu_count") or 1)
         # A rent is billable and a lost response may have succeeded server-side, so it is never
         # retried blindly; a dry run rents nothing and keeps the retries. Pods that exist before
