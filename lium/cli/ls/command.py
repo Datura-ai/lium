@@ -103,9 +103,8 @@ def ls_command(
     Rows are cheapest $/GPU·h first; nodes without a price come last. ★ marks
     nodes no other node beats: a node more than 10% faster to download wins
     outright; at a similar download speed a node wins by being no worse, and
-    better somewhere, on price, VRAM, RAM, disk, PCIe, memory bandwidth, TFLOPS,
-    upload and US location (at the same price, bandwidth and US location count
-    before the hardware specs). Nodes under 100 Mbps download are never ★.
+    better somewhere, on price, VRAM, RAM, disk, upload and US location (at the
+    same price, bandwidth and US location count before the hardware specs). Nodes under 100 Mbps download are never ★.
     --sort picks another key.
 
     Link shows how the GPUs of a node are wired to each other (NV18 = NVLink with

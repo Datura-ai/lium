@@ -108,7 +108,7 @@ def opt_out(ctx: click.Context) -> None:
 @with_provider_overrides
 @click.pass_context
 def set_email(ctx: click.Context, email: str) -> None:
-    require_hotkey(ctx, group="config")
+    require_hotkey(ctx, group="config", signer=True)
     require_persona_ack(ctx)
     client = build_client(ctx)
     try:
@@ -132,7 +132,7 @@ def set_email(ctx: click.Context, email: str) -> None:
 @with_provider_overrides
 @click.pass_context
 def set_password(ctx: click.Context, new_password: str | None) -> None:
-    require_hotkey(ctx, group="config")
+    require_hotkey(ctx, group="config", signer=True)
     stop_if_dry_run(ctx)
     if not new_password:
         if _json_mode(ctx):

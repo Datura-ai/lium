@@ -241,6 +241,7 @@ class RentPodAction:
         enable_volume_encryption: bool | None = ctx.get("enable_volume_encryption")
         backup_id: Optional[str] = ctx.get("backup_id")
         restore_path: Optional[str] = ctx.get("restore_path")
+        enable_backups: bool = ctx.get("enable_backups", True)
         # `lium up <node> -c N`: the node path only. On the spec path the count is part of the
         # spec the server selects on, so it is not sent twice.
         requested_gpu_count: Optional[int] = ctx.get("gpu_count")
@@ -258,6 +259,7 @@ class RentPodAction:
             enable_volume_encryption=enable_volume_encryption,
             backup_id=backup_id,
             restore_path=restore_path,
+            enable_backups=enable_backups,
         )
         if build_context_sha256:
             rental["build_context_sha256"] = build_context_sha256

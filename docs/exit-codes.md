@@ -81,7 +81,9 @@ json` print theirs (no `ok` wrapper: exit 0 says it worked):
 `up --json` implies `--no-ssh`: the command ends once the pod is ready, and `pod`
 has the keys of one row of `lium ps --format json`. `termination_time` is the
 time the backend was given by `--ttl`, `--until` or the `--budget` cap, and is
-absent when none was set. Pair `--json` with `--yes`: behind a pipe the price
+absent when none was set. With `--verify-gpus`, `gpu_verification` holds the
+counts the passed check saw (`{"expected": 8, "billed": 8, "visible": 8}`;
+`visible` is the `nvidia-smi` count); a failed check is the error envelope. Pair `--json` with `--yes`: behind a pipe the price
 prompt cannot be asked and the command fails with `confirmation_required`
 before anything is rented. The teardown is `lium rm … --format json` (its
 `{"removed": […], "failed": […]}` payload carries each pod's uptime and
