@@ -1,3 +1,7 @@
+## 1.0.5
+
+- Removed the Rent GPU Pod action: Zapier does not publish integrations that make financial transactions. Find GPU Offers, the triggers and Terminate Pod stay.
+
 ## 1.0.4
 
 - Rent GPU Pod: the pod-name code comes from the Idempotency Key and the rental (GPU model, GPU count, SSH key, template), so the same key on a different rental is no longer handed the first pod; it reaches Lium, which refuses a reused key. A replay that finds its pod returns the same fields as a fresh rental (`price_per_hour`, `template_id`, and `node` with `id`, `machine_name`, `gpu_count` and `price_per_gpu`, the charged price over the rented GPUs, on both paths).
