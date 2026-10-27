@@ -1648,7 +1648,10 @@ class Lium:
         pod_id = (response or {}).get("id") or (response or {}).get("pod_id")
         if not pod_id:
             raise still_unknown(ValueError("the answer named no pod"))
-        return {"id": str(pod_id), "name": error.pod_name, "executor_id": error.executor_id}
+        # the stored first answer carries the same backup_notice the lost response did
+        notice = (response or {}).get("backup_notice") or (getattr(resp, "headers", None) or {}).get(BACKUP_NOTICE_HEADER)
+        return {"id": str(pod_id), "name": error.pod_name, "executor_id": error.executor_id,
+                **({"backup_notice": notice} if notice else {})}
 
     def _list_pods_or_none(self) -> Optional[List[PodInfo]]:
         """``ps()`` for the rent lookups: ``None`` when the listing itself failed,

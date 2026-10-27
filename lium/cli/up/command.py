@@ -791,12 +791,14 @@ def up_command(
         )
     executor = rented
     ui.dim(f"pod {pod_name} (id: {pod_id}) created; waiting for it to become ready")
+    if backup_notice:
+        ui.warning(escape(backup_notice))  # now, not at the end: a later failure must not hide it
 
     # The pod is rented and already billing from here on. Every failure below
     # names it before propagating, or the caller cannot clean up what it pays for.
     # In the JSON envelope the name lives in ``data`` too, so a program does not
     # have to parse it out of the message.
-    billing_pod = {"pod_id": pod_id, "pod_name": pod_name}
+    billing_pod = {"pod_id": pod_id, "pod_name": pod_name, **({"backup_notice": backup_notice} if backup_notice else {})}
     #
     # --ttl/--until are scheduled now, with the id the rent returned, not once the pod is ready:
     # a pod that never gets there (a wait that runs out, a stuck pull) bills all the same, and
@@ -1008,8 +1010,6 @@ def up_command(
     # Always state what was created: a caller that only gets an SSH banner or a
     # log stream has no way to name the pod it is now paying for.
     ui.info(f"{pod_label} ready")
-    if backup_notice:
-        ui.warning(escape(backup_notice))
 
     if restore_backup_id:
         ui.warning(

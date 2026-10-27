@@ -187,6 +187,28 @@ def test_up_says_when_the_pod_rented_without_its_backup(monkeypatch):
     assert notice in result.stderr
 
 
+@pytest.mark.parametrize(
+    "outcome, args",
+    [
+        (dict(jupyter="failed"), ["--jupyter"]),
+        (dict(jupyter="network_error"), ["--jupyter"]),
+        (dict(wait="timeout"), []),
+        (dict(wait="failed"), []),
+        (dict(wait="network_error"), []),
+        (dict(schedule_error=requests.ConnectionError("connection reset")), ["--ttl", "2h"]),
+    ],
+)
+def test_up_keeps_the_backup_notice_when_a_step_after_the_rent_fails(monkeypatch, outcome, args):
+    """DAH-5023: the pod rented and bills whatever fails next, so its backup notice is shown and named in data."""
+    notice = "Backups need a paid deposit: this pod rents without a backup."
+    result, _ = _run_up(monkeypatch, args, backup_notice=notice, **outcome)
+
+    assert result.exit_code != 0
+    assert notice in result.stderr
+    envelope = json.loads(result.stderr.strip().splitlines()[-1])
+    assert envelope["data"]["backup_notice"] == notice and envelope["data"]["pod_id"] == "pod-1"
+
+
 def test_up_json_ends_after_the_pod_is_ready_without_an_ssh_session(monkeypatch):
     """`--json` without `--no-ssh` used to fall through to the interactive SSH session."""
     result, calls = _run_up(monkeypatch)
