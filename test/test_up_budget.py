@@ -196,10 +196,16 @@ def test_ps_table_shows_spent_against_the_cap():
 
 def test_ps_spent_column_is_wide_enough_for_a_three_digit_cap():
     """"$200.00/$480.00" is 15 characters; a narrower fixed column cropped it to "$200.00/$480.…"."""
-    table, _ = ps_display.build_pods_table([_pod(removal="2026-09-05T17:00:00Z")])
+    import io
 
-    spent = next(column for column in table.columns if column.header == "Spent")
-    assert spent.width >= len("$200.00/$480.00")
+    from rich.console import Console
+
+    pod = _pod(removal="2026-09-05T17:00:00Z")
+    table, _ = ps_display.build_pods_table([pod])
+    out = io.StringIO()
+    Console(file=out, width=80, force_terminal=False).print(table)
+
+    assert ps_display._format_spent(pod.created_at, pod.removal_scheduled_at, PRICE) in out.getvalue()
 
 
 # --- lium up --budget -----------------------------------------------------------------------

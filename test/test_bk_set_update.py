@@ -1,4 +1,4 @@
-"""bk set updates an existing backup schedule in place.
+"""bk set updates an existing backup schedule in place; bk show names the effective path.
 
 Kept in its own file so this coverage does not depend on test_backup_cli.py
 or test_sdk_client.py, which lium#307 removes.
@@ -159,3 +159,28 @@ def test_backup_update_puts_the_new_schedule_on_the_existing_config(monkeypatch)
         "payload": {"backup_frequency_hours": 24, "retention_days": 30, "backup_path": "/root/data"},
     }
     assert config.backup_frequency_hours == 24
+
+
+def test_bk_show_names_the_default_path_when_the_api_returns_none(monkeypatch):
+    from lium.cli.bk.show import command as show_command
+
+    class FakeLium:
+        def __init__(self, source="sdk"):
+            pass
+
+        def ps(self):
+            return [_pod()]
+
+        def backup_config(self, pod):
+            return SimpleNamespace(id="config-123", backup_path="", backup_frequency_hours=6,
+                                   retention_days=2, next_backup_at=None)
+
+        def backup_logs(self, pod):
+            return []
+
+    _patch_backup_command(monkeypatch, show_command, FakeLium)
+
+    result = CliRunner().invoke(cli, ["bk", "show", "backup-test"])
+
+    assert result.exit_code == 0, result.output
+    assert "path=/root," in result.output

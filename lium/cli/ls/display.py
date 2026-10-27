@@ -165,7 +165,7 @@ def _specs_row(executor: ExecutorInfo) -> Dict[str, str]:
     download, download_source = network_speed(executor, "download")
     upload, upload_source = network_speed(executor, "upload")
     if not specs:
-        row = {k: "—" for k in ["VRAM", "RAM", "CPUs", "Disk", "DiskTotal", "Country", "PCIe", "Ports"]}
+        row = {k: "—" for k in ["VRAM", "RAM", "CPUs", "Disk", "DiskTotal", "Country", "Ports"]}
         row.update(Upload=_speed_cell(upload, upload_source), Download=_speed_cell(download, download_source))
         return row
 
@@ -182,7 +182,6 @@ def _specs_row(executor: ExecutorInfo) -> Dict[str, str]:
         "Disk": _maybe_gi_from_big_number(disk.get("free")),
         "DiskTotal": _maybe_gi_from_big_number(disk.get("total")),
         "Country": _country_name(specs.get("location")),
-        "PCIe": _maybe_int(d.get("pcie_speed")),
         "Upload": _speed_cell(upload, upload_source),
         "Download": _speed_cell(download, download_source),
         "Ports": _maybe_int(specs.get("available_port_count")),
@@ -295,7 +294,7 @@ def format_tip(power_limited_rows: bool = False) -> str:
     tip = (
         f"Tip: {console.get_styled('lium up <index>', 'success')} {console.get_styled('# e.g. lium up 1', 'dim')}\n"
         f"{console.get_styled('default order: cheapest $/GPU·h first; --sort picks another key', 'dim')}\n"
-        f"{console.get_styled('★ = no other node beats it: a 10% faster download wins outright, else better on price and specs (VRAM, RAM, disk, PCIe, memory bandwidth, TFLOPS, upload, US location)', 'dim')}\n"
+        f"{console.get_styled('★ = no other node beats it: a 10% faster download wins outright, else better on price and specs (VRAM, RAM, disk, upload, US location)', 'dim')}\n"
         f"{console.get_styled(REPORTED_FOOTNOTE, 'dim')}"
     )
     if power_limited_rows:

@@ -81,7 +81,9 @@ json` print theirs (no `ok` wrapper: exit 0 says it worked):
 `up --json` implies `--no-ssh`: the command ends once the pod is ready, and `pod`
 has the keys of one row of `lium ps --format json`. `termination_time` is the
 time the backend was given by `--ttl`, `--until` or the `--budget` cap, and is
-absent when none was set. Pair `--json` with `--yes`: behind a pipe the price
+absent when none was set. With `--verify-gpus`, `gpu_verification` holds the
+counts the passed check saw (`{"expected": 8, "billed": 8, "visible": 8}`;
+`visible` is the `nvidia-smi` count); a failed check is the error envelope. Pair `--json` with `--yes`: behind a pipe the price
 prompt cannot be asked and the command fails with `confirmation_required`
 before anything is rented. The teardown is `lium rm … --format json` (its
 `{"removed": […], "failed": […]}` payload carries each pod's uptime and
@@ -117,6 +119,8 @@ Codes raised by the shared error handler (any command can produce them) when the
 | `not_found` | 3 | The API returned 404 for a resource other than the target pod. | List it again and retry. |
 | `rate_limited` | 3 | The API returned 429. | Wait and retry with back-off. |
 | `server_error` | 3 | The API returned 5xx. | Retry; `LIUM_DEBUG=1` prints the traceback on stderr. |
+| `gpu_reset_timeout` | 3 | `lium reset-gpu` (`Lium.reset_gpu`) sent the reset and got no final status in 330 s, or lost the connection to the server while it sent the reset. | Do not reset again yet: the reset may still be running. In a minute check the GPUs with `lium exec <pod> nvidia-smi`. |
+| `gpu_reset_unavailable` | 3 | `lium reset-gpu` (`Lium.reset_gpu`): the server could not send the reset to the GPU host, or the host did not answer in time (status `timeout`). | The reset may still finish. Check the GPUs with `lium exec <pod> nvidia-smi` before you reset again. |
 | `rent_outcome_unknown` | 3 | A rent (`lium up`, `Lium.rent`) got no answer, its resend was refused (401/403), and no pod shows up in the listing: the first request may still have rented a pod. | Do not re-run the rent yet: `lium ps` shows whether the pod exists; `lium rm <pod>` removes it. |
 | `lium_error` | 3 | Any other API failure. | Retry; `LIUM_DEBUG=1` prints the traceback on stderr. |
 | `ssh_unavailable` | 4 | The pod has no SSH endpoint yet. | Wait for `lium ps` to show it RUNNING with an SSH command. |

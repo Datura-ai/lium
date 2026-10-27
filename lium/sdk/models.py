@@ -57,6 +57,9 @@ class ExecutorInfo(_Serializable):
     # partially rented split host this is the smaller number, and a rent that names
     # no count takes and is billed for exactly these.
     available_gpu_count: Optional[int] = None
+    # True when the API listed the node with min_gpu_count_for_rental null: it rents whole only
+    # (every GPU), so a partial count is refused. None = the API did not say.
+    whole_host_only: Optional[bool] = None
 
     # How the GPUs are wired to each other, as Lium's `nvidia-smi topo` check saw them:
     # {"gpu_count", "gpu_pairs", "nvlink", "nvlink_links", "nvlink_pairs", "nvlink_active_links",
@@ -504,6 +507,26 @@ class GpuStats(_Serializable):
 
     def _derived(self) -> Dict[str, Any]:
         return {"memory_pct": self.memory_pct}
+
+
+@dataclass
+class GpuResetOutcome(_Serializable):
+    """One GPU's result of :meth:`Lium.reset_gpu`: ``result`` is ``reset``, ``latch_cleared`` or ``failed``."""
+
+    index: int
+    uuid: str
+    result: str
+    detail: Optional[str] = None
+
+
+@dataclass
+class GpuResetResult(_Serializable):
+    """What :meth:`Lium.reset_gpu` returns when every GPU was reset."""
+
+    pod_id: str
+    ok: bool
+    container_restarted: bool
+    gpus: List[GpuResetOutcome]
 
 
 @dataclass

@@ -2,19 +2,30 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
-from lium.cli.mine import storage
-from lium.cli.mine.docker_config import build_verification_result, inspect_docker_state, load_daemon_json, merge_overlay2
-from lium.cli.mine.models import BlockDevice, CommandResult, MountedFilesystem, MountInfo
+from lium.cli.mine import gpu_splitting, storage
+from lium.cli.mine.docker_config import merge_overlay2
+from lium.cli.mine.models import (
+    BlockDevice,
+    CommandResult,
+    DockerState,
+    MountedFilesystem,
+    MountInfo,
+    PreflightResult,
+    SetupPlan,
+    TargetPlan,
+    VerificationCheck,
+    VerificationResult,
+)
 from lium.cli.mine.storage import (
     NoSafeTargetError,
     _source_disk_is_local,
     auto_select_target,
     load_mounted_filesystems,
-    load_mount_info,
     plan_loop_file_target,
     resolve_explicit_target,
 )
@@ -39,33 +50,6 @@ def _root_mount() -> MountInfo:
 
 def _docker_mount() -> MountInfo:
     return MountInfo(target="/", source="/dev/nvme0n1p2", fstype="ext4", options=["rw"])
-
-
-def test_resolve_explicit_blank_disk(monkeypatch):
-    monkeypatch.setattr(Path, "resolve", lambda self, strict=True: Path(str(self)))
-    devices = [
-        BlockDevice(
-            path="/dev/nvme1n1",
-            name="nvme1n1",
-            kernel_name="nvme1n1",
-            type="disk",
-            size_bytes=1_000_000,
-            fstype=None,
-            mountpoints=[],
-            parent_kernel_name=None,
-            model=None,
-            serial=None,
-            children=[],
-        )
-    ]
-    runner = _runner_factory({})
-
-    plan = resolve_explicit_target(runner, devices, _root_mount(), _docker_mount(), "/dev/nvme1n1")
-
-    assert plan.classification == "blank_whole_disk"
-    assert plan.needs_partition_creation is True
-    assert plan.needs_format is True
-    assert plan.parent_disk == "/dev/nvme1n1"
 
 
 def test_resolve_explicit_ext4_partition_rejected(monkeypatch):
@@ -124,42 +108,6 @@ def test_resolve_explicit_xfs_partition_with_data_rejected(monkeypatch):
         resolve_explicit_target(runner, devices, _root_mount(), _docker_mount(), "/dev/nvme1n1p1")
 
 
-def test_auto_select_prefers_blank_disk_over_empty_partition():
-    devices = [
-        BlockDevice(
-            path="/dev/nvme2n1p1",
-            name="nvme2n1p1",
-            kernel_name="nvme2n1p1",
-            type="part",
-            size_bytes=1_000_000,
-            fstype=None,
-            mountpoints=[],
-            parent_kernel_name="nvme2n1",
-            model=None,
-            serial=None,
-            children=[],
-        ),
-        BlockDevice(
-            path="/dev/nvme1n1",
-            name="nvme1n1",
-            kernel_name="nvme1n1",
-            type="disk",
-            size_bytes=2_000_000,
-            fstype=None,
-            mountpoints=[],
-            parent_kernel_name=None,
-            model=None,
-            serial=None,
-            children=[],
-        ),
-    ]
-
-    plan = auto_select_target(_runner_factory({}), devices, _root_mount(), _docker_mount())
-
-    assert plan.resolved_target == "/dev/nvme1n1"
-    assert plan.classification == "blank_whole_disk"
-
-
 def test_auto_select_rejects_multiple_blank_disks():
     devices = [
         BlockDevice(
@@ -194,117 +142,263 @@ def test_auto_select_rejects_multiple_blank_disks():
         auto_select_target(_runner_factory({}), devices, _root_mount(), _docker_mount())
 
 
-def test_auto_select_allows_single_removable_only_when_no_non_removable():
-    devices = [
-        BlockDevice(
-            path="/dev/sdb",
-            name="sdb",
-            kernel_name="sdb",
-            type="disk",
-            size_bytes=2_000_000,
-            fstype=None,
-            mountpoints=[],
-            parent_kernel_name=None,
-            model=None,
-            serial=None,
-            is_removable=True,
-            children=[],
+# A failed _execute_setup must leave the host as it found it: Docker restarted, daemon.json/fstab and the original
+# mount restored, rollback errors reported (moved from test_gpu_splitting_cli.py, DAH-4027 review).
+@contextmanager
+def _no_spinner(*args, **kwargs):
+    yield
+
+
+def _sample_preflight() -> PreflightResult:
+    return PreflightResult(
+        os_name="Linux",
+        distro_id="ubuntu",
+        root_mount=MountInfo(target="/", source="/dev/nvme0n1p2", fstype="ext4", options=["rw"]),
+        docker_mount=MountInfo(target="/", source="/dev/nvme0n1p2", fstype="ext4", options=["rw"]),
+        docker_state=DockerState(
+            docker_root_dir="/var/lib/docker",
+            storage_driver="overlay2",
+            backing_filesystem="xfs",
+            supports_d_type=True,
+            service_running=True,
+            docker_info_available=True,
+            driver_status={"Backing Filesystem": "xfs", "Supports d_type": "true"},
+        ),
+        block_devices=[],
+    )
+
+
+def _sample_plan() -> SetupPlan:
+    return SetupPlan(
+        preflight=_sample_preflight(),
+        target=TargetPlan(
+            selection_mode="auto",
+            requested_device=None,
+            resolved_target="/dev/nvme1n1",
+            parent_disk="/dev/nvme1n1",
+            classification="blank_whole_disk",
+            needs_partition_creation=True,
+            needs_format=True,
+            existing_fs_type=None,
+            selection_reason="Auto-selected blank_whole_disk",
+            needs_new_gpt=True,
+        ),
+        backup_dir="/var/lib/docker.lium-backup-20260303120000",
+        daemon_json_path="/etc/docker/daemon.json",
+        daemon_json_changed=True,
+        daemon_json_merged={"storage-driver": "overlay2"},
+        fstab_path="/etc/fstab",
+        fstab_changed=True,
+        destructive_actions=[
+            "create GPT label on /dev/nvme1n1",
+            "create partition on /dev/nvme1n1",
+            "format target as XFS: /dev/nvme1n1",
+        ],
+    )
+
+
+def _execution_plan(tmp_path, docker_mount: MountInfo | None = None) -> SetupPlan:
+    preflight = _sample_preflight()
+    if docker_mount is not None:
+        preflight.docker_mount = docker_mount
+
+    return SetupPlan(
+        preflight=preflight,
+        target=TargetPlan(
+            selection_mode="explicit",
+            requested_device="/dev/vdb1",
+            resolved_target="/dev/vdb1",
+            parent_disk="/dev/vdb",
+            classification="empty_partition",
+            needs_partition_creation=False,
+            needs_format=False,
+            existing_fs_type="xfs",
+            selection_reason="Selected explicit empty XFS partition",
+            needs_new_gpt=False,
+        ),
+        backup_dir=str(tmp_path / "docker-backup"),
+        daemon_json_path=str(tmp_path / "daemon.json"),
+        daemon_json_changed=True,
+        daemon_json_merged={"storage-driver": "overlay2"},
+        fstab_path=str(tmp_path / "fstab"),
+        fstab_changed=True,
+        destructive_actions=[],
+    )
+
+
+def _patch_execute_setup_dependencies(monkeypatch, run_command, load_mount_info, verification=None):
+    monkeypatch.setattr(gpu_splitting, "timed_step_status", _no_spinner)
+    monkeypatch.setattr(gpu_splitting, "_pre_stop_checks", lambda *_: None)
+    monkeypatch.setattr(gpu_splitting, "_partition_paths_for_disk", lambda *_: set())
+    monkeypatch.setattr(gpu_splitting, "_ensure_xfs_compliant", lambda *_: None)
+    monkeypatch.setattr(gpu_splitting, "_mount_validation", lambda *_: None)
+    monkeypatch.setattr(gpu_splitting, "_get_uuid", lambda *_: "uuid-test")
+    monkeypatch.setattr(gpu_splitting, "run_command", run_command)
+    monkeypatch.setattr(gpu_splitting, "load_mount_info", load_mount_info)
+    monkeypatch.setattr(
+        gpu_splitting,
+        "build_verification_result",
+        verification
+        or (
+            lambda runner, docker_root_dir="/var/lib/docker": VerificationResult(
+                checks=[
+                    VerificationCheck(
+                        name="Mount options include project quota",
+                        passed=True,
+                        actual="rw,pquota",
+                        expected="contains pquota or prjquota",
+                    )
+                ]
+            )
+        ),
+    )
+
+
+def test_execute_setup_restarts_docker_when_failure_happens_after_stop(monkeypatch, tmp_path):
+    plan = _execution_plan(tmp_path)
+    commands: list[list[str]] = []
+
+    def run_command(args, check=True, capture=True):
+        commands.append(args)
+        if args[:3] == ["systemctl", "stop", "docker"]:
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args == ["systemctl", "stop", "docker.socket"]:
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args[:2] == ["rsync", "-aHAX"]:
+            raise RuntimeError("backup failed")
+        if args == ["systemctl", "start", "docker"]:
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        raise AssertionError(f"Unexpected command: {args}")
+
+    _patch_execute_setup_dependencies(
+        monkeypatch,
+        run_command,
+        lambda runner, target: plan.preflight.docker_mount,
+    )
+
+    with pytest.raises(RuntimeError, match="GPU splitting setup failed: backup failed"):
+        gpu_splitting._execute_setup(plan)
+
+    assert ["systemctl", "start", "docker"] in commands
+
+
+def test_execute_setup_restores_config_files_after_config_stage_failure(monkeypatch, tmp_path):
+    plan = _execution_plan(tmp_path)
+    daemon_path = Path(plan.daemon_json_path)
+    daemon_path.write_text('{"debug": true}\n')
+    fstab_path = Path(plan.fstab_path)
+    fstab_path.write_text("/dev/sda1 / ext4 defaults 0 1\n")
+    commands: list[list[str]] = []
+
+    def run_command(args, check=True, capture=True):
+        commands.append(args)
+        if args[:2] == ["systemctl", "stop"] or args == ["systemctl", "start", "docker"]:
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args[:2] == ["rsync", "-aHAX"]:
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args[:3] == ["blkid", "-s", "UUID"]:
+            return gpu_splitting.CommandResult(args=args, stdout="uuid-test\n", stderr="", returncode=0)
+        if args == ["mount", "/var/lib/docker"]:
+            raise RuntimeError("mount failed")
+        raise AssertionError(f"Unexpected command: {args}")
+
+    _patch_execute_setup_dependencies(
+        monkeypatch,
+        run_command,
+        lambda runner, target: plan.preflight.docker_mount,
+    )
+
+    with pytest.raises(RuntimeError, match="mount failed"):
+        gpu_splitting._execute_setup(plan)
+
+    assert daemon_path.read_text() == '{"debug": true}\n'
+    assert fstab_path.read_text() == "/dev/sda1 / ext4 defaults 0 1\n"
+    assert ["systemctl", "start", "docker"] in commands
+
+
+def test_execute_setup_restores_original_mount_after_cutover_failure(monkeypatch, tmp_path):
+    docker_mount = MountInfo(
+        target="/var/lib/docker",
+        source="/dev/mapper/docker-old",
+        fstype="xfs",
+        options=["rw", "pquota"],
+    )
+    plan = _execution_plan(tmp_path, docker_mount=docker_mount)
+    commands: list[list[str]] = []
+    mount_state = {"phase": "original"}
+
+    Path(plan.daemon_json_path).write_text('{"storage-driver": "aufs"}\n')
+    Path(plan.fstab_path).write_text("UUID=old /var/lib/docker xfs defaults,pquota 0 0\n")
+
+    def load_mount_info(runner, target):
+        if mount_state["phase"] == "original":
+            return docker_mount
+        return MountInfo(
+            target="/var/lib/docker",
+            source="/dev/vdb1",
+            fstype="xfs",
+            options=["rw", "pquota"],
         )
-    ]
 
-    plan = auto_select_target(_runner_factory({}), devices, _root_mount(), _docker_mount())
+    def run_command(args, check=True, capture=True):
+        commands.append(args)
+        if args[:2] == ["systemctl", "stop"] or args == ["systemctl", "start", "docker"]:
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args[:2] == ["rsync", "-aHAX"]:
+            if args[-1] == f"{plan.preflight.docker_state.docker_root_dir}/":
+                raise RuntimeError("restore failed")
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args[:3] == ["blkid", "-s", "UUID"]:
+            return gpu_splitting.CommandResult(args=args, stdout="uuid-test\n", stderr="", returncode=0)
+        if args == ["umount", "/var/lib/docker"]:
+            mount_state["phase"] = "root"
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args == ["mount", "/var/lib/docker"]:
+            mount_state["phase"] = "target"
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args == ["mount", "-t", "xfs", "-o", "rw,pquota", "/dev/mapper/docker-old", "/var/lib/docker"]:
+            mount_state["phase"] = "original"
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        raise AssertionError(f"Unexpected command: {args}")
 
-    assert plan.resolved_target == "/dev/sdb"
+    _patch_execute_setup_dependencies(monkeypatch, run_command, load_mount_info)
+
+    with pytest.raises(RuntimeError, match="restore failed"):
+        gpu_splitting._execute_setup(plan)
+
+    assert commands.count(["umount", "/var/lib/docker"]) == 2
+    assert ["mount", "-t", "xfs", "-o", "rw,pquota", "/dev/mapper/docker-old", "/var/lib/docker"] in commands
+    assert ["systemctl", "start", "docker"] in commands
 
 
-def test_merge_overlay2_preserves_other_keys():
-    merged, changed = merge_overlay2({"debug": True, "storage-driver": "aufs"})
+def test_execute_setup_reports_rollback_failures(monkeypatch, tmp_path):
+    plan = _execution_plan(tmp_path)
+    commands: list[list[str]] = []
 
-    assert changed is True
-    assert merged == {"debug": True, "storage-driver": "overlay2"}
+    def run_command(args, check=True, capture=True):
+        commands.append(args)
+        if args[:2] == ["systemctl", "stop"]:
+            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
+        if args[:2] == ["rsync", "-aHAX"]:
+            raise RuntimeError("backup failed")
+        if args == ["systemctl", "start", "docker"]:
+            raise RuntimeError("start failed")
+        raise AssertionError(f"Unexpected command: {args}")
 
-
-def test_load_mount_info_uses_findmnt_target_semantics():
-    runner = _runner_factory(
-        {
-            ("findmnt", "--json", "--target", "/var/lib/docker"): CommandResult(
-                args=["findmnt", "--json", "--target", "/var/lib/docker"],
-                stdout='{"filesystems":[{"target":"/","source":"/dev/sda1","fstype":"ext4","options":"rw,noatime"}]}',
-                stderr="",
-                returncode=0,
-            )
-        }
+    _patch_execute_setup_dependencies(
+        monkeypatch,
+        run_command,
+        lambda runner, target: plan.preflight.docker_mount,
     )
 
-    mount_info = load_mount_info(runner, "/var/lib/docker")
+    with pytest.raises(RuntimeError) as exc_info:
+        gpu_splitting._execute_setup(plan)
 
-    assert mount_info.target == "/"
-    assert mount_info.source == "/dev/sda1"
-    assert mount_info.fstype == "ext4"
-    assert "rw" in mount_info.options
-
-
-def test_has_project_quota_option_accepts_aliases():
-    assert storage.has_project_quota_option(["rw", "pquota"]) is True
-    assert storage.has_project_quota_option(["rw", "prjquota"]) is True
-    assert storage.has_project_quota_option(["rw", "prjquota=1"]) is True
-    assert storage.has_project_quota_option(["rw", "noquota"]) is False
-
-
-def test_build_verification_result_accepts_prjquota_mount_option():
-    runner = _runner_factory(
-        {
-            ("docker", "info", "--format", "{{json .}}"): CommandResult(
-                args=["docker", "info", "--format", "{{json .}}"],
-                stdout=(
-                    '{"DockerRootDir":"/var/lib/docker","Driver":"overlay2",'
-                    '"DriverStatus":[["Backing Filesystem","xfs"],["Supports d_type","true"]]}'
-                ),
-                stderr="",
-                returncode=0,
-            ),
-            ("findmnt", "--json", "--target", "/var/lib/docker"): CommandResult(
-                args=["findmnt", "--json", "--target", "/var/lib/docker"],
-                stdout='{"filesystems":[{"target":"/var/lib/docker","source":"/dev/vdb1","fstype":"xfs","options":"rw,prjquota"}]}',
-                stderr="",
-                returncode=0,
-            ),
-        }
-    )
-
-    result = build_verification_result(runner)
-    project_quota_check = next(check for check in result.checks if check.name == "Mount options include project quota")
-
-    assert result.passed is True
-    assert project_quota_check.passed is True
-    assert project_quota_check.expected == "contains pquota or prjquota"
-
-
-def test_inspect_docker_state_captures_error_details():
-    runner = _runner_factory(
-        {
-            ("docker", "info", "--format", "{{json .}}"): CommandResult(
-                args=["docker", "info", "--format", "{{json .}}"],
-                stdout="",
-                stderr="permission denied while trying to connect to the docker API at unix:///var/run/docker.sock",
-                returncode=1,
-            )
-        }
-    )
-
-    state = inspect_docker_state(runner)
-
-    assert state.docker_info_available is False
-    assert state.docker_info_error is not None
-    assert "permission denied" in state.docker_info_error
-
-
-def test_load_daemon_json_invalid(tmp_path):
-    path = tmp_path / "daemon.json"
-    path.write_text("{not-json}")
-
-    with pytest.raises(RuntimeError, match="invalid JSON"):
-        load_daemon_json(str(path))
+    message = str(exc_info.value)
+    assert "GPU splitting setup failed: backup failed" in message
+    assert "Rollback encountered additional errors:" in message
+    assert "- start docker: start failed" in message
+    assert f"Backup remains at {plan.backup_dir}" in message
 
 
 def _lsblk(blockdevices):

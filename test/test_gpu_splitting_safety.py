@@ -12,7 +12,7 @@ from lium.cli.cli import cli
 from lium.cli.mine import gpu_splitting
 from lium.cli.mine.models import BlockDevice, CommandResult, TargetPlan
 
-from test_gpu_splitting_cli import _execution_plan, _no_spinner, _sample_plan, _sample_preflight
+from test_gpu_splitting_storage import _execution_plan, _no_spinner, _sample_plan, _sample_preflight
 
 
 def _disk(path="/dev/nvme1n1", size_gib=500, removable=False, transport="nvme") -> BlockDevice:

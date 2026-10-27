@@ -1,12 +1,12 @@
 # Lium for agents and scripts
 
-One page for an LLM agent (or any unattended script) that has to rent a GPU pod, run work on it, collect the results and give the pod back, without a human at the keyboard. Everything here is a shell command plus `jq`, or the Python SDK; nothing needs a terminal. Every `lium …` line on this page, and the list of `--json` commands in §2, is resolved against this version's command tree by `test/test_agent_docs.py`; check `lium <command> --help` for anything not covered here.
+One page for an LLM agent (or any unattended script) that has to rent a GPU pod, run work on it, collect the results and give the pod back, without a human at the keyboard. Everything here is a shell command plus `jq`, or the Python SDK; nothing needs a terminal. Check `lium <command> --help` for anything not covered here.
 
 The rules of the road:
 
 1. **Authenticate from the environment.** `LIUM_API_KEY` wins over `~/.lium/config.ini`. Never run `lium init` from an agent.
 2. **Ask for JSON.** `--format json` on `ls`/`ps`, `--json` on `exec`/`describe`/`balance`: the result is on stdout and the exit code says whether it worked. On any of them a runtime error is one JSON object on stderr, the last line of stderr under `--wait` (`LIUM_OUTPUT=json` switches that on for every renter command); `lium provider` prints its error envelope on stdout under `--json` or `LIUM_OUTPUT=json` (§7). A usage error is click's plain text with exit 2 (§2).
-3. **Never let a command wait for a human.** Pass `--yes` to anything that would confirm (`up`, `rm`); `reboot` never asks.
+3. **Never let a command wait for a human.** Pass `--yes` to anything that would confirm (`up`, `rm`, `reset-gpu`); `reboot` never asks.
 4. **Always give a pod a lifetime** (`--ttl`) and always remove it when finished, including on failure.
 
 ## 0. Start from nothing
@@ -46,7 +46,7 @@ SSH: the CLI and SDK use `LIUM_SSH_KEY_PATH` if set, else `[ssh] key_path` in `~
 
 Success: the JSON result is on **stdout**, exit code 0.
 
-Failure on a renter command that takes `--json` (`up`, `exec`, `describe`, `balance`, `request`, `whoami`, `audit`, `cp`, `init`; `fund`, `signup`, `topup currencies`, `topup create`, `topup link`, `topup wait`, `topup card`, `keys create`, `keys list`, `keys show`, `keys scopes`, `keys budget`, `workspaces list` and `workspaces members` too): stdout is empty, the error is one JSON object on **stderr**, the exit code is non-zero. Under `--wait` (`topup link`, `topup create`, `topup card`) stderr may first carry the progress line (`"event": "handoff"`, `"invoice_created"` or `"charged"`, once the page, invoice or charge exists); the error object is always the **last line**: parse the last line of stderr, not the whole stream. After a card charge that timed out (`credit_not_seen`, exit 6, `data.charged: true`) the card was charged: do not run the charge again, keep waiting with `lium topup wait --above <data.balance_before>`. A repeat of `topup card` must carry that last line's `data.idempotency_key` and the same amount (`data.amount_usd`) within 24 h; the same key with a different amount is a new charge:
+Failure on a renter command that takes `--json` (`up`, `exec`, `describe`, `balance`, `request`, `whoami`, `audit`, `cp`, `init`; `fund`, `reset-gpu`, `signup`, `topup currencies`, `topup create`, `topup link`, `topup wait`, `topup card`, `keys create`, `keys list`, `keys show`, `keys scopes`, `keys budget`, `workspaces list` and `workspaces members` too): stdout is empty, the error is one JSON object on **stderr**, the exit code is non-zero. Under `--wait` (`topup link`, `topup create`, `topup card`) stderr may first carry the progress line (`"event": "handoff"`, `"invoice_created"` or `"charged"`, once the page, invoice or charge exists); the error object is always the **last line**: parse the last line of stderr, not the whole stream. After a card charge that timed out (`credit_not_seen`, exit 6, `data.charged: true`) the card was charged: do not run the charge again, keep waiting with `lium topup wait --above <data.balance_before>`. A repeat of `topup card` must carry that last line's `data.idempotency_key` and the same amount (`data.amount_usd`) within 24 h; the same key with a different amount is a new charge:
 
 ```json
 {"ok": false, "error": {"code": "pod_not_found", "message": "No pods match targets: train-1", "hint": "Run 'lium ps' to list pods; a name, huid, id or 1-based index is accepted", "exit_code": 5}}
@@ -105,7 +105,7 @@ lium ls --gpu H100 --count 1 --format json | jq -r '.[0].huid'
 
 ### Rent it
 
-`lium up --json` prints the ready pod as one JSON document on stdout, `{"pod": {…}}` with the keys of one `lium ps --format json` row (plus `termination_time` when `--ttl`, `--until` or `--budget` set one), and returns instead of opening a shell; progress lines go to stderr:
+`lium up --json` prints the ready pod as one JSON document on stdout, `{"pod": {…}}` with the keys of one `lium ps --format json` row (plus `termination_time` when `--ttl`, `--until` or `--budget` set one, and `gpu_verification` with `--verify-gpus`), and returns instead of opening a shell; progress lines go to stderr:
 
 ```bash
 POD=$(lium up "$NODE" --ttl 4h --yes --json | jq -r '.pod.huid')

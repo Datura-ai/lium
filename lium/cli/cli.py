@@ -3,6 +3,7 @@
 import click
 import os
 import sys
+import warnings
 from typing import Optional
 from importlib import import_module
 from importlib.metadata import version, PackageNotFoundError
@@ -20,6 +21,7 @@ from .ssh.command import ssh_command
 from .rm import rm_command
 from .logs import logs_command
 from .reboot import reboot_command
+from .reset_gpu import reset_gpu_command
 from .scp.command import scp_command
 from .rsync import rsync_command
 from .whoami import whoami_command
@@ -123,6 +125,7 @@ cli.add_command(ssh_command)
 cli.add_command(rm_command)
 cli.add_command(logs_command)
 cli.add_command(reboot_command)
+cli.add_command(reset_gpu_command)
 cli.add_command(scp_command)
 cli.add_command(rsync_command)
 cli.add_command(whoami_command)
@@ -174,8 +177,22 @@ def invoked_subcommand(argv: list) -> Optional[str]:
     return None
 
 
+def quiet_host_key_pin_notices() -> None:
+    """Drop the SDK's first-connection pin notices, which reach a CLI user as raw ``UserWarning`` tracebacks.
+
+    A changed key still fails loudly (LiumHostKeyError). Under LIUM_SSH_INSECURE=1 ssh's
+    "Permanently added" line is the notice that verification is off, so it stays.
+    """
+    from lium.sdk.client import ssh_insecure
+
+    warnings.filterwarnings("ignore", message=r"Pinning \S+ host key ", category=UserWarning)
+    if not ssh_insecure():
+        warnings.filterwarnings("ignore", message=r"(Warning: )?Permanently added ", category=UserWarning)
+
+
 def main():
     """Main entry point for the CLI."""
+    quiet_host_key_pin_notices()
     if not os.environ.get("_LIUM_COMPLETE"):
         maybe_perform_startup_update()
         # `lium completion ...` manages the rc file itself: the silent install must not run first,

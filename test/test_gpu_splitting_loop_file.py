@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_gpu_splitting_cli import (
+from test_gpu_splitting_storage import (
     _patch_execute_setup_dependencies,
     _sample_preflight,
 )

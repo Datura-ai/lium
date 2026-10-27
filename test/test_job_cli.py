@@ -70,3 +70,48 @@ def test_job_run_budget_help_says_approximate():
     help_text = CliRunner().invoke(cli, ["job", "run", "--help"]).output
 
     assert "Approximate compute budget in USD" in help_text
+
+
+def test_job_run_gpu_count_refusal_names_the_counts_on_offer(monkeypatch):
+    # the real run_job: a refused rent comes back as rent_failed, not as an exception
+    from lium.sdk import Config, Lium, LiumError
+
+    client = Lium(Config(api_key="test"))
+
+    def refuse(**kwargs):
+        raise LiumError(_REFUSAL)
+
+    monkeypatch.setattr(client, "rent", refuse)
+    monkeypatch.setattr(client, "ps", lambda: [])
+    monkeypatch.setattr(job_module, "Lium", lambda: client)
+    out = _run("nvidia-smi", "--gpu", "A4000", "--budget", "1", "--deadline", "10m")
+
+    assert out.exit_code != 0
+    assert "rent_failed" in out.output
+    assert "Use --count 6 (on offer: 6, 8), or another --gpu" in out.output
+
+
+_REFUSAL = ("API error 409: gpu_count=1: none of the 2 node(s) matching the earlier "
+            "constraints satisfies it; rentable GPU counts: 6, 8")
+
+
+@pytest.mark.parametrize("server_hint", [None, "Loosen the spec or run 'lium ls' to see what is listed."])
+def test_up_gpu_count_refusal_names_the_counts_on_offer(server_hint):
+    # `lium up --gpu` takes the dry-run path, which wraps the 409 in an ActionResult, not an SDK error
+    from lium.sdk import LiumError
+    from lium.cli.up.actions import ResolveExecutorAction
+    from lium.cli.utils import CliFailure
+
+    class Refusing:
+        def supports(self, feature):
+            return True
+
+        def rent(self, **kwargs):
+            raise LiumError(_REFUSAL, hint=server_hint)
+
+    result = ResolveExecutorAction().execute(dict(lium=Refusing(), executor_id=None, gpu="A4000", count=None,
+                                                  country=None, min_cpus=None, ports=None))
+
+    assert not result.ok
+    failure = CliFailure("node_selection_failed", result.error, hint=result.data.get("hint"))
+    assert failure.hint == "Use --count 6 (on offer: 6, 8), or another --gpu"

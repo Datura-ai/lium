@@ -44,6 +44,7 @@ from .exceptions import (
     LiumChargeOutcomeUnknownError,
     LiumRentOutcomeUnknownError,
     LiumError,
+    LiumGpuOperationError,
     LiumHostKeyError,
     LiumNotFoundError,
     LiumInsufficientBalanceError,
@@ -72,6 +73,8 @@ from .models import (
     Cluster,
     ClusterOffer,
     ExecutorInfo,
+    GpuResetOutcome,
+    GpuResetResult,
     GpuStats,
     JobQuote,
     PodInfo,
@@ -90,6 +93,7 @@ from .utils import (
     parse_api_timestamp,
     request_same_origin,
     spend_cap_deadline,
+    TRANSIENT_ERRORS,
     with_retry,
 )
 from .api_keys import ApiKeysClient
@@ -492,6 +496,46 @@ def budget_error(detail: str, key: Optional[str] = None, **context: Optional[str
         window=window,
         api_key_id=str(key_id) if key_id else None,
         **context,
+    )
+
+
+def _gpu_reset_outcome(gpu: Dict[str, Any]) -> GpuResetOutcome:
+    return GpuResetOutcome(
+        index=int(gpu.get("index", -1)), uuid=gpu.get("uuid") or "", result=gpu.get("result") or "",
+        detail=gpu.get("detail"),
+    )
+
+
+GPU_RESET_POLL_SECONDS = 3
+GPU_RESET_POLL_TIMEOUT_SECONDS = 30
+# the server marks a reset `timeout` after 300 s; wait past that to read its own answer
+GPU_RESET_CLIENT_DEADLINE_SECONDS = 330
+GPU_RESET_MAY_STILL_RUN = "The reset may still finish; check the pod's GPUs (nvidia-smi) before you reset again"
+
+
+def _gpu_reset_result(pod: PodInfo, body: Dict[str, Any]) -> GpuResetResult:
+    """The final GPU reset answer as the result, or its error. An old backend's 200 has no ``status``."""
+    status = body.get("status") or ("failed" if body.get("ok") is False else "done")
+    error = body.get("error") or {}
+    gpus = [_gpu_reset_outcome(g) for g in body.get("gpus") or []]
+    if status == "timeout":
+        raise LiumServerError(
+            f"GPU reset: {error.get('message') or 'no answer in time'}",
+            code=error.get("code") or "gpu_reset_unavailable", hint=GPU_RESET_MAY_STILL_RUN,
+        )
+    if status == "failed":
+        message = f"GPU reset failed: {error.get('message') or 'the GPUs could not be reset'}"
+        code = error.get("code") or "reset_not_supported"
+        if gpus:
+            raise LiumGpuOperationError(
+                message, gpus=gpus, container_restarted=body.get("container_restarted"), code=code,
+            )
+        raise LiumError(message, code=code)
+    return GpuResetResult(
+        pod_id=str(body.get("pod_id", pod.id)),
+        ok=bool(body.get("ok")),
+        container_restarted=bool(body.get("container_restarted")),
+        gpus=gpus,
     )
 
 
@@ -916,6 +960,14 @@ class Lium:
             raise card_topup_error(resp, **context)
         if 500 <= resp.status_code < 600:
             raise LiumServerError(f"Server error: {resp.status_code}", **context)
+        data = _error_data(resp) if resp.status_code == 409 else {}
+        if data.get("gpus"):
+            # a GPU operation ran and a GPU failed: keep each GPU's outcome (and container state) for the caller;
+            # a precheck refusal (``gpus: []``) stays a plain LiumError
+            raise LiumGpuOperationError(
+                f"API error 409: {_response_error_message(resp)}",
+                gpus=[_gpu_reset_outcome(g) for g in data["gpus"]], container_restarted=data.get("container_restarted"), **context,
+            )
         raise LiumError(f"API error {resp.status_code}: {_response_error_message(resp)}", **context)
 
     def _dict_to_backup_config(self, config_dict: Dict) -> BackupConfig:
@@ -1072,6 +1124,11 @@ class Lium:
             max_cuda_version=executor_dict.get("max_cuda_version"),
             tier=executor_dict.get("tier"),
             available_gpu_count=_int_or_none(executor_dict, "available_gpu_count"),
+            whole_host_only=(
+                executor_dict["min_gpu_count_for_rental"] is None
+                if "min_gpu_count_for_rental" in executor_dict
+                else None
+            ),
             interconnect=interconnect,
             nvlink=nvlink,
             gpu_power_limited=gpu_power_limited,
@@ -1214,6 +1271,7 @@ class Lium:
         confirmed_only: bool = False,
         before_send: Optional[Callable[[Dict[str, Any]], None]] = None,
         termination_hours: Optional[int] = None,
+        enable_backups: bool = True,
     ) -> Union[Dict[str, Any], PodInfo]:
         """Start a new pod on a specific node.
 
@@ -1272,6 +1330,8 @@ class Lium:
                 propagates.
             termination_hours: Sent with the rent (1 to 720): the server removes the pod this
                 many hours after it starts, even if this process never gets to schedule it.
+            enable_backups: Lium backs up a new pod's volume automatically by default;
+                ``False`` turns that off for this pod.
 
         Returns:
             Pod metadata as returned by the rent API (id, name, status, ssh command,
@@ -1296,6 +1356,7 @@ class Lium:
             confirmed_only=confirmed_only,
             before_send=before_send,
             termination_hours=termination_hours,
+            enable_backups=enable_backups,
         )
         if not wait:
             return created
@@ -1331,6 +1392,7 @@ class Lium:
         termination_hours: Optional[int] = None,
         posted: Optional[List[bool]] = None,
         build_context_sha256: Optional[str] = None,
+        enable_backups: bool = True,
     ) -> Dict[str, Any]:
         """The rent call itself; :meth:`up` adds the optional wait on top.
 
@@ -1382,6 +1444,7 @@ class Lium:
             "enable_volume_encryption": enable_volume_encryption,
             "backup_log_id": backup_id,
             "restore_path": restore_path,
+            "enable_backups": enable_backups,
         }
         if gpu_count is not None:
             payload["gpu_count"] = gpu_count
@@ -1722,7 +1785,7 @@ class Lium:
         rent_args = dict(
             name="Your Pod", template_id=None, image=None, dockerfile_content=None, volume_id=None,
             ports=None, ssh_keys=None, ssh_name=None, enable_volume_encryption=None,
-            backup_id=None, restore_path=None, gpu_count=None,
+            backup_id=None, restore_path=None, gpu_count=None, enable_backups=True,
         )
         unknown = set(up_kwargs) - set(rent_args)
         if unknown:
@@ -1888,6 +1951,7 @@ class Lium:
         restore_path: Optional[str] = None,
         dry_run: bool = False,
         termination_hours: Optional[int] = None,
+        enable_backups: bool = True,
     ) -> RentResult:
         """Rent the cheapest available node that satisfies a spec, without listing the fleet.
 
@@ -1916,7 +1980,7 @@ class Lium:
                 Client-side only: a rent-by-spec backend has no such field, so the call is
                 refused there rather than sent with a constraint the server would not check.
             volume_id, ports, ssh_keys, ssh_name, enable_volume_encryption, backup_id,
-                restore_path, termination_hours: as in :meth:`up`.
+                restore_path, termination_hours, enable_backups: as in :meth:`up`.
             dry_run: Choose and price only; nothing is rented and no SSH key is registered
                 with the account. Against a rent-by-spec backend the request still carries
                 your SSH public key (``ssh_keys`` or the configured key: the server validates
@@ -1982,6 +2046,7 @@ class Lium:
             "backup_id": backup_id,
             "restore_path": restore_path,
             "termination_hours": termination_hours,
+            "enable_backups": enable_backups,
         }
         if self.supports(RENT_BY_SPEC):
             return self._rent_on_server(spec, rental, dry_run)
@@ -2018,6 +2083,7 @@ class Lium:
             ),
             "backup_log_id": rental["backup_id"],
             "restore_path": rental["restore_path"],
+            "enable_backups": rental["enable_backups"],
             "dry_run": dry_run,
             **({"build_context_sha256": rental["build_context_sha256"]} if rental["build_context_sha256"] else {}),
         }
@@ -2153,6 +2219,7 @@ class Lium:
                 backup_id=rental["backup_id"],
                 restore_path=rental["restore_path"],
                 termination_hours=rental["termination_hours"],
+                enable_backups=rental["enable_backups"],
             )
         return RentResult(
             executor=executor,
@@ -2313,8 +2380,10 @@ class Lium:
                 ``False``/``None`` do not filter.
             view: ``"summary"`` (default) asks the API for the fields a listing reads — price, GPU/CPU/RAM/disk
                 headline specs, location, tier, network; an API that does not know the parameter returns the
-                full row. ``"full"`` asks for the whole node-check scrape in :attr:`ExecutorInfo.specs` (docker
-                info, verified ports, per-GPU telemetry, checksums).
+                full row. ``"full"`` asks for the whole public node-check scrape in :attr:`ExecutorInfo.specs` (verified
+                ports, checksums, per-GPU card fields). What the renters' pods are doing (docker containers, GPU
+                processes, per-GPU load, memory in use, current clocks and PCIe link) is not served; a renter reads
+                their own pod's load with :meth:`gpu_stats`.
 
         Returns:
             A list of :class:`ExecutorInfo` objects that satisfy the filters.
@@ -2542,6 +2611,72 @@ class Lium:
         self._release_ssh(pod)
         return result
 
+    def reset_gpu(
+        self,
+        pod: PodInfo,
+        gpu_indices: Optional[List[int]] = None,
+        on_progress: Optional[Callable[[float], None]] = None,
+    ) -> GpuResetResult:
+        """Reset a pod's hung GPUs: stops the container, resets the GPUs, starts it again.
+
+        Every process in the pod is stopped, even when one GPU is named; files are kept and the
+        SSH host key stays. ``POST /pods/{id}/reset-gpu`` starts the reset (202 with a ``request_id``),
+        then ``GET /pods/{id}/reset-gpu/{request_id}`` is polled until it ends; a reset takes 1 to 2 minutes.
+
+        Args:
+            pod: Pod whose GPUs to reset.
+            gpu_indices: Pod GPU indices as ``nvidia-smi`` numbers them inside the pod; ``None`` resets all.
+            on_progress: Called with the seconds since the start before each poll.
+
+        Returns:
+            :class:`GpuResetResult`, one :class:`GpuResetOutcome` per GPU.
+
+        Raises:
+            LiumGpuOperationError: the reset ran and a GPU failed; ``gpus`` and ``container_restarted`` say
+                what happened to each GPU.
+            LiumError: refusals with the API's ``code`` (``invalid_gpu_index``, ``mig_enabled``, ...).
+            LiumServerError: ``gpu_reset_unavailable`` (the request was not sent, or the server gave up waiting)
+                or ``gpu_reset_timeout`` (this client gave up waiting or lost the connection); after both
+                the reset may still finish.
+        """
+        started = time.monotonic()
+        deadline = started + GPU_RESET_CLIENT_DEADLINE_SECONDS
+        try:
+            # sent once: a 429 is the 1/min limit and a second reset must not follow a lost answer;
+            # an old backend answers 200 with the result after up to 50 s, past the 30 s default timeout
+            try:
+                body = self._request(
+                    "POST", f"/pods/{pod.id}/reset-gpu", json={"gpu_indices": gpu_indices}, retry=False, timeout=120,
+                ).json()
+            except requests.RequestException as e:
+                raise LiumServerError(
+                    f"GPU reset: no answer from the server ({e})", code="gpu_reset_timeout", hint=GPU_RESET_MAY_STILL_RUN,
+                ) from e
+            request_id = body.get("request_id")
+            while body.get("status") == "running":
+                if on_progress:
+                    on_progress(time.monotonic() - started)
+                time.sleep(GPU_RESET_POLL_SECONDS)
+                time_left = deadline - time.monotonic()
+                if time_left <= 0:
+                    raise LiumServerError(
+                        f"GPU reset {request_id} did not finish in {GPU_RESET_CLIENT_DEADLINE_SECONDS} s",
+                        code="gpu_reset_timeout", hint=GPU_RESET_MAY_STILL_RUN,
+                    )
+                try:
+                    body = self._request(
+                        "GET", f"/pods/{pod.id}/reset-gpu/{request_id}",
+                        retry=False, timeout=min(GPU_RESET_POLL_TIMEOUT_SECONDS, time_left),
+                    ).json()
+                except TRANSIENT_ERRORS:
+                    continue  # 5xx, 429 or a lost connection: the reset runs on, poll again until the deadline
+                except LiumError as e:
+                    e.hint = GPU_RESET_MAY_STILL_RUN  # the reset was sent: a "Retry" could start a second one
+                    raise
+        finally:
+            self._release_ssh(pod)  # a failed reset stops the container too; held connections are dead
+        return _gpu_reset_result(pod, body)
+
     # -- multi-node clusters ---------------------------------------------------------------------
 
     #: Only an image with this prefix reads the injected overlay config; the API refuses any other.
@@ -2600,6 +2735,7 @@ class Lium:
         enable_volume_encryption: bool | None = True,
         wait: bool = False,
         timeout: int = 900,
+        enable_backups: bool = True,
     ) -> Cluster:
         """Rent several nodes of one fabric as a single all-or-nothing cluster.
 
@@ -2615,6 +2751,7 @@ class Lium:
             ports: Ports to expose per node.
             enable_volume_encryption: As for :meth:`up`.
             wait: Block until every member is RUNNING with SSH (``timeout`` seconds).
+            enable_backups: As for :meth:`up`; applies to every member.
 
         Raises:
             ValueError: fewer than two nodes, or no SSH key.
@@ -2645,6 +2782,7 @@ class Lium:
             "user_public_key": ssh_material,
             "initial_port_count": ports,
             "enable_volume_encryption": enable_volume_encryption,
+            "enable_backups": enable_backups,
         }
         # Not retried blindly: a timeout may have rented the group anyway. A backend that honours
         # the Idempotency-Key (RENT_IDEMPOTENCY) gets the order once more with the same key and

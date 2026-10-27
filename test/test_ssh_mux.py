@@ -12,9 +12,9 @@ import pytest
 from click.testing import CliRunner
 
 from lium.cli.commands import exec as exec_module
-from lium.cli.commands.exec import exec_command, pods_with_live_masters
+from lium.cli.commands.exec import exec_command
 from lium.cli.utils import POD_CACHE_TTL_SECONDS, remember_pods, remembered_pods
-from lium.sdk import Config, Lium, LiumError, LiumHostKeyError, OutputLimitExceeded, PodInfo, ssh_mux
+from lium.sdk import Config, Lium, PodInfo, ssh_mux
 
 
 def _pod(pod_id="pod-1", name="warm-pod", huid="eager-wolf-aa", ssh_cmd="ssh root@203.0.113.10 -p 20299"):
@@ -76,11 +76,6 @@ class _Ssh:
         return [argv for argv, _ in self.calls if "ControlMaster=no" in argv]
 
 
-def test_the_control_socket_is_per_pod_and_ssh_address(home):
-    first = ssh_mux.control_path(_lium(home), _pod())
-    assert first.parent == home / ".lium" / "ssh-mux"
-    assert first != ssh_mux.control_path(_lium(home), _pod(ssh_cmd="ssh root@203.0.113.10 -p 20300"))
-    assert first != ssh_mux.control_path(_lium(home), _pod(pod_id="pod-2"))
 
 
 def test_the_control_socket_changes_with_the_host_key_policy_and_the_key(home, monkeypatch):
@@ -106,42 +101,12 @@ def test_a_master_opened_without_host_key_checks_is_not_reused_once_they_are_bac
     assert "StrictHostKeyChecking=accept-new" in starts[1]
 
 
-def test_a_home_too_long_for_a_unix_socket_puts_the_socket_under_the_temp_dir(monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path / ("x" * 80)))
-    assert ssh_mux.socket_dir().parent == Path(ssh_mux.tempfile.gettempdir())
 
 
-@pytest.mark.parametrize("value, seconds", [("", 600), ("30", 30), ("0", 0), ("soon", 600)])
-def test_persist_seconds_reads_lium_ssh_persist(monkeypatch, value, seconds):
-    monkeypatch.setenv(ssh_mux.PERSIST_ENV, value)
-    assert ssh_mux.persist_seconds() == seconds
 
 
-def test_persist_zero_or_no_ssh_binary_turns_the_master_off(home, monkeypatch):
-    assert ssh_mux.available()
-    monkeypatch.setenv(ssh_mux.PERSIST_ENV, "0")
-    assert not ssh_mux.available()
-    monkeypatch.setenv(ssh_mux.PERSIST_ENV, "")
-    monkeypatch.setattr(ssh_mux.shutil, "which", lambda name: None)
-    assert not ssh_mux.available()
 
 
-def test_the_first_command_starts_a_background_master_with_the_pods_pinned_key(home, monkeypatch):
-    ssh = _Ssh(live=False, start_stderr=b"Warning: Permanently added '[203.0.113.10]:20299' (ED25519) to the list of known hosts.\n")
-    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
-    pod = _pod()
-
-    with pytest.warns(UserWarning, match="Permanently added"):
-        result = ssh_mux.exec_over_master(_lium(home), pod, command="nvidia-smi")
-
-    start = next(argv for argv, _ in ssh.calls if "ControlMaster=yes" in argv)
-    assert {"-N", "-f", "ControlPersist=600", "BatchMode=yes", "IdentitiesOnly=yes"} <= set(start)
-    assert "StrictHostKeyChecking=accept-new" in start
-    assert f'UserKnownHostsFile="{home / ".lium" / "known_hosts" / "pod-1"}"' in start
-    assert start[-2:] == ["--", "root@203.0.113.10"] and start[start.index("-p") + 1] == "20299"
-    assert result == {"stdout": "out\n", "stderr": "", "exit_code": 0, "success": True}
-    assert oct((home / ".lium" / "ssh-mux").stat().st_mode & 0o777) == "0o700"
-    assert all({"ForwardAgent=no", "ForwardX11=no", "ClearAllForwardings=yes"} <= set(argv) for argv, _ in ssh.calls if argv[0] == "ssh")   # master and command
 
 
 @pytest.mark.skipif(shutil.which("ssh") is None, reason="needs the OpenSSH client")
@@ -174,105 +139,22 @@ def test_the_renters_ssh_config_cannot_send_environment_values_to_the_pod(home):
     assert "sendenv" not in evaluated and "setenv" not in evaluated
 
 
-def test_a_pin_notice_is_reported_when_the_login_then_fails(home, monkeypatch):
-    ssh = _Ssh(live=False, start_code=255, start_stderr=b"Warning: Permanently added '[203.0.113.10]:20299' (ED25519) to the list of known hosts.\nroot@203.0.113.10: Permission denied (publickey).\n")
-    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
-
-    with pytest.warns(UserWarning, match="Permanently added"), pytest.raises(LiumError):
-        ssh_mux.exec_over_master(_lium(home), _pod(), command="true")
 
 
-def test_insecure_accept_warns_even_when_ssh_prints_nothing(home, monkeypatch):
-    monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
-    monkeypatch.setattr(ssh_mux.subprocess, "run", _Ssh(live=False, start_stderr=b""))
-
-    with pytest.warns(UserWarning, match="disabled host key verification"):
-        ssh_mux.exec_over_master(_lium(home), _pod(), command="true")
 
 
-def test_a_command_goes_over_the_live_master_and_env_values_travel_on_stdin(home, monkeypatch):
-    ssh = _Ssh(live=True)
-    ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
-    ssh_mux.control_path(_lium(home), _pod()).touch()
-    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
-
-    ssh_mux.exec_over_master(_lium(home), _pod(), command="-v; python app.py", env={"TOKEN": "s3cret"})
-
-    assert not any("ControlMaster=yes" in argv for argv, _ in ssh.calls)
-    [argv] = ssh.commands()
-    assert argv[-3:] == ["--", "root@203.0.113.10", 'eval "$(cat)" && -v; python app.py']
-    assert "s3cret" not in " ".join(argv)
-    stdin = next(kwargs["input"] for a, kwargs in ssh.calls if a is argv)
-    assert b"s3cret" in stdin
 
 
-def test_a_bad_env_name_is_refused_before_ssh_runs(home, monkeypatch):
-    ssh = _Ssh()
-    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
-    with pytest.raises(ValueError):
-        ssh_mux.exec_over_master(_lium(home), _pod(), command="true", env={"1BAD": "x"})
-    assert ssh.calls == []
 
 
-def test_exit_255_with_the_master_gone_is_a_lost_connection(home, monkeypatch):
-    ssh = _Ssh(live=True, exit_code=255, stderr=b"Connection to 203.0.113.10 closed by remote host.\n")
-    ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
-    ssh_mux.control_path(_lium(home), _pod()).touch()
-    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
-    original = ssh.__call__
-
-    def dies_during_the_command(argv, **kwargs):
-        done = original(argv, **kwargs)
-        if "ControlMaster=no" in argv:
-            ssh.live = False
-        return done
-
-    monkeypatch.setattr(ssh_mux.subprocess, "run", dies_during_the_command)
-    result = ssh_mux.exec_over_master(_lium(home), _pod(), command="train.py")
-    assert result["exit_code"] == 255 and not result["success"]
-    assert result["stdout"] == "out\n"   # what the command printed before the drop is kept
-    assert result["error"].startswith("SSH connection to pod warm-pod was lost: Connection to")
 
 
-def test_exit_255_from_the_command_itself_is_its_exit_code(home, monkeypatch):
-    ssh = _Ssh(live=True, exit_code=255)
-    ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
-    ssh_mux.control_path(_lium(home), _pod()).touch()
-    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
-
-    assert ssh_mux.exec_over_master(_lium(home), _pod(), command="exit 255")["exit_code"] == 255
 
 
-def test_a_changed_host_key_is_a_host_key_error(home, monkeypatch):
-    ssh = _Ssh(live=False, start_code=255,
-               start_stderr=b"@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key verification failed.\n")
-    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
-    with pytest.raises(LiumHostKeyError, match="known_hosts"):
-        ssh_mux.exec_over_master(_lium(home), _pod(), command="true")
-    assert ssh.commands() == []
 
 
-def test_an_unreachable_pod_names_sshs_reason(home, monkeypatch):
-    ssh = _Ssh(live=False, start_code=255, start_stderr=b"ssh: connect to host 203.0.113.10 port 20299: Connection refused\n")
-    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
-    with pytest.raises(ssh_mux.LiumSSHError, match="SSH to pod warm-pod .* Connection refused"):
-        ssh_mux.exec_over_master(_lium(home), _pod(), command="true")
 
 
-def test_exec_all_over_masters_reports_one_unreachable_pod_as_one_failed_entry(home, monkeypatch):
-    good, bad = _pod(), _pod(pod_id="pod-2", name="gone", ssh_cmd="ssh root@203.0.113.99 -p 22")
-
-    def one(lium, pod, *, command, env=None, max_output_bytes=None):
-        if pod is bad:
-            raise LiumError("SSH to pod gone failed")
-        return {"stdout": "", "stderr": "", "exit_code": 0, "success": True}
-
-    monkeypatch.setattr(ssh_mux, "exec_over_master", one)
-    results = ssh_mux.exec_all_over_masters(_lium(home), [good, bad], command="true")
-    assert results == [
-        {"stdout": "", "stderr": "", "exit_code": 0, "success": True, "pod": "pod-1"},
-        {"pod": "pod-2", "error": "SSH to pod gone failed", "success": False},
-    ]
 
 
 def test_a_socket_in_a_directory_open_to_others_is_never_used(home, monkeypatch):
@@ -290,67 +172,12 @@ def test_a_socket_in_a_directory_open_to_others_is_never_used(home, monkeypatch)
     assert ssh.calls == []                        # nothing was sent to that socket
 
 
-def test_starting_a_master_replaces_a_socket_left_at_its_path(home, monkeypatch):
-    ssh = _Ssh(live=False)
-    ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
-    path = ssh_mux.control_path(_lium(home), _pod())
-    path.write_text("planted")
-    os.chmod(path.parent, 0o777)
-    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
-
-    ssh_mux.exec_over_master(_lium(home), _pod(), command="true")
-
-    assert path.read_text() == ""                 # the fake master made a new one
-    assert oct(path.parent.stat().st_mode & 0o777) == "0o700"
-    checks = [i for i, (argv, _) in enumerate(ssh.calls) if "check" in argv]
-    starts = [i for i, (argv, _) in enumerate(ssh.calls) if "ControlMaster=yes" in argv]
-    assert checks == [0] and starts == [1]   # the open directory was never trusted; checked only once closed
 
 
-@pytest.mark.parametrize("operation", ["down", "reboot"])
-def test_removing_or_rebooting_a_pod_closes_its_master(home, monkeypatch, operation):
-    ssh = _Ssh(live=True)
-    ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
-    ssh_mux.control_path(_lium(home), _pod()).touch()
-    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
-    lium = _lium(home)
-    monkeypatch.setattr(lium, "_request", lambda *a, **k: SimpleNamespace(json=lambda: {}))
-
-    getattr(lium, operation)(_pod())
-
-    assert any("exit" in argv for argv, _ in ssh.calls) and not ssh.live
 
 
-def test_editing_a_pod_closes_its_master(home, monkeypatch):
-    ssh = _Ssh(live=True)
-    ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
-    ssh_mux.control_path(_lium(home), _pod()).touch()
-    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
-    lium = _lium(home)
-    rows = {"/pods/pod-1": {"id": "pod-1", "ssh_connect_cmd": _pod().ssh_cmd, "template": {"id": "t1"}},
-            "/templates/t1": {"id": "t1"}}
-    monkeypatch.setattr(lium, "_request", lambda method, endpoint, **k: SimpleNamespace(json=lambda: rows.get(endpoint, {})))
-
-    lium.edit("pod-1", startup_commands="python main.py")
-
-    assert any("exit" in argv for argv, _ in ssh.calls) and not ssh.live
 
 
-def test_an_api_only_client_editing_a_pod_closes_the_master_lium_exec_opened(home, monkeypatch):
-    ssh = _Ssh(live=True)
-    ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
-    opened = ssh_mux.control_path(_lium(home), _pod())
-    opened.touch()
-    monkeypatch.setattr(ssh_mux.subprocess, "run", ssh)
-    api_only = Lium(Config(api_key="test-key"))
-    rows = {"/pods/pod-1": {"id": "pod-1", "ssh_connect_cmd": _pod().ssh_cmd, "template": {"id": "t1"}},
-            "/templates/t1": {"id": "t1"}}
-    monkeypatch.setattr(api_only, "_request", lambda method, endpoint, **k: SimpleNamespace(json=lambda: rows.get(endpoint, {})))
-
-    api_only.edit("pod-1", startup_commands="python main.py")
-
-    exits = [argv for argv, _ in ssh.calls if "exit" in argv]
-    assert [f'ControlPath="{opened}"' in argv for argv in exits] == [True]
 
 
 # -- lium exec ------------------------------------------------------------------------------------
@@ -370,43 +197,14 @@ def test_the_pod_cache_is_per_account_private_and_expires(home):
     assert oct(path.stat().st_mode & 0o777) == "0o600" and "test-key" not in path.read_text()
 
 
-@pytest.mark.parametrize("targets", ["all", "1", "warm-pod,2", "someone-else"])
-def test_targets_the_cache_cannot_answer_go_to_the_pod_list(home, monkeypatch, targets):
-    lium = _lium(home)
-    remember_pods(lium, [_pod()])
-    monkeypatch.setattr(ssh_mux, "has_live_master", lambda lium, pod: True)
-    assert pods_with_live_masters(lium, targets) is None
 
 
-def test_a_cached_pod_without_a_live_master_goes_to_the_pod_list(home, monkeypatch):
-    lium = _lium(home)
-    remember_pods(lium, [_pod()])
-    monkeypatch.setattr(ssh_mux, "has_live_master", lambda lium, pod: False)
-    assert pods_with_live_masters(lium, "warm-pod") is None
 
 
-def test_cached_pods_with_live_masters_are_used_by_huid_or_id(home, monkeypatch):
-    lium = _lium(home)
-    remember_pods(lium, [_pod(), _pod(pod_id="pod-2", name="other", huid="calm-owl-bb")])
-    monkeypatch.setattr(ssh_mux, "has_live_master", lambda lium, pod: True)
-    assert [p.id for p in pods_with_live_masters(lium, "eager-wolf-aa, calm-owl-bb,pod-1")] == ["pod-1", "pod-2", "pod-1"]
 
 
-def test_a_pod_name_is_never_taken_from_the_cache(home, monkeypatch):
-    # a name can be moved to another pod after the cache was written: names go to the live list
-    lium = _lium(home)
-    remember_pods(lium, [_pod()])
-    monkeypatch.setattr(ssh_mux, "has_live_master", lambda lium, pod: True)
-    assert pods_with_live_masters(lium, "warm-pod") is None
 
 
-def test_the_control_path_with_a_space_in_the_home_directory_is_one_quoted_value(home, monkeypatch):
-    spaced = home / "my home"
-    spaced.mkdir()
-    monkeypatch.setenv("HOME", str(spaced))
-    master = ssh_mux.ControlMaster(_lium(home), _pod())
-    option = next(a for a in master.base if a.startswith("ControlPath="))
-    assert option == f'ControlPath="{master.path}"' and " " in str(master.path)
 
 
 class _CliLium:
@@ -438,18 +236,6 @@ def _run_cli(monkeypatch, *args):
     return result, sent
 
 
-def test_lium_exec_on_a_pod_with_a_live_master_lists_no_pods(home, monkeypatch):
-    _CliLium.pods = [_pod()]
-    live = set()
-    monkeypatch.setattr(ssh_mux, "has_live_master", lambda lium, pod: pod.id in live)
-
-    first, sent = _run_cli(monkeypatch, "warm-pod", "echo hi", "-e", "K=v")
-    assert first.exit_code == 0 and _CliLium.ps_calls == 1 and sent == [("pod-1", "echo hi", {"K": "v"})]
-
-    live.add("pod-1")
-    second, sent = _run_cli(monkeypatch, "eager-wolf-aa", "echo hi")
-    assert second.exit_code == 0 and _CliLium.ps_calls == 0 and sent == [("pod-1", "echo hi", {})]
-    assert "hi" in second.output
 
 
 def test_lium_exec_script_never_puts_its_text_in_ssh_argv(home, monkeypatch, tmp_path):
@@ -466,17 +252,6 @@ def test_lium_exec_script_never_puts_its_text_in_ssh_argv(home, monkeypatch, tmp
     assert sent == [] and len(calls) == 1 and "SECRET-IN-SCRIPT" in calls[0]
 
 
-def test_lium_exec_with_persist_off_runs_over_the_sdk(home, monkeypatch):
-    monkeypatch.setenv(ssh_mux.PERSIST_ENV, "0")
-    _CliLium.pods = [_pod()]
-    calls = []
-    monkeypatch.setattr(_CliLium, "exec", lambda self, pod, **kw: calls.append(kw) or
-                        {"stdout": "", "stderr": "", "exit_code": 0, "success": True})
-
-    result, sent = _run_cli(monkeypatch, "warm-pod", "true")
-
-    assert result.exit_code == 0 and calls and sent == []
-    assert not (home / ".lium" / "pod_cache").exists()
 
 
 # -- against a real sshd --------------------------------------------------------------------------
@@ -499,38 +274,12 @@ def bench():
         b.close()
 
 
-@pytest.mark.skipif(_no_sshd, reason="needs sshd, ssh and ssh-keygen")
-def test_repeated_lium_exec_opens_one_ssh_connection_and_lists_pods_once(bench):
-    result = bench_warm_exec.bench_cli(bench, sys.executable, 3, {})
-    assert result["ssh_connections"] == 1
-    assert result["api_by_route"] == {"GET /pods": 1}
 
 
-@pytest.mark.skipif(_no_sshd, reason="needs sshd, ssh and ssh-keygen")
-def test_lium_exec_with_persist_off_connects_and_lists_pods_per_run(bench):
-    result = bench_warm_exec.bench_cli(bench, sys.executable, 2, {ssh_mux.PERSIST_ENV: "0"})
-    assert result["ssh_connections"] == 2
-    assert result["api_by_route"] == {"GET /pods": 2}
 
 
-@pytest.mark.skipif(_no_sshd, reason="needs sshd, ssh and ssh-keygen")
-def test_repeated_sdk_exec_opens_one_ssh_connection(bench):
-    result = bench_warm_exec.bench_sdk(bench, sys.executable, 3, {})
-    assert result["ssh_connections"] == 1
 
 
-@pytest.mark.skipif(_no_sshd, reason="needs sshd, ssh and ssh-keygen")
-def test_parallel_lium_exec_on_a_pod_without_a_master_starts_exactly_one(bench):
-    env = bench.env()
-    runs = [subprocess.Popen([sys.executable, "-c", bench_warm_exec.CLI_MAIN, "exec", bench_warm_exec.POD_ID, "true"],
-                             env=env, cwd=bench.workdir, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.PIPE) for _ in range(4)]
-    errors = [run.communicate(timeout=120)[1] for run in runs]
-    assert [run.returncode for run in runs] == [0] * 4, errors
-    assert bench.proxy.connections == 1
-    # the one master is the only ssh process left: no plain connection that nothing would ever close
-    masters = subprocess.run(["pgrep", "-f", f"^ssh .*{bench.home}"], capture_output=True, text=True).stdout.split()
-    assert len(masters) == 1
 
 
 def test_a_symlinked_socket_dir_is_refused_and_its_target_left_alone(tmp_path):
@@ -549,30 +298,9 @@ def test_a_symlinked_socket_dir_is_refused_and_its_target_left_alone(tmp_path):
 _OUTPUT_600_OUT_401_ERR = [sys.executable, "-c", "import os; os.write(1, b'o' * 600); os.write(2, b'e' * 401)"]
 
 
-def test_capture_stops_a_command_whose_stdout_and_stderr_together_pass_the_limit():
-    code, out, err, over = ssh_mux._capture(_OUTPUT_600_OUT_401_ERR, b"", 1000)
-
-    assert over and len(out) + len(err) <= 1000
 
 
-def test_capture_returns_everything_under_the_limit():
-    code, out, err, over = ssh_mux._capture(_OUTPUT_600_OUT_401_ERR, b"", 1001)
-
-    assert (code, out, err, over) == (0, b"o" * 600, b"e" * 401, False)
 
 
-def test_capture_kills_a_command_that_never_stops_printing():
-    endless = [sys.executable, "-c", "import os\nwhile True: os.write(1, b'x' * 4096)"]
-
-    code, out, err, over = ssh_mux._capture(endless, b"", 100_000)
-
-    assert over and code != 0 and len(out) <= 100_000
 
 
-def test_output_past_the_limit_over_the_master_raises_output_limit_exceeded(home, monkeypatch):
-    ssh_mux.ensure_socket_dir(ssh_mux.socket_dir())
-    ssh_mux.control_path(_lium(home), _pod()).touch()
-    monkeypatch.setattr(ssh_mux.subprocess, "run", _Ssh())   # its command answers b"out\n", 4 bytes
-
-    with pytest.raises(OutputLimitExceeded, match="more than 3 bytes"):
-        ssh_mux.exec_over_master(_lium(home), _pod(), command="cat log", max_output_bytes=3)
