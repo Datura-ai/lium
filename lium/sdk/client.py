@@ -1320,7 +1320,8 @@ class Lium:
                 none of it is rented). The API rejects a count above the free GPUs, below
                 the provider's minimum, or on nodes that do not allow splitting; a count below
                 the free GPUs on a node listed whole-host-only (:attr:`ExecutorInfo.whole_host_only`)
-                raises ``ValueError`` before anything is sent.
+                raises ``ValueError`` after the node listing is read and before the rent request
+                is sent; requesting all its free GPUs rents as usual.
             idempotency_key: The ``Idempotency-Key`` the rent request carries (a new UUID when ``None``).
                 The API keeps a key only for a limited time and per account, so a key sent again later
                 can rent a second pod.
