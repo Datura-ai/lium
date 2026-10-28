@@ -2833,6 +2833,7 @@ class Lium:
             # a definite refusal: nothing was rented, so there is nothing to look for
             raise LiumError(f"Cluster rental refused: {response.get('message') or response}")
         pod_ids: List[str] = [str(p) for p in (response or {}).get("pod_ids") or []]
+        backup_notice = (response or {}).get("backup_notice")  # read now: a not-listed error below must carry it
 
         cluster, listed, listing_error = self._find_cluster(
             pod_ids=pod_ids, name=name, size=len(ids), attempts=3, interval=3, exclude=known_clusters,
@@ -2850,7 +2851,7 @@ class Lium:
                     f"Cluster rental of {len(ids)} nodes is confirmed (pods {', '.join(pod_ids)}) but the pod "
                     f"listing {shown}; the nodes are rented and billing: do not rent again, list the pods to "
                     "find the cluster",
-                    pod_ids=pod_ids, listed=listed, confirmed=True,
+                    pod_ids=pod_ids, listed=listed, confirmed=True, backup_notice=backup_notice,
                 )
             if listing_error is not None:
                 # No answer to the order and no listing either: the rent may have gone through.
@@ -2878,7 +2879,7 @@ class Lium:
             )
         if wait:
             cluster = self.wait_cluster_ready(cluster, timeout=timeout)
-        cluster.backup_notice = (response or {}).get("backup_notice")
+        cluster.backup_notice = backup_notice
         return cluster
 
     def _cluster_ids_now(self) -> frozenset:

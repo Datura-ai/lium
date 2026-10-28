@@ -210,7 +210,10 @@ def clusters_up_command(
     except ClusterNotListedError as exc:
         # the money is, or may be, spent although no cluster came back: the generic hint says "Retry"
         if exc.confirmed:
-            raise CliFailure("cluster_rented_not_listed", str(exc), EXIT_API_ERROR, hint=RENTED_NOT_LISTED_HINT) from exc
+            if exc.backup_notice and output_format == "table":
+                ui.warning(escape(exc.backup_notice))
+            raise CliFailure("cluster_rented_not_listed", str(exc), EXIT_API_ERROR, hint=RENTED_NOT_LISTED_HINT,
+                             data={"backup_notice": exc.backup_notice} if exc.backup_notice else None) from exc
         raise CliFailure("cluster_rent_uncertain", str(exc), EXIT_API_ERROR, hint=RENT_UNCERTAIN_HINT) from exc
     backup_notice = cluster.backup_notice  # --wait below re-reads the cluster
     notice_data = {"backup_notice": backup_notice} if backup_notice else None  # on every failure below too

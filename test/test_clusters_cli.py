@@ -255,3 +255,22 @@ def test_clusters_up_keeps_the_backup_notice_whatever_fails_after_the_rent(monke
         assert json.loads(result.stdout)["backup_notice"] == NOTICE
     else:  # the error envelope on stderr
         assert json.loads(result.stderr.strip().splitlines()[-1])["data"]["backup_notice"] == NOTICE
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_clusters_up_confirmed_but_not_listed_keeps_the_backup_notice(monkeypatch, tmp_path, fmt):
+    """DAH-5023: a confirmed rent the listing does not show yet still bills, so its backup notice is shown."""
+    from lium.sdk.exceptions import ClusterNotListedError
+
+    error = ClusterNotListedError("confirmed but not listed", pod_ids=["pod-0", "pod-1"], backup_notice=NOTICE)
+    _patch(monkeypatch, tmp_path, up_result=error)
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--format", fmt)
+
+    assert result.exit_code != 0, result.output
+    if fmt == "table":
+        assert NOTICE in _flat(result.output)
+    else:
+        envelope = json.loads(result.stderr.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "cluster_rented_not_listed"
+        assert envelope["data"]["backup_notice"] == NOTICE
