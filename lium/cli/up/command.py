@@ -734,6 +734,7 @@ def up_command(
                 "restore_path": restore_path,
                 "enable_backups": not no_backup,
                 "gpu_count": requested_gpu_count,
+                "jupyter": jupyter,
             })
         )
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, LiumRentOutcomeUnknownError) as exc:

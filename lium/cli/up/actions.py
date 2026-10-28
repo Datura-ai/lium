@@ -242,6 +242,7 @@ class RentPodAction:
         backup_id: Optional[str] = ctx.get("backup_id")
         restore_path: Optional[str] = ctx.get("restore_path")
         enable_backups: bool = ctx.get("enable_backups", True)
+        enable_jupyter: bool = ctx.get("jupyter", False)
         # `lium up <node> -c N`: the node path only. On the spec path the count is part of the
         # spec the server selects on, so it is not sent twice.
         requested_gpu_count: Optional[int] = ctx.get("gpu_count")
@@ -260,6 +261,7 @@ class RentPodAction:
             backup_id=backup_id,
             restore_path=restore_path,
             enable_backups=enable_backups,
+            enable_jupyter=enable_jupyter,
         )
         if build_context_sha256:
             rental["build_context_sha256"] = build_context_sha256
@@ -548,26 +550,30 @@ class InstallJupyterAction:
         pod: PodInfo = ctx["pod"]
         ui = ctx.get("ui")
 
-        if not pod.ports:
-            return ActionResult(ok=False, data={}, error="No ports allocated to pod for Jupyter installation")
+        jupyter_port = None
+        # rented with enable_jupyter: the server already installs it on the port it held back, so only wait
+        if not getattr(pod, "jupyter_installation_status", None):
+            if not pod.ports:
+                return ActionResult(ok=False, data={}, error="No ports allocated to pod for Jupyter installation")
 
-        available_ports = [int(port) for port in pod.ports.keys() if int(port) != 22]
+            available_ports = [int(port) for port in pod.ports.keys() if int(port) != 22]
 
-        if not available_ports:
-            return ActionResult(
-                ok=False,
-                data={},
-                error="No suitable ports available for Jupyter (only SSH port 22 found)"
-            )
+            if not available_ports:
+                return ActionResult(
+                    ok=False,
+                    data={},
+                    error="No suitable ports available for Jupyter (only SSH port 22 found)"
+                )
 
-        jupyter_port = available_ports[0]
+            jupyter_port = available_ports[0]
 
-        lium.install_jupyter(pod, jupyter_internal_port=jupyter_port)
+            lium.install_jupyter(pod, jupyter_internal_port=jupyter_port)
 
         max_wait = 120
         wait_interval = 3
         deadline = time.monotonic() + max_wait  # time inside ps() and its retries counts too (DAH-4993 review)
         pod_id = pod.id
+        no_url = False
 
         while time.monotonic() < deadline:
             time.sleep(min(wait_interval, max(0.0, deadline - time.monotonic())))
@@ -584,19 +590,26 @@ class InstallJupyterAction:
             updated_pod = next((p for p in all_pods if p.id == pod_id or p.huid == pod_id or p.name == pod_id), None)
 
             if updated_pod and hasattr(updated_pod, 'jupyter_installation_status'):
-                if updated_pod.jupyter_installation_status == "SUCCESS":
-                    jupyter_url = getattr(updated_pod, 'jupyter_url', None)
+                jupyter_url = getattr(updated_pod, 'jupyter_url', None)
+                # a rent-time install is stamped SUCCESS from the intent even when no port was mapped for it:
+                # only a SUCCESS with a URL is a reachable Jupyter (DAH-3698)
+                if updated_pod.jupyter_installation_status == "SUCCESS" and jupyter_url:
                     return ActionResult(
                         ok=True,
                         data={"jupyter_url": jupyter_url, "jupyter_port": jupyter_port}
                     )
-                elif updated_pod.jupyter_installation_status == "FAILED":
+                if updated_pod.jupyter_installation_status == "FAILED":
                     error_details = getattr(updated_pod, 'jupyter_error', '')
                     error_msg = f"Jupyter installation failed"
                     if error_details:
                         error_msg += f": {error_details}"
                     return ActionResult(ok=False, data={}, error=error_msg)
+                no_url = updated_pod.jupyter_installation_status == "SUCCESS"
 
+        if no_url:
+            return ActionResult(
+                ok=False, data={}, error="Jupyter has no URL: the node mapped no port for it. Run 'lium ps' to check status"
+            )
         return ActionResult(
             ok=False,
             data={},
