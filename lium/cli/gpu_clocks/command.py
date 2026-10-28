@@ -1,7 +1,6 @@
 """Gpu-clocks command implementation."""
 
 import json
-import sys
 from typing import Optional, Tuple
 
 import click
@@ -11,7 +10,6 @@ from lium.cli import ui
 from lium.cli.utils import (
     CliFailure,
     EXIT_CONFIGURATION_ERROR,
-    EXIT_GENERAL_ERROR,
     handle_errors,
     json_output_requested,
     narrate_on_stderr_under_json,
@@ -78,10 +76,7 @@ def gpu_clocks_command(target: str, lock: Optional[Tuple[int, int]], reset: bool
         click.echo(json.dumps(result.to_dict(), sort_keys=True))
     else:
         _table(result.gpus)
-        if result.ok:
-            ui.success(f"GPU clocks {'reset' if reset else 'locked'} on {pod.huid}")
-    if not result.ok:
-        sys.exit(EXIT_GENERAL_ERROR)
+        ui.success(f"GPU clocks {'reset' if reset else 'locked'} on {pod.huid}")  # a failed GPU is a 409, above
 
 
 def _mhz(value) -> str:

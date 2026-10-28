@@ -909,6 +909,7 @@ class Lium:
         endpoint: str,
         base_url: Optional[str] = None,
         headers: Optional[Dict[str, str]] = None,
+        gpu_outcome: Callable[[Dict[str, Any]], Any] = _gpu_reset_outcome,
         **kwargs,
     ) -> requests.Response:
         url = f"{base_url or self.config.base_url}/{endpoint.lstrip('/')}"
@@ -924,7 +925,7 @@ class Lium:
             **kwargs,
         )
         try:
-            self._raise_for_status(resp, key=self.config.api_key_description)
+            self._raise_for_status(resp, key=self.config.api_key_description, gpu_outcome=gpu_outcome)
         except Exception:
             # A streamed response (logs) that is never read keeps its socket
             # until garbage collection; the caller only gets the exception.
@@ -935,13 +936,16 @@ class Lium:
         return resp
 
     @staticmethod
-    def _raise_for_status(resp: requests.Response, key: str = "") -> None:
+    def _raise_for_status(
+        resp: requests.Response, key: str = "", gpu_outcome: Callable[[Dict[str, Any]], Any] = _gpu_reset_outcome,
+    ) -> None:
         """Map a non-2xx response to the SDK exception for its status.
 
         The single place this mapping lives; every HTTP path (``_request`` and
         the streaming ``logs``) goes through it so a 403 reads the same
         everywhere. ``key`` is the caller's ``api_key_description``; it is named
-        in the 401/403 message so the user knows which key to fix.
+        in the 401/403 message so the user knows which key to fix. ``gpu_outcome``
+        parses each GPU of a 409 GPU-operation failure (the caller's endpoint picks it).
         """
         if resp.ok:
             return
@@ -974,10 +978,9 @@ class Lium:
         if data.get("gpus"):
             # a GPU operation ran and a GPU failed: keep each GPU's outcome (and container state) for the caller;
             # a precheck refusal (``gpus: []``) stays a plain LiumError
-            outcome = _gpu_clock_outcome if "/gpu-clocks" in (getattr(resp, "url", None) or "") else _gpu_reset_outcome
             raise LiumGpuOperationError(
                 f"API error 409: {_response_error_message(resp)}",
-                gpus=[outcome(g) for g in data["gpus"]], container_restarted=data.get("container_restarted"), **context,
+                gpus=[gpu_outcome(g) for g in data["gpus"]], container_restarted=data.get("container_restarted"), **context,
             )
         raise LiumError(f"API error {resp.status_code}: {_response_error_message(resp)}", **context)
 
@@ -2718,7 +2721,9 @@ class Lium:
 
     def _gpu_clocks(self, pod: PodInfo, body: Dict[str, Any]) -> GpuClockResult:
         # sent once (a lost answer must not stack a second operation); the backend waits up to 60 s
-        answer = self._request("POST", f"/pods/{pod.id}/gpu-clocks", json=body, retry=False, timeout=90).json()
+        answer = self._request(
+            "POST", f"/pods/{pod.id}/gpu-clocks", json=body, retry=False, timeout=90, gpu_outcome=_gpu_clock_outcome,
+        ).json()
         return GpuClockResult(
             pod_id=str(answer.get("pod_id", pod.id)), ok=bool(answer.get("ok")),
             gpus=[_gpu_clock_outcome(g) for g in answer.get("gpus") or []],

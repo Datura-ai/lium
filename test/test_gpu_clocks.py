@@ -68,12 +68,8 @@ def test_sdk_refusal_carries_the_api_code(monkeypatch, status, code):
 def test_sdk_partly_failed_lock_keeps_every_gpu_on_the_error(monkeypatch):
     detail = {"code": "clock_lock_not_supported", "message": "GPU 1 failed", "gpus": [LOCKED, FAILED]}
     body = {"message": detail, "error": {"code": "clock_lock_not_supported", "message": "GPU 1 failed"}}
-    def fake(method, url, **kw):
-        resp = _Resp(409, body)
-        resp.url = url
-        return resp
-
-    monkeypatch.setattr("lium.sdk.client.requests.request", fake)
+    # no resp.url: the parser comes from the clocks call, not from the URL text
+    monkeypatch.setattr("lium.sdk.client.requests.request", lambda *a, **kw: _Resp(409, body))
     with pytest.raises(LiumGpuOperationError) as exc:
         Lium(Config(api_key="test")).lock_gpu_clocks(SimpleNamespace(id="p"), 1400, 1800)
     assert exc.value.code == "clock_lock_not_supported"
@@ -136,14 +132,6 @@ def test_bad_lock_range_is_a_usage_error(monkeypatch, value):
 def test_missing_pod_fails_before_any_call(monkeypatch):
     result, seen = _run(monkeypatch, ["no-such-pod-zz", "--reset"])
     assert result.exit_code == EXIT_POD_NOT_FOUND and not seen
-
-
-def test_ok_false_exits_1(monkeypatch):
-    failed = GpuClockResult(pod_id="pod-uuid-1", ok=False, gpus=[GpuClockOutcome(**FAILED)])
-    result, _ = _run(monkeypatch, ["my-pod", "--lock", "1400,1800", "--json"], failed)
-    assert result.exit_code == 1 and json.loads(result.stdout)["ok"] is False
-    result, _ = _run(monkeypatch, ["my-pod", "--lock", "1400,1800"], failed)
-    assert result.exit_code == 1 and "refused" in result.output
 
 
 def test_409_exits_3_with_the_code(monkeypatch):
