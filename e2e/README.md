@@ -68,9 +68,9 @@ Without `E2E_API_KEY` every test skips and `run.sh` exits 0 — nothing to run a
 
 ## CI (`.github/workflows/ci.yml`, job `e2e-live`)
 
-Runs on every PR from this repo that touches `lium/**`, `e2e/**`, `pyproject.toml`, `uv.lock` or `ci.yml` (the
-`e2e-inputs` job reads the PR's file list — the workflow itself has no `paths:` filter since #169, so that `ci-ok`
-always reports; a README- or `test/`-only PR does not rent anything), on `workflow_dispatch`, and once a day
+Never runs on a pull_request (DAH-4027: it was the one required check that flaked); the skipped job still reports
+the required `e2e-live` context. It runs on `workflow_dispatch` (`gh workflow run ci.yml --ref <branch>`, also the
+pre-release run RELEASING.md asks for) and once a day
 (`schedule`, e2e-live only — the suite and the build jobs skip on the cron) so API drift shows up without a push.
 `ci-ok` (the check meant to be required; lium requires none today) does not depend on `e2e-live`: a live suite red on a platform defect or an empty
 listing must not block every merge; the sticky comment is its verdict. Needs the repository secret **`LIUM_E2E_API_KEY`** (the key of a funded account on the target API) and the

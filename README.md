@@ -708,12 +708,12 @@ uv run pytest test/ -q
 ```
 
 `.github/workflows/ci.yml` (`CI - Build Verification`) runs on every PR: the unit tests, the packaging-inputs
-check, an sdist/wheel build, the binary-target matrix check (`test/test_release_binary_targets.py`) and the
-Linux amd64 binary build. The Linux arm64 and macOS builds run only when a packaging input changes
-(`pyproject.toml`, `uv.lock`, `lium.spec`, `lium_entry.py`, `Dockerfile.build`, `scripts/install.sh`,
-`scripts/linux_bundle_report.py`, `ci.yml`, `release.yml`) or on a manual dispatch. The live e2e
-(`./e2e/run.sh`, see `e2e/README.md`) runs when `lium/`, `e2e/`, `pyproject.toml`, `uv.lock` or `ci.yml`
-changes, on a manual dispatch, and once a day on a schedule. `ci-ok` (the aggregate of the test, packaging,
+check, an sdist/wheel build and the binary-target matrix check (`test/test_release_binary_targets.py`). The binary
+builds (Linux amd64/arm64 in Docker, macOS arm64) run only when a packaging input changes (`pyproject.toml`,
+`uv.lock`, `lium.spec`, `lium_entry.py`, `Dockerfile.build`, `scripts/install.sh`, `scripts/linux_bundle_report.py`,
+`ci.yml`, `release.yml`); macOS Intel never builds on a PR. A manual dispatch (`gh workflow run ci.yml --ref <branch>`)
+builds all five targets and runs the live e2e (`./e2e/run.sh`, see `e2e/README.md`), which otherwise runs once a day
+on a schedule and never on a PR. `ci-ok` (the aggregate of the test, packaging,
 wheel and target-matrix jobs) and `e2e-live` are the two status checks the `main` ruleset requires.
 
 
