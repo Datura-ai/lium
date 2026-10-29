@@ -15,6 +15,14 @@ Runner = Callable[[list[str], bool, bool], CommandResult]
 
 # a few GPU images fill a smaller disk, and then the host stalls exactly as it would without the limit
 MIN_TARGET_BYTES = 100 * 1024**3
+# VerifyX refuses a node with under 100 GiB free, measured after the node images are pulled (~40 GiB: executor,
+# runner, validator preflight). On 7 Oct 2026 a 100 GB disk passed every earlier check and failed only at step 6.
+NODE_FREE_DISK_GIB = 100
+NODE_IMAGES_GIB = 40
+# the image file is the disk the node reports, so it must hold the node images and still show the listing floor free
+LOOP_FILE_MIN_SIZE_BYTES = (NODE_FREE_DISK_GIB + NODE_IMAGES_GIB) * 1024**3
+# the validator pays no idle incentive to a node whose total disk is under this many times its total GPU VRAM
+MIN_DISK_TO_VRAM_RATE = 1.5
 # Docker storage must outlive a cable pull or a network blip
 NON_LOCAL_TRANSPORTS = {"usb", "iscsi", "fc", "mmc"}
 # filesystems that may hold the XFS image file: local ones on a block device, never network or overlay;
@@ -620,11 +628,13 @@ def plan_loop_file_target(
     docker_root: str,
     image_file: Optional[str] = None,
     image_size_bytes: Optional[int] = None,
+    total_vram_bytes: Optional[int] = None,
 ) -> TargetPlan:
     """Plan an XFS image file on the local filesystem with the most free space, or on the one holding `image_file`.
 
     No commands are run. The file takes the free space minus a reserve of max(10% of the
-    filesystem, 20 GiB) that stays with the host; under MIN_TARGET_BYTES the plan is refused
+    filesystem, 20 GiB) that stays with the host; under LOOP_FILE_MIN_SIZE_BYTES, or under
+    MIN_DISK_TO_VRAM_RATE times the host's GPU VRAM when that is known, the plan is refused
     with the numbers, so the operator sees what to free or attach.
     """
     requested = bool(image_file) or image_size_bytes is not None
@@ -657,11 +667,18 @@ def plan_loop_file_target(
     room = holder.avail_bytes - reserve
     size = room if image_size_bytes is None else image_size_bytes
     gib = 1024**3
-    if size < MIN_TARGET_BYTES:
+    if size < LOOP_FILE_MIN_SIZE_BYTES:
         raise RuntimeError(
             f"An XFS image file on {holder.target} would get {size // gib} GiB ({holder.avail_bytes // gib} GiB free, "
-            f"{reserve // gib} GiB kept for the system); it needs {MIN_TARGET_BYTES // gib} GiB. "
-            "Free space, attach a spare disk, or pass --size"
+            f"{reserve // gib} GiB kept for the system); it needs {LOOP_FILE_MIN_SIZE_BYTES // gib} GiB: the file is "
+            f"the disk the node reports, and the marketplace lists a node only with {NODE_FREE_DISK_GIB} GiB free "
+            f"after about {NODE_IMAGES_GIB} GiB of node images. Free space, attach a spare disk, or pass --size"
+        )
+    if total_vram_bytes is not None and size < total_vram_bytes * MIN_DISK_TO_VRAM_RATE:
+        raise RuntimeError(
+            f"An XFS image file on {holder.target} would get {size // gib} GiB, under {MIN_DISK_TO_VRAM_RATE}x the "
+            f"{total_vram_bytes // gib} GiB of GPU VRAM on this host ({int(total_vram_bytes * MIN_DISK_TO_VRAM_RATE) // gib} GiB); "
+            "the validator pays no idle incentive for a node with less disk. Free space, attach a spare disk, or pass --size"
         )
     if size > room:
         raise RuntimeError(

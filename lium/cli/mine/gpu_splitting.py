@@ -31,9 +31,12 @@ from .models import (
     MountInfo,
     PreflightResult,
     SetupPlan,
+    TargetPlan,
     VerificationResult,
 )
 from .storage import (
+    LOOP_FILE_MIN_SIZE_BYTES,
+    MIN_DISK_TO_VRAM_RATE,
     MIN_TARGET_BYTES,
     NON_LOCAL_TRANSPORTS,
     NoSafeTargetError,
@@ -51,8 +54,9 @@ from .storage import (
 GPU_SPLITTING_DOC_URL = "https://docs.lium.io/providers/nodes/gpu-splitting"
 # fstab and the cutover mount the target at this path; another data-root would be left on the old disk
 DEFAULT_DOCKER_ROOT = "/var/lib/docker"
-# the image file is mounted by path through a loop device; direct I/O is set by the docker.service drop-in
-LOOP_FILE_FSTAB_OPTIONS = "loop,pquota,noatime"
+# the image file is mounted by path through a loop device; direct I/O is set by the docker.service drop-in;
+# nofail: without it a missing image file fails local-fs.target and the host boots into emergency mode
+LOOP_FILE_FSTAB_OPTIONS = "loop,pquota,noatime,nofail"
 
 
 @dataclass
@@ -236,7 +240,8 @@ def _build_setup_plan(
     Commands delegated through helpers:
 
     - explicit device validation / auto-selection from `storage.py`
-    - `findmnt --json --bytes --list --real ...` when the target is an XFS image file
+    - `findmnt --json --bytes --list --real ...` and `nvidia-smi --query-gpu=memory.total ...` when the
+      target is an XFS image file
     - `/etc/docker/daemon.json` load + merge from `docker_config.py`
 
     With no spare disk or partition (or with `--file` / `--size`) the target is an XFS
@@ -286,8 +291,8 @@ def _build_setup_plan(
     daemon_json_path = "/etc/docker/daemon.json"
     existing_daemon = load_daemon_json(daemon_json_path)
     # the containerd image store reports its driver as `overlayfs`
-    leaves_containerd_store = preflight.docker_state.storage_driver == "overlayfs"
-    merged_daemon, daemon_changed = merge_overlay2(existing_daemon, disable_containerd_snapshotter=leaves_containerd_store)
+    host_uses_containerd_image_store = preflight.docker_state.storage_driver == "overlayfs"
+    merged_daemon, daemon_changed = merge_overlay2(existing_daemon, disable_containerd_snapshotter=host_uses_containerd_image_store)
     target_path = target.created_partition_path or target.resolved_target
     fstab_entry = ""
     if loop_file:
@@ -314,11 +319,11 @@ def _build_setup_plan(
     )
 
 
-def _destructive_actions(preflight: PreflightResult, target, loop_file: bool) -> list[str]:
+def _destructive_actions(preflight: PreflightResult, target: TargetPlan, loop_file: bool) -> list[str]:
     """The host changes `setup` makes, in order, as printed by `check` and confirmed by `setup`."""
     docker_root = preflight.docker_state.docker_root_dir
     daemon_json_path = "/etc/docker/daemon.json"
-    leaves_containerd_store = preflight.docker_state.storage_driver == "overlayfs"
+    host_uses_containerd_image_store = preflight.docker_state.storage_driver == "overlayfs"
     gib = 1024**3
     destructive_actions = []
     if loop_file:
@@ -341,7 +346,7 @@ def _destructive_actions(preflight: PreflightResult, target, loop_file: bool) ->
             "update /etc/fstab",
         ]
     )
-    if leaves_containerd_store:
+    if host_uses_containerd_image_store:
         destructive_actions.append(
             "switch Docker from the containerd image store to overlay2 (images and containers in the old store become "
             "unavailable: pull the images and recreate the containers afterwards)"
@@ -356,18 +361,41 @@ def _destructive_actions(preflight: PreflightResult, target, loop_file: bool) ->
     return destructive_actions
 
 
-def _loop_file_target(preflight: PreflightResult, image_file: Optional[str], image_size_gib: Optional[int]):
-    """Plan the XFS image file; `findmnt --json --bytes --list --real ...` via `load_mounted_filesystems(...)`."""
+def _loop_file_target(preflight: PreflightResult, image_file: Optional[str], image_size_gib: Optional[int]) -> TargetPlan:
+    """Plan the XFS image file; `findmnt --json --bytes --list --real ...` via `load_mounted_filesystems(...)`,
+    `nvidia-smi --query-gpu=memory.total ...` via `_total_gpu_vram_bytes()`."""
     filesystems = load_mounted_filesystems(run_command, preflight.block_devices)
+    total_vram_bytes = _total_gpu_vram_bytes()
+    if total_vram_bytes is None:
+        console.warning(
+            f"GPU VRAM could not be read (nvidia-smi); the image file is not checked against the validator's "
+            f"{MIN_DISK_TO_VRAM_RATE}x VRAM disk floor for the idle incentive"
+        )
     return plan_loop_file_target(
         filesystems,
         preflight.docker_state.docker_root_dir,
         image_file,
         image_size_gib * 1024**3 if image_size_gib else None,
+        total_vram_bytes,
     )
 
 
-def _backup_by_rename(preflight: PreflightResult, target) -> bool:
+def _total_gpu_vram_bytes() -> Optional[int]:
+    # `nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits`: one MiB figure per GPU; None when it
+    # cannot be read, so the caller warns instead of blocking
+    try:
+        found = run_command(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"], False, True)
+    except FileNotFoundError:
+        return None
+    if found.returncode != 0:
+        return None
+    try:
+        return sum(int(line.strip()) for line in found.stdout.splitlines() if line.strip()) * 1024**2
+    except ValueError:
+        return None
+
+
+def _backup_by_rename(preflight: PreflightResult, target: TargetPlan) -> bool:
     # the image file shares the filesystem with Docker's data, so the data root is renamed aside, not copied;
     # a Docker root that is its own mount cannot be renamed off it and is copied as for a disk target
     return target.classification == "loop_file" and preflight.docker_mount.target != preflight.docker_state.docker_root_dir
@@ -915,6 +943,18 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
     return errors
 
 
+def _refuse_mounts_under(docker_root: str):
+    # `mv` would carry a mount left under the data root into the backup, and the final rmtree would erase that disk
+    prefix = docker_root.rstrip("/") + "/"
+    targets = run_command(["findmnt", "--list", "--noheadings", "-o", "TARGET"], True, True).stdout.split()
+    mounted = [target for target in targets if target.startswith(prefix)]
+    if mounted:
+        raise RuntimeError(
+            f"Something is still mounted under {docker_root}: {', '.join(mounted)}. Moving the data root aside would "
+            "take the mount with it; unmount it (`umount <path>`) and run setup again"
+        )
+
+
 def _move_docker_root_back(plan: SetupPlan):
     # rmdir first: were the directory not empty, `mv` would put the backup inside it instead of in its place
     docker_root = plan.preflight.docker_state.docker_root_dir
@@ -933,9 +973,9 @@ def _irreversible_note(plan: SetupPlan, state: _SetupExecutionState) -> str:
     return "Disk partitioning and filesystem formatting were not rolled back."
 
 
-def _setup_failure_message(plan: SetupPlan, state: _SetupExecutionState, exc: Exception, rollback_errors: list[str]) -> str:
+def _setup_failure_message(plan: SetupPlan, state: _SetupExecutionState, exc: BaseException, rollback_errors: list[str]) -> str:
     lines = [
-        f"GPU splitting setup failed: {exc}",
+        f"GPU splitting setup failed: {str(exc) or type(exc).__name__}",
         "Rollback of reversible host changes was attempted.",
         _irreversible_note(plan, state),
         f"Backup remains at {plan.backup_dir}",
@@ -1008,7 +1048,8 @@ def _execute_setup(plan: SetupPlan):
 
     2. Back up the current Docker root
        - `rsync -aHAX --numeric-ids <docker-root>/ <backup-dir>/`
-       - or `mv <docker-root> <backup-dir>` for an image file on the same filesystem
+       - or, for an image file on the same filesystem, `findmnt --list --noheadings -o TARGET` (no mount may
+         be left under the data root) and `mv <docker-root> <backup-dir>`
 
     3. Prepare the target partition
        - optional `parted -s <disk> mklabel gpt`
@@ -1072,6 +1113,7 @@ def _execute_setup(plan: SetupPlan):
         with timed_step_status(2, total_steps, "Moving Docker data aside" if rename_backup else "Backing up Docker data"):
             console.dim(f"Backup directory: {plan.backup_dir}")
             if rename_backup:
+                _refuse_mounts_under(docker_root)
                 run_command(["mv", docker_root, plan.backup_dir], True, True)
                 state.docker_root_moved = True
             else:
@@ -1157,8 +1199,9 @@ def _execute_setup(plan: SetupPlan):
                 raise RuntimeError(f"Verification failed. Backup remains at {plan.backup_dir}")
             # the data is restored and verified on the new mount; the copy would only hold the old disk's space
             shutil.rmtree(plan.backup_dir, ignore_errors=True)
-    except Exception as exc:
-        console.error(f"Setup failed: {exc}")
+    except (Exception, KeyboardInterrupt) as exc:
+        # Ctrl+C included: without the rollback the host stays with Docker stopped and its data root moved aside
+        console.error(f"Setup failed: {str(exc) or type(exc).__name__}")
         console.warning("Attempting rollback of reversible host changes.")
         console.warning(f"Backup remains at {plan.backup_dir}")
         rollback_errors = _rollback_setup(plan, state, target_partition)
@@ -1167,6 +1210,10 @@ def _execute_setup(plan: SetupPlan):
             console.error("Rollback encountered additional errors.")
         else:
             console.success("Reversible host changes rolled back and Docker was restarted.")
+        if isinstance(exc, KeyboardInterrupt):
+            # the interrupt itself goes on, so `lium mine` stops instead of treating it as a refused storage step
+            console.error(_setup_failure_message(plan, state, exc, rollback_errors))
+            raise
         raise RuntimeError(_setup_failure_message(plan, state, exc, rollback_errors)) from exc
 
 
@@ -1181,7 +1228,8 @@ _IMAGE_FILE_OPTION = click.option(
 )
 _IMAGE_SIZE_OPTION = click.option(
     "--size", "image_size_gib", type=int,
-    help="Size of the XFS image file in GiB (default: free space minus the system reserve)",
+    help=f"Size of the XFS image file in GiB (default: free space minus the system reserve; at least "
+    f"{LOOP_FILE_MIN_SIZE_BYTES // 1024**3} GiB and {MIN_DISK_TO_VRAM_RATE}x the host's GPU VRAM)",
 )
 
 

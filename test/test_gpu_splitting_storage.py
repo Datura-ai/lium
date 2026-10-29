@@ -516,19 +516,31 @@ def test_plan_loop_file_takes_the_filesystem_with_most_free_space_minus_the_rese
 
 
 def test_plan_loop_file_on_root_goes_to_var_lib_and_keeps_at_least_20_gib():
-    plan = plan_loop_file_target([_filesystem("/", 150, size_gib=180)], "/var/lib/docker")
+    plan = plan_loop_file_target([_filesystem("/", 170, size_gib=190)], "/var/lib/docker")
 
     assert plan.resolved_target == "/var/lib/lium-docker.xfs"
-    assert plan.loop_file_reserve_bytes == 20 * 1024**3 and plan.loop_file_size_bytes == 130 * 1024**3
+    assert plan.loop_file_reserve_bytes == 20 * 1024**3 and plan.loop_file_size_bytes == 150 * 1024**3
 
 
-def test_plan_loop_file_refuses_under_100_gib_with_the_numbers():
-    with pytest.raises(RuntimeError, match="would get 66 GiB \\(86 GiB free, 20 GiB kept"):
-        plan_loop_file_target([_filesystem("/", 86, size_gib=120)], "/var/lib/docker")
+def test_plan_loop_file_refuses_under_the_140_gib_listing_floor_with_the_numbers():
+    # the file is the disk the node reports: 100 GiB free for the marketplace listing after ~40 GiB of node images
+    with pytest.raises(RuntimeError, match="would get 130 GiB \\(150 GiB free, 20 GiB kept.*needs 140 GiB.*100 GiB free"):
+        plan_loop_file_target([_filesystem("/", 150, size_gib=180)], "/var/lib/docker")
+
+
+def test_plan_loop_file_refuses_a_file_under_1_5x_the_gpu_vram():
+    with pytest.raises(RuntimeError, match="would get 250 GiB, under 1.5x the 640 GiB of GPU VRAM on this host \\(960 GiB\\)"):
+        plan_loop_file_target([_filesystem("/", 300)], "/var/lib/docker", total_vram_bytes=8 * 80 * 1024**3)
+
+
+def test_plan_loop_file_accepts_a_file_of_1_5x_the_gpu_vram():
+    plan = plan_loop_file_target([_filesystem("/", 300)], "/var/lib/docker", total_vram_bytes=2 * 80 * 1024**3)
+
+    assert plan.loop_file_size_bytes == 250 * 1024**3
 
 
 def test_plan_loop_file_skips_a_docker_root_that_is_its_own_mount():
-    filesystems = [_filesystem("/", 150), _filesystem("/var/lib/docker", 900, source="/dev/sdc1")]
+    filesystems = [_filesystem("/", 200), _filesystem("/var/lib/docker", 900, source="/dev/sdc1")]
 
     plan = plan_loop_file_target(filesystems, "/var/lib/docker")
 

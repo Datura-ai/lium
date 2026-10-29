@@ -328,10 +328,6 @@ def _has_sysbox() -> bool:
     return isinstance(parsed, dict) and "sysbox-runc" in parsed
 
 
-# VerifyX refuses a node with under 100 GiB free, measured after the node images are pulled (~40 GiB: executor,
-# runner, validator preflight). On 7 Oct 2026 a 100 GB disk passed every earlier check and failed only at step 6.
-NODE_FREE_DISK_GIB = 100
-NODE_IMAGES_GIB = 40
 GIB = 1024**3
 
 
@@ -355,6 +351,8 @@ def _node_images_present(executor_dir: Path) -> bool:
 
 
 def _check_free_disk(executor_dir: Path):
+    from ..mine.storage import NODE_FREE_DISK_GIB, NODE_IMAGES_GIB
+
     root = _run("docker info --format '{{.DockerRootDir}}'", check=False)[0].strip() or "/var/lib/docker"
     free = shutil.disk_usage(root if Path(root).exists() else "/").free
     needed_gib = NODE_FREE_DISK_GIB + (0 if _node_images_present(executor_dir) else NODE_IMAGES_GIB)

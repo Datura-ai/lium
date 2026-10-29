@@ -115,6 +115,38 @@ def test_harden_loop_device_only_warns_when_direct_io_is_refused(monkeypatch):
     assert len(warnings) == 1 and "Direct I/O could not be turned on for /dev/loop5" in warnings[0]
 
 
+def test_loop_file_target_passes_the_summed_gpu_vram_to_the_plan(monkeypatch):
+    preflight = _sample_preflight()
+    monkeypatch.setattr(gpu_splitting, "load_mounted_filesystems", lambda *a: [])
+    monkeypatch.setattr(
+        gpu_splitting, "run_command",
+        lambda args, check=True, capture=True: CommandResult(args, "81559\n81559\n", "", 0) if args[0] == "nvidia-smi" else None,
+    )
+    planned = {}
+    monkeypatch.setattr(gpu_splitting, "plan_loop_file_target", lambda *args: planned.setdefault("args", args))
+
+    gpu_splitting._loop_file_target(preflight, None, 200)
+
+    assert planned["args"][3:] == (200 * GIB, 2 * 81559 * 1024**2)
+
+
+def test_loop_file_target_warns_and_plans_without_vram_when_nvidia_smi_is_missing(monkeypatch, capsys):
+    preflight = _sample_preflight()
+    monkeypatch.setattr(gpu_splitting, "load_mounted_filesystems", lambda *a: [])
+
+    def run_command(args, check=True, capture=True):
+        raise FileNotFoundError("nvidia-smi")
+
+    monkeypatch.setattr(gpu_splitting, "run_command", run_command)
+    planned = {}
+    monkeypatch.setattr(gpu_splitting, "plan_loop_file_target", lambda *args: planned.setdefault("args", args))
+
+    gpu_splitting._loop_file_target(preflight, None, None)
+
+    assert planned["args"][4] is None
+    assert "GPU VRAM could not be read" in capsys.readouterr().out
+
+
 def test_plan_refuses_device_together_with_file(monkeypatch):
     with pytest.raises(RuntimeError, match="pass one of them"):
         gpu_splitting._build_setup_plan(_sample_preflight(), "/dev/sdb", image_file="/pool.xfs")
@@ -122,7 +154,7 @@ def test_plan_refuses_device_together_with_file(monkeypatch):
 
 def test_fstab_entry_and_drop_in_for_the_image_file():
     assert gpu_splitting._fstab_entry("/var/lib/lium-docker.xfs", gpu_splitting.LOOP_FILE_FSTAB_OPTIONS) == (
-        "/var/lib/lium-docker.xfs /var/lib/docker xfs loop,pquota,noatime 0 0"
+        "/var/lib/lium-docker.xfs /var/lib/docker xfs loop,pquota,noatime,nofail 0 0"
     )
     assert gpu_splitting._docker_drop_in("/var/lib/docker") == "[Unit]\nRequiresMountsFor=/var/lib/docker\n"
     rule = gpu_splitting._loop_device_udev_rule("/var/lib/lium-docker.xfs")
@@ -314,10 +346,55 @@ def test_execute_setup_image_file_moves_data_aside_preallocates_and_wires_docker
     assert ["rsync", "-aHAX", "--numeric-ids", f"{plan.backup_dir}/", f"{docker_root}/"] in commands
     assert commands[-1] == ["systemctl", "start", "docker"]
     assert not any(args[0] in {"blkid", "parted", "rsync"} and args[-1] == f"{plan.backup_dir}/" for args in commands)
-    assert Path(plan.fstab_path).read_text() == f"{image} /var/lib/docker xfs loop,pquota,noatime 0 0\n"
+    assert Path(plan.fstab_path).read_text() == f"{image} /var/lib/docker xfs loop,pquota,noatime,nofail 0 0\n"
     assert Path(plan.drop_in_path).read_text() == f"[Unit]\nRequiresMountsFor={docker_root}\n"
     assert f'ATTR{{loop/backing_file}}=="{image}"' in Path(plan.udev_rule_path).read_text()
     assert not Path(plan.backup_dir).exists()
+
+
+def test_execute_setup_refuses_to_move_a_data_root_with_a_mount_under_it(monkeypatch, tmp_path):
+    plan = _loop_file_plan(tmp_path)
+    commands = _loop_file_host(monkeypatch, plan)
+    docker_root = plan.preflight.docker_state.docker_root_dir
+    host_run_command = gpu_splitting.run_command
+
+    def run_command(args, check=True, capture=True):
+        if args[0] == "findmnt":
+            commands.append(args)
+            return CommandResult(args, f"/\n/boot/efi\n{docker_root}/volumes/backups\n", "", 0)
+        return host_run_command(args, check, capture)
+
+    monkeypatch.setattr(gpu_splitting, "run_command", run_command)
+
+    with pytest.raises(RuntimeError, match=f"mounted under {docker_root}: {docker_root}/volumes/backups.*umount"):
+        gpu_splitting._execute_setup(plan)
+
+    assert not any(args[0] == "mv" for args in commands)
+    assert (Path(docker_root) / "image-layers").read_text() == "x"
+    assert commands[-1] == ["systemctl", "start", "docker"]
+
+
+def test_execute_setup_rolls_back_on_ctrl_c_and_lets_the_interrupt_through(monkeypatch, tmp_path):
+    plan = _loop_file_plan(tmp_path)
+    commands = _loop_file_host(monkeypatch, plan)
+    docker_root = plan.preflight.docker_state.docker_root_dir
+    image = plan.target.resolved_target
+    host_run_command = gpu_splitting.run_command
+
+    def run_command(args, check=True, capture=True):
+        if args[:2] == ["mkfs.xfs", "-f"]:
+            raise KeyboardInterrupt
+        return host_run_command(args, check, capture)
+
+    monkeypatch.setattr(gpu_splitting, "run_command", run_command)
+
+    with pytest.raises(KeyboardInterrupt):
+        gpu_splitting._execute_setup(plan)
+
+    assert (Path(docker_root) / "image-layers").read_text() == "x"
+    assert not Path(plan.backup_dir).exists()
+    assert not Path(image).exists()
+    assert commands[-1] == ["systemctl", "start", "docker"]
 
 
 def test_execute_setup_image_file_copies_when_the_docker_root_is_its_own_mount(monkeypatch, tmp_path):
