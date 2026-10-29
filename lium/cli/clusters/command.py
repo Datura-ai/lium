@@ -155,7 +155,7 @@ def clusters_list_command(output_format: str, json_output: bool):
 @click.option("--ttl", help="Auto-terminate every member after a duration (e.g. 6h, 45m, 2d)")
 @click.option("--wait/--no-wait", default=True, show_default=True, help="Wait until every member is RUNNING with SSH")
 @click.option("--timeout", type=int, default=900, show_default=True, help="Seconds to wait with --wait")
-@click.option("--no-backup", "no_backup", is_flag=True, help="Do not back up the members' volumes. Default: Lium backs them up automatically")
+@click.option("--no-backup", "no_backup", is_flag=True, help="Do not back up the members' volumes. Default: Lium backs them up automatically, except for now on encrypted volumes")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @FORMAT_OPTION
 @handle_errors

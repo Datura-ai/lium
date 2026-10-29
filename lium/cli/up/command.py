@@ -196,7 +196,7 @@ def _post_rent_failure(exc: Exception, billing_pod: dict, doing: str, note: str 
 @click.option("--restore-to", "restore_path", help="New or empty subdirectory for the startup restore")
 @click.option(
     "--no-backup", "no_backup", is_flag=True,
-    help="Do not back up the pod's volume. Default: Lium backs it up automatically",
+    help="Do not back up the pod's volume. Default: Lium backs it up automatically, except for now on encrypted volumes",
 )
 @click.option("--image", help="Docker image to run (e.g., pytorch/pytorch:2.0, nvidia/cuda:12.0)")
 @click.option("--internal-ports", help="Internal ports to expose (comma-separated, e.g., 22,8000,8080)")
