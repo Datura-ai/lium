@@ -49,8 +49,8 @@ def run_json_command(runner: Runner, args: list[str]) -> dict:
     Typical commands passed here:
 
     - `lsblk --json --bytes ...`
-    - `findmnt --json --target /`
-    - `findmnt --json --target /var/lib/docker`
+    - `findmnt --json --canonicalize --evaluate --target /`
+    - `findmnt --json --canonicalize --evaluate --target /var/lib/docker`
 
     Keeping JSON parsing here avoids repeating the same decode/error handling in
     the storage-inspection helpers.
@@ -144,13 +144,15 @@ def load_mount_info(runner: Runner, target: str) -> MountInfo:
 
     Command run:
 
-    - `findmnt --json --target <target>`
+    - `findmnt --json --canonicalize --evaluate --target <target>`
 
     We use this for `/`, `/var/lib/docker`, and the temporary validation
     mountpoint so later safety checks can compare device sources, filesystems,
-    and mount options such as project quota (`pquota`/`prjquota`).
+    and mount options such as project quota (`pquota`/`prjquota`). Sources come
+    back canonical (`/dev/sdc1`, not `/dev/disk/by-id/...` or `UUID=`): the
+    rollback compares the snapshot with what `mount` later reports.
     """
-    data = run_json_command(runner, ["findmnt", "--json", "--target", target])
+    data = run_json_command(runner, ["findmnt", "--json", "--canonicalize", "--evaluate", "--target", target])
     filesystems = data.get("filesystems") or []
     if not filesystems:
         raise RuntimeError(f"Unable to determine mount info for {target}")

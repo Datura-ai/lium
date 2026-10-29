@@ -170,9 +170,9 @@ def _preflight() -> PreflightResult:
 
     Commands delegated through helpers:
 
-    - `findmnt --json --target /` via `load_mount_info(...)`
+    - `findmnt --json --canonicalize --evaluate --target /` via `load_mount_info(...)`
     - `docker info --format '{{json .}}'` via `inspect_docker_state(...)`
-    - `findmnt --json --target <docker-root>` via `load_mount_info(...)`
+    - `findmnt --json --canonicalize --evaluate --target <docker-root>` via `load_mount_info(...)`
     - `lsblk --json --bytes ...` via `load_block_devices(...)`
 
     This function must stay read-only. Its job is to confirm the OS/runtime
@@ -809,7 +809,7 @@ def _mount_validation(target_path: str, docker_root: str, loop_file: bool = Fals
     Commands run here:
 
     - `mount -o pquota <target> /mnt/lium-docker-validate` (`-o loop,pquota` for an image file)
-    - `findmnt --json --target /mnt/lium-docker-validate` via `load_mount_info(...)`
+    - `findmnt --json --canonicalize --evaluate --target /mnt/lium-docker-validate` via `load_mount_info(...)`
     - `umount /mnt/lium-docker-validate`
 
     The temporary mount checks three things before we touch `/var/lib/docker`:
@@ -1143,7 +1143,7 @@ def _execute_setup(plan: SetupPlan):
 
     5. Temporary mount validation
        - `mount -o pquota <partition> /mnt/lium-docker-validate`
-       - `findmnt --json --target /mnt/lium-docker-validate` via helper
+       - `findmnt --json --canonicalize --evaluate --target /mnt/lium-docker-validate` via helper
        - statfs of the mount: its total against the validator's VRAM floor (image file with known VRAM)
        - `umount /mnt/lium-docker-validate`
 
@@ -1157,13 +1157,13 @@ def _execute_setup(plan: SetupPlan):
     7. Cut over Docker root and restore data
        - optional `umount /var/lib/docker`
        - `mount /var/lib/docker`
-       - `findmnt --json --target /var/lib/docker` via helper
+       - `findmnt --json --canonicalize --evaluate --target /var/lib/docker` via helper
        - `rsync -aHAX --numeric-ids <backup-dir>/ <docker-root>/`
 
     8. Restart and verify Docker
        - `systemctl start docker`
        - `docker info --format '{{json .}}'` via helper
-       - `findmnt --json --target /var/lib/docker` via helper
+       - `findmnt --json --canonicalize --evaluate --target /var/lib/docker` via helper
        - statfs of the Docker root: free space against the listing floor (image file)
 
     9. Commit point: remove the backup. A failure or Ctrl+C here keeps the verified image, mount and config.
@@ -1231,29 +1231,31 @@ def _execute_setup(plan: SetupPlan):
         with timed_step_status(5, total_steps, "Validating temporary mount"):
             _mount_validation(target_partition, docker_root, loop_file, plan.target.loop_file_total_vram_bytes)
 
+        # each `*_written` flag is set before its writer: an interrupt after the write but before the flag would
+        # otherwise leave the file changed and the rollback blind to it; the snapshots were taken before the first step
         with timed_step_status(6, total_steps, "Updating daemon.json"):
             console.dim(f"Writing Docker config to {plan.daemon_json_path}")
-            _write_json_atomic(plan.daemon_json_path, plan.daemon_json_merged)
             state.daemon_json_written = True
+            _write_json_atomic(plan.daemon_json_path, plan.daemon_json_merged)
 
         with timed_step_status(7, total_steps, "Updating fstab, docker.service and udev" if loop_file else "Updating fstab"):
             if loop_file:
                 console.dim(f"Mounting {target_partition} at {docker_root} with {LOOP_FILE_FSTAB_OPTIONS}")
-                _update_fstab(plan.fstab_path, _fstab_entry(target_partition, LOOP_FILE_FSTAB_OPTIONS))
                 state.fstab_written = True
+                _update_fstab(plan.fstab_path, _fstab_entry(target_partition, LOOP_FILE_FSTAB_OPTIONS))
                 console.dim(f"Writing {plan.drop_in_path}")
-                _write_text_file(plan.drop_in_path, _docker_drop_in(docker_root))
                 state.drop_in_written = True
+                _write_text_file(plan.drop_in_path, _docker_drop_in(docker_root))
                 run_command(["systemctl", "daemon-reload"], True, True)
                 console.dim(f"Writing {plan.udev_rule_path}")
-                _write_text_file(plan.udev_rule_path, _loop_device_udev_rule(target_partition))
                 state.udev_rule_written = True
+                _write_text_file(plan.udev_rule_path, _loop_device_udev_rule(target_partition))
                 run_command(["udevadm", "control", "--reload-rules"], True, True)
             else:
                 uuid = _get_uuid(target_partition)
                 console.dim(f"Using UUID={uuid} for /var/lib/docker")
-                _update_fstab(plan.fstab_path, _fstab_entry(f"UUID={uuid}", "defaults,pquota"))
                 state.fstab_written = True
+                _update_fstab(plan.fstab_path, _fstab_entry(f"UUID={uuid}", "defaults,pquota"))
 
         with timed_step_status(8, total_steps, "Cutting over /var/lib/docker"):
             docker_root = Path(plan.preflight.docker_state.docker_root_dir)

@@ -676,3 +676,20 @@ def test_plan_loop_file_target_refuses_an_existing_auto_path(monkeypatch):
 
     with pytest.raises(RuntimeError, match="/var/lib/lium-docker.xfs already exists"):
         plan_loop_file_target([_filesystem("/", 300)], "/var/lib/docker")
+
+
+def test_load_mount_info_asks_findmnt_for_canonical_sources():
+    # a mount made through /dev/disk/by-id/... must read as the same device as its later remount, which mount
+    # canonicalises; tags (UUID=, LABEL=) are evaluated to devices for the same reason
+    seen = []
+
+    def runner(args, check=True, capture=True):
+        seen.append(args)
+        return CommandResult(args, json.dumps({"filesystems": [
+            {"target": "/var/lib/docker", "source": "/dev/sdc1", "fstype": "ext4", "options": "rw,relatime"}
+        ]}), "", 0)
+
+    mount = storage.load_mount_info(runner, "/var/lib/docker")
+
+    assert seen == [["findmnt", "--json", "--canonicalize", "--evaluate", "--target", "/var/lib/docker"]]
+    assert mount == MountInfo(target="/var/lib/docker", source="/dev/sdc1", fstype="ext4", options=["rw", "relatime"])

@@ -561,8 +561,14 @@ def test_execute_setup_rsync_branch_keeps_docker_down_when_the_mount_table_canno
     assert any("start docker: skipped" in message for message in messages)
 
 
-def test_execute_setup_rsync_branch_starts_docker_only_on_the_confirmed_original_filesystem(monkeypatch, tmp_path):
-    # the remount command returns 0 but the mount table does not show /dev/sdc1 back at the root: Docker stays down
+@pytest.mark.parametrize("seen_after_remount, starts", [
+    ("/dev/sdc1", True), ("/dev/sdc2", False), (None, False),
+], ids=["same-device", "other-device", "findmnt-fails"])
+def test_execute_setup_rsync_branch_starts_docker_only_on_the_confirmed_original_filesystem(
+    monkeypatch, tmp_path, seen_after_remount, starts
+):
+    # findmnt canonicalises sources, so a mount made through /dev/disk/by-id/... is seen as /dev/sdc1 both at preflight
+    # and after the remount; another device, or no answer, keeps Docker down
     own_mount = MountInfo(target=str(tmp_path / "docker"), source="/dev/sdc1", fstype="ext4", options=["rw"])
     plan = _loop_file_plan(tmp_path, docker_mount=own_mount)
     docker_root = plan.preflight.docker_state.docker_root_dir
@@ -570,21 +576,74 @@ def test_execute_setup_rsync_branch_starts_docker_only_on_the_confirmed_original
     remount = ["mount", "-t", "ext4", "-o", "rw", "/dev/sdc1", docker_root]
     commands = _loop_file_host(monkeypatch, plan, fail_at=restore)
     host_run_command = gpu_splitting.run_command
+    host_load_mount_info = gpu_splitting.load_mount_info
 
     def run_command(args, check=True, capture=True):
         if args == remount:
             commands.append(args)
+            commands.mounted["remounted"] = True
             return CommandResult(args, "", "", 0)
         return host_run_command(args, check, capture)
 
+    def load_mount_info(runner, target):
+        if not commands.mounted.get("remounted"):
+            return host_load_mount_info(runner, target)
+        if seen_after_remount is None:
+            raise RuntimeError("findmnt failed")
+        return MountInfo(target=target, source=seen_after_remount, fstype="ext4", options=["rw"])
+
     monkeypatch.setattr(gpu_splitting, "run_command", run_command)
+    monkeypatch.setattr(gpu_splitting, "load_mount_info", load_mount_info)
 
     with pytest.raises(RuntimeError, match="rsync failed") as exc_info:
         gpu_splitting._execute_setup(plan)
 
     assert remount in commands
-    assert ["systemctl", "start", "docker"] not in commands
-    assert f"confirm /dev/sdc1 is mounted at {docker_root}" in str(exc_info.value)
+    assert (["systemctl", "start", "docker"] in commands) is starts
+    assert (f"confirm /dev/sdc1 is mounted at {docker_root}" in str(exc_info.value)) is not starts
+
+
+_ORIGINAL_CONFIG = {
+    "daemon_json": '{"debug": true}\n',
+    "fstab": "/dev/sdc1 /var/lib/docker ext4 defaults 0 2\n",
+    "drop_in": "[Unit]\nRequiresMountsFor=/srv\n",
+    "udev_rule": 'ATTR{loop/backing_file}=="/srv/old.img"\n',
+}
+
+
+@pytest.mark.parametrize("existed", [True, False], ids=["existing", "absent"])
+@pytest.mark.parametrize("after", [False, True], ids=["before-write", "after-write"])
+@pytest.mark.parametrize("config", list(_ORIGINAL_CONFIG))
+def test_execute_setup_ctrl_c_around_each_config_write_restores_the_file(monkeypatch, tmp_path, config, after, existed):
+    # the flag for a written file is set after its writer returns; rollback must restore every file it may have changed
+    own_mount = MountInfo(target=str(tmp_path / "docker"), source="/dev/sdc1", fstype="ext4", options=["rw"])
+    plan = _loop_file_plan(tmp_path, docker_mount=own_mount)
+    commands = _loop_file_host(monkeypatch, plan)
+    path = Path(getattr(plan, f"{config}_path"))
+    if existed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_ORIGINAL_CONFIG[config])
+    writer_name = {"daemon_json": "_write_json_atomic", "fstab": "_update_fstab"}.get(config, "_write_text_file")
+    writer = getattr(gpu_splitting, writer_name)
+
+    def interrupted_writer(target, payload):
+        if Path(target) != path:
+            return writer(target, payload)
+        if after:
+            writer(target, payload)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(gpu_splitting, writer_name, interrupted_writer)
+
+    with pytest.raises(KeyboardInterrupt):
+        gpu_splitting._execute_setup(plan)
+
+    if existed:
+        assert path.read_text() == _ORIGINAL_CONFIG[config]
+    else:
+        assert not path.exists()
+    assert not Path(plan.target.resolved_target).exists()
+    assert commands[-1] == ["systemctl", "start", "docker"] and commands.docker["active"]
 
 
 def test_execute_setup_refuses_the_rename_when_the_backup_path_already_exists(monkeypatch, tmp_path):
