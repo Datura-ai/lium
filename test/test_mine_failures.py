@@ -486,3 +486,17 @@ def test_an_occupied_port_stops_the_rerun_before_env_changes(monkeypatch, tmp_pa
                                                     "--ssh-port", "22"])
     assert result.exit_code != 0
     assert (node / ".env").read_text() == saved
+
+
+@pytest.mark.parametrize("listener,taken", [("sshd pid 1", True), ("", False)])
+def test_a_privileged_port_unprivileged_is_checked_by_listener(monkeypatch, listener, taken):
+    """Non-root rerun: bind to port 22 gives EACCES; a listener there must still count as taken."""
+    import errno
+    import socket
+
+    def deny(self, addr):
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(socket.socket, "bind", deny)
+    monkeypatch.setattr(mine, "_listening_process", lambda port: listener)
+    assert mine._port_in_use(22) is taken

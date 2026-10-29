@@ -474,8 +474,8 @@ def _port_in_use(port: int, host: str = "0.0.0.0") -> bool:
     so there the plain bind stays; ``lium mine`` brings up a Linux host. IPv4
     only: the executor's compose publishes ``0.0.0.0``; an IPv6-only listener on
     the port is not seen here (compose would then fail at ``:::<port>``). Only
-    ``EADDRINUSE`` means taken: ``EACCES`` on a privileged port from an
-    unprivileged ``lium mine`` is left to compose, which binds as root.
+    ``EADDRINUSE`` means taken; ``EACCES`` on a privileged port from an
+    unprivileged ``lium mine`` falls back to ``ss`` listing a listener there.
     """
     import errno
     import socket
@@ -487,8 +487,10 @@ def _port_in_use(port: int, host: str = "0.0.0.0") -> bool:
         try:
             s.bind((host, port))
         except OSError as e:
-            # only "somebody holds it" is a conflict: EACCES on a port below 1024 says this uid may not bind it,
-            # which compose (root) can — a provider running `lium mine` unprivileged must not be told 443 is taken
+            if e.errno == errno.EACCES:
+                # a port below 1024 this uid may not bind (compose, as root, can): ask ss for a listener instead,
+                # so sshd on 22 or nginx on 443 still stops an unprivileged rerun before the executor is recreated
+                return bool(_listening_process(port))
             return e.errno == errno.EADDRINUSE
     return False
 
