@@ -78,3 +78,13 @@ def test_a_paying_port_limited_remainder_reads_partial_idle_pay(short, expected)
     assert expected in printed
     assert "not eligible" not in printed.lower()
     assert "no action" not in printed.lower()
+
+
+def test_a_port_limited_remainder_without_a_served_verdict_never_claims_pay():
+    row = _partial_row()
+    del row["blocking_reasons"][0]["gating"]
+
+    with _blocking.console.capture() as captured:
+        print_not_eligible([row], short=False)
+
+    assert "partial idle pay" not in " ".join(captured.get().split()).lower()

@@ -577,8 +577,9 @@ def print_not_eligible(rows: Iterable[Any], *, short: bool) -> int:
         if not reasons:
             continue
         nodes += 1
-        partial = [r for r in reasons if r.get("code") == PARTIAL_PAY_CODE]
-        reasons = [r for r in reasons if r.get("code") != PARTIAL_PAY_CODE]
+        # partial only when the portal itself served ``gating: false`` (it does so only while some splits pay)
+        partial = [r for r in reasons if r.get("code") == PARTIAL_PAY_CODE and r.get("gating_source") == "portal"]
+        reasons = [r for r in reasons if r not in partial]
         if short:
             node_id = str(row.get("id") or row.get("executor_id") or "?")
             for reason in partial:
