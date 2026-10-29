@@ -1139,7 +1139,16 @@ class Lium:
                 if isinstance(executor_dict.get("frequent_rent_failures"), bool) else None
             ),
             last_verified_at=executor_dict.get("last_verified_at"),
-            reliability_score=executor_dict.get("reliability_score"),
+            # the score lium.io shows: the node's own once the per-node gate sends it, none while it is new
+            reliability_score=(
+                None
+                if executor_dict.get("node_reliability_new")
+                else next(
+                    (executor_dict[k] for k in ("node_reliability_pct", "reliability_score")
+                     if executor_dict.get(k) is not None),
+                    None,
+                )
+            ),
         )
 
     def list_ssh_keys(self) -> List[SSHKey]:

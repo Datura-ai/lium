@@ -80,7 +80,8 @@ class ExecutorInfo(_Serializable):
     frequent_rent_failures: Optional[bool] = None
     # When a validator last passed the node, as the API's ISO 8601 UTC string; None = never passed.
     last_verified_at: Optional[str] = None
-    # The platform's 0-100 reliability score for the node (uptime and rental history); None when not sent.
+    # The platform's 0-100 reliability score for the node (uptime and rental history), the one lium.io shows: the
+    # node's own score when the API sends one, else its provider's. None when not sent or the node is still new.
     reliability_score: Optional[float] = None
 
     @property
