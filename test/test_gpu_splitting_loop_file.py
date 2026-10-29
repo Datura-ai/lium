@@ -65,11 +65,16 @@ def _host_probes(docker_data_gib: int = 0, vram_mib: list[int] | None = None):
 
 
 def _mounts(plan: SetupPlan, mounted: dict):
-    # the Docker root is a plain directory on / until `mount <root>` runs, then an XFS loop mount with pquota
+    # the Docker root is a plain directory on / (or its own ext4 mount) until `mount <root>` runs, then an XFS loop
+    # mount with pquota; once its own mount is unmounted the directory sits on /
     def load_mount_info(runner, target):
+        if mounted["query_fails"]:
+            raise RuntimeError("findmnt failed")
         if mounted["on_target"]:
             return MountInfo(target=target, source="/dev/loop0", fstype="xfs", options=["rw", "noatime", "prjquota"])
-        return plan.preflight.docker_mount
+        if mounted["original"]:
+            return plan.preflight.docker_mount
+        return MountInfo(target="/", source="/dev/nvme0n1p2", fstype="ext4", options=["rw"])
 
     return load_mount_info
 
@@ -196,6 +201,8 @@ def test_confirm_asks_for_the_image_file_path(monkeypatch, tmp_path):
 class _Commands(list):
     created: list[tuple[str, int]]
     sysfs: dict[str, str]
+    mounted: dict
+    docker: dict
 
 
 def _loop_file_host(
@@ -209,19 +216,23 @@ def _loop_file_host(
     free_gib: int = 200,
 ) -> _Commands:
     # and_fail fails from its and_fail_from-th run on: the rsync branch unmounts the original root once in the flow;
-    # interrupt_at is Ctrl+C before the command's effect, interrupt_after once the host has already changed
+    # interrupt_at is Ctrl+C before the command's effect, interrupt_after once the host has already changed; both hit
+    # the command's first run only, the rollback may issue it again
     commands = _Commands()
-    mounted = {"on_target": False}
+    mounted = {"on_target": False, "original": True, "query_fails": False}
+    docker = {"active": True}
     docker_root = plan.preflight.docker_state.docker_root_dir
+    original_source = plan.preflight.docker_mount.source
 
     def run_command(args, check=True, capture=True):
         commands.append(args)
         if args == fail_at or (args == and_fail and commands.count(args) >= and_fail_from):
             raise RuntimeError(f"{args[0]} failed")
-        if args == interrupt_at:
+        first_run = commands.count(args) == 1
+        if args == interrupt_at and first_run:
             raise KeyboardInterrupt
         result = _host_effect(args)
-        if args == interrupt_after:
+        if args == interrupt_after and first_run:
             raise KeyboardInterrupt
         return result
 
@@ -234,10 +245,21 @@ def _loop_file_host(
             Path(args[1]).rename(args[2])
         if args[0] == "rmdir":
             Path(args[1]).rmdir()
+        if args == ["systemctl", "stop", "docker"]:
+            docker["active"] = False
+        if args == ["systemctl", "start", "docker"]:
+            docker["active"] = True
         if args == ["mount", docker_root]:
             mounted["on_target"] = True
+        if args[0] == "mount" and args[-2:] == [original_source, docker_root]:
+            mounted["original"] = True
         if args == ["umount", docker_root]:
-            mounted["on_target"] = False
+            if docker["active"]:
+                raise RuntimeError("umount: target is busy")
+            if mounted["on_target"]:
+                mounted["on_target"] = False
+            else:
+                mounted["original"] = False
         return CommandResult(args=args, stdout="", stderr="", returncode=0)
 
     _patch_execute_setup_dependencies(monkeypatch, run_command, _mounts(plan, mounted))
@@ -255,6 +277,8 @@ def _loop_file_host(
     monkeypatch.setattr(gpu_splitting, "_write_sysfs", lambda path, value: sysfs.__setitem__(path, value))
     commands.created = created
     commands.sysfs = sysfs
+    commands.mounted = mounted
+    commands.docker = docker
     Path(docker_root).mkdir()
     (Path(docker_root) / "image-layers").write_text("x")
     return commands
@@ -460,7 +484,8 @@ def test_execute_setup_ctrl_c_during_backup_cleanup_keeps_the_finished_migration
 
 @pytest.mark.parametrize("own_mount", [False, True], ids=["rename", "rsync"])
 @pytest.mark.parametrize("step, after", [
-    ("rename", False), ("rename", True), ("allocate", False), ("allocate", True), ("mount", False), ("mount", True),
+    ("stop", False), ("stop", True), ("rename", False), ("rename", True), ("allocate", False), ("allocate", True),
+    ("unmount", False), ("unmount", True), ("mount", False), ("mount", True), ("start", False), ("start", True),
 ])
 def test_execute_setup_ctrl_c_around_each_mutation_puts_the_host_back(monkeypatch, tmp_path, own_mount, step, after):
     # the flag for a mutation is set after its helper returns; an interrupt in that window must roll back the same way
@@ -470,7 +495,12 @@ def test_execute_setup_ctrl_c_around_each_mutation_puts_the_host_back(monkeypatc
     image = plan.target.resolved_target
     if own_mount and step == "rename":
         pytest.skip("the rsync branch does not rename")
-    command = {"rename": ["mv", docker_root, plan.backup_dir], "mount": ["mount", docker_root]}.get(step)
+    if not own_mount and step == "unmount":
+        pytest.skip("the rename branch has no original mount to unmount")
+    command = {
+        "stop": ["systemctl", "stop", "docker"], "rename": ["mv", docker_root, plan.backup_dir],
+        "unmount": ["umount", docker_root], "mount": ["mount", docker_root], "start": ["systemctl", "start", "docker"],
+    }.get(step)
     commands = _loop_file_host(
         monkeypatch, plan, interrupt_at=None if after or not command else command, interrupt_after=command if after else None
     )
@@ -492,7 +522,69 @@ def test_execute_setup_ctrl_c_around_each_mutation_puts_the_host_back(monkeypatc
     assert not Path(plan.fstab_path).exists() or image not in Path(plan.fstab_path).read_text()
     if step == "mount" and after:
         assert ["umount", docker_root] in commands
+    if step == "start" and after:
+        # the daemon came up on the image: rollback stops it before unmounting its storage
+        rollback = commands[len(commands) - commands[::-1].index(["systemctl", "start", "docker"], 1):]
+        assert rollback.index(["systemctl", "stop", "docker"]) < rollback.index(["umount", docker_root])
     assert commands[-1] == ["systemctl", "start", "docker"]
+    assert commands.docker["active"]
+    assert commands.mounted["original"] and not commands.mounted["on_target"]
+
+
+def test_execute_setup_rsync_branch_keeps_docker_down_when_the_mount_table_cannot_be_read_after_an_unmount(monkeypatch, tmp_path):
+    # Ctrl+C after `umount` of the original root took effect, then findmnt fails in the rollback: whether /dev/sdc1 is
+    # still mounted is unknown, so nothing is remounted, the image stays and Docker is not started on a bare directory
+    own_mount = MountInfo(target=str(tmp_path / "docker"), source="/dev/sdc1", fstype="ext4", options=["rw"])
+    plan = _loop_file_plan(tmp_path, docker_mount=own_mount)
+    commands = _loop_file_host(monkeypatch, plan)
+    docker_root = plan.preflight.docker_state.docker_root_dir
+    host_run_command = gpu_splitting.run_command
+
+    def run_command(args, check=True, capture=True):
+        result = host_run_command(args, check, capture)
+        if args == ["umount", docker_root]:
+            commands.mounted["query_fails"] = True
+            raise KeyboardInterrupt
+        return result
+
+    monkeypatch.setattr(gpu_splitting, "run_command", run_command)
+    messages = []
+    monkeypatch.setattr(gpu_splitting.console, "error", messages.append)
+
+    with pytest.raises(KeyboardInterrupt):
+        gpu_splitting._execute_setup(plan)
+
+    assert ["systemctl", "start", "docker"] not in commands
+    assert not any(args[0] == "mount" and args[-1] == docker_root for args in commands)
+    assert Path(plan.target.resolved_target).exists()
+    assert any(f"findmnt {docker_root}" in message and "/dev/sdc1" in message for message in messages)
+    assert any("start docker: skipped" in message for message in messages)
+
+
+def test_execute_setup_rsync_branch_starts_docker_only_on_the_confirmed_original_filesystem(monkeypatch, tmp_path):
+    # the remount command returns 0 but the mount table does not show /dev/sdc1 back at the root: Docker stays down
+    own_mount = MountInfo(target=str(tmp_path / "docker"), source="/dev/sdc1", fstype="ext4", options=["rw"])
+    plan = _loop_file_plan(tmp_path, docker_mount=own_mount)
+    docker_root = plan.preflight.docker_state.docker_root_dir
+    restore = ["rsync", "-aHAX", "--numeric-ids", f"{plan.backup_dir}/", f"{docker_root}/"]
+    remount = ["mount", "-t", "ext4", "-o", "rw", "/dev/sdc1", docker_root]
+    commands = _loop_file_host(monkeypatch, plan, fail_at=restore)
+    host_run_command = gpu_splitting.run_command
+
+    def run_command(args, check=True, capture=True):
+        if args == remount:
+            commands.append(args)
+            return CommandResult(args, "", "", 0)
+        return host_run_command(args, check, capture)
+
+    monkeypatch.setattr(gpu_splitting, "run_command", run_command)
+
+    with pytest.raises(RuntimeError, match="rsync failed") as exc_info:
+        gpu_splitting._execute_setup(plan)
+
+    assert remount in commands
+    assert ["systemctl", "start", "docker"] not in commands
+    assert f"confirm /dev/sdc1 is mounted at {docker_root}" in str(exc_info.value)
 
 
 def test_execute_setup_refuses_the_rename_when_the_backup_path_already_exists(monkeypatch, tmp_path):

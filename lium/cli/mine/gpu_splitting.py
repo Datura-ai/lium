@@ -75,8 +75,10 @@ class _SetupExecutionState:
     original_daemon_json: _FileSnapshot
     original_fstab: _FileSnapshot
     original_docker_mount: MountInfo
-    docker_stopped: bool = False
-    docker_started: bool = False
+    # both are set before their systemctl call: Docker is known to run before the stop, and may run once the start
+    # was submitted, whatever an interrupt in between lets the caller record
+    docker_restart_owed: bool = False
+    docker_may_be_running: bool = False
     daemon_json_written: bool = False
     fstab_written: bool = False
     docker_root_mounted_on_target: bool = False
@@ -928,14 +930,17 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
     docker_root = plan.preflight.docker_state.docker_root_dir
     errors: list[str] = []
 
-    if state.docker_started:
+    if state.docker_may_be_running:
+        # `systemctl stop` of an inactive unit is a no-op, so no need to ask first
         _rollback_attempt(errors, "stop docker", lambda: run_command(["systemctl", "stop", "docker"], True, True))
         _rollback_attempt(errors, "stop docker.socket", lambda: run_command(["systemctl", "stop", "docker.socket"], False, True))
 
     # the flags are set after each helper returns, so an interrupt in between leaves the host changed and the flag
-    # off: the mount table and the backup path decide too
+    # off: the mount table and the backup path decide too. A renamed-away root has no mount table entry to read.
     original = state.original_docker_mount
-    current = _mount_at_or_none(docker_root)
+    root_exists = os.path.lexists(docker_root)
+    current = _mount_at_or_none(docker_root) if root_exists else None
+    mount_table_unknown = root_exists and current is None
     source_changed = current is not None and current.source != original.source
     mounted_on_target = state.docker_root_mounted_on_target or (source_changed and current.target == docker_root)
     original_unmounted = state.original_docker_root_unmounted or (source_changed and original.target == docker_root)
@@ -946,7 +951,12 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
     )
 
     # data_restored: the original data root is back under docker_root, whichever way the backup was taken
-    unmounted = data_restored = True
+    unmounted = data_restored = not mount_table_unknown
+    if mount_table_unknown:
+        errors.append(
+            f"read the mount table: `findmnt {docker_root}` failed, so whether {original.source} or {target_partition} "
+            f"is mounted there is unknown; check `findmnt {docker_root}` by hand before starting Docker"
+        )
     if mounted_on_target:
         unmounted = _rollback_attempt(errors, f"unmount {docker_root}", lambda: run_command(["umount", docker_root], True, True))
         if not unmounted:
@@ -966,6 +976,15 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
     if rename_backup and (not os.path.isdir(docker_root) or (root_moved and os.path.lexists(plan.backup_dir))):
         # Docker starts only on a data root that is demonstrably back in place, never on an empty directory
         data_restored = False
+    if data_restored and original.target == docker_root:
+        # the rsync branch starts Docker only once the mount table shows the original filesystem back at the root
+        back = _mount_at_or_none(docker_root)
+        if back is None or back.source != original.source:
+            data_restored = False
+            errors.append(
+                f"confirm {original.source} is mounted at {docker_root}: "
+                + ("`findmnt` failed" if back is None else f"{back.source} is mounted there")
+            )
 
     if state.fstab_written:
         _rollback_attempt(errors, f"restore {plan.fstab_path}", lambda: _restore_text_file(state.original_fstab))
@@ -990,7 +1009,7 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
         else:
             errors.append(f"remove {target_partition}: skipped, still mounted at {docker_root}")
 
-    if state.docker_stopped:
+    if state.docker_restart_owed:
         if data_restored:
             _rollback_attempt(errors, "start docker", lambda: run_command(["systemctl", "start", "docker"], True, True))
         else:
@@ -1170,8 +1189,8 @@ def _execute_setup(plan: SetupPlan):
     try:
         with timed_step_status(1, total_steps, "Stopping Docker"):
             console.dim(f"Stopping docker services for {docker_root}")
+            state.docker_restart_owed = True
             run_command(["systemctl", "stop", "docker"], True, True)
-            state.docker_stopped = True
             run_command(["systemctl", "stop", "docker.socket"], False, True)
 
         with timed_step_status(2, total_steps, "Moving Docker data aside" if rename_backup else "Backing up Docker data"):
@@ -1259,8 +1278,8 @@ def _execute_setup(plan: SetupPlan):
             )
 
         with timed_step_status(10, total_steps, "Starting Docker and verifying"):
+            state.docker_may_be_running = True
             run_command(["systemctl", "start", "docker"], True, True)
-            state.docker_started = True
             verification = build_verification_result(run_command, plan.preflight.docker_state.docker_root_dir)
             console.print(_verification_table(verification, "Final Verification"))
             if not verification.passed:
