@@ -3,7 +3,7 @@
 // Lium (lium.io) is a GPU cloud: rent GPU servers (H100, B200, RTX 4090 ...) by the hour.
 // This app wraps Lium's REST API (https://lium.io/api), the same API the `lium` CLI and SDK use.
 const { version } = require('./package.json');
-const { version: platformVersion, errors } = require('zapier-platform-core');
+const { version: platformVersion } = require('zapier-platform-core');
 
 const API = 'https://lium.io/api';
 const NODES_FEED = `${API}/public/v1/nodes`; // public, no API key needed
@@ -126,39 +126,6 @@ const podStatusChanged = {
 
 // ---- Actions ----
 
-// Hidden, and never rents: Zapier publishes no integration that makes financial transactions, and an action cannot be
-// removed (C011) while old Zaps reference it.
-const rentPod = {
-  key: 'rent_gpu_pod',
-  noun: 'Pod',
-  display: {
-    label: 'Rent GPU Pod (removed)',
-    description: 'Removed: renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.',
-    hidden: true,
-  },
-  operation: {
-    // the 1.0.4 fields stay so Zapier can migrate Zaps that use them (C002)
-    inputFields: [
-      { key: 'gpu_type', label: 'GPU Model', required: true, helpText: 'Unused: renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.' },
-      { key: 'gpu_count', label: 'GPU Count', type: 'integer', required: false, default: '1', helpText: 'Unused: renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.' },
-      { key: 'max_price_per_gpu_hour', label: 'Max Price per GPU-Hour (USD)', type: 'number', required: false, helpText: 'Unused: renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.' },
-      { key: 'ssh_public_key', label: 'SSH Public Key', required: true, helpText: 'Unused: renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.' },
-      { key: 'pod_name', label: 'Pod Name', required: false, helpText: 'Unused: renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.' },
-      {
-        key: 'idempotency_key',
-        label: 'Idempotency Key',
-        required: true,
-        helpText: 'Unused: renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.',
-      },
-      { key: 'template_id', label: 'Template ID', required: false, helpText: 'Unused: renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.' },
-    ],
-    perform: async () => {
-      throw new errors.Error('Renting is not available from Zapier. Rent GPU pods on lium.io, the lium CLI or the API.', 'RentRemoved', 400);
-    },
-    sample: { id: 'removed' },
-  },
-};
-
 const terminatePod = {
   key: 'terminate_pod',
   noun: 'Pod',
@@ -189,5 +156,5 @@ module.exports = {
   beforeRequest: [addApiKey],
   triggers: { [newOffer.key]: newOffer, [podStatusChanged.key]: podStatusChanged },
   searches: { [findOffers.key]: findOffers },
-  creates: { [rentPod.key]: rentPod, [terminatePod.key]: terminatePod },
+  creates: { [terminatePod.key]: terminatePod },
 };
