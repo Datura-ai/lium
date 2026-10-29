@@ -63,6 +63,8 @@ def transfer_command(to: str, amount: float, note: Optional[str], idempotency_ke
         result = billing_client().transfer_credits(to, amount, description=note, idempotency_key=key)
     except LiumChargeOutcomeUnknownError as e:
         retry = f"lium transfer {shlex.quote(to)} {format(amount, '.17g')} --idempotency-key {shlex.quote(key)} --yes"
+        if note:
+            retry += f" --note {shlex.quote(note)}"
         raise CliFailure(
             "transfer_outcome_unknown",
             f"The transfer may or may not have happened. Idempotency key: {key}",
@@ -70,7 +72,7 @@ def transfer_command(to: str, amount: float, note: Optional[str], idempotency_ke
             data={"idempotency_key": key, "amount": amount, "to": to,
                   **({"request_id": e.request_id} if e.request_id else {})},
             hint=f"Check 'lium balance' or 'lium billing history', then re-run '{retry}': "
-                 "the same key cannot move the money twice. Do not retry without the key.",
+                 "within 24 h the same key cannot move the money twice. Do not retry without the key.",
         )
     except LiumScopeError as e:
         raise CliFailure("missing_scope", str(e), EXIT_PERMISSION_DENIED,

@@ -153,3 +153,14 @@ def test_cli_lost_answer_is_outcome_unknown_with_the_key(client, answer):
     sent = responses.calls[-1].request.headers["Idempotency-Key"]
     assert sent in error["hint"]
     assert json.loads(as_json.stderr.strip().splitlines()[-1])["data"]["idempotency_key"] == sent
+
+
+@responses.activate
+def test_cli_lost_answer_retry_hint_keeps_the_note(client):
+    # a retry without the note has a different body: the backend answers idempotency_key_reused, not the first transfer
+    responses.post(URL, body=requests.Timeout("read timed out"))
+
+    result = _run("friend@example.com", "25", "--note", "rent split", "--idempotency-key", "k-3", "--yes", "--json")
+    hint = json.loads(result.stderr.strip().splitlines()[-1])["error"]["hint"]
+    assert "--idempotency-key k-3 --yes --note 'rent split'" in hint
+    assert "within 24 h" in hint
