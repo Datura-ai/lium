@@ -935,11 +935,13 @@ def _renting_ports(value: str) -> set[int]:
     parts = m.groups() if m else value.split(",")
     if not all(p.isdigit() and 1 <= int(p) <= 65535 for p in parts):
         raise click.BadParameter(
-            f"{value!r}: use FIRST-LAST (e.g. 41000-41100) or a comma list (e.g. 41000,41001), ports 1-65535."
+            f"{value!r}: use FIRST-LAST (e.g. 41000-41100) or a comma list (e.g. 41000,41001,41002), ports 1-65535."
         )
     ports = set(range(int(parts[0]), int(parts[1]) + 1)) if m else {int(p) for p in parts}
     if not ports:
         raise click.BadParameter(f"{value!r}: the first port is above the last.")
+    if len(ports) < 3:  # validators list no node with fewer than 3 renting ports
+        raise click.BadParameter(f"{value!r}: give at least 3 ports; validators list no node with fewer.")
     return ports
 
 
@@ -1023,7 +1025,7 @@ def _renting_port_range(ctx, param, value: str | None) -> str | None:
     "--renting-port-range",
     callback=_renting_port_range,
     default=None,
-    help="Ports rented pods are published on (RENTING_PORT_RANGE), e.g. 41000-41100 or 41000,41001 "
+    help="Ports rented pods are published on (RENTING_PORT_RANGE), e.g. 41000-41100 or 41000,41001,41002 "
     "(default: all ports). A second node behind the same public IP needs a range of its own.",
 )
 @click.pass_context

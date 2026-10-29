@@ -320,7 +320,7 @@ def test_defaults_without_the_new_flags(monkeypatch):
     assert answers["ssh_port"] == "2200" and answers["port_range"] == ""
 
 
-@pytest.mark.parametrize("value", ["41000-", "41100-41000", "40000-70000", "a-b", "41000,,41001", "0-10"])
+@pytest.mark.parametrize("value", ["41000-", "41100-41000", "40000-70000", "a-b", "41000,,41001", "0-10", "41000", "41000,41001", "41000-41001"])
 def test_bad_renting_port_range_is_a_usage_error(value):
     result = CliRunner().invoke(mine.mine_command, ["--auto", "-k", _HK, "--renting-port-range", value])
     assert result.exit_code == 2, result.output
@@ -329,8 +329,8 @@ def test_bad_renting_port_range_is_a_usage_error(value):
 
 def test_comma_list_renting_ports_are_accepted(monkeypatch):
     answers = _capture_answers(monkeypatch)
-    CliRunner().invoke(mine.mine_command, ["--auto", "-k", _HK, "--renting-port-range", "41000, 41001"])
-    assert answers["port_range"] == "41000,41001"
+    CliRunner().invoke(mine.mine_command, ["--auto", "-k", _HK, "--renting-port-range", "41000, 41001, 41002"])
+    assert answers["port_range"] == "41000,41001,41002"
 
 
 @pytest.mark.parametrize("flags", [["--ssh-port", "41050"], ["--internal-port", "41000"], ["--external-port", "41100"]])
