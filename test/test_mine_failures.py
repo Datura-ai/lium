@@ -360,16 +360,19 @@ def test_prompted_renting_range_gets_the_flag_checks(monkeypatch, flags, prompte
         assert "--renting-port-range" in result.output
 
 
-@pytest.mark.parametrize("running, rentals, up, rerun_without_flags", [
-    (None, False, "docker compose up -d", False),                                    # first installation
-    ({"SSH_PORT": "2201"}, False, "docker compose up -d", False),                    # unchanged rerun
-    ({"SSH_PORT": "2200"}, False, "docker compose up -d --force-recreate", False),   # changed SSH port
-    ({"RENTING_PORT_RANGE": ""}, False, "docker compose up -d --force-recreate", False),  # changed renting range
-    ({"SSH_PORT": "2200"}, True, "docker compose up -d --no-recreate", False),       # changed, but rentals running
-    ({"SSH_PORT": "2201"}, False, "docker compose up -d", True),                     # rerun without port flags keeps .env
+@pytest.mark.parametrize("running, rentals, up, rerun_without_flags, env_format", [
+    (None, False, "docker compose up -d", False, "plain"),                                    # first installation
+    ({"SSH_PORT": "2201"}, False, "docker compose up -d", False, "plain"),                    # unchanged rerun
+    ({"SSH_PORT": "2200"}, False, "docker compose up -d --force-recreate", False, "plain"),   # changed SSH port
+    ({"RENTING_PORT_RANGE": ""}, False, "docker compose up -d --force-recreate", False, "plain"),  # changed renting range
+    ({"SSH_PORT": "2200"}, True, "docker compose up -d --no-recreate", False, "plain"),       # changed, but rentals running
+    ({"SSH_PORT": "2201"}, False, "docker compose up -d", True, "plain"),                     # rerun without port flags keeps .env
+    ({"SSH_PORT": "2201"}, False, "docker compose up -d", True, "commented"),  # saved values with inline comments
+    ({"SSH_PORT": "2201"}, False, "docker compose up -d", True, "quoted"),     # quoted saved port values
+    ({"SSH_PORT": "2201"}, False, "docker compose up -d", True, "quoted_range"),  # quoted saved renting range
 ])
 def test_rerun_with_changed_ports_recreates_the_executor(
-    monkeypatch, tmp_path: Path, running, rentals, up, rerun_without_flags
+    monkeypatch, tmp_path: Path, running, rentals, up, rerun_without_flags, env_format
 ):
     env = {"MINER_ACCOUNT_CLAIM": "", "INTERNAL_PORT": "8080", "EXTERNAL_PORT": "8081", "SSH_PORT": "2201",
            "SSH_PUBLIC_PORT": "2201", "RENTING_PORT_RANGE": "41000-41100"}
@@ -398,7 +401,15 @@ def test_rerun_with_changed_ports_recreates_the_executor(
         target = tmp_path / "repo"
         node = target / "neurons" / "executor"
         node.mkdir(parents=True)
-        (node / ".env").write_text((tmp_path / ".env").read_text())
+        numeric = {"INTERNAL_PORT", "EXTERNAL_PORT", "SSH_PORT", "SSH_PUBLIC_PORT"}
+        lines = []
+        for key, value in env.items():
+            if env_format == "commented" and key in numeric:
+                value += " # configured node port"
+            elif env_format == "quoted" and key in numeric or env_format == "quoted_range" and key == "RENTING_PORT_RANGE":
+                value = f'"{value}"'
+            lines.append(f"{key}={value}\n")
+        (node / ".env").write_text("".join(lines))
         (node / ".env.template").write_text(
             "MINER_HOTKEY_SS58_ADDRESS=\nINTERNAL_PORT=8080\nEXTERNAL_PORT=8080\nSSH_PORT=2200\nSSH_PUBLIC_PORT=2200\n"
         )

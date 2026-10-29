@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import click
+from dotenv import dotenv_values
 from rich import box
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -1129,13 +1130,15 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
 
     # a rerun keeps the port settings an earlier run wrote; a flag or a prompt answer overrides them
     saved_env = Path(dir_).absolute() / "neurons" / "executor" / ".env"
-    saved = {k: _env_value(saved_env, k) for k in ("INTERNAL_PORT", "EXTERNAL_PORT", "SSH_PORT", "SSH_PUBLIC_PORT")}
+    # dotenv parsing: a saved value may carry quotes or an inline comment
+    parsed = dotenv_values(saved_env) if saved_env.is_file() else {}
+    saved = {k: parsed.get(k) or "" for k in ("INTERNAL_PORT", "EXTERNAL_PORT", "SSH_PORT", "SSH_PUBLIC_PORT", "RENTING_PORT_RANGE")}
     internal_port = internal_port or (int(saved["INTERNAL_PORT"]) if saved["INTERNAL_PORT"].isdigit() else None)
     if saved["EXTERNAL_PORT"].isdigit() and saved["EXTERNAL_PORT"] != saved["INTERNAL_PORT"]:  # equal: follows the service port
         external_port = external_port or int(saved["EXTERNAL_PORT"])
     ssh_port = ssh_port or (int(saved["SSH_PORT"]) if saved["SSH_PORT"].isdigit() else None)
     ssh_public = saved["SSH_PUBLIC_PORT"] if saved["SSH_PUBLIC_PORT"] != saved["SSH_PORT"] else ""  # equal: follows SSH_PORT
-    renting_port_range = renting_port_range or _env_value(saved_env, "RENTING_PORT_RANGE") or None
+    renting_port_range = renting_port_range or saved["RENTING_PORT_RANGE"] or None
     answers = _gather_inputs(hotkey, auto, internal_port, external_port, ssh_port, renting_port_range, ssh_public)
     # the flag and the prompt answer get the same check: spaces dropped, format, size and overlap
     answers["port_range"] = answers["port_range"].replace(" ", "")
