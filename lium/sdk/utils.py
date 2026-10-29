@@ -80,6 +80,7 @@ def extract_gpu_type(machine_name: str) -> str:
         "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"-> "RTXPRO6000"
         "NVIDIA RTX PRO 6000D Blackwell Workstation Edition"-> "RTXPRO6000D"
         "NVIDIA A100-SXM4-80GB"                            -> "A100"
+        "NVIDIA Tesla V100 Tensor Core GPU"                -> "V100"
     """
     patterns = [
         # "RTX PRO 6000 Blackwell ..." must be tried before the plain RTX pattern, otherwise the
@@ -89,6 +90,8 @@ def extract_gpu_type(machine_name: str) -> str:
         (r"RTX\s*(\d{4})", lambda m: f"RTX{m.group(1)}"),
         (r"([HBL])(\d{2,3}S?)", lambda m: f"{m.group(1)}{m.group(2)}"),
         (r"A(\d{2,4})", lambda m: f"A{m.group(1)}"),
+        # Tesla-era names end in "GPU" ("NVIDIA Tesla V100 Tensor Core GPU"), so the last-word fallback said "GPU"
+        (r"\b([VPTKM])(\d{1,3})\b", lambda m: f"{m.group(1)}{m.group(2)}"),
     ]
     for pattern, fmt in patterns:
         if match := re.search(pattern, machine_name, re.I):
