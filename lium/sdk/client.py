@@ -1328,7 +1328,10 @@ class Lium:
             gpu_count: Rent only this many of the node's GPUs (GPU splitting). ``None``
                 takes every GPU that is free on the node right now (the whole node when
                 none of it is rented). The API rejects a count above the free GPUs, below
-                the provider's minimum, or on nodes that do not allow splitting.
+                the provider's minimum, or on nodes that do not allow splitting; a count below
+                the free GPUs on a node listed whole-host-only (:attr:`ExecutorInfo.whole_host_only`)
+                raises ``ValueError`` after the node listing is read and before the rent request
+                is sent; requesting all its free GPUs rents as usual.
             idempotency_key: The ``Idempotency-Key`` the rent request carries (a new UUID when ``None``).
                 The API keeps a key only for a limited time and per account, so a key sent again later
                 can rent a second pod.
@@ -1420,6 +1423,12 @@ class Lium:
         executor_info = self.get_executor(executor_id)
         if not executor_info:
             raise ValueError(self.executor_not_found_message(executor_id))
+        # Same check as `lium up -c` (DAH-5146): the API refuses a partial count on a node listed
+        # whole-host-only, so say so before anything is created or posted.
+        if gpu_count and getattr(executor_info, "whole_host_only", None):
+            free = executor_info.available_gpu_count or executor_info.gpu_count
+            if gpu_count < free:
+                raise ValueError(f"{executor_info.huid} rents whole only. Request all {free} GPUs.")
 
         # before the one-time template is created: a refusal here must leave nothing on the account
         ssh_material = ssh_keys or self.config.ssh_public_keys
