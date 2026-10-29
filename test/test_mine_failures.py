@@ -429,3 +429,60 @@ def test_rerun_with_changed_ports_recreates_the_executor(
     else:
         mine._start_executor(tmp_path, wait_secs=5, recreate=mine._executor_env_stale(tmp_path))
     assert [c for c in calls if c.startswith("docker compose up")] == [up]
+
+
+@pytest.mark.parametrize("ssh_port, running, rentals, ok", [
+    ("2201", True, False, True),     # unchanged: the running executor's own listener
+    ("2201", True, True, True),
+    ("2202", True, False, True),     # free replacement port
+    ("2202", True, True, True),
+    ("22", True, False, False),      # replacement port held by the host's sshd
+    ("22", True, True, False),
+    ("22", False, False, False),     # nothing of ours running: every port is checked
+])
+def test_a_rerun_refuses_an_occupied_replacement_port(monkeypatch, tmp_path: Path, ssh_port, running, rentals, ok):
+    """Only the ports the running executor publishes are exempt from the free-port check."""
+    container = "EXTERNAL_PORT=8081\nSSH_PORT=2201\n"
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        if "--status running executor" in cmd:
+            return ("cid" if running else ""), ""
+        if "ps -aq executor" in cmd:
+            return ("cid" if running else ""), ""
+        if ".Config.Env" in cmd:
+            return container, ""
+        if cmd.startswith("docker ps --filter"):
+            return ("pod_abc\n" if rentals else ""), ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine, "_port_in_use", lambda port, host="0.0.0.0": port == 22 or running and port in {8081, 2201})
+    monkeypatch.setattr(mine, "_listening_process", lambda port: "sshd pid 1" if port == 22 else "docker-proxy pid 2")
+    ports = mine._host_ports_from_answers({"external_port": "8081", "ssh_port": ssh_port})
+    if ok:
+        mine._check_ports_free(ports, tmp_path)
+    else:
+        with pytest.raises(Exception, match=f"Port {ssh_port} \\(SSH port\\) is already in use"):
+            mine._check_ports_free(ports, tmp_path)
+
+
+def test_an_occupied_port_stops_the_rerun_before_env_changes(monkeypatch, tmp_path: Path):
+    """The free-port check runs before .env is rewritten, so a refused port never reaches it."""
+    node = tmp_path / "repo" / "neurons" / "executor"
+    node.mkdir(parents=True)
+    saved = "MINER_HOTKEY_SS58_ADDRESS=x\nINTERNAL_PORT=8080\nEXTERNAL_PORT=8081\nSSH_PORT=2201\nSSH_PUBLIC_PORT=2201\n"
+    (node / ".env").write_text(saved)
+    (node / ".env.template").write_text(saved)
+    for name in ("_clone_or_update_repo", "_install_executor_tools", "_check_prereqs", "_check_free_disk"):
+        monkeypatch.setattr(mine, name, lambda *a, **k: None)
+    monkeypatch.setattr(mine, "_docker_storage_limited", lambda: True)
+    monkeypatch.setattr(mine, "_start_preflight_pull", lambda: SimpleNamespace(poll=lambda: 0))
+
+    def port_taken(*a, **k):
+        raise Exception("Port 22 (SSH port) is already in use on this host")
+
+    monkeypatch.setattr(mine, "_check_ports_free", port_taken)
+    result = CliRunner().invoke(mine.mine_command, ["--auto", "-k", _HK, "--dir", str(tmp_path / "repo"),
+                                                    "--ssh-port", "22"])
+    assert result.exit_code != 0
+    assert (node / ".env").read_text() == saved

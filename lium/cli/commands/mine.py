@@ -533,14 +533,17 @@ def _check_ports_free(ports: dict[str, int], executor_dir: Optional[Path] = None
     ``ports`` maps a human label to the port number, e.g.
     ``{"service port": 8080, "SSH port": 2200}``. Without this check the
     executor container enters a restart loop and the caller only sees the
-    health check time out three minutes later. Skipped when the executor's
-    own ``executor`` service is already running (``executor_dir`` given):
-    those listeners are ours and ``compose up`` keeps them.
+    health check time out three minutes later. When the executor's own
+    ``executor`` service is already running (``executor_dir`` given), only the
+    host ports it publishes now are exempt: those listeners are ours, while a
+    changed port must be free before a recreate removes the working executor.
     """
+    own: set[int] = set()
     if executor_dir is not None and _compose_project_running(executor_dir):
-        return
+        # docker-compose.app.yml publishes ${EXTERNAL_PORT} and ${SSH_PORT} on the host
+        own = {int(v) for k in ("EXTERNAL_PORT", "SSH_PORT") if (v := _executor_env_value(executor_dir, k) or "").isdigit()}
     for label, port in ports.items():
-        if not port or not _port_in_use(port):
+        if not port or port in own or not _port_in_use(port):
             continue
         owner = _listening_process(port)
         who = f" ({owner})" if owner else ""
@@ -1170,6 +1173,11 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             if not executor_dir.exists():
                 raise Exception(f"Node directory not found at {executor_dir}")
 
+            # A taken host port makes `docker compose up` loop on
+            # "address already in use" and the health check below time out
+            # with no explanation. Catch it here, before .env changes or the 3-minute wait.
+            _check_ports_free(_host_ports_from_answers(answers), executor_dir)
+
             _setup_executor_env(
                 str(executor_dir),
                 hotkey=answers["hotkey"],
@@ -1184,11 +1192,6 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 rng=answers["port_range"],
                 account_claim=token.account_claim if token else None,
             )
-
-            # A taken host port makes `docker compose up` loop on
-            # "address already in use" and the health check below time out
-            # with no explanation. Catch it here, before the 3-minute wait.
-            _check_ports_free(_host_ports_from_answers(answers), executor_dir)
 
         with timed_step_status(5, TOTAL_STEPS, "Starting node"):
             # recreate only an executor whose claim or ports differ from .env: a repeat run leaves it alone, and a
