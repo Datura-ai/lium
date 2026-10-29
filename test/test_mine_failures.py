@@ -500,3 +500,84 @@ def test_a_privileged_port_unprivileged_is_checked_by_listener(monkeypatch, list
     monkeypatch.setattr(socket.socket, "bind", deny)
     monkeypatch.setattr(mine, "_listening_process", lambda port: listener)
     assert mine._port_in_use(22) is taken
+
+
+_MAP = "[[41000,51000],[41001,51001],[41002,51002]]"
+
+
+@pytest.mark.parametrize("flags, rentals, mappings, rng, up", [
+    ([], False, _MAP, "", "docker compose up -d"),                                          # unchanged rerun
+    (["--ssh-port", "2202"], False, _MAP, "", "docker compose up -d --force-recreate"),    # SSH change keeps the forwards
+    (["--renting-port-range", "41000-41100"], False, "", "41000-41100",
+     "docker compose up -d --force-recreate"),                                              # a chosen range replaces them
+    (["--ssh-port", "2202"], True, _MAP, "", "docker compose up -d --no-recreate"),        # restart deferred under rentals
+])
+def test_a_rerun_keeps_renting_port_mappings_unless_a_range_replaces_them(
+    monkeypatch, tmp_path: Path, flags, rentals, mappings, rng, up
+):
+    saved = {"MINER_HOTKEY_SS58_ADDRESS": _HK, "INTERNAL_PORT": "8080", "EXTERNAL_PORT": "8081", "SSH_PORT": "2201",
+             "SSH_PUBLIC_PORT": "2201", "RENTING_PORT_RANGE": "", "RENTING_PORT_MAPPINGS": _MAP}
+    node = tmp_path / "repo" / "neurons" / "executor"
+    node.mkdir(parents=True)
+    (node / ".env").write_text("".join(f"{k}={v}\n" for k, v in saved.items()))
+    (node / ".env.template").write_text(
+        "MINER_HOTKEY_SS58_ADDRESS=\nINTERNAL_PORT=8080\nEXTERNAL_PORT=8080\nSSH_PORT=2200\nSSH_PUBLIC_PORT=2200\n"
+        "# RENTING_PORT_MAPPINGS=\"[[46681, 56681]]\"\n"
+    )
+    container = "\n".join(f"{k}={v}" for k, v in saved.items())
+    calls, ids = [], iter(["old", "new"])
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        calls.append(cmd)
+        if cmd.startswith("docker ps --filter"):
+            return ("pod_abc\n" if rentals else ""), ""
+        if "ps -aq executor" in cmd:
+            return "cid", ""
+        if ".Config.Env" in cmd:
+            return container, ""
+        if "ps -q executor" in cmd:
+            return next(ids, "new"), ""
+        if cmd.startswith("docker inspect"):
+            return "healthy", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+    monkeypatch.setattr(mine.console, "warning", lambda *a: None)
+    for name in ("_clone_or_update_repo", "_install_executor_tools", "_check_prereqs", "_check_free_disk",
+                 "_check_ports_free"):
+        monkeypatch.setattr(mine, name, lambda *a, **k: None)
+    monkeypatch.setattr(mine, "_docker_storage_limited", lambda: True)
+    monkeypatch.setattr(mine, "_start_preflight_pull", lambda: SimpleNamespace(poll=lambda: 0))
+
+    def stop_after_start(*a):
+        raise RuntimeError("stop after start")
+
+    monkeypatch.setattr(mine, "_finish_preflight_pull", stop_after_start)
+    result = CliRunner().invoke(mine.mine_command, ["--auto", "-k", _HK, "--dir", str(tmp_path / "repo"), *flags])
+    assert "stop after start" in result.output, result.output
+    assert mine._env_value(node / ".env", "RENTING_PORT_MAPPINGS") == mappings
+    assert mine._env_value(node / ".env", "RENTING_PORT_RANGE") == rng
+    assert [c for c in calls if c.startswith("docker compose up")] == [up]
+
+
+@pytest.mark.parametrize("saved, flags, ok", [
+    (None, ["--external-port", "8081", "--ssh-port", "8081"], False),                         # fresh install
+    (None, ["--external-port", "8081", "--ssh-port", "8081", "--renting-port-range", "41000-41100"], False),
+    ("EXTERNAL_PORT=8081\nSSH_PORT=2201\n", ["--ssh-port", "8081"], False),                   # rerun
+    ("EXTERNAL_PORT=8081\nSSH_PORT=2201\nRENTING_PORT_RANGE=41000-41100\n", ["--ssh-port", "8081"], False),
+    ("EXTERNAL_PORT=8081\nSSH_PORT=2201\n", ["--ssh-port", "2202"], True),
+])
+def test_one_host_port_for_service_and_ssh_is_a_usage_error(monkeypatch, tmp_path: Path, saved, flags, ok):
+    """compose cannot publish the same host port for both; refused before anything is installed."""
+    answers = _capture_answers(monkeypatch)
+    node = tmp_path / "neurons" / "executor"
+    if saved:
+        node.mkdir(parents=True)
+        (node / ".env").write_text("INTERNAL_PORT=8080\n" + saved)
+    result = CliRunner().invoke(mine.mine_command, ["--auto", "-k", _HK, "--dir", str(tmp_path), *flags])
+    if ok:
+        assert "stop after gathering inputs" in result.output and answers["ssh_port"] == "2202"
+    else:
+        assert result.exit_code == 2, result.output
+        assert "both 8081" in result.output

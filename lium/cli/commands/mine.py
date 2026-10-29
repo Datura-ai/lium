@@ -671,7 +671,8 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = F
 
 def _apply_env_overrides(
     executor_dir: Path,
-    internal: str, external: str, ssh: str, ssh_pub: str, rng: str, account_claim: str | None = None
+    internal: str, external: str, ssh: str, ssh_pub: str, rng: str, account_claim: str | None = None,
+    mappings: str = "",
 ):
     env_f = executor_dir / ".env"
     content = env_f.read_text().splitlines()
@@ -694,6 +695,8 @@ def _apply_env_overrides(
         set_or_append("RENTING_PORT_RANGE", rng)
     if account_claim:
         set_or_append("MINER_ACCOUNT_CLAIM", account_claim)
+    if mappings:   # the template rebuild dropped them
+        set_or_append("RENTING_PORT_MAPPINGS", mappings)
     env_f.write_text("\n".join(content) + "\n")
 
 def _check_renting_ports_apart(answers: dict) -> None:
@@ -1149,6 +1152,13 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     answers["port_range"] = answers["port_range"].replace(" ", "")
     if answers["port_range"]:
         _check_renting_ports_apart(answers)
+    host_ports = _host_ports_from_answers(answers)
+    if len(set(host_ports.values())) < len(host_ports):   # compose cannot publish one host port twice
+        raise click.UsageError(f"The service port and the SSH port are both {host_ports['SSH port']}; pick different ports.")
+    # NAT forwards win over the range in the validator: kept as written unless a different range replaces them
+    mappings = ""
+    if parsed.get("RENTING_PORT_MAPPINGS") and answers["port_range"] == saved["RENTING_PORT_RANGE"].replace(" ", ""):
+        mappings = _env_value(saved_env, "RENTING_PORT_MAPPINGS")
     target_dir = Path(dir_).absolute()
 
     TOTAL_STEPS = 8 if token else 6
@@ -1178,7 +1188,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             # A taken host port makes `docker compose up` loop on
             # "address already in use" and the health check below time out
             # with no explanation. Catch it here, before .env changes or the 3-minute wait.
-            _check_ports_free(_host_ports_from_answers(answers), executor_dir)
+            _check_ports_free(host_ports, executor_dir)
 
             _setup_executor_env(
                 str(executor_dir),
@@ -1193,6 +1203,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 ssh_pub=answers["ssh_public_port"],
                 rng=answers["port_range"],
                 account_claim=token.account_claim if token else None,
+                mappings=mappings,
             )
 
         with timed_step_status(5, TOTAL_STEPS, "Starting node"):
