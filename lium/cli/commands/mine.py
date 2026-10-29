@@ -709,6 +709,7 @@ def _gather_inputs(
     external_port: int | None = None,
     ssh_port: int | None = None,
     port_range: str | None = None,
+    ssh_public_port: str = "",
 ) -> dict:
     """Ask everything up-front; return a dict of resolved inputs."""
     answers = {}
@@ -720,7 +721,7 @@ def _gather_inputs(
             internal_port=internal,
             external_port=str(external_port) if external_port else internal,
             ssh_port=str(ssh_port or 2200),
-            ssh_public_port="",
+            ssh_public_port=ssh_public_port,
             port_range=port_range or "",
         ))
     else:
@@ -753,7 +754,7 @@ def _gather_inputs(
         answers["ssh_port"] = ask_port("Node SSH port (used by validator to SSH into the container)", ssh_port or 2200)
         
         # Optional ports
-        ssh_public = Prompt.ask("Public SSH port (optional, only if behind NAT and forwarding a different port)", default="")
+        ssh_public = Prompt.ask("Public SSH port (optional, only if behind NAT and forwarding a different port)", default=ssh_public_port)
         answers["ssh_public_port"] = ssh_public if ssh_public and ssh_public.isdigit() else ""
         
         answers["port_range"] = Prompt.ask("Renting port range (optional, e.g. 2000-2005 or 2000,2001,2002). Leave empty if all ports open", default=port_range or "")
@@ -1126,7 +1127,16 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 "If registration fails with an expired token, copy a fresh command from the portal."
             )
 
-    answers = _gather_inputs(hotkey, auto, internal_port, external_port, ssh_port, renting_port_range)
+    # a rerun keeps the port settings an earlier run wrote; a flag or a prompt answer overrides them
+    saved_env = Path(dir_).absolute() / "neurons" / "executor" / ".env"
+    saved = {k: _env_value(saved_env, k) for k in ("INTERNAL_PORT", "EXTERNAL_PORT", "SSH_PORT", "SSH_PUBLIC_PORT")}
+    internal_port = internal_port or (int(saved["INTERNAL_PORT"]) if saved["INTERNAL_PORT"].isdigit() else None)
+    if saved["EXTERNAL_PORT"].isdigit() and saved["EXTERNAL_PORT"] != saved["INTERNAL_PORT"]:  # equal: follows the service port
+        external_port = external_port or int(saved["EXTERNAL_PORT"])
+    ssh_port = ssh_port or (int(saved["SSH_PORT"]) if saved["SSH_PORT"].isdigit() else None)
+    ssh_public = saved["SSH_PUBLIC_PORT"] if saved["SSH_PUBLIC_PORT"] != saved["SSH_PORT"] else ""  # equal: follows SSH_PORT
+    renting_port_range = renting_port_range or _env_value(saved_env, "RENTING_PORT_RANGE") or None
+    answers = _gather_inputs(hotkey, auto, internal_port, external_port, ssh_port, renting_port_range, ssh_public)
     # the flag and the prompt answer get the same check: spaces dropped, format, size and overlap
     answers["port_range"] = answers["port_range"].replace(" ", "")
     if answers["port_range"]:

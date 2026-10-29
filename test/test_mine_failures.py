@@ -360,14 +360,17 @@ def test_prompted_renting_range_gets_the_flag_checks(monkeypatch, flags, prompte
         assert "--renting-port-range" in result.output
 
 
-@pytest.mark.parametrize("running, rentals, up", [
-    (None, False, "docker compose up -d"),                                    # first installation
-    ({"SSH_PORT": "2201"}, False, "docker compose up -d"),                    # unchanged rerun
-    ({"SSH_PORT": "2200"}, False, "docker compose up -d --force-recreate"),   # changed SSH port
-    ({"RENTING_PORT_RANGE": ""}, False, "docker compose up -d --force-recreate"),  # changed renting range
-    ({"SSH_PORT": "2200"}, True, "docker compose up -d --no-recreate"),       # changed, but rentals running
+@pytest.mark.parametrize("running, rentals, up, rerun_without_flags", [
+    (None, False, "docker compose up -d", False),                                    # first installation
+    ({"SSH_PORT": "2201"}, False, "docker compose up -d", False),                    # unchanged rerun
+    ({"SSH_PORT": "2200"}, False, "docker compose up -d --force-recreate", False),   # changed SSH port
+    ({"RENTING_PORT_RANGE": ""}, False, "docker compose up -d --force-recreate", False),  # changed renting range
+    ({"SSH_PORT": "2200"}, True, "docker compose up -d --no-recreate", False),       # changed, but rentals running
+    ({"SSH_PORT": "2201"}, False, "docker compose up -d", True),                     # rerun without port flags keeps .env
 ])
-def test_rerun_with_changed_ports_recreates_the_executor(monkeypatch, tmp_path: Path, running, rentals, up):
+def test_rerun_with_changed_ports_recreates_the_executor(
+    monkeypatch, tmp_path: Path, running, rentals, up, rerun_without_flags
+):
     env = {"MINER_ACCOUNT_CLAIM": "", "INTERNAL_PORT": "8080", "EXTERNAL_PORT": "8081", "SSH_PORT": "2201",
            "SSH_PUBLIC_PORT": "2201", "RENTING_PORT_RANGE": "41000-41100"}
     (tmp_path / ".env").write_text("".join(f"{k}={v}\n" for k, v in env.items()))
@@ -391,5 +394,27 @@ def test_rerun_with_changed_ports_recreates_the_executor(monkeypatch, tmp_path: 
     monkeypatch.setattr(mine, "_run", fake_run)
     monkeypatch.setattr(mine.time, "sleep", lambda s: None)
     monkeypatch.setattr(mine.console, "warning", lambda *a: None)
-    mine._start_executor(tmp_path, wait_secs=5, recreate=mine._executor_env_stale(tmp_path))
+    if rerun_without_flags:
+        target = tmp_path / "repo"
+        node = target / "neurons" / "executor"
+        node.mkdir(parents=True)
+        (node / ".env").write_text((tmp_path / ".env").read_text())
+        (node / ".env.template").write_text(
+            "MINER_HOTKEY_SS58_ADDRESS=\nINTERNAL_PORT=8080\nEXTERNAL_PORT=8080\nSSH_PORT=2200\nSSH_PUBLIC_PORT=2200\n"
+        )
+        for name in ("_clone_or_update_repo", "_install_executor_tools", "_check_prereqs", "_check_free_disk",
+                     "_check_ports_free"):
+            monkeypatch.setattr(mine, name, lambda *a, **k: None)
+        monkeypatch.setattr(mine, "_docker_storage_limited", lambda: True)
+        monkeypatch.setattr(mine, "_start_preflight_pull", lambda: SimpleNamespace(poll=lambda: 0))
+
+        def stop_after_start(*a):
+            raise SystemExit(99)
+
+        monkeypatch.setattr(mine, "_finish_preflight_pull", stop_after_start)
+        result = CliRunner().invoke(mine.mine_command, ["--auto", "-k", _HK, "--dir", str(target)])
+        assert result.exit_code == 99, result.output
+        assert {key: mine._env_value(node / ".env", key) for key in env} == env
+    else:
+        mine._start_executor(tmp_path, wait_secs=5, recreate=mine._executor_env_stale(tmp_path))
     assert [c for c in calls if c.startswith("docker compose up")] == [up]
