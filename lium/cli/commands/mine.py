@@ -674,11 +674,25 @@ def _apply_env_overrides(
         set_or_append("MINER_ACCOUNT_CLAIM", account_claim)
     env_f.write_text("\n".join(content) + "\n")
 
+def _check_renting_ports_apart(answers: dict) -> None:
+    """A renting port that is also the service or SSH port would be handed to a pod while the executor holds it."""
+    taken = {int(answers[k]) for k in ("internal_port", "external_port", "ssh_port", "ssh_public_port")
+             if str(answers.get(k) or "").isdigit()}
+    clash = sorted(_renting_ports(answers["port_range"]) & taken)
+    if clash:
+        raise click.UsageError(
+            f"--renting-port-range includes {', '.join(map(str, clash))}, which the node's service or SSH port uses; "
+            "pick a range without it."
+        )
+
+
 def _gather_inputs(
     hotkey: Optional[str],
     auto: bool,
     internal_port: int | None = None,
     external_port: int | None = None,
+    ssh_port: int | None = None,
+    port_range: str | None = None,
 ) -> dict:
     """Ask everything up-front; return a dict of resolved inputs."""
     answers = {}
@@ -689,9 +703,9 @@ def _gather_inputs(
         answers.update(dict(
             internal_port=internal,
             external_port=str(external_port) if external_port else internal,
-            ssh_port="2200",
+            ssh_port=str(ssh_port or 2200),
             ssh_public_port="",
-            port_range=""
+            port_range=port_range or "",
         ))
     else:
         # Show informative header about port configuration
@@ -720,13 +734,13 @@ def _gather_inputs(
         service_port = ask_port("Service port (where the node API will be reachable)", internal_port or 8080)
         answers["internal_port"] = service_port
         answers["external_port"] = str(external_port) if external_port else service_port
-        answers["ssh_port"] = ask_port("Node SSH port (used by validator to SSH into the container)", 2200)
+        answers["ssh_port"] = ask_port("Node SSH port (used by validator to SSH into the container)", ssh_port or 2200)
         
         # Optional ports
         ssh_public = Prompt.ask("Public SSH port (optional, only if behind NAT and forwarding a different port)", default="")
         answers["ssh_public_port"] = ssh_public if ssh_public and ssh_public.isdigit() else ""
         
-        answers["port_range"] = Prompt.ask("Renting port range (optional, e.g. 2000-2005 or 2000,2001). Leave empty if all ports open", default="")
+        answers["port_range"] = Prompt.ask("Renting port range (optional, e.g. 2000-2005 or 2000,2001). Leave empty if all ports open", default=port_range or "")
 
     return answers
 
@@ -915,6 +929,28 @@ def _ipv4(ctx, param, value: str | None) -> str | None:
         raise click.BadParameter(f"{value!r} is not an IPv4 address.")
 
 
+def _renting_ports(value: str) -> set[int]:
+    """Ports in a RENTING_PORT_RANGE value, read as the executor reads it: ``FIRST-LAST`` or a comma list."""
+    m = re.fullmatch(r"(\d+)-(\d+)", value)
+    parts = m.groups() if m else value.split(",")
+    if not all(p.isdigit() and 1 <= int(p) <= 65535 for p in parts):
+        raise click.BadParameter(
+            f"{value!r}: use FIRST-LAST (e.g. 41000-41100) or a comma list (e.g. 41000,41001), ports 1-65535."
+        )
+    ports = set(range(int(parts[0]), int(parts[1]) + 1)) if m else {int(p) for p in parts}
+    if not ports:
+        raise click.BadParameter(f"{value!r}: the first port is above the last.")
+    return ports
+
+
+def _renting_port_range(ctx, param, value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.replace(" ", "")
+    _renting_ports(value)
+    return value
+
+
 @click.command("mine", context_settings=dict(ignore_unknown_options=True, allow_extra_args=True), add_help_option=False)
 @click.option("--hotkey", "-k", help="Miner hotkey SS58 address (for `mine status`: the wallet hotkey name)")
 @click.option("--dir", "-d", "dir_", default="compute-subnet", help="Target directory")
@@ -976,10 +1012,24 @@ def _ipv4(ctx, param, value: str | None) -> str | None:
     default=None,
     help="Port the node is registered at and validators connect to (default: --internal-port).",
 )
+@click.option(
+    "--ssh-port",
+    type=click.IntRange(1, 65535),
+    default=None,
+    help="Port validators SSH into the node on (SSH_PORT, default 2200). A second node behind the same "
+    "public IP needs its own, e.g. 2201.",
+)
+@click.option(
+    "--renting-port-range",
+    callback=_renting_port_range,
+    default=None,
+    help="Ports rented pods are published on (RENTING_PORT_RANGE), e.g. 41000-41100 or 41000,41001 "
+    "(default: all ports). A second node behind the same public IP needs a range of its own.",
+)
 @click.pass_context
 @handle_errors
 def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token, portal_url, price, gpu_type,
-                 wait_minutes, ip, internal_port, external_port):
+                 wait_minutes, ip, internal_port, external_port, ssh_port, renting_port_range):
     """Set up this host as a Lium provider node: clone, configure, start and validate the executor.
 
     Before `docker compose up`, the service and SSH ports are checked on this host: a port
@@ -1055,7 +1105,9 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 "If registration fails with an expired token, copy a fresh command from the portal."
             )
 
-    answers = _gather_inputs(hotkey, auto, internal_port, external_port)
+    answers = _gather_inputs(hotkey, auto, internal_port, external_port, ssh_port, renting_port_range)
+    if renting_port_range:
+        _check_renting_ports_apart(answers)
     target_dir = Path(dir_).absolute()
 
     TOTAL_STEPS = 8 if token else 6

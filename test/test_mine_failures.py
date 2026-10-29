@@ -278,3 +278,64 @@ def test_storage_setup_target_check_refusal_names_the_manual_command(monkeypatch
     out = capsys.readouterr().out
     assert calls == ["asked", ("plan", "/dev/sdb")]
     assert "removable" in out and "lium gpu-splitting setup --device" in out
+
+
+_HK = "5F" + "x" * 46
+
+
+def _capture_answers(monkeypatch) -> dict:
+    """Run `lium mine` up to the first step; return the answers it would write into .env."""
+    seen = {}
+    real = mine._gather_inputs
+
+    def gather(*a):
+        seen.update(real(*a))
+        return seen
+
+    def stop(*a, **k):
+        raise RuntimeError("stop after gathering inputs")
+
+    monkeypatch.setattr(mine, "_gather_inputs", gather)
+    monkeypatch.setattr(mine, "_clone_or_update_repo", stop)
+    return seen
+
+
+def test_ssh_port_and_renting_port_range_reach_the_env(monkeypatch, tmp_path: Path):
+    """A second node behind one public IP: its own SSH port and renting range go into .env, no hand edit."""
+    answers = _capture_answers(monkeypatch)
+    result = CliRunner().invoke(mine.mine_command, ["--auto", "-k", _HK, "--external-port", "8081",
+                                                   "--ssh-port", "2201", "--renting-port-range", "41000-41100"])
+    assert "stop after gathering inputs" in result.output
+    env = tmp_path / ".env"
+    env.write_text("SSH_PORT=2200\nSSH_PUBLIC_PORT=2200\nRENTING_PORT_RANGE=\n")
+    mine._apply_env_overrides(tmp_path, internal=answers["internal_port"], external=answers["external_port"],
+                              ssh=answers["ssh_port"], ssh_pub=answers["ssh_public_port"], rng=answers["port_range"])
+    lines = env.read_text().splitlines()
+    assert {"EXTERNAL_PORT=8081", "SSH_PORT=2201", "SSH_PUBLIC_PORT=2201", "RENTING_PORT_RANGE=41000-41100"} <= set(lines)
+
+
+def test_defaults_without_the_new_flags(monkeypatch):
+    answers = _capture_answers(monkeypatch)
+    CliRunner().invoke(mine.mine_command, ["--auto", "-k", _HK])
+    assert answers["ssh_port"] == "2200" and answers["port_range"] == ""
+
+
+@pytest.mark.parametrize("value", ["41000-", "41100-41000", "40000-70000", "a-b", "41000,,41001", "0-10"])
+def test_bad_renting_port_range_is_a_usage_error(value):
+    result = CliRunner().invoke(mine.mine_command, ["--auto", "-k", _HK, "--renting-port-range", value])
+    assert result.exit_code == 2, result.output
+    assert "--renting-port-range" in result.output
+
+
+def test_comma_list_renting_ports_are_accepted(monkeypatch):
+    answers = _capture_answers(monkeypatch)
+    CliRunner().invoke(mine.mine_command, ["--auto", "-k", _HK, "--renting-port-range", "41000, 41001"])
+    assert answers["port_range"] == "41000,41001"
+
+
+@pytest.mark.parametrize("flags", [["--ssh-port", "41050"], ["--internal-port", "41000"], ["--external-port", "41100"]])
+def test_renting_range_overlapping_another_port_is_refused(monkeypatch, flags):
+    _capture_answers(monkeypatch)
+    result = CliRunner().invoke(mine.mine_command, ["--auto", "-k", _HK, "--renting-port-range", "41000-41100", *flags])
+    assert result.exit_code == 2, result.output
+    assert "pick a range without it" in result.output
