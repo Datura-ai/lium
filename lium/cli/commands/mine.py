@@ -597,6 +597,22 @@ def _executor_env_value(executor_dir: Path, key: str) -> Optional[str]:
     return next((line.split("=", 1)[1].strip() for line in env.splitlines() if line.startswith(f"{key}=")), "")
 
 
+# .env keys the executor reads only at container start (env_file); a rerun that changes one must recreate it
+_RESTART_KEYS = ("MINER_ACCOUNT_CLAIM", "INTERNAL_PORT", "EXTERNAL_PORT", "SSH_PORT", "SSH_PUBLIC_PORT", "RENTING_PORT_RANGE")
+
+
+def _executor_env_stale(executor_dir: Path) -> bool:
+    """True when a running executor was created with a value of a ``_RESTART_KEYS`` key other than .env now holds."""
+    env_f = executor_dir / ".env"
+    for key in _RESTART_KEYS:
+        running = _executor_env_value(executor_dir, key)
+        if running is None:  # no executor container yet: a plain `up -d` creates it from .env
+            return False
+        if running != _env_value(env_f, key):
+            return True
+    return False
+
+
 def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = False):
     # Start using the default docker-compose.yml
     # recreate: an executor already running keeps its old .env, so a new MINER_ACCOUNT_CLAIM never reaches it;
@@ -608,7 +624,7 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = F
     if rentals and recreate:
         console.warning(
             f"{len(rentals)} rental(s) running on this node, so the executor was not restarted. "
-            "The new account claim is in .env and applies on its next restart; rerun this command once the rentals end."
+            "The new settings are in .env and apply on its next restart; rerun this command once the rentals end."
         )
         recreate = False
     # after --force-recreate the old container can still report healthy; wait for one with a new ID
@@ -740,7 +756,7 @@ def _gather_inputs(
         ssh_public = Prompt.ask("Public SSH port (optional, only if behind NAT and forwarding a different port)", default="")
         answers["ssh_public_port"] = ssh_public if ssh_public and ssh_public.isdigit() else ""
         
-        answers["port_range"] = Prompt.ask("Renting port range (optional, e.g. 2000-2005 or 2000,2001). Leave empty if all ports open", default=port_range or "")
+        answers["port_range"] = Prompt.ask("Renting port range (optional, e.g. 2000-2005 or 2000,2001,2002). Leave empty if all ports open", default=port_range or "")
 
     return answers
 
@@ -935,13 +951,16 @@ def _renting_ports(value: str) -> set[int]:
     parts = m.groups() if m else value.split(",")
     if not all(p.isdigit() and 1 <= int(p) <= 65535 for p in parts):
         raise click.BadParameter(
-            f"{value!r}: use FIRST-LAST (e.g. 41000-41100) or a comma list (e.g. 41000,41001,41002), ports 1-65535."
+            f"{value!r}: use FIRST-LAST (e.g. 41000-41100) or a comma list (e.g. 41000,41001,41002), ports 1-65535.",
+            param_hint="'--renting-port-range'",
         )
     ports = set(range(int(parts[0]), int(parts[1]) + 1)) if m else {int(p) for p in parts}
     if not ports:
-        raise click.BadParameter(f"{value!r}: the first port is above the last.")
+        raise click.BadParameter(f"{value!r}: the first port is above the last.", param_hint="'--renting-port-range'")
     if len(ports) < 3:  # validators list no node with fewer than 3 renting ports
-        raise click.BadParameter(f"{value!r}: give at least 3 ports; validators list no node with fewer.")
+        raise click.BadParameter(
+            f"{value!r}: give at least 3 ports; validators list no node with fewer.", param_hint="'--renting-port-range'"
+        )
     return ports
 
 
@@ -1108,7 +1127,9 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             )
 
     answers = _gather_inputs(hotkey, auto, internal_port, external_port, ssh_port, renting_port_range)
-    if renting_port_range:
+    # the flag and the prompt answer get the same check: spaces dropped, format, size and overlap
+    answers["port_range"] = answers["port_range"].replace(" ", "")
+    if answers["port_range"]:
         _check_renting_ports_apart(answers)
     target_dir = Path(dir_).absolute()
 
@@ -1157,10 +1178,9 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             _check_ports_free(_host_ports_from_answers(answers), executor_dir)
 
         with timed_step_status(5, TOTAL_STEPS, "Starting node"):
-            # recreate only an executor whose claim differs from .env: a repeat run leaves it alone, and a rerun after
-            # a restart skipped under rentals still delivers the claim .env already holds
-            running_claim = _executor_env_value(executor_dir, "MINER_ACCOUNT_CLAIM")
-            _start_executor(executor_dir, recreate=running_claim not in (None, _env_value(executor_dir / ".env", "MINER_ACCOUNT_CLAIM")))
+            # recreate only an executor whose claim or ports differ from .env: a repeat run leaves it alone, and a
+            # rerun after a restart skipped under rentals still delivers what .env already holds
+            _start_executor(executor_dir, recreate=_executor_env_stale(executor_dir))
 
         console.dim(
             "Validation runs the validator's preflight image: GPU check, matrix "

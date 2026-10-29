@@ -339,3 +339,57 @@ def test_renting_range_overlapping_another_port_is_refused(monkeypatch, flags):
     result = CliRunner().invoke(mine.mine_command, ["--auto", "-k", _HK, "--renting-port-range", "41000-41100", *flags])
     assert result.exit_code == 2, result.output
     assert "pick a range without it" in result.output
+
+
+@pytest.mark.parametrize("flags, prompted, ok", [
+    (["--ssh-port", "2201"], "2200-2202", False),               # prompt answer overlapping the SSH flag
+    (["--renting-port-range", "41000-41100"], "41000, 41001, 41002", True),  # spaced prompt answer over a flag default
+    ([], "41000-41100", True),
+    ([], "41000,41001", False),
+    ([], "41000-x", False),
+])
+def test_prompted_renting_range_gets_the_flag_checks(monkeypatch, flags, prompted, ok):
+    """Interactive answers are normalized and refused exactly like the flag."""
+    answers = _capture_answers(monkeypatch)
+    monkeypatch.setattr(mine.Prompt, "ask", lambda text, default="", **k: prompted if "Renting" in text else default)
+    result = CliRunner().invoke(mine.mine_command, ["-k", _HK, *flags])
+    assert (result.exit_code != 2) == ok, result.output
+    if ok:
+        assert answers["port_range"] == prompted.replace(" ", "")
+    else:
+        assert "--renting-port-range" in result.output
+
+
+@pytest.mark.parametrize("running, rentals, up", [
+    (None, False, "docker compose up -d"),                                    # first installation
+    ({"SSH_PORT": "2201"}, False, "docker compose up -d"),                    # unchanged rerun
+    ({"SSH_PORT": "2200"}, False, "docker compose up -d --force-recreate"),   # changed SSH port
+    ({"RENTING_PORT_RANGE": ""}, False, "docker compose up -d --force-recreate"),  # changed renting range
+    ({"SSH_PORT": "2200"}, True, "docker compose up -d --no-recreate"),       # changed, but rentals running
+])
+def test_rerun_with_changed_ports_recreates_the_executor(monkeypatch, tmp_path: Path, running, rentals, up):
+    env = {"MINER_ACCOUNT_CLAIM": "", "INTERNAL_PORT": "8080", "EXTERNAL_PORT": "8081", "SSH_PORT": "2201",
+           "SSH_PUBLIC_PORT": "2201", "RENTING_PORT_RANGE": "41000-41100"}
+    (tmp_path / ".env").write_text("".join(f"{k}={v}\n" for k, v in env.items()))
+    container = None if running is None else "\n".join(f"{k}={v}" for k, v in {**env, **running}.items())
+    calls, ids = [], iter(["old", "new"])
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        calls.append(cmd)
+        if cmd.startswith("docker ps --filter"):
+            return ("pod_abc\n" if rentals else ""), ""
+        if "ps -aq executor" in cmd:
+            return ("cid" if container else ""), ""
+        if ".Config.Env" in cmd:
+            return container, ""
+        if "ps -q executor" in cmd:
+            return next(ids, "new"), ""
+        if cmd.startswith("docker inspect"):
+            return "healthy", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+    monkeypatch.setattr(mine.console, "warning", lambda *a: None)
+    mine._start_executor(tmp_path, wait_secs=5, recreate=mine._executor_env_stale(tmp_path))
+    assert [c for c in calls if c.startswith("docker compose up")] == [up]
