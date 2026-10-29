@@ -626,7 +626,10 @@ def up_command(
         )
 
     if not no_backup:
-        ui.dim("Backups on: Lium backs up this pod's data automatically. Turn off with --no-backup.")
+        ui.dim(
+            "Backups on: Lium backs up this pod's data automatically, except for now on encrypted volumes. "
+            "Turn off with --no-backup."
+        )
 
     if not yes:
         confirm_msg = (
