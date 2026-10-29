@@ -61,6 +61,8 @@ NOT_GATED: dict[str, tuple[str, str]] = {
 }
 # The one not-gated code with something to do (GPU Splitting): the portal's served fix is printed as is.
 SPLIT_TO_EARN_CODE = "no_unrented_capacity_for_gpu_count"
+# a ``gating: false`` port-limited remainder still pays some free splits: partial idle pay, not "not eligible"
+PARTIAL_PAY_CODE = "port_limited_remainder"
 _ALIASES = {
     "price_above_p90": "price_above_market_p90_soft_limit",
     "gpu_model_not_eligible": "gpu_model_not_eligible_for_unrented_incentive",
@@ -383,6 +385,7 @@ def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
         "code": code,
         "kind": str(entry.get("kind") or "idle_pay"),
         "title": _first(entry, "title", "message") or code,
+        "message": _first(entry, "message"),
         "measured": _first(entry, "measured", "measured_value"),
         "required": _first(entry, "required", "required_value"),
         "fix": _first(entry, "fix", "exact_fix", "fix_text", "remediation") or "",
@@ -574,8 +577,14 @@ def print_not_eligible(rows: Iterable[Any], *, short: bool) -> int:
         if not reasons:
             continue
         nodes += 1
+        partial = [r for r in reasons if r.get("code") == PARTIAL_PAY_CODE]
+        reasons = [r for r in reasons if r.get("code") != PARTIAL_PAY_CODE]
         if short:
             node_id = str(row.get("id") or row.get("executor_id") or "?")
+            for reason in partial:
+                console.print(Text(f"  ◦ {node_id}: partial idle pay ({_lower_first(str(reason['title']))}); open more ports", style="dim"))
+            if not reasons:
+                continue
             words = "; ".join(_lower_first(str(r["title"])) for r in reasons)
             action = (
                 "turn on GPU Splitting"
@@ -584,6 +593,10 @@ def print_not_eligible(rows: Iterable[Any], *, short: bool) -> int:
             )
             console.print(Text(f"  ◦ {node_id}: not eligible for idle pay ({words}); {action}", style="dim"))
             continue
+        for reason in partial:
+            console.print(Text.from_markup(f"[bold]Partial idle pay:[/] {escape(str(reason['message'] or reason['title']))}"))
+            if reason["fix"]:
+                console.print(Padding(Text(str(reason["fix"])), (0, 0, 0, 2)))
         for reason in reasons:
             console.print(Text.from_markup(f"[bold]Not eligible for idle pay:[/] {escape(_lower_first(str(reason['title'])))}"))
             if _no_action(reason):
