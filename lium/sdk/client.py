@@ -1331,8 +1331,8 @@ class Lium:
                 propagates.
             termination_hours: Sent with the rent (1 to 720): the server removes the pod this
                 many hours after it starts, even if this process never gets to schedule it.
-            enable_backups: Lium backs up a new pod's volume automatically by default;
-                ``False`` turns that off for this pod.
+            enable_backups: Lium backs up a new pod's volume automatically by default, except for
+                now on encrypted volumes; ``False`` turns that off for this pod.
 
         Returns:
             Pod metadata as returned by the rent API (id, name, status, ssh command,

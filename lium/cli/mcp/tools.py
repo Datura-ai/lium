@@ -1165,7 +1165,8 @@ def tool_functions(tools: LiumTools) -> List[Callable[..., Awaitable[Dict[str, A
         If it has status "recovered", nothing new was rented: it lists pods earlier calls rented that you have not
         used yet. To rent another pod next to those, pass their ids as known_pod_ids. One rent_pod runs at a time:
         while one is still running, another returns the error rent_in_progress and rents nothing.
-        Lium backs up the pod's data automatically; enable_backups=false rents it without that backup."""
+        Lium backs up the pod's data automatically, except for now on encrypted volumes;
+        enable_backups=false rents it without that backup."""
         if dry_run:
             return await asyncio.to_thread(tools.quote_rental, executor_id)
         rental = _Rental()

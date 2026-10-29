@@ -189,7 +189,10 @@ def clusters_up_command(
 
     hourly = sum(n.price_per_hour for n in chosen)
     if not no_backup and output_format == "table":
-        ui.dim("Backups on: Lium backs up each member's data automatically. Turn off with --no-backup.")
+        ui.dim(
+            "Backups on: Lium backs up each member's data automatically, except for now on encrypted volumes. "
+            "Turn off with --no-backup."
+        )
     # money is spent only after -y or an answered prompt, in every output mode — as `lium up` does
     if not yes:
         summary = (
