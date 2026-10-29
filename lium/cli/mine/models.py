@@ -115,6 +115,8 @@ class TargetPlan:
     loop_file_mountpoint: Optional[str] = None
     loop_file_size_bytes: Optional[int] = None
     loop_file_reserve_bytes: Optional[int] = None
+    # the GPU VRAM the file was sized against; None when nvidia-smi could not be read
+    loop_file_total_vram_bytes: Optional[int] = None
 
 
 @dataclass

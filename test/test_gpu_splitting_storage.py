@@ -524,13 +524,43 @@ def test_plan_loop_file_on_root_goes_to_var_lib_and_keeps_at_least_20_gib():
 
 def test_plan_loop_file_refuses_under_the_140_gib_listing_floor_with_the_numbers():
     # the file is the disk the node reports: 100 GiB free for the marketplace listing after ~40 GiB of node images
-    with pytest.raises(RuntimeError, match="would get 130 GiB \\(150 GiB free, 20 GiB kept.*needs 140 GiB.*100 GiB free"):
+    with pytest.raises(RuntimeError, match="would get 130 GiB \\(150 GiB free, 20 GiB kept.*keep 127 GiB free.*needs 140 GiB free.*100 GiB free"):
         plan_loop_file_target([_filesystem("/", 150, size_gib=180)], "/var/lib/docker")
 
 
+@pytest.mark.parametrize("docker_data_gib, passes", [(5, True), (80, False)])
+def test_plan_loop_file_counts_the_docker_data_restored_into_the_file(docker_data_gib, passes):
+    # 300 GiB filesystem, 180 GiB free: a 150 GiB file, about 147 GiB after XFS metadata, must keep 140 GiB free
+    filesystems = [_filesystem("/", 180, size_gib=300)]
+    if passes:
+        plan = plan_loop_file_target(filesystems, "/var/lib/docker", docker_data_bytes=docker_data_gib * 1024**3)
+        assert plan.loop_file_size_bytes == 150 * 1024**3
+    else:
+        with pytest.raises(RuntimeError, match="keep 67 GiB free once the 80 GiB of Docker data in /var/lib/docker move into it"):
+            plan_loop_file_target(filesystems, "/var/lib/docker", docker_data_bytes=docker_data_gib * 1024**3)
+
+
 def test_plan_loop_file_refuses_a_file_under_1_5x_the_gpu_vram():
-    with pytest.raises(RuntimeError, match="would get 250 GiB, under 1.5x the 640 GiB of GPU VRAM on this host \\(960 GiB\\)"):
+    with pytest.raises(RuntimeError, match="about 246 GiB of filesystem after XFS metadata.*640.0 GiB here, 960.0 GiB needed"):
         plan_loop_file_target([_filesystem("/", 300)], "/var/lib/docker", total_vram_bytes=8 * 80 * 1024**3)
+
+
+@pytest.mark.parametrize("size_gib, passes", [(242, False), (243, True)])
+def test_plan_loop_file_sizes_the_vram_floor_with_xfs_overhead_and_the_validators_rounding(size_gib, passes):
+    # two GPUs of 81559 MiB need 238.95 GiB of filesystem: 242 GiB leaves 238.6 after metadata, 243 leaves 239.6
+    vram = 2 * 81559 * 1024**2
+    if passes:
+        plan = plan_loop_file_target([_filesystem("/", 300)], "/var/lib/docker", image_size_bytes=size_gib * 1024**3, total_vram_bytes=vram)
+        assert plan.loop_file_total_vram_bytes == vram
+    else:
+        with pytest.raises(RuntimeError, match="159.3 GiB here, 239.0 GiB needed"):
+            plan_loop_file_target([_filesystem("/", 300)], "/var/lib/docker", image_size_bytes=size_gib * 1024**3, total_vram_bytes=vram)
+
+
+@pytest.mark.parametrize("total_gib, clears", [(238.94, False), (238.96, True), (960, True)])
+def test_disk_total_clears_vram_floor_mirrors_the_validator(total_gib, clears):
+    # lium-io rental_price.py: round(vram, 1) * 1.5 <= round(disk, 1); 2 x 81559 MiB = 159.3 GiB -> 238.95 GiB
+    assert storage.disk_total_clears_vram_floor(int(total_gib * 1024**3), 2 * 81559 * 1024**2) is clears
 
 
 def test_plan_loop_file_accepts_a_file_of_1_5x_the_gpu_vram():

@@ -23,6 +23,9 @@ NODE_IMAGES_GIB = 40
 LOOP_FILE_MIN_SIZE_BYTES = (NODE_FREE_DISK_GIB + NODE_IMAGES_GIB) * 1024**3
 # the validator pays no idle incentive to a node whose total disk is under this many times its total GPU VRAM
 MIN_DISK_TO_VRAM_RATE = 1.5
+# what mkfs.xfs keeps for its log and metadata, so statfs reports less than the file's size
+XFS_OVERHEAD_FIXED_BYTES = 1024**3
+XFS_OVERHEAD_FRACTION = 0.01
 # Docker storage must outlive a cable pull or a network blip
 NON_LOCAL_TRANSPORTS = {"usb", "iscsi", "fc", "mmc"}
 # filesystems that may hold the XFS image file: local ones on a block device, never network or overlay;
@@ -629,13 +632,15 @@ def plan_loop_file_target(
     image_file: Optional[str] = None,
     image_size_bytes: Optional[int] = None,
     total_vram_bytes: Optional[int] = None,
+    docker_data_bytes: int = 0,
 ) -> TargetPlan:
     """Plan an XFS image file on the local filesystem with the most free space, or on the one holding `image_file`.
 
     No commands are run. The file takes the free space minus a reserve of max(10% of the
-    filesystem, 20 GiB) that stays with the host; under LOOP_FILE_MIN_SIZE_BYTES, or under
-    MIN_DISK_TO_VRAM_RATE times the host's GPU VRAM when that is known, the plan is refused
-    with the numbers, so the operator sees what to free or attach.
+    filesystem, 20 GiB) that stays with the host. The plan is refused with the numbers, so the
+    operator sees what to free or attach, when the file would keep under LOOP_FILE_MIN_SIZE_BYTES
+    free once the current Docker data moves into it, or when its filesystem would fall under
+    MIN_DISK_TO_VRAM_RATE times the host's GPU VRAM (when that is known).
     """
     requested = bool(image_file) or image_size_bytes is not None
     if image_file:
@@ -667,18 +672,17 @@ def plan_loop_file_target(
     room = holder.avail_bytes - reserve
     size = room if image_size_bytes is None else image_size_bytes
     gib = 1024**3
-    if size < LOOP_FILE_MIN_SIZE_BYTES:
+    what = (
+        f"An XFS image file on {holder.target} would get {size // gib} GiB ({holder.avail_bytes // gib} GiB free, "
+        f"{reserve // gib} GiB kept for the system)"
+    )
+    check_loop_file_free_after_restore(what, size, docker_data_bytes, docker_root)
+    if total_vram_bytes is not None and not disk_total_clears_vram_floor(xfs_usable_estimate_bytes(size), total_vram_bytes):
         raise RuntimeError(
-            f"An XFS image file on {holder.target} would get {size // gib} GiB ({holder.avail_bytes // gib} GiB free, "
-            f"{reserve // gib} GiB kept for the system); it needs {LOOP_FILE_MIN_SIZE_BYTES // gib} GiB: the file is "
-            f"the disk the node reports, and the marketplace lists a node only with {NODE_FREE_DISK_GIB} GiB free "
-            f"after about {NODE_IMAGES_GIB} GiB of node images. Free space, attach a spare disk, or pass --size"
-        )
-    if total_vram_bytes is not None and size < total_vram_bytes * MIN_DISK_TO_VRAM_RATE:
-        raise RuntimeError(
-            f"An XFS image file on {holder.target} would get {size // gib} GiB, under {MIN_DISK_TO_VRAM_RATE}x the "
-            f"{total_vram_bytes // gib} GiB of GPU VRAM on this host ({int(total_vram_bytes * MIN_DISK_TO_VRAM_RATE) // gib} GiB); "
-            "the validator pays no idle incentive for a node with less disk. Free space, attach a spare disk, or pass --size"
+            f"{what}, about {xfs_usable_estimate_bytes(size) // gib} GiB of filesystem after XFS metadata; the validator "
+            f"pays no idle incentive for a node whose disk is under {MIN_DISK_TO_VRAM_RATE}x its GPU VRAM "
+            f"({round(total_vram_bytes / gib, 1)} GiB here, {round(total_vram_bytes / gib, 1) * MIN_DISK_TO_VRAM_RATE:.1f} GiB "
+            "needed). Free space, attach a spare disk, or pass --size"
         )
     if size > room:
         raise RuntimeError(
@@ -698,4 +702,31 @@ def plan_loop_file_target(
         loop_file_mountpoint=holder.target,
         loop_file_size_bytes=size,
         loop_file_reserve_bytes=reserve,
+        loop_file_total_vram_bytes=total_vram_bytes,
+    )
+
+
+def xfs_usable_estimate_bytes(size_bytes: int) -> int:
+    """What statfs would report as the total of an XFS filesystem made on a file of `size_bytes`."""
+    return size_bytes - XFS_OVERHEAD_FIXED_BYTES - int(size_bytes * XFS_OVERHEAD_FRACTION)
+
+
+def disk_total_clears_vram_floor(disk_total_bytes: int, total_vram_bytes: int) -> bool:
+    """The validator's own comparison (lium-io rental_price.py): both sides rounded to 0.1 GiB before the ratio."""
+    gib = 1024**3
+    return round(total_vram_bytes / gib, 1) * MIN_DISK_TO_VRAM_RATE <= round(disk_total_bytes / gib, 1)
+
+
+def check_loop_file_free_after_restore(what: str, size_bytes: int, docker_data_bytes: int, docker_root: str):
+    """Refuse an image file that keeps under the listing floor free once the current Docker data is restored into it."""
+    gib = 1024**3
+    free_after_restore = xfs_usable_estimate_bytes(size_bytes) - docker_data_bytes
+    if free_after_restore >= LOOP_FILE_MIN_SIZE_BYTES:
+        return
+    raise RuntimeError(
+        f"{what} and keep {max(free_after_restore, 0) // gib} GiB free once the {docker_data_bytes // gib} GiB of Docker "
+        f"data in {docker_root} move into it (after about {(size_bytes - xfs_usable_estimate_bytes(size_bytes)) // gib} GiB "
+        f"of XFS metadata); it needs {LOOP_FILE_MIN_SIZE_BYTES // gib} GiB free: the file is the disk the node reports, "
+        f"and the marketplace lists a node only with {NODE_FREE_DISK_GIB} GiB free after about {NODE_IMAGES_GIB} GiB of "
+        "node images. Prune Docker (`docker system prune -a --volumes`), free space, attach a spare disk, or pass --size"
     )

@@ -13,7 +13,7 @@ from functools import wraps
 from datetime import datetime, timezone
 from pathlib import Path
 from stat import S_ISDIR, S_ISLNK
-from typing import Optional
+from typing import Callable, Optional
 
 import click
 from rich.box import SIMPLE_HEAVY
@@ -38,9 +38,13 @@ from .storage import (
     LOOP_FILE_MIN_SIZE_BYTES,
     MIN_DISK_TO_VRAM_RATE,
     MIN_TARGET_BYTES,
+    NODE_FREE_DISK_GIB,
+    NODE_IMAGES_GIB,
     NON_LOCAL_TRANSPORTS,
     NoSafeTargetError,
     auto_select_target,
+    check_loop_file_free_after_restore,
+    disk_total_clears_vram_floor,
     evaluate_candidates,
     get_device_by_path,
     has_project_quota_option,
@@ -240,8 +244,8 @@ def _build_setup_plan(
     Commands delegated through helpers:
 
     - explicit device validation / auto-selection from `storage.py`
-    - `findmnt --json --bytes --list --real ...` and `nvidia-smi --query-gpu=memory.total ...` when the
-      target is an XFS image file
+    - `findmnt --json --bytes --list --real ...`, `nvidia-smi --query-gpu=memory.total ...` and
+      `du -sxb <docker-root>` when the target is an XFS image file
     - `/etc/docker/daemon.json` load + merge from `docker_config.py`
 
     With no spare disk or partition (or with `--file` / `--size`) the target is an XFS
@@ -363,7 +367,8 @@ def _destructive_actions(preflight: PreflightResult, target: TargetPlan, loop_fi
 
 def _loop_file_target(preflight: PreflightResult, image_file: Optional[str], image_size_gib: Optional[int]) -> TargetPlan:
     """Plan the XFS image file; `findmnt --json --bytes --list --real ...` via `load_mounted_filesystems(...)`,
-    `nvidia-smi --query-gpu=memory.total ...` via `_total_gpu_vram_bytes()`."""
+    `nvidia-smi --query-gpu=memory.total ...` via `_total_gpu_vram_bytes()`, `du -sxb <docker-root>` via
+    `_docker_data_bytes(...)` (that data is restored into the file, so it counts against the file's free space)."""
     filesystems = load_mounted_filesystems(run_command, preflight.block_devices)
     total_vram_bytes = _total_gpu_vram_bytes()
     if total_vram_bytes is None:
@@ -377,7 +382,12 @@ def _loop_file_target(preflight: PreflightResult, image_file: Optional[str], ima
         image_file,
         image_size_gib * 1024**3 if image_size_gib else None,
         total_vram_bytes,
+        _docker_data_bytes(preflight.docker_state.docker_root_dir),
     )
+
+
+def _docker_data_bytes(docker_root: str) -> int:
+    return int(run_command(["du", "-sxb", docker_root], True, True).stdout.split()[0])
 
 
 def _total_gpu_vram_bytes() -> Optional[int]:
@@ -626,17 +636,19 @@ def _loop_device_udev_rule(image_file: str) -> str:
     )
 
 
-def _create_image_file(path: str, size_bytes: int):
+def _create_image_file(path: str, size_bytes: int, on_created: Callable[[], None] = lambda: None):
     # exclusive create with the final mode: no following a planted symlink, no formatting a file someone else
-    # put there, no window in which the image is world-readable
+    # put there, no window in which the image is world-readable; `on_created` runs once the file is ours, so the
+    # caller's rollback knows about it even when the preallocation is interrupted
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     except FileExistsError:
         raise RuntimeError(f"{path} appeared after the plan was made; remove it and run setup again") from None
+    on_created()
     try:
         os.posix_fallocate(fd, 0, size_bytes)
-    except OSError:
-        # a preallocation that stopped at ENOSPC keeps its extents; the file would leave the host full
+    except BaseException:
+        # a preallocation that stopped at ENOSPC or Ctrl+C keeps its extents; the file would leave the host full
         os.unlink(path)
         raise
     finally:
@@ -789,7 +801,7 @@ def _ensure_xfs_compliant(target_path: str):
         raise RuntimeError(f"{target_path} is not XFS with ftype=1")
 
 
-def _mount_validation(target_path: str, docker_root: str, loop_file: bool = False):
+def _mount_validation(target_path: str, docker_root: str, loop_file: bool = False, total_vram_bytes: Optional[int] = None):
     """Perform a temporary mount probe before cutting over Docker root.
 
     Commands run here:
@@ -798,10 +810,11 @@ def _mount_validation(target_path: str, docker_root: str, loop_file: bool = Fals
     - `findmnt --json --target /mnt/lium-docker-validate` via `load_mount_info(...)`
     - `umount /mnt/lium-docker-validate`
 
-    The temporary mount checks two things before we touch `/var/lib/docker`:
+    The temporary mount checks three things before we touch `/var/lib/docker`:
 
     - the kernel accepted project quota (`pquota` or `prjquota`)
     - the mounted filesystem is writable
+    - its total (what the node will report) clears the validator's VRAM floor, when the VRAM is known
     """
     validation_mount = Path("/mnt/lium-docker-validate")
     validation_mount.mkdir(parents=True, exist_ok=True)
@@ -813,8 +826,33 @@ def _mount_validation(target_path: str, docker_root: str, loop_file: bool = Fals
             raise RuntimeError("Temporary mount validation failed: project quota option not present (pquota/prjquota)")
         if not os.access(str(validation_mount), os.W_OK):
             raise RuntimeError("Temporary mount validation failed: mount is not writable")
+        if total_vram_bytes is not None:
+            _check_mounted_total_clears_vram_floor(str(validation_mount), total_vram_bytes)
     finally:
         run_command(["umount", str(validation_mount)], True, True)
+
+
+def _check_mounted_total_clears_vram_floor(mountpoint: str, total_vram_bytes: int):
+    # the total statfs reports is what the validator compares against the GPU VRAM, with its own rounding
+    total = shutil.disk_usage(mountpoint).total
+    gib = 1024**3
+    if not disk_total_clears_vram_floor(total, total_vram_bytes):
+        raise RuntimeError(
+            f"The new filesystem reports {round(total / gib, 1)} GiB, under {MIN_DISK_TO_VRAM_RATE}x the "
+            f"{round(total_vram_bytes / gib, 1)} GiB of GPU VRAM; the validator would pay no idle incentive. "
+            "Rerun with a larger --size"
+        )
+
+
+def _check_free_after_restore(docker_root: str):
+    # the marketplace reads this free space; a file sized without the restored data would list the node and drop it
+    free = shutil.disk_usage(docker_root).free
+    gib = 1024**3
+    if free < LOOP_FILE_MIN_SIZE_BYTES:
+        raise RuntimeError(
+            f"{free // gib} GiB free on {docker_root} after the restore; the marketplace lists a node only with "
+            f"{NODE_FREE_DISK_GIB} GiB free after about {NODE_IMAGES_GIB} GiB of node images ({LOOP_FILE_MIN_SIZE_BYTES // gib} GiB)"
+        )
 
 
 def _print_action_details(plan: SetupPlan):
@@ -894,25 +932,40 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
         _rollback_attempt(errors, "stop docker", lambda: run_command(["systemctl", "stop", "docker"], True, True))
         _rollback_attempt(errors, "stop docker.socket", lambda: run_command(["systemctl", "stop", "docker.socket"], False, True))
 
+    # the flags are set after each helper returns, so an interrupt in between leaves the host changed and the flag
+    # off: the mount table and the backup path decide too
+    original = state.original_docker_mount
+    current = _mount_at_or_none(docker_root)
+    source_changed = current is not None and current.source != original.source
+    mounted_on_target = state.docker_root_mounted_on_target or (source_changed and current.target == docker_root)
+    original_unmounted = state.original_docker_root_unmounted or (source_changed and original.target == docker_root)
+    rename_backup = _backup_by_rename(plan.preflight, plan.target)
+    # a backup path that exists while the root is gone is our interrupted `mv`; one beside a live root is not ours
+    root_moved = state.docker_root_moved or (
+        rename_backup and os.path.isdir(plan.backup_dir) and not os.path.lexists(docker_root)
+    )
+
     # data_restored: the original data root is back under docker_root, whichever way the backup was taken
     unmounted = data_restored = True
-    if state.docker_root_mounted_on_target:
+    if mounted_on_target:
         unmounted = _rollback_attempt(errors, f"unmount {docker_root}", lambda: run_command(["umount", docker_root], True, True))
         if not unmounted:
             data_restored = False
-    if unmounted and state.original_docker_root_unmounted:
+    if unmounted and original_unmounted:
         data_restored = _rollback_attempt(
             errors,
-            f"remount original Docker root {state.original_docker_mount.source}",
-            lambda: run_command(_mount_command_for_mount_info(state.original_docker_mount, docker_root), True, True),
+            f"remount original Docker root {original.source}",
+            lambda: run_command(_mount_command_for_mount_info(original, docker_root), True, True),
         )
 
-    if state.docker_root_moved:
+    if root_moved:
         if unmounted:
-            data_restored = _rollback_attempt(errors, f"move Docker data back to {docker_root}", lambda: _move_docker_root_back(plan))
+            _rollback_attempt(errors, f"move Docker data back to {docker_root}", lambda: _move_docker_root_back(plan))
         else:
-            data_restored = False
             errors.append(f"move Docker data back to {docker_root}: skipped, {docker_root} is still mounted")
+    if rename_backup and (not os.path.isdir(docker_root) or (root_moved and os.path.lexists(plan.backup_dir))):
+        # Docker starts only on a data root that is demonstrably back in place, never on an empty directory
+        data_restored = False
 
     if state.fstab_written:
         _rollback_attempt(errors, f"restore {plan.fstab_path}", lambda: _restore_text_file(state.original_fstab))
@@ -930,7 +983,10 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
 
     if state.loop_file_created:
         if unmounted:
-            state.loop_file_removed = _rollback_attempt(errors, f"remove {target_partition}", lambda: os.unlink(target_partition))
+            # an interrupted preallocation has already unlinked the file itself
+            state.loop_file_removed = _rollback_attempt(
+                errors, f"remove {target_partition}", lambda: os.path.lexists(target_partition) and os.unlink(target_partition)
+            )
         else:
             errors.append(f"remove {target_partition}: skipped, still mounted at {docker_root}")
 
@@ -941,6 +997,13 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
             errors.append(f"start docker: skipped, Docker data is not back at {docker_root} (backup at {plan.backup_dir})")
 
     return errors
+
+
+def _mount_at_or_none(docker_root: str) -> Optional[MountInfo]:
+    try:
+        return load_mount_info(run_command, docker_root)
+    except (RuntimeError, OSError, ValueError):
+        return None
 
 
 def _refuse_mounts_under(docker_root: str):
@@ -988,8 +1051,8 @@ def _setup_failure_message(plan: SetupPlan, state: _SetupExecutionState, exc: Ba
 
 def _pre_stop_checks(plan: SetupPlan):
     """Refuse before the first host change: Docker down, containers running, containers left in the containerd
-    store, no room for the backup, an image file directory other users can write to, or Docker data larger than
-    the planned image file.
+    store, no room for the backup, an image file directory other users can write to, or Docker data that would
+    leave the planned image file under the listing floor (the data may have grown since the plan).
 
     Commands run: `docker ps -q`, `du -sxb <docker-root>`.
     """
@@ -1009,18 +1072,15 @@ def _pre_stop_checks(plan: SetupPlan):
                 "only, not a container's own files), remove them (`docker rm`) and run setup again"
             )
     docker_root = plan.preflight.docker_state.docker_root_dir
-    used = int(run_command(["du", "-sxb", docker_root], True, True).stdout.split()[0])
+    used = _docker_data_bytes(docker_root)
     if plan.target.classification == "loop_file":
         _check_image_file_parent(plan.target.resolved_target)
+        check_loop_file_free_after_restore(
+            f"The {plan.target.loop_file_size_bytes // 1024**3} GiB image file {plan.target.resolved_target} would",
+            plan.target.loop_file_size_bytes, used, docker_root,
+        )
     if _backup_by_rename(plan.preflight, plan.target):
-        # the data root is renamed, not copied, so the host needs no room for a backup; the image file was sized
-        # from the free space next to that data, and the data is copied into it at the restore step
-        if used > plan.target.loop_file_size_bytes:
-            raise RuntimeError(
-                f"Docker data in {docker_root} takes {used / 1024**3:.1f} GiB, more than the "
-                f"{plan.target.loop_file_size_bytes / 1024**3:.1f} GiB image file; prune images and volumes "
-                "(`docker system prune -a --volumes`) and run setup again"
-            )
+        # the data root is renamed, not copied, so the host needs no room for a backup
         return
     needed = int(used * 1.1) + 1024**3
     what = f"The backup of {docker_root}"
@@ -1056,7 +1116,7 @@ def _execute_setup(plan: SetupPlan):
        - optional `parted -s <disk> mkpart primary xfs <start> <end>`
        - optional `partprobe <disk>`
        - `lsblk --json -o PATH,PKNAME,TYPE` before/after via helper
-       - or an exclusive create + `posix_fallocate` of the image file (mode 0600)
+       - or an exclusive create + `posix_fallocate` of the image file (mode 0600); the backup path must not exist
 
     4. Format / validate filesystem metadata
        - optional `mkfs.xfs -f <partition>` (`mkfs.xfs -f -K <image-file>`)
@@ -1065,6 +1125,7 @@ def _execute_setup(plan: SetupPlan):
     5. Temporary mount validation
        - `mount -o pquota <partition> /mnt/lium-docker-validate`
        - `findmnt --json --target /mnt/lium-docker-validate` via helper
+       - statfs of the mount: its total against the validator's VRAM floor (image file with known VRAM)
        - `umount /mnt/lium-docker-validate`
 
     6. Persist host configuration
@@ -1084,6 +1145,9 @@ def _execute_setup(plan: SetupPlan):
        - `systemctl start docker`
        - `docker info --format '{{json .}}'` via helper
        - `findmnt --json --target /var/lib/docker` via helper
+       - statfs of the Docker root: free space against the listing floor (image file)
+
+    9. Commit point: remove the backup. A failure or Ctrl+C here keeps the verified image, mount and config.
 
     The sequence is intentionally linear and verbose because a partial failure
     here affects real host storage state.
@@ -1114,6 +1178,9 @@ def _execute_setup(plan: SetupPlan):
             console.dim(f"Backup directory: {plan.backup_dir}")
             if rename_backup:
                 _refuse_mounts_under(docker_root)
+                if os.path.lexists(plan.backup_dir):
+                    # `mv` into an existing directory would nest the data root inside it
+                    raise RuntimeError(f"{plan.backup_dir} already exists; remove it and run setup again")
                 run_command(["mv", docker_root, plan.backup_dir], True, True)
                 state.docker_root_moved = True
             else:
@@ -1123,8 +1190,9 @@ def _execute_setup(plan: SetupPlan):
         with timed_step_status(3, total_steps, "Creating the image file" if loop_file else "Preparing partition"):
             if loop_file:
                 console.dim(f"Preallocating {plan.target.loop_file_size_bytes // 1024**3} GiB at {target_partition}")
-                _create_image_file(target_partition, plan.target.loop_file_size_bytes)
-                state.loop_file_created = True
+                _create_image_file(
+                    target_partition, plan.target.loop_file_size_bytes, lambda: setattr(state, "loop_file_created", True)
+                )
             else:
                 target_partition = _prepare_partition(plan, existing_partition_paths)
 
@@ -1142,7 +1210,7 @@ def _execute_setup(plan: SetupPlan):
             _ensure_xfs_compliant(target_partition)
 
         with timed_step_status(5, total_steps, "Validating temporary mount"):
-            _mount_validation(target_partition, docker_root, loop_file)
+            _mount_validation(target_partition, docker_root, loop_file, plan.target.loop_file_total_vram_bytes)
 
         with timed_step_status(6, total_steps, "Updating daemon.json"):
             console.dim(f"Writing Docker config to {plan.daemon_json_path}")
@@ -1197,8 +1265,8 @@ def _execute_setup(plan: SetupPlan):
             console.print(_verification_table(verification, "Final Verification"))
             if not verification.passed:
                 raise RuntimeError(f"Verification failed. Backup remains at {plan.backup_dir}")
-            # the data is restored and verified on the new mount; the copy would only hold the old disk's space
-            shutil.rmtree(plan.backup_dir, ignore_errors=True)
+            if loop_file:
+                _check_free_after_restore(str(docker_root))
     except (Exception, KeyboardInterrupt) as exc:
         # Ctrl+C included: without the rollback the host stays with Docker stopped and its data root moved aside
         console.error(f"Setup failed: {str(exc) or type(exc).__name__}")
@@ -1215,6 +1283,16 @@ def _execute_setup(plan: SetupPlan):
             console.error(_setup_failure_message(plan, state, exc, rollback_errors))
             raise
         raise RuntimeError(_setup_failure_message(plan, state, exc, rollback_errors)) from exc
+
+    # commit point: the data is restored and verified on the new mount, the backup only holds the old disk's space;
+    # a cleanup that fails or is interrupted must never roll the migration back over a half-deleted backup
+    try:
+        shutil.rmtree(plan.backup_dir)
+    except KeyboardInterrupt:
+        console.warning(f"Setup is complete; the backup at {plan.backup_dir} was only partly removed, delete it: rm -rf {plan.backup_dir}")
+        raise
+    except OSError as exc:
+        console.warning(f"Setup is complete; the backup at {plan.backup_dir} could not be fully removed ({exc}), delete it: rm -rf {plan.backup_dir}")
 
 
 @click.group("gpu-splitting")
