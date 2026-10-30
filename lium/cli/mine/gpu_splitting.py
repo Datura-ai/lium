@@ -353,7 +353,7 @@ def _destructive_actions(preflight: PreflightResult, target: TargetPlan, loop_fi
     destructive_actions.extend(
         [
             f"stop Docker services for {docker_root}",
-            "move Docker data aside (same filesystem, no copy)" if _backup_by_rename(preflight, target) else "back up Docker data",
+            "move Docker data aside (same filesystem, no copy)" if _should_rename_docker_root_for_backup(preflight, target) else "back up Docker data",
             f"mount target at {docker_root} with pquota",
             f"update {daemon_json_path}",
             "update /etc/fstab",
@@ -395,7 +395,8 @@ def _loop_file_target(
         image_size_gib * 1024**3 if image_size_gib else None,
         total_vram_bytes,
         _docker_data_bytes(preflight.docker_state.docker_root_dir),
-        _node_images_present(mine_dir or DEFAULT_MINE_DIR),
+        # the switch to overlay2 hides images in the containerd store, so lium mine pulls them again
+        preflight.docker_state.storage_driver != "overlayfs" and _node_images_present(mine_dir or DEFAULT_MINE_DIR),
     )
 
 
@@ -434,7 +435,7 @@ def _total_gpu_vram_bytes() -> Optional[int]:
         return None
 
 
-def _backup_by_rename(preflight: PreflightResult, target: TargetPlan) -> bool:
+def _should_rename_docker_root_for_backup(preflight: PreflightResult, target: TargetPlan) -> bool:
     # the image file shares the filesystem with Docker's data, so the data root is renamed aside, not copied;
     # a Docker root that is its own mount cannot be renamed off it and is copied as for a disk target
     return target.classification == "loop_file" and preflight.docker_mount.target != preflight.docker_state.docker_root_dir
@@ -971,7 +972,7 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
     source_changed = current is not None and current.source != original.source
     mounted_on_target = state.docker_root_mounted_on_target or (source_changed and current.target == docker_root)
     original_unmounted = state.original_docker_root_unmounted or (source_changed and original.target == docker_root)
-    rename_backup = _backup_by_rename(plan.preflight, plan.target)
+    rename_backup = _should_rename_docker_root_for_backup(plan.preflight, plan.target)
     # a backup path that exists while the root is gone is our interrupted `mv`; one beside a live root is not ours
     root_moved = state.docker_root_moved or (
         rename_backup and os.path.isdir(plan.backup_dir) and not os.path.lexists(docker_root)
@@ -1158,7 +1159,7 @@ def _pre_stop_checks(plan: SetupPlan):
             f"The {plan.target.loop_file_size_bytes // 1024**3} GiB image file {plan.target.resolved_target} would",
             plan.target.loop_file_size_bytes, used, docker_root, plan.target.loop_file_free_floor_bytes,
         )
-    if _backup_by_rename(plan.preflight, plan.target):
+    if _should_rename_docker_root_for_backup(plan.preflight, plan.target):
         # the data root is renamed, not copied, so the host needs no room for a backup
         return
     needed = int(used * 1.1) + 1024**3
@@ -1237,7 +1238,7 @@ def _execute_setup(plan: SetupPlan):
     _pre_stop_checks(plan)
     total_steps = 10
     loop_file = plan.target.classification == "loop_file"
-    rename_backup = _backup_by_rename(plan.preflight, plan.target)
+    rename_backup = _should_rename_docker_root_for_backup(plan.preflight, plan.target)
     docker_root = plan.preflight.docker_state.docker_root_dir
     target_partition = _target_partition_path(plan)
     existing_partition_paths = set() if loop_file else _partition_paths_for_disk(plan.target.parent_disk)

@@ -88,7 +88,8 @@ def test_plan_falls_back_to_an_image_file_when_no_disk_is_safe(monkeypatch, tmp_
     preflight.docker_state.storage_driver = "overlayfs"   # Docker 29 with the containerd image store
     monkeypatch.setattr(gpu_splitting, "auto_select_target", lambda *a: (_ for _ in ()).throw(NoSafeTargetError("none")))
     monkeypatch.setattr(gpu_splitting, "load_mounted_filesystems", lambda *a: [
-        MountedFilesystem(target="/", source="/dev/nvme0n1p2", fstype="ext4", size_bytes=250 * GIB, avail_bytes=200 * GIB, local=True)
+        MountedFilesystem(target="/", source="/dev/nvme0n1p2", fstype="ext4", size_bytes=250 * GIB, avail_bytes=200 * GIB, local=True,
+                          mounted_at_boot=True)
     ])
     monkeypatch.setattr(gpu_splitting, "load_daemon_json", lambda *a: {})
     monkeypatch.setattr(gpu_splitting, "_fstab_would_change", lambda *a: True)
@@ -162,6 +163,21 @@ def test_loop_file_target_tells_the_plan_when_the_node_images_are_already_pulled
     gpu_splitting._loop_file_target(preflight, None, None, tmp_path / "mine")
 
     assert planned["args"][5:] == (60 * GIB, True) and asked == [tmp_path / "mine"]
+
+
+def test_loop_file_target_counts_containerd_store_images_as_still_to_pull(monkeypatch, tmp_path):
+    # the switch to overlay2 hides the containerd store, so the node images present there are pulled again
+    preflight = _sample_preflight()
+    preflight.docker_state.storage_driver = "overlayfs"
+    monkeypatch.setattr(gpu_splitting, "load_mounted_filesystems", lambda *a: [])
+    monkeypatch.setattr(gpu_splitting, "run_command", _host_probes(docker_data_gib=60, vram_mib=[81559]))
+    monkeypatch.setattr(gpu_splitting, "_node_images_present", lambda mine_dir: True)
+    planned = {}
+    monkeypatch.setattr(gpu_splitting, "plan_loop_file_target", lambda *args: planned.setdefault("args", args))
+
+    gpu_splitting._loop_file_target(preflight, None, None, tmp_path / "mine")
+
+    assert planned["args"][5:] == (60 * GIB, False)
 
 
 @pytest.mark.parametrize("checkout_exists, answer", [(False, False), (True, True), (True, False)])

@@ -458,9 +458,12 @@ def test_auto_select_raises_no_safe_target_error_when_nothing_is_safe():
         auto_select_target(_runner_factory({}), [], _root_mount(), _docker_mount())
 
 
-def _filesystem(target, avail_gib, size_gib=500, fstype="ext4", source="/dev/nvme0n1p2", local=True) -> MountedFilesystem:
+def _filesystem(
+    target, avail_gib, size_gib=500, fstype="ext4", source="/dev/nvme0n1p2", local=True, mounted_at_boot=True
+) -> MountedFilesystem:
     return MountedFilesystem(
-        target=target, source=source, fstype=fstype, size_bytes=size_gib * 1024**3, avail_bytes=avail_gib * 1024**3, local=local
+        target=target, source=source, fstype=fstype, size_bytes=size_gib * 1024**3, avail_bytes=avail_gib * 1024**3, local=local,
+        mounted_at_boot=mounted_at_boot,
     )
 
 
@@ -483,7 +486,11 @@ def test_load_mounted_filesystems_marks_local_block_filesystems_only():
     runner = _runner_factory({
         ("findmnt", "--json", "--bytes", "--list", "--real", "-o", "TARGET,SOURCE,FSTYPE,SIZE,AVAIL"): CommandResult(
             args=[], stdout=json.dumps(findmnt), stderr="", returncode=0
-        )
+        ),
+        ("findmnt", "--fstab", "--json", "--list", "-o", "TARGET"): CommandResult(
+            args=[], stdout=json.dumps({"filesystems": [{"target": "/raid/"}, {"target": "/boot/efi"}, {"target": "none"}]}),
+            stderr="", returncode=0,
+        ),
     })
     usb = BlockDevice(path="/dev/sdb", name="sdb", kernel_name="sdb", type="disk", size_bytes=2000 * gib, fstype=None,
                       mountpoints=[], parent_kernel_name=None, model=None, serial=None, transport="usb", children=[
@@ -499,6 +506,41 @@ def test_load_mounted_filesystems_marks_local_block_filesystems_only():
         "/": True, "/raid": True, "/mnt/nfs": False, "/media/usb": False, "/boot/efi": False
     }
     assert filesystems[1].avail_bytes == 3500 * gib
+    # / is mounted at boot even without its own fstab line (root= on the kernel command line)
+    assert {fs.target for fs in filesystems if fs.mounted_at_boot} == {"/", "/raid", "/boot/efi"}
+
+
+def test_load_mounted_filesystems_reads_an_empty_fstab_as_root_only():
+    findmnt = {"filesystems": [
+        {"target": "/", "source": "/dev/vda1", "fstype": "ext4", "size": 1, "avail": 1},
+        {"target": "/data", "source": "/dev/vdb1", "fstype": "ext4", "size": 1, "avail": 1},
+    ]}
+    runner = _runner_factory({
+        ("findmnt", "--json", "--bytes", "--list", "--real", "-o", "TARGET,SOURCE,FSTYPE,SIZE,AVAIL"): CommandResult(
+            args=[], stdout=json.dumps(findmnt), stderr="", returncode=0
+        ),
+        ("findmnt", "--fstab", "--json", "--list", "-o", "TARGET"): CommandResult(args=[], stdout="", stderr="", returncode=1),
+    })
+
+    filesystems = load_mounted_filesystems(runner, [])
+
+    assert {fs.target: fs.mounted_at_boot for fs in filesystems} == {"/": True, "/data": False}
+
+
+def test_plan_loop_file_skips_a_filesystem_not_mounted_at_boot():
+    # a disk mounted by hand is gone after a reboot, and with it the image file the Docker root is mounted from
+    filesystems = [_filesystem("/", 300), _filesystem("/data", 3500, size_gib=4000, source="/dev/sdb1", mounted_at_boot=False)]
+
+    plan = plan_loop_file_target(filesystems, "/var/lib/docker")
+
+    assert plan.resolved_target == "/var/lib/lium-docker.xfs" and plan.loop_file_mountpoint == "/"
+
+
+def test_plan_loop_file_refuses_an_explicit_file_on_a_filesystem_not_mounted_at_boot():
+    filesystems = [_filesystem("/", 300), _filesystem("/data", 3500, size_gib=4000, source="/dev/sdb1", mounted_at_boot=False)]
+
+    with pytest.raises(RuntimeError, match="/data has no /etc/fstab entry"):
+        plan_loop_file_target(filesystems, "/var/lib/docker", "/data/pool.xfs")
 
 
 def test_plan_loop_file_takes_the_filesystem_with_most_free_space_minus_the_reserve():

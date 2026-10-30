@@ -46,7 +46,7 @@ class BlockDevice:
 
 @dataclass
 class MountedFilesystem:
-    """One real mounted filesystem from findmnt; `local` ones may hold the XFS image file."""
+    """One real mounted filesystem from findmnt; `local` ones mounted at boot may hold the XFS image file."""
 
     target: str
     source: str
@@ -54,6 +54,7 @@ class MountedFilesystem:
     size_bytes: int
     avail_bytes: int
     local: bool
+    mounted_at_boot: bool
 
 
 @dataclass

@@ -564,9 +564,10 @@ def auto_select_target(
 def load_mounted_filesystems(runner: Runner, devices: list[BlockDevice]) -> list[MountedFilesystem]:
     """List the real mounted filesystems and mark the local ones that could hold the XFS image file.
 
-    Command run:
+    Commands run:
 
     - `findmnt --json --bytes --list --real -o TARGET,SOURCE,FSTYPE,SIZE,AVAIL`
+    - `findmnt --fstab --json --list -o TARGET`
 
     Network, overlay and pseudo filesystems are not local by type; removable disks and
     disks attached over USB/iSCSI by their lsblk entry.
@@ -574,6 +575,7 @@ def load_mounted_filesystems(runner: Runner, devices: list[BlockDevice]) -> list
     data = run_json_command(
         runner, ["findmnt", "--json", "--bytes", "--list", "--real", "-o", "TARGET,SOURCE,FSTYPE,SIZE,AVAIL"]
     )
+    boot_targets = _fstab_targets(runner) | {"/"}
     filesystems = []
     for item in data.get("filesystems") or []:
         fstype = str(item.get("fstype") or "")
@@ -586,9 +588,26 @@ def load_mounted_filesystems(runner: Runner, devices: list[BlockDevice]) -> list
                 size_bytes=_to_size_bytes(item.get("size")),
                 avail_bytes=_to_size_bytes(item.get("avail")),
                 local=fstype in LOOP_FILE_HOST_FSTYPES and _source_disk_is_local(source, devices),
+                mounted_at_boot=_normalized_mountpoint(str(item.get("target") or "")) in boot_targets,
             )
         )
     return filesystems
+
+
+def _fstab_targets(runner: Runner) -> set[str]:
+    # findmnt exits 1 with no output when fstab lists nothing
+    found = runner(["findmnt", "--fstab", "--json", "--list", "-o", "TARGET"], False, True)
+    if found.returncode != 0 or not found.stdout.strip():
+        return set()
+    try:
+        entries = json.loads(found.stdout).get("filesystems") or []
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid JSON from findmnt --fstab: {exc}") from exc
+    return {_normalized_mountpoint(str(entry.get("target") or "")) for entry in entries}
+
+
+def _normalized_mountpoint(target: str) -> str:
+    return target.rstrip("/") or "/"
 
 
 def _source_disk_is_local(source: str, devices: list[BlockDevice]) -> bool:
@@ -651,8 +670,14 @@ def plan_loop_file_target(
         holder = _filesystem_holding(image_file, filesystems)
         if holder is None or not holder.local or holder.target == docker_root:
             raise RuntimeError(f"{image_file} is not on a local filesystem that can hold the image file")
+        if not holder.mounted_at_boot:
+            raise RuntimeError(
+                f"{holder.target} has no /etc/fstab entry, so it is not mounted at boot and Docker would not start "
+                "after a reboot; add it to fstab or choose another path"
+            )
     else:
-        candidates = [fs for fs in filesystems if fs.local and fs.target != docker_root]
+        # a filesystem mounted by hand is gone after a reboot, and with it the image file Docker's root is mounted from
+        candidates = [fs for fs in filesystems if fs.local and fs.mounted_at_boot and fs.target != docker_root]
         if not candidates:
             raise RuntimeError("No local filesystem can hold an XFS image file")
         holder = max(candidates, key=lambda fs: fs.avail_bytes)
