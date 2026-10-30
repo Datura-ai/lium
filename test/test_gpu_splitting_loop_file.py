@@ -187,7 +187,7 @@ def test_fstab_entry_and_drop_in_for_the_image_file():
     assert gpu_splitting._fstab_entry("/var/lib/lium-docker.xfs", gpu_splitting.LOOP_FILE_FSTAB_OPTIONS) == (
         "/var/lib/lium-docker.xfs /var/lib/docker xfs loop,pquota,noatime,nofail 0 0"
     )
-    assert gpu_splitting._docker_drop_in("/var/lib/docker") == "[Unit]\nRequiresMountsFor=/var/lib/docker\n"
+    assert gpu_splitting._docker_drop_in_contents("/var/lib/docker") == "[Unit]\nRequiresMountsFor=/var/lib/docker\n"
     rule = gpu_splitting._loop_device_udev_rule("/var/lib/lium-docker.xfs")
     assert 'ATTR{loop/backing_file}=="/var/lib/lium-docker.xfs"' in rule
     assert 'ATTR{queue/discard_max_bytes}="0"' in rule

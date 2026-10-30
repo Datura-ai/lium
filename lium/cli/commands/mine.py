@@ -20,6 +20,7 @@ _SS58_HOTKEY = r"[1-9A-HJ-NP-Za-km-z]{40,60}"  # the shape `lium mine -k` valida
 
 if TYPE_CHECKING:
     from . import mine_register
+    from ..mine.models import PreflightResult
 
 
 # --------------------------
@@ -276,7 +277,7 @@ def _setup_docker_storage(auto: bool = False):
         console.warning(f"Docker storage was not set up: {exc}\n{manual}")
 
 
-def _offer_and_run_image_file_setup(preflight, lines: list[str], manual: str):
+def _offer_and_run_image_file_setup(preflight: "PreflightResult", lines: list[str], manual: str):
     """Single-disk host: offer Docker storage in an XFS image file (what `lium gpu-splitting setup` plans with no device).
 
     Typing `file` is the consent; anything else leaves the host as it is.

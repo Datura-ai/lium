@@ -634,7 +634,7 @@ def _fstab_would_change(fstab_path: str, desired: str) -> bool:
     return True
 
 
-def _docker_drop_in(docker_root: str) -> str:
+def _docker_drop_in_contents(docker_root: str) -> str:
     # without RequiresMountsFor Docker starts on the empty directory after a reboot and every pod "disappears"
     return f"[Unit]\nRequiresMountsFor={docker_root}\n"
 
@@ -1273,7 +1273,7 @@ def _execute_setup(plan: SetupPlan):
                 _update_fstab(plan.fstab_path, _fstab_entry(target_partition, LOOP_FILE_FSTAB_OPTIONS))
                 console.dim(f"Writing {plan.drop_in_path}")
                 state.drop_in_written = True
-                _write_text_file(plan.drop_in_path, _docker_drop_in(docker_root))
+                _write_text_file(plan.drop_in_path, _docker_drop_in_contents(docker_root))
                 run_command(["systemctl", "daemon-reload"], True, True)
                 console.dim(f"Writing {plan.udev_rule_path}")
                 state.udev_rule_written = True
