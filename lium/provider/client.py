@@ -217,6 +217,12 @@ class ProviderClient:
                 "`lium provider portal login` in a terminal to be asked for the code",
                 code=PORTAL_AUTH_TOTP_REQUIRED,
             )
+        if not response.mfa_token:
+            raise ProviderAuthError(
+                "portal asked for an authenticator code without a challenge",
+                code=PORTAL_AUTH_INVALID,
+                context={"provider_id": response.provider.id},
+            )
         totp_payload = {"mfa_token": response.mfa_token, "code": self.totp_code().strip()}
         try:
             return _login_response(
@@ -240,6 +246,12 @@ class ProviderClient:
         )
         if response.mfa_required:
             response = self._finish_totp_sign_in(response)
+        if not response.token:
+            raise ProviderAuthError(
+                "portal sign-in returned no session token",
+                code=PORTAL_AUTH_INVALID,
+                context={"provider_id": response.provider.id},
+            )
         self.account = response.provider.miner_hotkey
         self._cached_token = with_refresh_retry(
             lambda: self._token_store.save(self.account, response.token, provider_id=response.provider.id)
@@ -436,9 +448,17 @@ class ProviderClient:
         address ends every earlier session and the answer carries the
         caller's new ``token``: it is stored in place of the old one and
         left out of the returned profile, which callers may print.
+
+        An account with an authenticator app spends one code on that sign-in
+        and needs a second for the address itself, so the code source is
+        asked twice; each code is accepted once.
         """
-        payload = _build_payload(SetEmailPayload, email=email)
         self.login(force=True)
+        payload = _build_payload(
+            SetEmailPayload,
+            email=email,
+            totp_code=self.totp_code().strip() if self.totp_code else None,
+        )
         body = self._http.post(SET_EMAIL, json_body=payload)
         token = body.pop("token", None) if isinstance(body, dict) else None
         if isinstance(token, str) and token:

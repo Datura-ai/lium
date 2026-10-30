@@ -177,6 +177,8 @@ class SetEmailPayload(BaseModel):
     email: str = Field(
         min_length=3, max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
     )
+    # an account with an authenticator app confirms the new address with its own code, after the sign-in
+    totp_code: str | None = Field(default=None, min_length=1, max_length=32)
 
 
 class SetMachineRequestSubscriptionPayload(BaseModel):

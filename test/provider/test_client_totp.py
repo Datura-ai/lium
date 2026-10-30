@@ -182,3 +182,55 @@ def test_email_sign_in_sends_the_authenticator_code_too(
     assert response.token == token
     assert portal.posts[1] == ("/auth/login-totp", {"mfa_token": "challenge-1", "code": "123456"}, False)
     assert tmp_token_store.load("acct-1").token == token
+
+
+def test_set_email_asks_for_a_second_code(
+    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
+) -> None:
+    """The portal spends one code on the sign-in and asks for another one for the address itself (DAH-4456)."""
+    token = _make_jwt(int(time.time()) + 3600)
+    portal = _SequencedPortal(
+        [
+            _mfa_challenge_body(fake_signer.ss58_address),
+            _login_response_body(token, fake_signer.ss58_address),
+            {"email": "new@example.com"},
+        ]
+    )
+    client = _build_client(portal, tmp_token_store, fake_signer)
+    codes = iter(["111111", "222222"])
+    client.totp_code = lambda: next(codes)
+
+    client.set_email("new@example.com")
+
+    assert portal.posts[1][1]["code"] == "111111"
+    assert portal.posts[2] == ("/auth/set-email", {"email": "new@example.com", "totp_code": "222222"}, True)
+
+
+def test_set_email_of_an_account_without_an_authenticator_sends_no_code(
+    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
+) -> None:
+    token = _make_jwt(int(time.time()) + 3600)
+    portal = _SequencedPortal(
+        [_login_response_body(token, fake_signer.ss58_address), {"email": "new@example.com"}]
+    )
+    client = _build_client(portal, tmp_token_store, fake_signer)
+
+    client.set_email("new@example.com")
+
+    assert portal.posts[-1][1] == {"email": "new@example.com", "totp_code": None}
+
+
+def test_the_given_code_answers_one_ask_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--totp-code` is one code: a command that needs a second one asks, and a script is refused."""
+    from lium.cli.provider import _client
+    from lium.provider.client import ProviderClient as _Client
+
+    monkeypatch.setattr(_client, "is_interactive", lambda: False)
+    client = _client.attach_totp_code(
+        _Client(portal_url="https://portal.example.com", account="me@example.com"), "111111"
+    )
+
+    assert client.totp_code() == "111111"
+    with pytest.raises(ProviderAuthError) as excinfo:
+        client.totp_code()
+    assert excinfo.value.code == "PORTAL_AUTH_TOTP_REQUIRED"

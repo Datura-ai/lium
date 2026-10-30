@@ -386,7 +386,7 @@ lium config set provider.coldkey miner-prod        # one-time: persist wallet id
 lium config set provider.hotkey  miner-1
 lium provider portal login                         # JWT exchange via hotkey signature
 lium provider portal login --totp-code <CODE>     # account with an authenticator app (a terminal asks instead)
-lium provider config set-email <EMAIL> --totp-code <CODE>  # set-email signs in again
+lium provider config set-email <EMAIL> --totp-code <CODE>  # signs in, then asks for a second code
 lium provider status                               # registration, portal session, nodes, weights
 lium provider node list --limit 50
 lium provider node add --gpu-type "NVIDIA H200 NVL" --gpu-count 8 \
