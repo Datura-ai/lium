@@ -130,7 +130,7 @@ def test_rent_posts_the_spec_once_and_maps_the_pick(client):
         "min_download_mbps": 100,
         "pod_name": "train-1", "template_id": None, "dockerfile_content": None, "volume_id": None,
         "user_public_key": [KEY], "initial_port_count": 3, "enable_volume_encryption": True,
-        "backup_log_id": None, "restore_path": None, "enable_backups": True, "dry_run": False,
+        "backup_log_id": None, "restore_path": None, "enable_backups": True, "dry_run": False, "enable_jupyter": False,
     }
     assert [c.request.url for c in responses.calls] == [f"{BASE}/version", f"{BASE}/pods", f"{BASE}/executors/rent-by-spec"]
     assert isinstance(result, RentResult) and result.server_side is True and result.gpu_count == 1
@@ -572,3 +572,57 @@ def test_a_definite_refusal_of_the_resend_propagates_without_another_look(client
     urls = [c.request.url for c in responses.calls]
     assert urls.count(f"{BASE}/executors/rent-by-spec") == 2
     assert urls.count(f"{BASE}/pods") == 1 + 3
+
+
+@responses.activate
+def test_rent_by_spec_asks_the_server_for_jupyter_only_when_wanted(client):
+    """DAH-3698: a tight split node gives a pod the SSH port only unless the rent says Jupyter, which holds its port."""
+    _version(["rent_by_spec"])
+    responses.add(responses.GET, f"{BASE}/pods", json=[])
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", json=RENTED)
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", json=RENTED)
+
+    client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY], enable_jupyter=True)
+    assert json.loads(responses.calls[-1].request.body)["enable_jupyter"] is True
+    client.rent(gpu_type="H100", name="train-1", ssh_keys=[KEY])
+    assert json.loads(responses.calls[-1].request.body)["enable_jupyter"] is False
+
+
+@responses.activate
+def test_a_rent_by_id_asks_the_server_for_jupyter(client):
+    _version(None)
+    _template()
+    _fleet()
+    responses.add(responses.POST, f"{BASE}/executors/cheap/rent", json={"id": "pod-uuid-9", "name": "train-1"})
+
+    client.rent(
+        gpu_type="H100", gpu_count=1, name="train-1", template_id="22222222-2222-4222-8222-222222222222", min_cpus=16, min_download_mbps=100,
+        ssh_keys=[KEY], enable_jupyter=True,
+    )
+
+    assert json.loads(responses.calls[-1].request.body)["enable_jupyter"] is True
+
+
+# --- whole-host-only nodes --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("minimum, gpu_count, posted", [(None, 1, False), (None, 2, True), (None, None, True), (1, 1, True)])
+@responses.activate
+def test_up_refuses_a_partial_count_on_a_whole_host_only_node_before_posting(client, minimum, gpu_count, posted):
+    # 28 Oct 2026: an SDK script looped up(executor_id=..., gpu_count=1) over 2-GPU nodes the listing
+    # marks whole-host-only (min_gpu_count_for_rental null) and got a rent 400 from each one
+    node = {**_node("two", gpu_count=2), "min_gpu_count_for_rental": minimum}
+    responses.add(responses.GET, f"{BASE}/executors", json=[node])
+    _template()
+    responses.add(responses.POST, f"{BASE}/executors/two/rent", json={"id": "pod-uuid-9", "name": "p"})
+
+    call = lambda: client.up(  # noqa: E731
+        executor_id="two", name="p", template_id="22222222-2222-4222-8222-222222222222", ssh_keys=[KEY], gpu_count=gpu_count
+    )
+    if posted:
+        call()
+        assert responses.calls[-1].request.url == f"{BASE}/executors/two/rent"
+    else:
+        with pytest.raises(ValueError, match="rents whole only. Request all 2 GPUs"):
+            call()
+        assert not any(c.request.method == "POST" for c in responses.calls)

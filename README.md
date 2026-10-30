@@ -310,11 +310,11 @@ Teams share a workspace whose billing owner pays. An API key is bound to one wor
 
 ### Provider Commands
 
-`lium provider …` is the provider-side CLI — full automation parity with the portal frontend at lium.io/portal: portal authentication, node lifecycle, central-miner-server configuration, batch sync, billing, and machine-request queries. Hotkey registration is still handled separately via `btcli subnet register`.
+`lium provider …` is the provider-side CLI — full automation parity with the provider portal at https://provider.lium.io: portal authentication, node lifecycle, central-miner-server configuration, batch sync, billing, and machine-request queries. Hotkey registration is still handled separately via `btcli subnet register`.
 
 Group-level flags inherited by every subcommand: `-w/--coldkey`, `-k/--hotkey`, `--portal-url`, `--json`, `--debug`, `-y/--yes`, `--dry-run`. Persist wallet identity once with `lium config set provider.coldkey <NAME>` and `lium config set provider.hotkey <NAME>`. Spend-affecting subcommands run a persona prompt unless `--yes` or `LIUM_PROVIDER_ACK=1` is set.
 
-**Account without a key (Google or e-mail):** create an API token in the portal (Account settings, API tokens; not released yet), then `export LIUM_PROVIDER_TOKEN=lpk_...` (or save it with `lium provider portal login --token`); `lium provider` commands then run without `--hotkey`. An e-mail account can also run `lium provider portal login --email <address>`.
+**Account without a key (Google or e-mail):** create an API token at https://provider.lium.io/settings (API tokens), then `export LIUM_PROVIDER_TOKEN=lpk_...` (or save it with `lium provider portal login --token`); `lium provider` commands then run without `--hotkey`. An e-mail account can also run `lium provider portal login --email <address>`.
 
 - `lium provider portal {login,logout,whoami}` - Manage the cached portal JWT
 - `lium provider status [--netuid 51]` - Aggregated provider snapshot (registration, portal session, nodes, validator weights)
@@ -708,12 +708,12 @@ uv run pytest test/ -q
 ```
 
 `.github/workflows/ci.yml` (`CI - Build Verification`) runs on every PR: the unit tests, the packaging-inputs
-check, an sdist/wheel build, the binary-target matrix check (`test/test_release_binary_targets.py`) and the
-Linux amd64 binary build. The Linux arm64 and macOS builds run only when a packaging input changes
-(`pyproject.toml`, `uv.lock`, `lium.spec`, `lium_entry.py`, `Dockerfile.build`, `scripts/install.sh`,
-`scripts/linux_bundle_report.py`, `ci.yml`, `release.yml`) or on a manual dispatch. The live e2e
-(`./e2e/run.sh`, see `e2e/README.md`) runs when `lium/`, `e2e/`, `pyproject.toml`, `uv.lock` or `ci.yml`
-changes, on a manual dispatch, and once a day on a schedule. `ci-ok` (the aggregate of the test, packaging,
+check, an sdist/wheel build and the binary-target matrix check (`test/test_release_binary_targets.py`). The binary
+builds (Linux amd64/arm64 in Docker, macOS arm64) run only when a packaging input changes (`pyproject.toml`,
+`uv.lock`, `lium.spec`, `lium_entry.py`, `Dockerfile.build`, `scripts/install.sh`, `scripts/linux_bundle_report.py`,
+`ci.yml`, `release.yml`); macOS Intel never builds on a PR. A manual dispatch (`gh workflow run ci.yml --ref <branch>`)
+builds all five targets and runs the live e2e (`./e2e/run.sh`, see `e2e/README.md`), which otherwise runs once a day
+on a schedule and never on a PR. `ci-ok` (the aggregate of the test, packaging,
 wheel and target-matrix jobs) and `e2e-live` are the two status checks the `main` ruleset requires.
 
 
