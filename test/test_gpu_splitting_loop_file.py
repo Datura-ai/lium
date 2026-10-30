@@ -536,21 +536,18 @@ def test_execute_setup_ctrl_c_during_backup_cleanup_keeps_the_finished_migration
     assert commands[-1] == ["systemctl", "start", "docker"]
 
 
-@pytest.mark.parametrize("own_mount", [False, True], ids=["rename", "rsync"])
-@pytest.mark.parametrize("step, after", [
-    ("stop", False), ("stop", True), ("rename", False), ("rename", True), ("allocate", False), ("allocate", True),
-    ("unmount", False), ("unmount", True), ("mount", False), ("mount", True), ("start", False), ("start", True),
+# the rename branch has no original mount to unmount; the rsync branch (Docker on its own mount) does not rename
+@pytest.mark.parametrize("own_mount, step", [
+    *(pytest.param(False, step, id=f"rename-{step}") for step in ["stop", "rename", "allocate", "mount", "start"]),
+    *(pytest.param(True, step, id=f"rsync-{step}") for step in ["stop", "allocate", "unmount", "mount", "start"]),
 ])
+@pytest.mark.parametrize("after", [False, True])
 def test_execute_setup_ctrl_c_around_each_mutation_puts_the_host_back(monkeypatch, tmp_path, own_mount, step, after):
     # the flag for a mutation is set after its helper returns; an interrupt in that window must roll back the same way
     docker_mount = MountInfo(target=str(tmp_path / "docker"), source="/dev/sdc1", fstype="ext4", options=["rw"]) if own_mount else None
     plan = _loop_file_plan(tmp_path, docker_mount=docker_mount)
     docker_root = plan.preflight.docker_state.docker_root_dir
     image = plan.target.resolved_target
-    if own_mount and step == "rename":
-        pytest.skip("the rsync branch does not rename")
-    if not own_mount and step == "unmount":
-        pytest.skip("the rename branch has no original mount to unmount")
     command = {
         "stop": ["systemctl", "stop", "docker"], "rename": ["mv", docker_root, plan.backup_dir],
         "unmount": ["umount", docker_root], "mount": ["mount", docker_root], "start": ["systemctl", "start", "docker"],

@@ -385,7 +385,7 @@ def _loop_file_target(
     total_vram_bytes = _total_gpu_vram_bytes()
     if total_vram_bytes is None:
         console.warning(
-            f"GPU VRAM could not be read (nvidia-smi); the image file is not checked against the validator's "
+            "GPU VRAM could not be read (nvidia-smi); the image file is not checked against the validator's "
             f"{MIN_DISK_TO_VRAM_RATE}x VRAM disk floor for the idle incentive"
         )
     return plan_loop_file_target(
@@ -1396,7 +1396,7 @@ _IMAGE_FILE_OPTION = click.option(
 )
 _IMAGE_SIZE_OPTION = click.option(
     "--size", "image_size_gib", type=int,
-    help=f"Size of the XFS image file in GiB (default: free space minus the system reserve; it must keep "
+    help="Size of the XFS image file in GiB (default: free space minus the system reserve; it must keep "
     f"{NODE_FREE_DISK_GIB} GiB free after the Docker data and the node images, and clear {MIN_DISK_TO_VRAM_RATE}x the "
     "host's GPU VRAM)",
 )
