@@ -369,7 +369,8 @@ def test_unexpected_error_mentions_the_opt_in_when_off():
     assert telemetry.OPT_IN_HINT in result.output
 
 
-def test_a_dropped_connection_exits_3_without_a_crash_report(events):
+@pytest.mark.parametrize("error", ["ConnectionError", "Timeout", "ChunkedEncodingError"])
+def test_a_dropped_connection_exits_3_without_a_crash_report(events, error):
     import requests
 
     assert telemetry.init("lium ps", "0.0.33") is True
@@ -377,7 +378,7 @@ def test_a_dropped_connection_exits_3_without_a_crash_report(events):
     @click.command("ps")
     @handle_errors
     def ps():
-        raise requests.ConnectionError("connection reset by peer")
+        raise getattr(requests.exceptions, error)("connection reset by peer")
 
     result = CliRunner().invoke(ps, [])
 

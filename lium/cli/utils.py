@@ -663,7 +663,7 @@ def handle_errors(func):
                     or default_hint(code, exit_code))
             fail(e.code or code, str(e), exit_code, _api_error_data(e), hint,
                  request_id=e.request_id, prefix="Error: ")
-        except (requests.ConnectionError, requests.Timeout) as e:
+        except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as e:
             # the API did not answer once the SDK's retries ran out (``ps()`` in every command):
             # a network drop, not a bug, so no crash report (DAH-5438)
             fail("api_timeout", f"The API did not answer ({e.__class__.__name__})", EXIT_API_ERROR,
