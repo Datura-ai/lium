@@ -53,7 +53,11 @@ class LoginResponse(BaseModel):
     model_config = {"populate_by_name": True}
 
     provider: SafeProviderResponse = Field(alias="miner")
-    token: str
+    # None when ``mfa_required``: the account has an authenticator app and
+    # ``mfa_token`` (5 minutes) plus a code gets the session from ``/auth/login-totp``
+    token: str | None = None
+    mfa_required: bool = False
+    mfa_token: str | None = None
 
 
 class ProviderCredentials(BaseModel):
@@ -173,6 +177,8 @@ class SetEmailPayload(BaseModel):
     email: str = Field(
         min_length=3, max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
     )
+    # an account with an authenticator app confirms the new address with its own code, after the sign-in
+    totp_code: str | None = Field(default=None, min_length=1, max_length=32)
 
 
 class SetMachineRequestSubscriptionPayload(BaseModel):

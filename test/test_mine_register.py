@@ -292,7 +292,8 @@ def test_mine_register_repeated_with_the_same_claim_does_not_recreate_the_execut
             executor["claim"] = mine._env_value(d / ".env", "MINER_ACCOUNT_CLAIM")
 
     monkeypatch.setattr(mine, "_start_executor", start)
-    monkeypatch.setattr(mine, "_executor_env_value", lambda d, key: executor["claim"])
+    monkeypatch.setattr(mine, "_executor_env_value", lambda d, key: executor["claim"] if key == "MINER_ACCOUNT_CLAIM"
+                        or executor["claim"] is None else mine._env_value(d / ".env", key))
     portal = _Portal()
     portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued"}}))
     portal.on("GET", "/executors", _listing())

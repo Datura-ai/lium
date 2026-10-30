@@ -382,10 +382,15 @@ lium mine --register <TOKEN> --wait 0          # add the node, do not wait for t
 # Node behind CGNAT or a port-forwarding VPS: register the VPS address and forwarded port
 lium mine --auto --hotkey <HOTKEY> --ip <VPS_IP> --external-port <FORWARDED_PORT> --internal-port 8080
 
+# Second node behind the same public IP: forward its own service, SSH and renting ports to it
+lium mine --register <TOKEN> --external-port 8081 --ssh-port 2201 --renting-port-range 41000-41100
+
 # Provider-portal automation (same surface as the portal frontend)
 lium config set provider.coldkey miner-prod        # one-time: persist wallet identity
 lium config set provider.hotkey  miner-1
 lium provider portal login                         # JWT exchange via hotkey signature
+lium provider portal login --totp-code <CODE>     # account with an authenticator app (a terminal asks instead)
+lium provider config set-email <EMAIL> --totp-code <CODE>  # signs in, then asks for a second code
 lium provider status                               # registration, portal session, nodes, weights
 lium provider node list --limit 50
 lium provider node add --gpu-type "NVIDIA H200 NVL" --gpu-count 8 \
