@@ -638,6 +638,7 @@ def test_renting_ports_apart_from_service_and_ssh_ports(monkeypatch, tmp_path: P
     ("EXTERNAL_PORT=8081\nSSH_PORT=2201\nRENTING_PORT_RANGE=41000-41100\n", ["--ssh-port", "8081"], False),
     ("EXTERNAL_PORT=8081\nSSH_PORT=2201\n", ["--ssh-port", "2202"], True),
     ("SSH_PORT=2201\nSSH_PUBLIC_PORT=8081\n", ["--external-port", "8081"], False),         # NAT: public endpoint
+    ("SSH_PORT=2201\nSSH_PUBLIC_PORT=08081\n", ["--external-port", "8081"], False),        # same port, leading zero
     ("SSH_PORT=2201\nSSH_PUBLIC_PORT=8081\n", ["--external-port", "8082", "--ssh-port", "2202"], True),
     ("SSH_PORT=8081\nSSH_PUBLIC_PORT=2201\n", ["--external-port", "8081"], False),         # NAT: local host port
     ("SSH_PORT=2202\nSSH_PUBLIC_PORT=2201\n", ["--external-port", "8081"], True),

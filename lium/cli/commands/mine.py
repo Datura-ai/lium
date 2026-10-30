@@ -1173,8 +1173,8 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     if len(set(host_ports.values())) < len(host_ports):   # compose cannot publish one host port twice
         raise click.UsageError(f"The service port and the SSH port are both {host_ports['SSH port']}; pick different ports.")
     public_ssh = answers["ssh_public_port"] or answers["ssh_port"]
-    if str(answers["external_port"]) == str(public_ssh):   # NAT: both would need one public IP:port
-        raise click.UsageError(f"The service port and the public SSH port are both {public_ssh}; pick different ports.")
+    if int(answers["external_port"]) == int(public_ssh):   # NAT: both would need one public IP:port; int: 08081 is 8081
+        raise click.UsageError(f"The service port and the public SSH port are both {int(public_ssh)}; pick different ports.")
     # NAT forwards win over the range in the validator: kept as written unless a different range replaces them
     mappings = ""
     if parsed.get("RENTING_PORT_MAPPINGS") and answers["port_range"] == saved["RENTING_PORT_RANGE"].replace(" ", ""):
