@@ -426,7 +426,14 @@ def _all_reasons(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     raw = row.get("blocking_reasons")
     if not isinstance(raw, list):
         return []
-    return [normalise(entry) for entry in raw if isinstance(entry, Mapping)]
+    reasons = [normalise(entry) for entry in raw if isinstance(entry, Mapping)]
+    hides_secure = bool(row.get("secure_listing_requires_idle_pay"))
+    for reason in reasons:
+        # partial pay only when nothing else on the node excludes idle pay, and never over a served
+        # gating entry once SECURE_LISTING_REQUIRES_IDLE_PAY hides the Secure node for it
+        if reason["partial"] and (len(reasons) > 1 or (hides_secure and reason["gating"])):
+            reason.update(partial=False, blocks=reason["gating"] or reason["kind"] != "idle_pay")
+    return reasons
 
 
 def node_reasons(row: Mapping[str, Any]) -> list[dict[str, Any]]:

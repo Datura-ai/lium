@@ -102,3 +102,27 @@ def test_a_port_limited_remainder_that_pays_no_split_still_blocks(measured, requ
     with _blocking.console.capture() as captured:
         print_not_eligible([row], short=False)
     assert "partial idle pay" not in captured.get().lower()
+
+
+@pytest.mark.parametrize("gating", [True, False])
+def test_a_port_limited_remainder_beside_another_zero_pay_reason_claims_no_pay(gating):
+    # F-6: any other reason on the node excludes idle pay, so the paid-split count is not paid
+    row = _partial_row()
+    row["blocking_reasons"].append(
+        {"code": "gpu_model_not_eligible_for_unrented_incentive", "kind": "idle_pay", "title": "GPU model earns no idle pay", "gating": gating}
+    )
+
+    assert "port_limited_remainder" in [r["code"] for r in _blocking.node_reasons(row)]
+    with _blocking.console.capture() as captured:
+        print_not_eligible([row], short=False)
+    assert "partial idle pay" not in captured.get().lower()
+
+
+def test_with_secure_listing_requiring_idle_pay_a_gating_remainder_still_blocks():
+    # F-7: with SECURE_LISTING_REQUIRES_IDLE_PAY on, the served gating entry hides a Secure node
+    row = {**_partial_row(), "secure_listing_requires_idle_pay": True}
+
+    assert [r["code"] for r in _blocking.node_reasons(row)] == ["port_limited_remainder"]
+    with _blocking.console.capture() as captured:
+        print_not_eligible([row], short=False)
+    assert "partial idle pay" not in captured.get().lower()
