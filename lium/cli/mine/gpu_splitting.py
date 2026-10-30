@@ -58,7 +58,7 @@ from .storage import (
 GPU_SPLITTING_DOC_URL = "https://docs.lium.io/providers/nodes/gpu-splitting"
 # fstab and the cutover mount the target at this path; another data-root would be left on the old disk
 DEFAULT_DOCKER_ROOT = "/var/lib/docker"
-# the image file is mounted by path through a loop device; direct I/O is set by the docker.service drop-in;
+# the image file is mounted by path through a loop device; direct I/O is set by the udev rule;
 # nofail: without it a missing image file fails local-fs.target and the host boots into emergency mode
 LOOP_FILE_FSTAB_OPTIONS = "loop,pquota,noatime,nofail"
 # `lium mine --dir`'s default, relative to the working directory as there; its neurons/executor compose files name
