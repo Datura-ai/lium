@@ -604,7 +604,18 @@ def _executor_env_value(executor_dir: Path, key: str) -> Optional[str]:
 
 
 # .env keys the executor reads only at container start (env_file); a rerun that changes one must recreate it
-_RESTART_KEYS = ("MINER_ACCOUNT_CLAIM", "INTERNAL_PORT", "EXTERNAL_PORT", "SSH_PORT", "SSH_PUBLIC_PORT", "RENTING_PORT_RANGE")
+_RESTART_KEYS = ("MINER_ACCOUNT_CLAIM", "INTERNAL_PORT", "EXTERNAL_PORT", "SSH_PORT", "SSH_PUBLIC_PORT", "RENTING_PORT_RANGE",
+                 "RENTING_PORT_MAPPINGS")
+
+
+def _restart_value(key: str, value: str):
+    """``value`` as compared for a restart: NAT forwards as parsed JSON, so reformatting alone does not restart."""
+    if key == "RENTING_PORT_MAPPINGS" and value:
+        try:
+            return json.loads(value)
+        except ValueError:
+            pass
+    return value
 
 
 def _executor_env_stale(executor_dir: Path) -> bool:
@@ -614,7 +625,7 @@ def _executor_env_stale(executor_dir: Path) -> bool:
         running = _executor_env_value(executor_dir, key)
         if running is None:  # no executor container yet: a plain `up -d` creates it from .env
             return False
-        if running != _env_value(env_f, key):
+        if _restart_value(key, running) != _restart_value(key, _env_value(env_f, key)):
             return True
     return False
 
@@ -1161,6 +1172,9 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     host_ports = _host_ports_from_answers(answers)
     if len(set(host_ports.values())) < len(host_ports):   # compose cannot publish one host port twice
         raise click.UsageError(f"The service port and the SSH port are both {host_ports['SSH port']}; pick different ports.")
+    public_ssh = answers["ssh_public_port"] or answers["ssh_port"]
+    if str(answers["external_port"]) == str(public_ssh):   # NAT: both would need one public IP:port
+        raise click.UsageError(f"The service port and the public SSH port are both {public_ssh}; pick different ports.")
     # NAT forwards win over the range in the validator: kept as written unless a different range replaces them
     mappings = ""
     if parsed.get("RENTING_PORT_MAPPINGS") and answers["port_range"] == saved["RENTING_PORT_RANGE"].replace(" ", ""):

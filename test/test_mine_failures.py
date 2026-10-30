@@ -572,6 +572,39 @@ def test_a_rerun_keeps_renting_port_mappings_unless_a_range_replaces_them(
     assert [c for c in calls if c.startswith("docker compose up")] == [up]
 
 
+@pytest.mark.parametrize("running_map, rentals, up", [
+    ("[[41000, 51000], [41001, 51001], [41002, 51002]]", False, "docker compose up -d"),     # unchanged, other format
+    ("[[42000,52000],[42001,52001],[42002,52002]]", False, "docker compose up -d --force-recreate"),  # changed
+    ("[[42000,52000],[42001,52001],[42002,52002]]", True, "docker compose up -d --no-recreate"),  # deferred under rentals
+])
+def test_changed_renting_port_mappings_recreate_the_executor(monkeypatch, tmp_path: Path, running_map, rentals, up):
+    """The executor reads RENTING_PORT_MAPPINGS only at start; a new value restarts it, a reformatted one does not."""
+    env = "INTERNAL_PORT=8080\nEXTERNAL_PORT=8081\nSSH_PORT=2201\nSSH_PUBLIC_PORT=2201\n"
+    (tmp_path / ".env").write_text(env + f"RENTING_PORT_MAPPINGS={_MAP}\n")
+    container = env + f"RENTING_PORT_MAPPINGS={running_map}\n"
+    calls, ids = [], iter(["old", "new"])
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        calls.append(cmd)
+        if cmd.startswith("docker ps --filter"):
+            return ("pod_abc\n" if rentals else ""), ""
+        if "ps -aq executor" in cmd:
+            return "cid", ""
+        if ".Config.Env" in cmd:
+            return container, ""
+        if "ps -q executor" in cmd:
+            return next(ids, "new"), ""
+        if cmd.startswith("docker inspect"):
+            return "healthy", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+    monkeypatch.setattr(mine.console, "warning", lambda *a: None)
+    mine._start_executor(tmp_path, wait_secs=5, recreate=mine._executor_env_stale(tmp_path))
+    assert [c for c in calls if c.startswith("docker compose up")] == [up]
+
+
 @pytest.mark.parametrize("saved, flags, ok", [
     ("RENTING_PORT_RANGE=41000-41100\n", ["--ssh-port", "41050"], False),                    # range vs local SSH
     ("RENTING_PORT_RANGE=41000-41100\nSSH_PUBLIC_PORT=41100\n", [], False),                  # range vs public SSH
@@ -604,6 +637,10 @@ def test_renting_ports_apart_from_service_and_ssh_ports(monkeypatch, tmp_path: P
     ("EXTERNAL_PORT=8081\nSSH_PORT=2201\n", ["--ssh-port", "8081"], False),                   # rerun
     ("EXTERNAL_PORT=8081\nSSH_PORT=2201\nRENTING_PORT_RANGE=41000-41100\n", ["--ssh-port", "8081"], False),
     ("EXTERNAL_PORT=8081\nSSH_PORT=2201\n", ["--ssh-port", "2202"], True),
+    ("SSH_PORT=2201\nSSH_PUBLIC_PORT=8081\n", ["--external-port", "8081"], False),         # NAT: public endpoint
+    ("SSH_PORT=2201\nSSH_PUBLIC_PORT=8081\n", ["--external-port", "8082", "--ssh-port", "2202"], True),
+    ("SSH_PORT=8081\nSSH_PUBLIC_PORT=2201\n", ["--external-port", "8081"], False),         # NAT: local host port
+    ("SSH_PORT=2202\nSSH_PUBLIC_PORT=2201\n", ["--external-port", "8081"], True),
 ])
 def test_one_host_port_for_service_and_ssh_is_a_usage_error(monkeypatch, tmp_path: Path, saved, flags, ok):
     """compose cannot publish the same host port for both; refused before anything is installed."""
