@@ -699,16 +699,24 @@ def _apply_env_overrides(
         set_or_append("RENTING_PORT_MAPPINGS", mappings)
     env_f.write_text("\n".join(content) + "\n")
 
-def _check_renting_ports_apart(answers: dict) -> None:
+def _check_renting_ports_apart(answers: dict, mappings: str = "") -> None:
     """A renting port that is also the service or SSH port would be handed to a pod while the executor holds it."""
     taken = {int(answers[k]) for k in ("internal_port", "external_port", "ssh_port", "ssh_public_port")
              if str(answers.get(k) or "").isdigit()}
-    clash = sorted(_renting_ports(answers["port_range"]) & taken)
-    if clash:
-        raise click.UsageError(
-            f"--renting-port-range includes {', '.join(map(str, clash))}, which the node's service or SSH port uses; "
-            "pick a range without it."
-        )
+    if mappings:  # validators drop a forward whose local or public port is the SSH port, leaving too few to list
+        clash = sorted({p for pair in json.loads(mappings) for p in pair} & taken)
+        if clash:
+            raise click.UsageError(
+                f"RENTING_PORT_MAPPINGS in the saved .env uses {', '.join(map(str, clash))}, which the node's service "
+                "or SSH port would use; pick another service or SSH port."
+            )
+    elif answers["port_range"]:
+        clash = sorted(_renting_ports(answers["port_range"]) & taken)
+        if clash:
+            raise click.UsageError(
+                f"--renting-port-range includes {', '.join(map(str, clash))}, which the node's service or SSH port uses; "
+                "pick a range without it."
+            )
 
 
 def _gather_inputs(
@@ -1150,8 +1158,6 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     answers = _gather_inputs(hotkey, auto, internal_port, external_port, ssh_port, renting_port_range, ssh_public)
     # the flag and the prompt answer get the same check: spaces dropped, format, size and overlap
     answers["port_range"] = answers["port_range"].replace(" ", "")
-    if answers["port_range"]:
-        _check_renting_ports_apart(answers)
     host_ports = _host_ports_from_answers(answers)
     if len(set(host_ports.values())) < len(host_ports):   # compose cannot publish one host port twice
         raise click.UsageError(f"The service port and the SSH port are both {host_ports['SSH port']}; pick different ports.")
@@ -1163,6 +1169,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             mappings = json.dumps(json.loads(parsed["RENTING_PORT_MAPPINGS"]), separators=(",", ":"))
         except ValueError:
             raise click.UsageError(f"RENTING_PORT_MAPPINGS in {saved_env} is not valid JSON; fix or remove it and rerun.")
+    _check_renting_ports_apart(answers, mappings)
     target_dir = Path(dir_).absolute()
 
     TOTAL_STEPS = 8 if token else 6

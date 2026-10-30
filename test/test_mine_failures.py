@@ -573,6 +573,32 @@ def test_a_rerun_keeps_renting_port_mappings_unless_a_range_replaces_them(
 
 
 @pytest.mark.parametrize("saved, flags, ok", [
+    ("RENTING_PORT_RANGE=41000-41100\n", ["--ssh-port", "41050"], False),                    # range vs local SSH
+    ("RENTING_PORT_RANGE=41000-41100\nSSH_PUBLIC_PORT=41100\n", [], False),                  # range vs public SSH
+    ("RENTING_PORT_RANGE=41000-41100\n", ["--external-port", "41000"], False),               # range vs service
+    ("RENTING_PORT_RANGE=41000-41100\n", ["--ssh-port", "2202"], True),
+    (f"RENTING_PORT_MAPPINGS={_MAP}\n", ["--ssh-port", "41000"], False),                     # mapping local vs SSH
+    (f"RENTING_PORT_MAPPINGS={_MAP}\n", ["--ssh-port", "51001"], False),                     # mapping public vs SSH
+    (f"RENTING_PORT_MAPPINGS={_MAP}\nSSH_PUBLIC_PORT=51002\n", [], False),                   # mapping vs public SSH
+    (f"RENTING_PORT_MAPPINGS={_MAP}\n", ["--internal-port", "41002"], False),                # mapping vs service
+    (f"RENTING_PORT_MAPPINGS={_MAP}\n", ["--ssh-port", "2202"], True),
+    (f"RENTING_PORT_MAPPINGS={_MAP}\n", ["--ssh-port", "41000", "--renting-port-range", "42000-42100"], True),
+])
+def test_renting_ports_apart_from_service_and_ssh_ports(monkeypatch, tmp_path: Path, saved, flags, ok):
+    """Saved ranges and NAT forwards are both checked against the local and public service/SSH ports."""
+    _capture_answers(monkeypatch)
+    node = tmp_path / "neurons" / "executor"
+    node.mkdir(parents=True)
+    (node / ".env").write_text("INTERNAL_PORT=8080\nEXTERNAL_PORT=8081\nSSH_PORT=2201\n" + saved)
+    result = CliRunner().invoke(mine.mine_command, ["--auto", "-k", _HK, "--dir", str(tmp_path), *flags])
+    if ok:
+        assert "stop after gathering inputs" in result.output, result.output
+    else:
+        assert result.exit_code == 2, result.output
+        assert "service or SSH port" in result.output
+
+
+@pytest.mark.parametrize("saved, flags, ok", [
     (None, ["--external-port", "8081", "--ssh-port", "8081"], False),                         # fresh install
     (None, ["--external-port", "8081", "--ssh-port", "8081", "--renting-port-range", "41000-41100"], False),
     ("EXTERNAL_PORT=8081\nSSH_PORT=2201\n", ["--ssh-port", "8081"], False),                   # rerun
