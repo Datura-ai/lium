@@ -257,7 +257,7 @@ def _update_spinner_display(step_prefix: str, message: str, start_time: float, r
         time.sleep(0.1)
 
 
-def _handle_step_completion(step_prefix: str, message: str, elapsed: float, exception: Optional[Exception] = None):
+def _handle_step_completion(step_prefix: str, message: str, elapsed: float, exception: Optional[BaseException] = None):
     """Internal function to handle step completion display."""
     import sys
     
@@ -306,7 +306,7 @@ def timed_step_status(step: int = 0, total_steps: int = 0, message: str = ""):
         elapsed = time.time() - start_time
         _handle_step_completion(step_prefix, message, elapsed)
         
-    except Exception as e:
+    except BaseException as e:   # SystemExit/KeyboardInterrupt too, or the spinner thread outlives the step
         # Stop the update and show appropriate message
         running[0] = False
         update_thread.join(timeout=0.1)

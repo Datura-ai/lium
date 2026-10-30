@@ -382,6 +382,9 @@ lium mine --register <TOKEN> --wait 0          # add the node, do not wait for t
 # Node behind CGNAT or a port-forwarding VPS: register the VPS address and forwarded port
 lium mine --auto --hotkey <HOTKEY> --ip <VPS_IP> --external-port <FORWARDED_PORT> --internal-port 8080
 
+# Second node behind the same public IP: forward its own service, SSH and renting ports to it
+lium mine --register <TOKEN> --external-port 8081 --ssh-port 2201 --renting-port-range 41000-41100
+
 # Provider-portal automation (same surface as the portal frontend)
 lium config set provider.coldkey miner-prod        # one-time: persist wallet identity
 lium config set provider.hotkey  miner-1

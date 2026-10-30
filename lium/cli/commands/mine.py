@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import click
+from dotenv import dotenv_values
 from rich import box
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -473,8 +474,8 @@ def _port_in_use(port: int, host: str = "0.0.0.0") -> bool:
     so there the plain bind stays; ``lium mine`` brings up a Linux host. IPv4
     only: the executor's compose publishes ``0.0.0.0``; an IPv6-only listener on
     the port is not seen here (compose would then fail at ``:::<port>``). Only
-    ``EADDRINUSE`` means taken: ``EACCES`` on a privileged port from an
-    unprivileged ``lium mine`` is left to compose, which binds as root.
+    ``EADDRINUSE`` means taken; ``EACCES`` on a privileged port from an
+    unprivileged ``lium mine`` falls back to ``ss`` listing a listener there.
     """
     import errno
     import socket
@@ -486,8 +487,10 @@ def _port_in_use(port: int, host: str = "0.0.0.0") -> bool:
         try:
             s.bind((host, port))
         except OSError as e:
-            # only "somebody holds it" is a conflict: EACCES on a port below 1024 says this uid may not bind it,
-            # which compose (root) can — a provider running `lium mine` unprivileged must not be told 443 is taken
+            if e.errno == errno.EACCES:
+                # a port below 1024 this uid may not bind (compose, as root, can): ask ss for a listener instead,
+                # so sshd on 22 or nginx on 443 still stops an unprivileged rerun before the executor is recreated
+                return bool(_listening_process(port))
             return e.errno == errno.EADDRINUSE
     return False
 
@@ -532,14 +535,17 @@ def _check_ports_free(ports: dict[str, int], executor_dir: Optional[Path] = None
     ``ports`` maps a human label to the port number, e.g.
     ``{"service port": 8080, "SSH port": 2200}``. Without this check the
     executor container enters a restart loop and the caller only sees the
-    health check time out three minutes later. Skipped when the executor's
-    own ``executor`` service is already running (``executor_dir`` given):
-    those listeners are ours and ``compose up`` keeps them.
+    health check time out three minutes later. When the executor's own
+    ``executor`` service is already running (``executor_dir`` given), only the
+    host ports it publishes now are exempt: those listeners are ours, while a
+    changed port must be free before a recreate removes the working executor.
     """
+    own: set[int] = set()
     if executor_dir is not None and _compose_project_running(executor_dir):
-        return
+        # docker-compose.app.yml publishes ${EXTERNAL_PORT} and ${SSH_PORT} on the host
+        own = {int(v) for k in ("EXTERNAL_PORT", "SSH_PORT") if (v := _executor_env_value(executor_dir, k) or "").isdigit()}
     for label, port in ports.items():
-        if not port or not _port_in_use(port):
+        if not port or port in own or not _port_in_use(port):
             continue
         owner = _listening_process(port)
         who = f" ({owner})" if owner else ""
@@ -597,6 +603,33 @@ def _executor_env_value(executor_dir: Path, key: str) -> Optional[str]:
     return next((line.split("=", 1)[1].strip() for line in env.splitlines() if line.startswith(f"{key}=")), "")
 
 
+# .env keys the executor reads only at container start (env_file); a rerun that changes one must recreate it
+_RESTART_KEYS = ("MINER_ACCOUNT_CLAIM", "INTERNAL_PORT", "EXTERNAL_PORT", "SSH_PORT", "SSH_PUBLIC_PORT", "RENTING_PORT_RANGE",
+                 "RENTING_PORT_MAPPINGS")
+
+
+def _restart_value(key: str, value: str):
+    """``value`` as compared for a restart: NAT forwards as parsed JSON, so reformatting alone does not restart."""
+    if key == "RENTING_PORT_MAPPINGS" and value:
+        try:
+            return json.loads(value)
+        except ValueError:
+            pass
+    return value
+
+
+def _executor_env_stale(executor_dir: Path) -> bool:
+    """True when a running executor was created with a value of a ``_RESTART_KEYS`` key other than .env now holds."""
+    env_f = executor_dir / ".env"
+    for key in _RESTART_KEYS:
+        running = _executor_env_value(executor_dir, key)
+        if running is None:  # no executor container yet: a plain `up -d` creates it from .env
+            return False
+        if _restart_value(key, running) != _restart_value(key, _env_value(env_f, key)):
+            return True
+    return False
+
+
 def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = False):
     # Start using the default docker-compose.yml
     # recreate: an executor already running keeps its old .env, so a new MINER_ACCOUNT_CLAIM never reaches it;
@@ -608,7 +641,7 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = F
     if rentals and recreate:
         console.warning(
             f"{len(rentals)} rental(s) running on this node, so the executor was not restarted. "
-            "The new account claim is in .env and applies on its next restart; rerun this command once the rentals end."
+            "The new settings are in .env and apply on its next restart; rerun this command once the rentals end."
         )
         recreate = False
     # after --force-recreate the old container can still report healthy; wait for one with a new ID
@@ -649,7 +682,8 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = F
 
 def _apply_env_overrides(
     executor_dir: Path,
-    internal: str, external: str, ssh: str, ssh_pub: str, rng: str, account_claim: str | None = None
+    internal: str, external: str, ssh: str, ssh_pub: str, rng: str, account_claim: str | None = None,
+    mappings: str = "",
 ):
     env_f = executor_dir / ".env"
     content = env_f.read_text().splitlines()
@@ -672,13 +706,38 @@ def _apply_env_overrides(
         set_or_append("RENTING_PORT_RANGE", rng)
     if account_claim:
         set_or_append("MINER_ACCOUNT_CLAIM", account_claim)
+    if mappings:   # the template rebuild dropped them
+        set_or_append("RENTING_PORT_MAPPINGS", mappings)
     env_f.write_text("\n".join(content) + "\n")
+
+def _check_renting_ports_apart(answers: dict, mappings: str = "") -> None:
+    """A renting port that is also the service or SSH port would be handed to a pod while the executor holds it."""
+    taken = {int(answers[k]) for k in ("internal_port", "external_port", "ssh_port", "ssh_public_port")
+             if str(answers.get(k) or "").isdigit()}
+    if mappings:  # validators drop a forward whose local or public port is the SSH port, leaving too few to list
+        clash = sorted({p for pair in json.loads(mappings) for p in pair} & taken)
+        if clash:
+            raise click.UsageError(
+                f"RENTING_PORT_MAPPINGS in the saved .env uses {', '.join(map(str, clash))}, which the node's service "
+                "or SSH port would use; pick another service or SSH port."
+            )
+    elif answers["port_range"]:
+        clash = sorted(_renting_ports(answers["port_range"]) & taken)
+        if clash:
+            raise click.UsageError(
+                f"--renting-port-range includes {', '.join(map(str, clash))}, which the node's service or SSH port uses; "
+                "pick a range without it."
+            )
+
 
 def _gather_inputs(
     hotkey: Optional[str],
     auto: bool,
     internal_port: int | None = None,
     external_port: int | None = None,
+    ssh_port: int | None = None,
+    port_range: str | None = None,
+    ssh_public_port: str = "",
 ) -> dict:
     """Ask everything up-front; return a dict of resolved inputs."""
     answers = {}
@@ -689,9 +748,9 @@ def _gather_inputs(
         answers.update(dict(
             internal_port=internal,
             external_port=str(external_port) if external_port else internal,
-            ssh_port="2200",
-            ssh_public_port="",
-            port_range=""
+            ssh_port=str(ssh_port or 2200),
+            ssh_public_port=ssh_public_port,
+            port_range=port_range or "",
         ))
     else:
         # Show informative header about port configuration
@@ -720,13 +779,13 @@ def _gather_inputs(
         service_port = ask_port("Service port (where the node API will be reachable)", internal_port or 8080)
         answers["internal_port"] = service_port
         answers["external_port"] = str(external_port) if external_port else service_port
-        answers["ssh_port"] = ask_port("Node SSH port (used by validator to SSH into the container)", 2200)
+        answers["ssh_port"] = ask_port("Node SSH port (used by validator to SSH into the container)", ssh_port or 2200)
         
         # Optional ports
-        ssh_public = Prompt.ask("Public SSH port (optional, only if behind NAT and forwarding a different port)", default="")
+        ssh_public = Prompt.ask("Public SSH port (optional, only if behind NAT and forwarding a different port)", default=ssh_public_port)
         answers["ssh_public_port"] = ssh_public if ssh_public and ssh_public.isdigit() else ""
         
-        answers["port_range"] = Prompt.ask("Renting port range (optional, e.g. 2000-2005 or 2000,2001). Leave empty if all ports open", default="")
+        answers["port_range"] = Prompt.ask("Renting port range (optional, e.g. 2000-2005 or 2000,2001,2002). Leave empty if all ports open", default=port_range or "")
 
     return answers
 
@@ -915,6 +974,33 @@ def _ipv4(ctx, param, value: str | None) -> str | None:
         raise click.BadParameter(f"{value!r} is not an IPv4 address.")
 
 
+def _renting_ports(value: str) -> set[int]:
+    """Ports in a RENTING_PORT_RANGE value, read as the executor reads it: ``FIRST-LAST`` or a comma list."""
+    m = re.fullmatch(r"(\d+)-(\d+)", value)
+    parts = m.groups() if m else value.split(",")
+    if not all(p.isdigit() and 1 <= int(p) <= 65535 for p in parts):
+        raise click.BadParameter(
+            f"{value!r}: use FIRST-LAST (e.g. 41000-41100) or a comma list (e.g. 41000,41001,41002), ports 1-65535.",
+            param_hint="'--renting-port-range'",
+        )
+    ports = set(range(int(parts[0]), int(parts[1]) + 1)) if m else {int(p) for p in parts}
+    if not ports:
+        raise click.BadParameter(f"{value!r}: the first port is above the last.", param_hint="'--renting-port-range'")
+    if len(ports) < 3:  # validators list no node with fewer than 3 renting ports
+        raise click.BadParameter(
+            f"{value!r}: give at least 3 ports; validators list no node with fewer.", param_hint="'--renting-port-range'"
+        )
+    return ports
+
+
+def _renting_port_range(ctx, param, value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.replace(" ", "")
+    _renting_ports(value)
+    return value
+
+
 @click.command("mine", context_settings=dict(ignore_unknown_options=True, allow_extra_args=True), add_help_option=False)
 @click.option("--hotkey", "-k", help="Miner hotkey SS58 address (for `mine status`: the wallet hotkey name)")
 @click.option("--dir", "-d", "dir_", default="compute-subnet", help="Target directory")
@@ -976,10 +1062,24 @@ def _ipv4(ctx, param, value: str | None) -> str | None:
     default=None,
     help="Port the node is registered at and validators connect to (default: --internal-port).",
 )
+@click.option(
+    "--ssh-port",
+    type=click.IntRange(1, 65535),
+    default=None,
+    help="Port validators SSH into the node on (SSH_PORT, default 2200). A second node behind the same "
+    "public IP needs its own, e.g. 2201.",
+)
+@click.option(
+    "--renting-port-range",
+    callback=_renting_port_range,
+    default=None,
+    help="Ports rented pods are published on (RENTING_PORT_RANGE), e.g. 41000-41100 or 41000,41001,41002 "
+    "(default: all ports). A second node behind the same public IP needs a range of its own.",
+)
 @click.pass_context
 @handle_errors
 def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token, portal_url, price, gpu_type,
-                 wait_minutes, ip, internal_port, external_port):
+                 wait_minutes, ip, internal_port, external_port, ssh_port, renting_port_range):
     """Set up this host as a Lium provider node: clone, configure, start and validate the executor.
 
     Before `docker compose up`, the service and SSH ports are checked on this host: a port
@@ -1055,7 +1155,35 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 "If registration fails with an expired token, copy a fresh command from the portal."
             )
 
-    answers = _gather_inputs(hotkey, auto, internal_port, external_port)
+    # a rerun keeps the port settings an earlier run wrote; a flag or a prompt answer overrides them
+    saved_env = Path(dir_).absolute() / "neurons" / "executor" / ".env"
+    # dotenv parsing: a saved value may carry quotes or an inline comment
+    parsed = dotenv_values(saved_env) if saved_env.is_file() else {}
+    saved = {k: parsed.get(k) or "" for k in ("INTERNAL_PORT", "EXTERNAL_PORT", "SSH_PORT", "SSH_PUBLIC_PORT", "RENTING_PORT_RANGE")}
+    internal_port = internal_port or (int(saved["INTERNAL_PORT"]) if saved["INTERNAL_PORT"].isdigit() else None)
+    if saved["EXTERNAL_PORT"].isdigit() and saved["EXTERNAL_PORT"] != saved["INTERNAL_PORT"]:  # equal: follows the service port
+        external_port = external_port or int(saved["EXTERNAL_PORT"])
+    ssh_port = ssh_port or (int(saved["SSH_PORT"]) if saved["SSH_PORT"].isdigit() else None)
+    ssh_public = saved["SSH_PUBLIC_PORT"] if saved["SSH_PUBLIC_PORT"] != saved["SSH_PORT"] else ""  # equal: follows SSH_PORT
+    renting_port_range = renting_port_range or saved["RENTING_PORT_RANGE"] or None
+    answers = _gather_inputs(hotkey, auto, internal_port, external_port, ssh_port, renting_port_range, ssh_public)
+    # the flag and the prompt answer get the same check: spaces dropped, format, size and overlap
+    answers["port_range"] = answers["port_range"].replace(" ", "")
+    host_ports = _host_ports_from_answers(answers)
+    if len(set(host_ports.values())) < len(host_ports):   # compose cannot publish one host port twice
+        raise click.UsageError(f"The service port and the SSH port are both {host_ports['SSH port']}; pick different ports.")
+    public_ssh = answers["ssh_public_port"] or answers["ssh_port"]
+    if int(answers["external_port"]) == int(public_ssh):   # NAT: both would need one public IP:port; int: 08081 is 8081
+        raise click.UsageError(f"The service port and the public SSH port are both {int(public_ssh)}; pick different ports.")
+    # NAT forwards win over the range in the validator: kept as written unless a different range replaces them
+    mappings = ""
+    if parsed.get("RENTING_PORT_MAPPINGS") and answers["port_range"] == saved["RENTING_PORT_RANGE"].replace(" ", ""):
+        # the value dotenv parsed (spaces around =, quotes, several lines), written back as one line of JSON
+        try:
+            mappings = json.dumps(json.loads(parsed["RENTING_PORT_MAPPINGS"]), separators=(",", ":"))
+        except ValueError:
+            raise click.UsageError(f"RENTING_PORT_MAPPINGS in {saved_env} is not valid JSON; fix or remove it and rerun.")
+    _check_renting_ports_apart(answers, mappings)
     target_dir = Path(dir_).absolute()
 
     TOTAL_STEPS = 8 if token else 6
@@ -1082,6 +1210,11 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             if not executor_dir.exists():
                 raise Exception(f"Node directory not found at {executor_dir}")
 
+            # A taken host port makes `docker compose up` loop on
+            # "address already in use" and the health check below time out
+            # with no explanation. Catch it here, before .env changes or the 3-minute wait.
+            _check_ports_free(host_ports, executor_dir)
+
             _setup_executor_env(
                 str(executor_dir),
                 hotkey=answers["hotkey"],
@@ -1095,18 +1228,13 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 ssh_pub=answers["ssh_public_port"],
                 rng=answers["port_range"],
                 account_claim=token.account_claim if token else None,
+                mappings=mappings,
             )
 
-            # A taken host port makes `docker compose up` loop on
-            # "address already in use" and the health check below time out
-            # with no explanation. Catch it here, before the 3-minute wait.
-            _check_ports_free(_host_ports_from_answers(answers), executor_dir)
-
         with timed_step_status(5, TOTAL_STEPS, "Starting node"):
-            # recreate only an executor whose claim differs from .env: a repeat run leaves it alone, and a rerun after
-            # a restart skipped under rentals still delivers the claim .env already holds
-            running_claim = _executor_env_value(executor_dir, "MINER_ACCOUNT_CLAIM")
-            _start_executor(executor_dir, recreate=running_claim not in (None, _env_value(executor_dir / ".env", "MINER_ACCOUNT_CLAIM")))
+            # recreate only an executor whose claim or ports differ from .env: a repeat run leaves it alone, and a
+            # rerun after a restart skipped under rentals still delivers what .env already holds
+            _start_executor(executor_dir, recreate=_executor_env_stale(executor_dir))
 
         console.dim(
             "Validation runs the validator's preflight image: GPU check, matrix "
