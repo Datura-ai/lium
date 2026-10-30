@@ -37,6 +37,7 @@ def _loop_file_plan(tmp_path, docker_mount: MountInfo | None = None) -> SetupPla
             parent_disk="/dev/nvme0n1p2", classification="loop_file", needs_partition_creation=False, needs_format=True,
             existing_fs_type=None, selection_reason="No spare disk or partition; XFS image file on /",
             loop_file_mountpoint="/", loop_file_size_bytes=180 * GIB, loop_file_reserve_bytes=25 * GIB,
+            loop_file_free_floor_bytes=140 * GIB,
         ),
         backup_dir=str(tmp_path / "docker.lium-backup-20261023120000"),
         daemon_json_path=str(tmp_path / "daemon.json"),
@@ -50,11 +51,15 @@ def _loop_file_plan(tmp_path, docker_mount: MountInfo | None = None) -> SetupPla
     )
 
 
-def _host_probes(docker_data_gib: int = 0, vram_mib: list[int] | None = None):
-    # the read-only commands the plan runs: `du -sxb <docker-root>` and nvidia-smi (missing when vram_mib is None)
+def _host_probes(docker_data_gib: int = 0, vram_mib: list[int] | None = None, node_images_present: bool = False):
+    # the read-only commands the plan runs: `du -sxb <docker-root>`, `docker images` and nvidia-smi (missing when
+    # vram_mib is None)
     def run_command(args, check=True, capture=True):
         if args[0] == "du":
             return CommandResult(args, f"{docker_data_gib * GIB}\t{args[-1]}\n", "", 0)
+        if args[:2] == ["docker", "images"]:
+            repositories = "daturaai/compute-subnet-executor-runner\ndaturaai/compute-subnet-executor\nwillfarrell/autoheal\n"
+            return CommandResult(args, repositories if node_images_present else "ubuntu\n", "", 0)
         if args[0] == "nvidia-smi":
             if vram_mib is None:
                 raise FileNotFoundError("nvidia-smi")
@@ -145,7 +150,19 @@ def test_loop_file_target_passes_the_summed_gpu_vram_to_the_plan(monkeypatch):
 
     gpu_splitting._loop_file_target(preflight, None, 200)
 
-    assert planned["args"][3:] == (200 * GIB, 2 * 81559 * 1024**2, 33 * GIB)
+    assert planned["args"][3:] == (200 * GIB, 2 * 81559 * 1024**2, 33 * GIB, False)
+
+
+def test_loop_file_target_tells_the_plan_when_the_node_images_are_already_pulled(monkeypatch):
+    preflight = _sample_preflight()
+    monkeypatch.setattr(gpu_splitting, "load_mounted_filesystems", lambda *a: [])
+    monkeypatch.setattr(gpu_splitting, "run_command", _host_probes(docker_data_gib=60, vram_mib=[81559], node_images_present=True))
+    planned = {}
+    monkeypatch.setattr(gpu_splitting, "plan_loop_file_target", lambda *args: planned.setdefault("args", args))
+
+    gpu_splitting._loop_file_target(preflight, None, None)
+
+    assert planned["args"][5:] == (60 * GIB, True)
 
 
 def test_loop_file_target_warns_and_plans_without_vram_when_nvidia_smi_is_missing(monkeypatch, capsys):

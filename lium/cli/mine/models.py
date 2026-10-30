@@ -117,6 +117,8 @@ class TargetPlan:
     loop_file_reserve_bytes: Optional[int] = None
     # the GPU VRAM the file was sized against; None when nvidia-smi could not be read
     loop_file_total_vram_bytes: Optional[int] = None
+    # what the file must keep free once the Docker data is back: the listing floor, node images included until pulled
+    loop_file_free_floor_bytes: Optional[int] = None
 
 
 @dataclass

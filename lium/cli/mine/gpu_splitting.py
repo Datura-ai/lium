@@ -35,15 +35,13 @@ from .models import (
     VerificationResult,
 )
 from .storage import (
-    LOOP_FILE_MIN_SIZE_BYTES,
     MIN_DISK_TO_VRAM_RATE,
     MIN_TARGET_BYTES,
     NODE_FREE_DISK_GIB,
-    NODE_IMAGES_GIB,
     NON_LOCAL_TRANSPORTS,
     NoSafeTargetError,
     auto_select_target,
-    check_loop_file_free_after_restore,
+    check_planned_loop_file_free_after_restore,
     disk_total_clears_vram_floor,
     evaluate_candidates,
     get_device_by_path,
@@ -51,6 +49,7 @@ from .storage import (
     load_block_devices,
     load_mounted_filesystems,
     load_mount_info,
+    node_images_note,
     plan_loop_file_target,
     resolve_explicit_target,
 )
@@ -370,7 +369,8 @@ def _destructive_actions(preflight: PreflightResult, target: TargetPlan, loop_fi
 def _loop_file_target(preflight: PreflightResult, image_file: Optional[str], image_size_gib: Optional[int]) -> TargetPlan:
     """Plan the XFS image file; `findmnt --json --bytes --list --real ...` via `load_mounted_filesystems(...)`,
     `nvidia-smi --query-gpu=memory.total ...` via `_total_gpu_vram_bytes()`, `du -sxb <docker-root>` via
-    `_docker_data_bytes(...)` (that data is restored into the file, so it counts against the file's free space)."""
+    `_docker_data_bytes(...)` (that data is restored into the file, so it counts against the file's free space),
+    `docker images --format {{.Repository}}` via `_node_images_present()` (pulled images are in that data already)."""
     filesystems = load_mounted_filesystems(run_command, preflight.block_devices)
     total_vram_bytes = _total_gpu_vram_bytes()
     if total_vram_bytes is None:
@@ -385,11 +385,19 @@ def _loop_file_target(preflight: PreflightResult, image_file: Optional[str], ima
         image_size_gib * 1024**3 if image_size_gib else None,
         total_vram_bytes,
         _docker_data_bytes(preflight.docker_state.docker_root_dir),
+        _node_images_present(),
     )
 
 
 def _docker_data_bytes(docker_root: str) -> int:
     return int(run_command(["du", "-sxb", docker_root], True, True).stdout.split()[0])
+
+
+def _node_images_present() -> bool:
+    # the executor images are the ~NODE_IMAGES_GIB the listing floor adds; on a node that already runs them they are
+    # part of the Docker data `du` measured and must not be counted a second time
+    listed = run_command(["docker", "images", "--format", "{{.Repository}}"], False, True)
+    return listed.returncode == 0 and any(repo.startswith("daturaai/compute-subnet-executor") for repo in listed.stdout.split())
 
 
 def _total_gpu_vram_bytes() -> Optional[int]:
@@ -846,14 +854,14 @@ def _check_mounted_total_clears_vram_floor(mountpoint: str, total_vram_bytes: in
         )
 
 
-def _check_free_after_restore(docker_root: str):
+def _check_mounted_root_free_after_restore(docker_root: str, free_floor_bytes: int):
     # the marketplace reads this free space; a file sized without the restored data would list the node and drop it
     free = shutil.disk_usage(docker_root).free
     gib = 1024**3
-    if free < LOOP_FILE_MIN_SIZE_BYTES:
+    if free < free_floor_bytes:
         raise RuntimeError(
             f"{free // gib} GiB free on {docker_root} after the restore; the marketplace lists a node only with "
-            f"{NODE_FREE_DISK_GIB} GiB free after about {NODE_IMAGES_GIB} GiB of node images ({LOOP_FILE_MIN_SIZE_BYTES // gib} GiB)"
+            f"{NODE_FREE_DISK_GIB} GiB free {node_images_note(free_floor_bytes)} ({free_floor_bytes // gib} GiB needed)"
         )
 
 
@@ -1094,9 +1102,9 @@ def _pre_stop_checks(plan: SetupPlan):
     used = _docker_data_bytes(docker_root)
     if plan.target.classification == "loop_file":
         _check_image_file_parent(plan.target.resolved_target)
-        check_loop_file_free_after_restore(
+        check_planned_loop_file_free_after_restore(
             f"The {plan.target.loop_file_size_bytes // 1024**3} GiB image file {plan.target.resolved_target} would",
-            plan.target.loop_file_size_bytes, used, docker_root,
+            plan.target.loop_file_size_bytes, used, docker_root, plan.target.loop_file_free_floor_bytes,
         )
     if _backup_by_rename(plan.preflight, plan.target):
         # the data root is renamed, not copied, so the host needs no room for a backup
@@ -1287,7 +1295,7 @@ def _execute_setup(plan: SetupPlan):
             if not verification.passed:
                 raise RuntimeError(f"Verification failed. Backup remains at {plan.backup_dir}")
             if loop_file:
-                _check_free_after_restore(str(docker_root))
+                _check_mounted_root_free_after_restore(str(docker_root), plan.target.loop_file_free_floor_bytes)
     except (Exception, KeyboardInterrupt) as exc:
         # Ctrl+C included: without the rollback the host stays with Docker stopped and its data root moved aside
         console.error(f"Setup failed: {str(exc) or type(exc).__name__}")
@@ -1327,8 +1335,9 @@ _IMAGE_FILE_OPTION = click.option(
 )
 _IMAGE_SIZE_OPTION = click.option(
     "--size", "image_size_gib", type=int,
-    help=f"Size of the XFS image file in GiB (default: free space minus the system reserve; at least "
-    f"{LOOP_FILE_MIN_SIZE_BYTES // 1024**3} GiB and {MIN_DISK_TO_VRAM_RATE}x the host's GPU VRAM)",
+    help=f"Size of the XFS image file in GiB (default: free space minus the system reserve; it must keep "
+    f"{NODE_FREE_DISK_GIB} GiB free after the Docker data and the node images, and clear {MIN_DISK_TO_VRAM_RATE}x the "
+    "host's GPU VRAM)",
 )
 
 

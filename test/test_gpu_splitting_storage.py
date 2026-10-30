@@ -540,6 +540,19 @@ def test_plan_loop_file_counts_the_docker_data_restored_into_the_file(docker_dat
             plan_loop_file_target(filesystems, "/var/lib/docker", docker_data_bytes=docker_data_gib * 1024**3)
 
 
+@pytest.mark.parametrize("node_images_present", [False, True])
+def test_plan_loop_file_floor_adds_the_node_images_only_while_they_are_not_pulled(node_images_present):
+    # 300 GiB filesystem, 180 GiB free: a 150 GiB file, about 147 GiB after XFS metadata; 40 GiB of Docker data leave
+    # 107 GiB, enough once the node images are part of that data and 33 GiB short while they are still to be pulled
+    filesystems = [_filesystem("/", 180, size_gib=300)]
+    if node_images_present:
+        plan = plan_loop_file_target(filesystems, "/var/lib/docker", docker_data_bytes=40 * GIB, node_images_present=True)
+        assert plan.loop_file_free_floor_bytes == 100 * GIB
+    else:
+        with pytest.raises(RuntimeError, match="keep 107 GiB free once the 40 GiB of Docker data .* needs 140 GiB free.*after about 40 GiB of node images"):
+            plan_loop_file_target(filesystems, "/var/lib/docker", docker_data_bytes=40 * GIB)
+
+
 def test_plan_loop_file_refuses_a_file_under_1_5x_the_gpu_vram():
     with pytest.raises(RuntimeError, match="about 246 GiB of filesystem after XFS metadata.*640.0 GiB here, 960.0 GiB needed"):
         plan_loop_file_target([_filesystem("/", 300)], "/var/lib/docker", total_vram_bytes=8 * 80 * 1024**3)

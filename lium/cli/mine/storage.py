@@ -19,8 +19,6 @@ MIN_TARGET_BYTES = 100 * 1024**3
 # runner, validator preflight). On 7 Oct 2026 a 100 GB disk passed every earlier check and failed only at step 6.
 NODE_FREE_DISK_GIB = 100
 NODE_IMAGES_GIB = 40
-# the image file is the disk the node reports, so it must hold the node images and still show the listing floor free
-LOOP_FILE_MIN_SIZE_BYTES = (NODE_FREE_DISK_GIB + NODE_IMAGES_GIB) * 1024**3
 # the validator pays no idle incentive to a node whose total disk is under this many times its total GPU VRAM
 MIN_DISK_TO_VRAM_RATE = 1.5
 # what mkfs.xfs keeps for its log and metadata, so statfs reports less than the file's size
@@ -635,13 +633,14 @@ def plan_loop_file_target(
     image_size_bytes: Optional[int] = None,
     total_vram_bytes: Optional[int] = None,
     docker_data_bytes: int = 0,
+    node_images_present: bool = False,
 ) -> TargetPlan:
     """Plan an XFS image file on the local filesystem with the most free space, or on the one holding `image_file`.
 
     No commands are run. The file takes the free space minus a reserve of max(10% of the
     filesystem, 20 GiB) that stays with the host. The plan is refused with the numbers, so the
-    operator sees what to free or attach, when the file would keep under LOOP_FILE_MIN_SIZE_BYTES
-    free once the current Docker data moves into it, or when its filesystem would fall under
+    operator sees what to free or attach, when the file would keep under the listing floor
+    (`node_free_disk_floor_bytes`) free once the current Docker data moves into it, or when its filesystem would fall under
     MIN_DISK_TO_VRAM_RATE times the host's GPU VRAM (when that is known).
     """
     requested = bool(image_file) or image_size_bytes is not None
@@ -678,7 +677,8 @@ def plan_loop_file_target(
         f"An XFS image file on {holder.target} would get {size // gib} GiB ({holder.avail_bytes // gib} GiB free, "
         f"{reserve // gib} GiB kept for the system)"
     )
-    check_loop_file_free_after_restore(what, size, docker_data_bytes, docker_root)
+    free_floor = node_free_disk_floor_bytes(node_images_present)
+    check_planned_loop_file_free_after_restore(what, size, docker_data_bytes, docker_root, free_floor)
     if total_vram_bytes is not None and not disk_total_clears_vram_floor(xfs_usable_estimate_bytes(size), total_vram_bytes):
         raise RuntimeError(
             f"{what}, about {xfs_usable_estimate_bytes(size) // gib} GiB of filesystem after XFS metadata; the validator "
@@ -705,6 +705,7 @@ def plan_loop_file_target(
         loop_file_size_bytes=size,
         loop_file_reserve_bytes=reserve,
         loop_file_total_vram_bytes=total_vram_bytes,
+        loop_file_free_floor_bytes=free_floor,
     )
 
 
@@ -719,16 +720,31 @@ def disk_total_clears_vram_floor(disk_total_bytes: int, total_vram_bytes: int) -
     return round(total_vram_bytes / gib, 1) * MIN_DISK_TO_VRAM_RATE <= round(disk_total_bytes / gib, 1)
 
 
-def check_loop_file_free_after_restore(what: str, size_bytes: int, docker_data_bytes: int, docker_root: str):
-    """Refuse an image file that keeps under the listing floor free once the current Docker data is restored into it."""
+def node_free_disk_floor_bytes(node_images_present: bool) -> int:
+    """What the Docker filesystem must keep free for the marketplace listing: NODE_FREE_DISK_GIB, plus the node images
+    while `lium mine` still has to pull them (its own free-disk check applies the same rule)."""
+    return (NODE_FREE_DISK_GIB + (0 if node_images_present else NODE_IMAGES_GIB)) * 1024**3
+
+
+def node_images_note(free_floor_bytes: int) -> str:
+    """The clause after "lists a node only with 100 GiB free" that says whether the node images are still to come."""
+    if free_floor_bytes > NODE_FREE_DISK_GIB * 1024**3:
+        return f"after about {NODE_IMAGES_GIB} GiB of node images"
+    return "(the node images are already in the Docker data)"
+
+
+def check_planned_loop_file_free_after_restore(
+    what: str, size_bytes: int, docker_data_bytes: int, docker_root: str, free_floor_bytes: int
+):
+    """Refuse a planned image file that keeps under the listing floor free once the current Docker data is restored into it."""
     gib = 1024**3
     free_after_restore = xfs_usable_estimate_bytes(size_bytes) - docker_data_bytes
-    if free_after_restore >= LOOP_FILE_MIN_SIZE_BYTES:
+    if free_after_restore >= free_floor_bytes:
         return
     raise RuntimeError(
         f"{what} and keep {max(free_after_restore, 0) // gib} GiB free once the {docker_data_bytes // gib} GiB of Docker "
         f"data in {docker_root} move into it (after about {(size_bytes - xfs_usable_estimate_bytes(size_bytes)) // gib} GiB "
-        f"of XFS metadata); it needs {LOOP_FILE_MIN_SIZE_BYTES // gib} GiB free: the file is the disk the node reports, "
-        f"and the marketplace lists a node only with {NODE_FREE_DISK_GIB} GiB free after about {NODE_IMAGES_GIB} GiB of "
-        "node images. Prune Docker (`docker system prune -a --volumes`), free space, attach a spare disk, or pass --size"
+        f"of XFS metadata); it needs {free_floor_bytes // gib} GiB free: the file is the disk the node reports, "
+        f"and the marketplace lists a node only with {NODE_FREE_DISK_GIB} GiB free {node_images_note(free_floor_bytes)}. "
+        "Prune Docker (`docker system prune -a --volumes`), free space, attach a spare disk, or pass --size"
     )
