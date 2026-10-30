@@ -260,14 +260,10 @@ def test_execute_setup_restarts_docker_when_failure_happens_after_stop(monkeypat
 
     def run_command(args, check=True, capture=True):
         commands.append(args)
-        if args[:3] == ["systemctl", "stop", "docker"]:
-            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
-        if args == ["systemctl", "stop", "docker.socket"]:
+        if args[0] == "systemctl":
             return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
         if args[:2] == ["rsync", "-aHAX"]:
             raise RuntimeError("backup failed")
-        if args == ["systemctl", "start", "docker"]:
-            return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
         raise AssertionError(f"Unexpected command: {args}")
 
     _patch_execute_setup_dependencies(
@@ -292,7 +288,7 @@ def test_execute_setup_restores_config_files_after_config_stage_failure(monkeypa
 
     def run_command(args, check=True, capture=True):
         commands.append(args)
-        if args[:2] == ["systemctl", "stop"] or args == ["systemctl", "start", "docker"]:
+        if args[0] == "systemctl":
             return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
         if args[:2] == ["rsync", "-aHAX"]:
             return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
@@ -342,7 +338,7 @@ def test_execute_setup_restores_original_mount_after_cutover_failure(monkeypatch
 
     def run_command(args, check=True, capture=True):
         commands.append(args)
-        if args[:2] == ["systemctl", "stop"] or args == ["systemctl", "start", "docker"]:
+        if args[0] == "systemctl":
             return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
         if args[:2] == ["rsync", "-aHAX"]:
             if args[-1] == f"{plan.preflight.docker_state.docker_root_dir}/":
@@ -377,7 +373,7 @@ def test_execute_setup_reports_rollback_failures(monkeypatch, tmp_path):
 
     def run_command(args, check=True, capture=True):
         commands.append(args)
-        if args[:2] == ["systemctl", "stop"]:
+        if args[:2] in (["systemctl", "stop"], ["systemctl", "mask"], ["systemctl", "unmask"]):
             return gpu_splitting.CommandResult(args=args, stdout="", stderr="", returncode=0)
         if args[:2] == ["rsync", "-aHAX"]:
             raise RuntimeError("backup failed")

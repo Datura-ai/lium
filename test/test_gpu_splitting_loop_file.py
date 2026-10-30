@@ -699,9 +699,9 @@ def test_execute_setup_refuses_the_rename_when_the_backup_path_already_exists(mo
 
 
 @pytest.mark.parametrize("own_mount", [False, True])
-def test_execute_setup_masks_docker_only_while_the_data_root_is_renamed_away(monkeypatch, tmp_path, own_mount):
-    # an enabled docker.service would start on the empty directory if the host rebooted between the rename and the
-    # restore; the rsync branch leaves the original data in place until the cutover and is not masked
+def test_execute_setup_masks_docker_from_the_stop_to_the_start_in_both_branches(monkeypatch, tmp_path, own_mount):
+    # an enabled docker.service would start on the renamed-away root, or on the new filesystem fstab names from step 7
+    # before the data is on it, if the host rebooted in between
     docker_mount = MountInfo(target=str(tmp_path / "docker"), source="/dev/sdc1", fstype="ext4", options=["rw"]) if own_mount else None
     plan = _loop_file_plan(tmp_path, docker_mount=docker_mount)
     commands = _loop_file_host(monkeypatch, plan)
@@ -710,12 +710,50 @@ def test_execute_setup_masks_docker_only_while_the_data_root_is_renamed_away(mon
     gpu_splitting._execute_setup(plan)
 
     mask, unmask = ["systemctl", "mask", "docker"], ["systemctl", "unmask", "docker"]
-    if own_mount:
-        assert mask not in commands and unmask not in commands
-    else:
-        assert commands.index(["systemctl", "stop", "docker"]) < commands.index(mask) < commands.index(["mv", docker_root, plan.backup_dir])
-        assert commands.index(["rsync", "-aHAX", "--numeric-ids", f"{plan.backup_dir}/", f"{docker_root}/"]) < commands.index(unmask)
-        assert commands[-2:] == [unmask, ["systemctl", "start", "docker"]]
+    assert commands[:3] == [["systemctl", "stop", "docker"], ["systemctl", "stop", "docker.socket"], mask]
+    assert commands.index(["rsync", "-aHAX", "--numeric-ids", f"{plan.backup_dir}/", f"{docker_root}/"]) < commands.index(unmask)
+    assert commands[-2:] == [unmask, ["systemctl", "start", "docker"]]
+    assert commands.count(mask) == 1
+
+
+def test_execute_setup_masks_docker_again_when_the_rollback_after_the_unmask_cannot_restore_the_data(monkeypatch, tmp_path):
+    # step 10 unmasked and started Docker, the post-restore floor check failed, and the rollback's umount fails: the
+    # data root is still the image, so Docker must not come back on it after a reboot either
+    plan = _loop_file_plan(tmp_path)
+    docker_root = plan.preflight.docker_state.docker_root_dir
+    commands = _loop_file_host(monkeypatch, plan, free_gib=70, and_fail=["umount", docker_root])
+
+    with pytest.raises(RuntimeError, match="after the restore") as exc_info:
+        gpu_splitting._execute_setup(plan)
+
+    mask, unmask, start = ["systemctl", "mask", "docker"], ["systemctl", "unmask", "docker"], ["systemctl", "start", "docker"]
+    assert commands.index(unmask) < commands.index(start) and commands.count(start) == 1
+    assert commands[-1] == mask and commands.count(mask) == 2
+    assert "docker.service stays masked" in str(exc_info.value)
+
+
+def test_execute_setup_keeps_docker_masked_when_fstab_would_mount_the_image_over_the_restored_root(monkeypatch, tmp_path):
+    # rsync branch, the cutover mount fails and the original filesystem is remounted, but the fstab restore fails: a
+    # reboot would mount the empty image over the data, so Docker stays masked and the message names the file
+    own_mount = MountInfo(target=str(tmp_path / "docker"), source="/dev/sdc1", fstype="ext4", options=["rw"])
+    plan = _loop_file_plan(tmp_path, docker_mount=own_mount)
+    docker_root = plan.preflight.docker_state.docker_root_dir
+    commands = _loop_file_host(monkeypatch, plan, fail_at=["mount", docker_root])
+    restore_text_file = gpu_splitting._restore_text_file
+
+    def restore(snapshot):
+        if snapshot.path == plan.fstab_path:
+            raise OSError("read-only /etc")
+        restore_text_file(snapshot)
+
+    monkeypatch.setattr(gpu_splitting, "_restore_text_file", restore)
+
+    with pytest.raises(RuntimeError, match="mount failed") as exc_info:
+        gpu_splitting._execute_setup(plan)
+
+    assert commands.mounted["original"] and ["systemctl", "start", "docker"] not in commands
+    assert commands[-1] == ["systemctl", "mask", "docker"]
+    assert f"{plan.fstab_path} would still mount {plan.target.resolved_target} over {docker_root} at boot" in str(exc_info.value)
 
 
 def test_execute_setup_rollback_keeps_the_image_when_its_loop_device_is_still_attached(monkeypatch, tmp_path):
@@ -856,7 +894,7 @@ def test_execute_setup_image_file_rollback_keeps_the_image_and_docker_down_when_
     assert Path(plan.target.resolved_target).exists()
     assert Path(plan.backup_dir).exists()
     assert ["systemctl", "start", "docker"] not in commands
-    assert ["systemctl", "unmask", "docker"] not in commands
+    assert ["systemctl", "unmask", "docker"] not in commands and commands[-1] == ["systemctl", "mask", "docker"]
     assert "docker.service stays masked" in str(exc_info.value) and "systemctl unmask docker && systemctl start docker" in str(exc_info.value)
     assert not any(args[0] in {"rmdir", "mv"} and args[-1] == docker_root for args in commands)
 
@@ -877,8 +915,8 @@ def test_execute_setup_rsync_branch_rollback_keeps_docker_down_until_the_origina
         gpu_splitting._execute_setup(plan)
 
     assert expected_error in str(exc_info.value)
-    assert "start docker: skipped" in str(exc_info.value)
-    assert ["systemctl", "start", "docker"] not in commands
+    assert "start docker: skipped" in str(exc_info.value) and "docker.service stays masked" in str(exc_info.value)
+    assert ["systemctl", "start", "docker"] not in commands and commands[-1] == ["systemctl", "mask", "docker"]
     assert ["mv", plan.backup_dir, docker_root] not in commands
 
 

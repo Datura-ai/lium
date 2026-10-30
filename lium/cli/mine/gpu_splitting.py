@@ -82,8 +82,8 @@ class _SetupExecutionState:
     # was submitted, whatever an interrupt in between lets the caller record
     docker_restart_owed: bool = False
     docker_may_be_running: bool = False
-    # set before `systemctl mask docker`: while the data root is renamed away, an enabled unit would start Docker on
-    # an empty directory after a reboot; the rollback unmasks only once the data is back
+    # set before `systemctl mask docker` at step 1: from the rename, or from the fstab line of step 7, a reboot would
+    # start an enabled unit on an empty root; the rollback unmasks only with the data back and that line gone
     docker_masked: bool = False
     daemon_json_written: bool = False
     fstab_written: bool = False
@@ -1013,8 +1013,9 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
                 + ("`findmnt` failed" if back is None else f"{back.source} is mounted there")
             )
 
+    fstab_restored = True
     if state.fstab_written:
-        _rollback_attempt(errors, f"restore {plan.fstab_path}", lambda: _restore_text_file(state.original_fstab))
+        fstab_restored = _rollback_attempt(errors, f"restore {plan.fstab_path}", lambda: _restore_text_file(state.original_fstab))
 
     if state.drop_in_written:
         _rollback_attempt(errors, f"restore {plan.drop_in_path}", lambda: _restore_text_file(state.original_drop_in))
@@ -1043,17 +1044,23 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
                 state.loop_file_removed = _rollback_attempt(errors, f"remove {target_partition}", lambda: os.unlink(target_partition))
 
     if state.docker_restart_owed:
-        if data_restored:
+        # Docker may come back only with its data under docker_root and no fstab line left to mount the new
+        # filesystem over it at boot; otherwise it is masked again (step 10 may have unmasked before the failure)
+        if data_restored and fstab_restored:
             if state.docker_masked:
                 _rollback_attempt(errors, "unmask docker", lambda: run_command(["systemctl", "unmask", "docker"], True, True))
             _rollback_attempt(errors, "start docker", lambda: run_command(["systemctl", "start", "docker"], True, True))
         else:
-            errors.append(f"start docker: skipped, Docker data is not back at {docker_root} (backup at {plan.backup_dir})")
-            if state.docker_masked:
-                errors.append(
-                    "docker.service stays masked, so a reboot does not start Docker on an empty directory; once the data "
-                    f"is back at {docker_root}: systemctl unmask docker && systemctl start docker"
-                )
+            _rollback_attempt(errors, "mask docker", lambda: run_command(["systemctl", "mask", "docker"], True, True))
+            why = (
+                f"Docker data is not back at {docker_root}" if not data_restored
+                else f"{plan.fstab_path} would still mount {target_partition} over {docker_root} at boot"
+            )
+            errors.append(
+                f"start docker: skipped, {why} (backup at {plan.backup_dir}); docker.service stays masked, so a reboot "
+                f"does not start Docker on an empty root. Once the data is back at {docker_root} and the fstab line is "
+                "gone: systemctl unmask docker && systemctl start docker"
+            )
 
     return errors
 
@@ -1164,12 +1171,13 @@ def _execute_setup(plan: SetupPlan):
     1. Stop Docker
        - `systemctl stop docker`
        - `systemctl stop docker.socket`
+       - `systemctl mask docker` until the start at step 8: a reboot in between must not start Docker on the
+         renamed-away root or on the new filesystem that fstab names from step 6 on, before the data is on it
 
     2. Back up the current Docker root
        - `rsync -aHAX --numeric-ids <docker-root>/ <backup-dir>/`
        - or, for an image file on the same filesystem, `findmnt --list --noheadings -o TARGET` (no mount may
-         be left under the data root), `systemctl mask docker` (a reboot while the data root is away must not
-         start Docker on an empty directory) and `mv <docker-root> <backup-dir>`
+         be left under the data root) and `mv <docker-root> <backup-dir>`
 
     3. Prepare the target partition
        - optional `parted -s <disk> mklabel gpt`
@@ -1202,7 +1210,7 @@ def _execute_setup(plan: SetupPlan):
        - `rsync -aHAX --numeric-ids <backup-dir>/ <docker-root>/`
 
     8. Restart and verify Docker
-       - `systemctl unmask docker` when step 2 masked it
+       - `systemctl unmask docker`
        - `systemctl start docker`
        - `docker info --format '{{json .}}'` via helper
        - `findmnt --json --canonicalize --evaluate --target /var/lib/docker` via helper
@@ -1234,6 +1242,8 @@ def _execute_setup(plan: SetupPlan):
             state.docker_restart_owed = True
             run_command(["systemctl", "stop", "docker"], True, True)
             run_command(["systemctl", "stop", "docker.socket"], False, True)
+            state.docker_masked = True
+            run_command(["systemctl", "mask", "docker"], True, True)
 
         with timed_step_status(2, total_steps, "Moving Docker data aside" if rename_backup else "Backing up Docker data"):
             console.dim(f"Backup directory: {plan.backup_dir}")
@@ -1242,8 +1252,6 @@ def _execute_setup(plan: SetupPlan):
                 if os.path.lexists(plan.backup_dir):
                     # `mv` into an existing directory would nest the data root inside it
                     raise RuntimeError(f"{plan.backup_dir} already exists; remove it and run setup again")
-                state.docker_masked = True
-                run_command(["systemctl", "mask", "docker"], True, True)
                 run_command(["mv", docker_root, plan.backup_dir], True, True)
                 state.docker_root_moved = True
             else:
