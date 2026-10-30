@@ -1507,3 +1507,39 @@ def test_the_cli_does_not_import_mcp_until_lium_mcp_runs():
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.strip()
 
     assert out == "False"
+
+
+NOTICE = "Backups need a paid deposit: this pod rents without a backup."
+
+
+@pytest.mark.parametrize("delivery", ["initial", "recovered", "restarted", "replayed"])
+def test_the_backup_notice_reaches_the_host_however_the_pod_is_delivered(monkeypatch, rental_state_dir, delivery):
+    """DAH-5023: a pod rented without its backup says so in its first result, in a re-delivery to a retry on the
+    same server, after a restart, and when a lost rent is settled by replaying its key."""
+    first = _no_answer() if delivery == "replayed" else _Answer(201, {"id": "pod-1", "backup_notice": NOTICE})
+    outcomes = [first]
+    sdk = _real_sdk(monkeypatch, outcomes, pods=lambda posts: [_pod("pod-1", "job")] if posts else [])
+    monkeypatch.setattr(sdk, "wait_ready", lambda *a, **k: None)
+    tools = _real_tools(sdk)
+    result = tools.rent_pod("node-a", "job", template_id="tpl-1", timeout_seconds=0)
+
+    if delivery == "initial":
+        assert result["backup_notice"] == NOTICE
+        return
+    if delivery == "replayed":
+        outcomes.append(_stored(201, {"id": "pod-1", "backup_notice": NOTICE}))
+        report = tools.list_pods()["recovered_rentals"][0]
+    else:
+        outcomes.append(_Answer(201, {"id": "pod-2"}))
+        server = _real_tools(sdk) if delivery == "restarted" else tools
+        report = server.rent_pod("node-a", "job", template_id="tpl-1", timeout_seconds=0)["recovered_rentals"][0]
+    assert report["pod_ids"] == ["pod-1"] and report["backup_notice"] == NOTICE
+
+
+def test_a_rent_with_its_backup_carries_no_notice_when_recovered(monkeypatch, rental_state_dir):
+    outcomes = [_Answer(201, {"id": "pod-1"}), _Answer(201, {"id": "pod-2"})]
+    sdk = _real_sdk(monkeypatch, outcomes)
+    monkeypatch.setattr(sdk, "wait_ready", lambda *a, **k: None)
+    tools = _real_tools(sdk)
+    assert "backup_notice" not in tools.rent_pod("node-a", "job", template_id="tpl-1", timeout_seconds=0)
+    assert "backup_notice" not in tools.rent_pod("node-a", "job", template_id="tpl-1", timeout_seconds=0)["recovered_rentals"][0]

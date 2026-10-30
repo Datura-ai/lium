@@ -781,6 +781,7 @@ def up_command(
     # a split of a larger node), else the node's count from the dry run. Kept here because
     # `result` is reused by the actions below, and the GPU-count check needs it.
     rented_gpus = result.data.get("gpu_count") or gpu_count
+    backup_notice = result.data.get("backup_notice")
     if rented.id != executor.id:
         # The confirmed node was taken between the dry run and the rent; the server took the
         # next candidate at or below the confirmed $/GPU·h.
@@ -791,12 +792,14 @@ def up_command(
         )
     executor = rented
     ui.dim(f"pod {pod_name} (id: {pod_id}) created; waiting for it to become ready")
+    if backup_notice:
+        ui.warning(escape(backup_notice))  # now, not at the end: a later failure must not hide it
 
     # The pod is rented and already billing from here on. Every failure below
     # names it before propagating, or the caller cannot clean up what it pays for.
     # In the JSON envelope the name lives in ``data`` too, so a program does not
     # have to parse it out of the message.
-    billing_pod = {"pod_id": pod_id, "pod_name": pod_name}
+    billing_pod = {"pod_id": pod_id, "pod_name": pod_name, **({"backup_notice": backup_notice} if backup_notice else {})}
     #
     # --ttl/--until are scheduled now, with the id the rent returned, not once the pod is ready:
     # a pod that never gets there (a wait that runs out, a stuck pull) bills all the same, and
@@ -1020,6 +1023,8 @@ def up_command(
         # no `ok` wrapper (success is exit 0; a failure is the envelope on stderr). The SSH
         # session and the log stream are for a person, so --json ends here.
         payload = {"pod": compact_pod(pod)}
+        if backup_notice:
+            payload["backup_notice"] = backup_notice
         if termination_time:
             # `--ttl`, `--until` or the `--budget` cap: the time the backend was given. Present only
             # when one was set, as `rm --format json` carries `termination_time` only for a schedule.

@@ -133,6 +133,7 @@ class _Rental:
         self.held_elsewhere = False  # read from another live session's journal: never settled here
         # time.monotonic() at which a listing started after the hand-over last showed the pod
         self.listed_at: Optional[float] = None
+        self.backup_notice: Optional[str] = None  # the rent went through without the backup; kept for every re-delivery
 
     def state(self) -> Dict[str, Any]:
         """What a restarted server needs to finish this rental: the request to replay, the account it was sent
@@ -151,6 +152,7 @@ class _Rental:
                 "before": sorted(self.before),
                 "pod_ids": sorted(self.pod_ids),
                 "delivered": self.delivered,
+                "backup_notice": self.backup_notice,
             }
 
     @classmethod
@@ -168,6 +170,7 @@ class _Rental:
         if pod_ids:  # the API named the pod before the restart: remove it (cancelled) or hand it over, no replay needed
             rental.outcome, rental.pod_ids = "created", set(pod_ids)
         rental.delivered = bool(state.get("delivered"))
+        rental.backup_notice = state.get("backup_notice")
         return rental
 
     def report(self) -> Dict[str, Any]:
@@ -593,6 +596,8 @@ class LiumTools:
                 raise
 
             pod_id = created.get("id") if isinstance(created, dict) else getattr(created, "id", None)
+            with rental.lock:  # before the journal is saved below: a recovered or restarted delivery repeats it
+                rental.backup_notice = created.get("backup_notice") if isinstance(created, dict) else None
             self._settle(rental, "created" if pod_id else "unknown", pod_id)
             if not pod_id:
                 self._track(rental)
@@ -607,6 +612,8 @@ class LiumTools:
                 self._save(rental)
             with rental.lock:
                 rental.reported = True  # every result from here on names pod_id
+            # the rent went through without the backup the account cannot have yet: say so in every result below
+            notice = {"backup_notice": rental.backup_notice} if rental.backup_notice else {}
             pending = {
                 "ok": True,
                 "status": "pending",
@@ -614,6 +621,7 @@ class LiumTools:
                 "name": name,
                 "next": "The pod is rented and billing. Do NOT call rent_pod again: call list_pods until its status is "
                 "RUNNING, then run_command; or remove_pod with this pod_id to stop billing.",
+                **notice,
             }
 
             def stop_if_cancelled(*_):
@@ -637,7 +645,7 @@ class LiumTools:
                 return {**pending, "warning": f"Could not confirm the pod is ready: {type(e).__name__}: {e}"}
             if ready is None:
                 return {**pending, "warning": f"Not running after {timeout_seconds}s; some nodes take longer to start."}
-            return {"ok": True, "pod": _pod(ready), "next": "run_command on this pod; remove_pod when done (billing stops)"}
+            return {"ok": True, "pod": _pod(ready), "next": "run_command on this pod; remove_pod when done (billing stops)", **notice}
 
         result = _guarded(call)
         if direct:
@@ -714,6 +722,7 @@ class LiumTools:
         return {
             "name": rental.name, "pod_ids": sorted(rental.pod_ids), "idempotency_key": rental.idempotency_key,
             **({"may_have_been_reported": True} if rental.delivered else {}),
+            **({"backup_notice": rental.backup_notice} if rental.backup_notice else {}),
         }
 
     def cancel_rental(self, rental: _Rental) -> None:
@@ -977,6 +986,7 @@ class LiumTools:
         with rental.lock:
             rental.outcome = "created"
             rental.pod_ids.add(created["id"])
+            rental.backup_notice = created.get("backup_notice") or rental.backup_notice
         return True
 
     def _hand_off_recovered(self, receiver: _Rental) -> List[Dict[str, Any]]:

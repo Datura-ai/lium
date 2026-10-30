@@ -108,6 +108,56 @@ def test_the_real_rent_payload_is_resolved_by_pod_id(client, monkeypatch):
     assert result["id"] == "pod-uuid-new"
     assert result["executor_id"] == EXECUTOR_ID
     assert len(_rent.calls) == 1
+    assert "backup_notice" not in result
+
+
+def _answer(data, headers=None):
+    reply = _Resp(data)
+    reply.headers = headers or {}
+    return reply
+
+
+@pytest.mark.parametrize("lost_first", [False, True], ids=["initial", "replayed"])
+@pytest.mark.parametrize(
+    "answer",
+    [
+        lambda: _answer({"success": True, "pod_id": "pod-uuid-new", "backup_notice": "no backup"}),
+        lambda: _answer({"success": True, "pod_id": "pod-uuid-new"}, {"X-Lium-Backup-Notice": "no backup"}),
+        lambda: _answer({"id": "pod-uuid-new", "name": POD_NAME}, {"X-Lium-Backup-Notice": "no backup"}),
+    ],
+    ids=["body", "header", "pod-record-header"],
+)
+def test_the_backup_notice_rides_on_the_rented_pod(client, monkeypatch, lost_first, answer):
+    """DAH-5023: the rent answer (body field or X-Lium-Backup-Notice header) says the pod rented without
+    the backup the account cannot fund yet. A replayed answer (the first one lost, the same key resent)
+    carries it too, and the accepted rental is never sent again."""
+    reply = answer()
+    if lost_first:
+        reply.headers = {**reply.headers, "Idempotent-Replayed": "true"}
+    _rent.outcomes = [requests.Timeout("read timed out"), reply] if lost_first else [reply]
+    monkeypatch.setattr(client_module.requests, "request", _rent(client, pods_after_failure=[]))
+    monkeypatch.setattr(client, "_find_pod_by_id", lambda *a, **k: None)
+
+    result = client.up(executor_id=EXECUTOR_ID, name=POD_NAME, template_id="tpl-1", ssh_keys=["k"])
+
+    assert result["id"] == "pod-uuid-new" and result["backup_notice"] == "no backup"
+    assert len(_rent.calls) == (2 if lost_first else 1) and not _rent.outcomes
+    assert len({c["headers"]["Idempotency-Key"] for c in _rent.calls}) == 1
+
+
+def test_the_backup_notice_survives_waiting_for_the_pod(client, monkeypatch):
+    """DAH-5023: up(wait=True) returns wait_ready's PodInfo; the notice (here only in the header) rides on it."""
+    reply = _Resp({"success": True, "pod_id": "pod-uuid-new"})
+    reply.headers = {"X-Lium-Backup-Notice": "no backup"}
+    _rent.outcomes = [reply]
+    monkeypatch.setattr(
+        client_module.requests, "request", _rent(client, pods_after_failure=[_pod(pod_id="pod-uuid-new")]),
+    )
+    monkeypatch.setattr(client, "wait_ready", lambda pod, timeout: SimpleNamespace(id=pod["id"]))
+
+    ready = client.up(executor_id=EXECUTOR_ID, name=POD_NAME, template_id="tpl-1", ssh_keys=["k"], wait=True)
+
+    assert ready.id == "pod-uuid-new" and ready.backup_notice == "no backup"
 
 
 def test_a_timed_out_rent_is_not_repeated_when_the_pod_exists(client, monkeypatch):

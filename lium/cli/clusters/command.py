@@ -210,8 +210,15 @@ def clusters_up_command(
     except ClusterNotListedError as exc:
         # the money is, or may be, spent although no cluster came back: the generic hint says "Retry"
         if exc.confirmed:
-            raise CliFailure("cluster_rented_not_listed", str(exc), EXIT_API_ERROR, hint=RENTED_NOT_LISTED_HINT) from exc
+            if exc.backup_notice and output_format == "table":
+                ui.warning(escape(exc.backup_notice))
+            raise CliFailure("cluster_rented_not_listed", str(exc), EXIT_API_ERROR, hint=RENTED_NOT_LISTED_HINT,
+                             data={"backup_notice": exc.backup_notice} if exc.backup_notice else None) from exc
         raise CliFailure("cluster_rent_uncertain", str(exc), EXIT_API_ERROR, hint=RENT_UNCERTAIN_HINT) from exc
+    backup_notice = cluster.backup_notice  # --wait below re-reads the cluster
+    notice_data = {"backup_notice": backup_notice} if backup_notice else None  # on every failure below too
+    if backup_notice and output_format == "table":
+        ui.warning(escape(backup_notice))  # now, not at the end: a TTL or wait failure must not hide it
 
     # The TTL is scheduled before any waiting: a --wait timeout must not leave N
     # nodes billing with nothing scheduled. Unlike `lium up --ttl` (lium#247), a member whose
@@ -241,12 +248,15 @@ def clusters_up_command(
             if output_format == "json":
                 data = cluster_to_dict(cluster)
                 data.update(ok=False, removal_scheduled_at=None, unscheduled=unscheduled, error=warning)
+                if backup_notice:
+                    data["backup_notice"] = backup_notice
                 click.echo(json.dumps(data, indent=2, ensure_ascii=False))
                 raise SystemExit(EXIT_API_ERROR)
             # the money is spent: the generic EXIT_API_ERROR hint says "Retry", and a retry of
             # `clusters up` rents a second cluster
             raise CliFailure(
                 "cluster_ttl_not_scheduled", warning, EXIT_API_ERROR, hint=RENTED_HINT.format(cluster_id=cluster.id[:8]),
+                data=notice_data,
             ) from last_error
 
     if wait:
@@ -264,11 +274,13 @@ def clusters_up_command(
             )
             code = "cluster_member_failed" if isinstance(exc, PodStartError) else "cluster_not_ready"
             raise CliFailure(code, f"{exc}. {billing[0].upper() + billing[1:]}; see 'lium clusters ps'.",
-                             EXIT_API_ERROR, hint=RENTED_HINT.format(cluster_id=cluster.id[:8])) from exc
+                             EXIT_API_ERROR, data=notice_data, hint=RENTED_HINT.format(cluster_id=cluster.id[:8])) from exc
 
     if output_format == "json":
         data = cluster_to_dict(cluster)
         data["removal_scheduled_at"] = scheduled.isoformat() if scheduled else None
+        if backup_notice:
+            data["backup_notice"] = backup_notice
         click.echo(json.dumps(data, indent=2, ensure_ascii=False))
         return
 
