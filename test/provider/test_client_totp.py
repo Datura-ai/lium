@@ -242,3 +242,28 @@ def test_the_given_code_answers_one_ask_only(monkeypatch: pytest.MonkeyPatch) ->
     with pytest.raises(ProviderAuthError) as excinfo:
         client.totp_code()
     assert excinfo.value.code == "PORTAL_AUTH_TOTP_REQUIRED"
+
+
+def test_a_wrong_code_on_the_new_address_reads_as_a_wrong_code(
+    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
+) -> None:
+    """The portal refuses it with the same 403 it uses for a forbidden action; the CLI must not say that."""
+    token = _make_jwt(int(time.time()) + 3600)
+
+    class _RefusingPortal(_SequencedPortal):
+        def post(self, path: str, *, json_body: dict | None = None, auth: bool = True) -> dict:
+            if path == "/auth/set-email":
+                raise ProviderAuthError("portal forbade the requested action", code="PORTAL_FORBIDDEN")
+            return super().post(path, json_body=json_body, auth=auth)
+
+    portal = _RefusingPortal(
+        [_mfa_challenge_body(fake_signer.ss58_address), _login_response_body(token, fake_signer.ss58_address)]
+    )
+    client = _build_client(portal, tmp_token_store, fake_signer)
+    codes = iter(["111111", "222222"])
+    client.totp_code = lambda: next(codes)
+
+    with pytest.raises(ProviderAuthError) as excinfo:
+        client.set_email("new@example.com")
+
+    assert excinfo.value.code == "PORTAL_AUTH_TOTP_INVALID"

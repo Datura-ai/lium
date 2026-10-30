@@ -196,6 +196,7 @@ class ProviderClient:
         response = _login_response(
             self._http.post(LOGIN_FLEXIBLE, json_body=payload, auth=False)
         )
+        self._totp_in_use = response.mfa_required
         if response.mfa_required:
             response = self._finish_totp_sign_in(response)
         if not response.token:
@@ -226,7 +227,6 @@ class ProviderClient:
                 code=PORTAL_AUTH_INVALID,
                 context={"provider_id": response.provider.id},
             )
-        self._totp_in_use = True
         totp_payload = {"mfa_token": response.mfa_token, "code": self.totp_code().strip()}
         try:
             return _login_response(
@@ -248,6 +248,7 @@ class ProviderClient:
         response = _login_response(
             self._http.post(LOGIN_EMAIL, json_body={"email": email, "password": password}, auth=False)
         )
+        self._totp_in_use = response.mfa_required
         if response.mfa_required:
             response = self._finish_totp_sign_in(response)
         if not response.token:
@@ -461,8 +462,18 @@ class ProviderClient:
         payload = _build_payload(SetEmailPayload, email=email)
         self.login(force=True)
         if self._totp_in_use and self.totp_code:
-            payload["totp_code"] = self.totp_code().strip()
-        body = self._http.post(SET_EMAIL, json_body=payload)
+            payload = _build_payload(
+                SetEmailPayload, email=email, totp_code=self.totp_code().strip()
+            )
+        try:
+            body = self._http.post(SET_EMAIL, json_body=payload)
+        except ProviderAuthError as e:
+            # the portal refuses a wrong step-up code with the same 403 it uses for a forbidden action
+            if not (self._totp_in_use and e.code == PORTAL_FORBIDDEN):
+                raise
+            raise ProviderAuthError(
+                "wrong or expired authenticator code", code=PORTAL_AUTH_TOTP_INVALID, context=e.context
+            ) from e
         token = body.pop("token", None) if isinstance(body, dict) else None
         if isinstance(token, str) and token:
             ss58 = self.signer.ss58_address
