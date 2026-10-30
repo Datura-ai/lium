@@ -78,6 +78,9 @@ class _SetupExecutionState:
     # was submitted, whatever an interrupt in between lets the caller record
     docker_restart_owed: bool = False
     docker_may_be_running: bool = False
+    # set before `systemctl mask docker`: while the data root is renamed away, an enabled unit would start Docker on
+    # an empty directory after a reboot; the rollback unmasks only once the data is back
+    docker_masked: bool = False
     daemon_json_written: bool = False
     fstab_written: bool = False
     docker_root_mounted_on_target: bool = False
@@ -1019,9 +1022,16 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
 
     if state.docker_restart_owed:
         if data_restored:
+            if state.docker_masked:
+                _rollback_attempt(errors, "unmask docker", lambda: run_command(["systemctl", "unmask", "docker"], True, True))
             _rollback_attempt(errors, "start docker", lambda: run_command(["systemctl", "start", "docker"], True, True))
         else:
             errors.append(f"start docker: skipped, Docker data is not back at {docker_root} (backup at {plan.backup_dir})")
+            if state.docker_masked:
+                errors.append(
+                    "docker.service stays masked, so a reboot does not start Docker on an empty directory; once the data "
+                    f"is back at {docker_root}: systemctl unmask docker && systemctl start docker"
+                )
 
     return errors
 
@@ -1136,7 +1146,8 @@ def _execute_setup(plan: SetupPlan):
     2. Back up the current Docker root
        - `rsync -aHAX --numeric-ids <docker-root>/ <backup-dir>/`
        - or, for an image file on the same filesystem, `findmnt --list --noheadings -o TARGET` (no mount may
-         be left under the data root) and `mv <docker-root> <backup-dir>`
+         be left under the data root), `systemctl mask docker` (a reboot while the data root is away must not
+         start Docker on an empty directory) and `mv <docker-root> <backup-dir>`
 
     3. Prepare the target partition
        - optional `parted -s <disk> mklabel gpt`
@@ -1169,6 +1180,7 @@ def _execute_setup(plan: SetupPlan):
        - `rsync -aHAX --numeric-ids <backup-dir>/ <docker-root>/`
 
     8. Restart and verify Docker
+       - `systemctl unmask docker` when step 2 masked it
        - `systemctl start docker`
        - `docker info --format '{{json .}}'` via helper
        - `findmnt --json --canonicalize --evaluate --target /var/lib/docker` via helper
@@ -1208,6 +1220,8 @@ def _execute_setup(plan: SetupPlan):
                 if os.path.lexists(plan.backup_dir):
                     # `mv` into an existing directory would nest the data root inside it
                     raise RuntimeError(f"{plan.backup_dir} already exists; remove it and run setup again")
+                state.docker_masked = True
+                run_command(["systemctl", "mask", "docker"], True, True)
                 run_command(["mv", docker_root, plan.backup_dir], True, True)
                 state.docker_root_moved = True
             else:
@@ -1288,6 +1302,9 @@ def _execute_setup(plan: SetupPlan):
             )
 
         with timed_step_status(10, total_steps, "Starting Docker and verifying"):
+            if state.docker_masked:
+                run_command(["systemctl", "unmask", "docker"], True, True)
+                state.docker_masked = False
             state.docker_may_be_running = True
             run_command(["systemctl", "start", "docker"], True, True)
             verification = build_verification_result(run_command, plan.preflight.docker_state.docker_root_dir)

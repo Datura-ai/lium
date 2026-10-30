@@ -677,6 +677,26 @@ def test_execute_setup_refuses_the_rename_when_the_backup_path_already_exists(mo
     assert commands[-1] == ["systemctl", "start", "docker"]
 
 
+@pytest.mark.parametrize("own_mount", [False, True])
+def test_execute_setup_masks_docker_only_while_the_data_root_is_renamed_away(monkeypatch, tmp_path, own_mount):
+    # an enabled docker.service would start on the empty directory if the host rebooted between the rename and the
+    # restore; the rsync branch leaves the original data in place until the cutover and is not masked
+    docker_mount = MountInfo(target=str(tmp_path / "docker"), source="/dev/sdc1", fstype="ext4", options=["rw"]) if own_mount else None
+    plan = _loop_file_plan(tmp_path, docker_mount=docker_mount)
+    commands = _loop_file_host(monkeypatch, plan)
+    docker_root = plan.preflight.docker_state.docker_root_dir
+
+    gpu_splitting._execute_setup(plan)
+
+    mask, unmask = ["systemctl", "mask", "docker"], ["systemctl", "unmask", "docker"]
+    if own_mount:
+        assert mask not in commands and unmask not in commands
+    else:
+        assert commands.index(["systemctl", "stop", "docker"]) < commands.index(mask) < commands.index(["mv", docker_root, plan.backup_dir])
+        assert commands.index(["rsync", "-aHAX", "--numeric-ids", f"{plan.backup_dir}/", f"{docker_root}/"]) < commands.index(unmask)
+        assert commands[-2:] == [unmask, ["systemctl", "start", "docker"]]
+
+
 def test_execute_setup_rolls_back_when_the_restore_leaves_under_the_listing_floor_free(monkeypatch, tmp_path):
     plan = _loop_file_plan(tmp_path)
     commands = _loop_file_host(monkeypatch, plan, free_gib=70)
@@ -792,6 +812,8 @@ def test_execute_setup_image_file_rollback_keeps_the_image_and_docker_down_when_
     assert Path(plan.target.resolved_target).exists()
     assert Path(plan.backup_dir).exists()
     assert ["systemctl", "start", "docker"] not in commands
+    assert ["systemctl", "unmask", "docker"] not in commands
+    assert "docker.service stays masked" in str(exc_info.value) and "systemctl unmask docker && systemctl start docker" in str(exc_info.value)
     assert not any(args[0] in {"rmdir", "mv"} and args[-1] == docker_root for args in commands)
 
 
