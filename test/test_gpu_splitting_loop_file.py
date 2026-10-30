@@ -779,6 +779,28 @@ def test_execute_setup_rollback_keeps_the_image_when_its_loop_device_is_still_at
     assert commands[-1] == ["systemctl", "start", "docker"]
 
 
+def test_execute_setup_rollback_keeps_the_image_when_losetup_cannot_be_asked(monkeypatch, tmp_path):
+    # a missing or failing losetup must not end the rollback before Docker is unmasked and started, and must not
+    # pass for "detached"
+    plan = _loop_file_plan(tmp_path)
+    commands = _loop_file_host(monkeypatch, plan)
+    host_run_command = gpu_splitting.run_command
+
+    def run_command(args, check=True, capture=True):
+        if args[:2] == ["losetup", "-j"]:
+            raise FileNotFoundError("losetup")
+        return host_run_command(args, check, capture)
+
+    monkeypatch.setattr(gpu_splitting, "run_command", run_command)
+
+    with pytest.raises(RuntimeError, match="losetup") as exc_info:
+        gpu_splitting._execute_setup(plan)
+
+    assert Path(plan.target.resolved_target).exists()
+    assert "`losetup -j` failed, so whether a loop device still holds it is unknown" in str(exc_info.value)
+    assert commands[-2:] == [["systemctl", "unmask", "docker"], ["systemctl", "start", "docker"]]
+
+
 def test_execute_setup_rolls_back_when_the_restore_leaves_under_the_listing_floor_free(monkeypatch, tmp_path):
     plan = _loop_file_plan(tmp_path)
     commands = _loop_file_host(monkeypatch, plan, free_gib=70)

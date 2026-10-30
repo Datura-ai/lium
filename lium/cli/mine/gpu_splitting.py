@@ -1036,10 +1036,13 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
         else:
             # `unmounted` covers the Docker root only; the validation mount's umount can have failed, and a backing
             # file unlinked while attached keeps its space with no name to find it by
-            attached = run_command(["losetup", "-j", target_partition, "-n", "-O", "NAME"], False, True)
-            if attached.returncode != 0 or attached.stdout.split():
-                devices = ", ".join(attached.stdout.split()) or "a loop device (`losetup -j` failed)"
-                errors.append(f"remove {target_partition}: skipped, still attached to {devices}; detach it before removing the file")
+            attached = _loop_devices_backed_by(target_partition)
+            if attached is None or attached:
+                held = (
+                    f"still attached to {', '.join(attached)}" if attached
+                    else "`losetup -j` failed, so whether a loop device still holds it is unknown"
+                )
+                errors.append(f"remove {target_partition}: skipped, {held}; detach it before removing the file")
             else:
                 state.loop_file_removed = _rollback_attempt(errors, f"remove {target_partition}", lambda: os.unlink(target_partition))
 
@@ -1063,6 +1066,16 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
             )
 
     return errors
+
+
+def _loop_devices_backed_by(image_file: str) -> Optional[list[str]]:
+    # None when `losetup -j` failed or is missing: the rollback must not unlink a file it cannot prove detached, and
+    # an exception here would end the rollback before Docker is unmasked and started
+    try:
+        found = run_command(["losetup", "-j", image_file, "-n", "-O", "NAME"], False, True)
+    except Exception:
+        return None
+    return None if found.returncode != 0 else found.stdout.split()
 
 
 def _mount_at_or_none(docker_root: str) -> Optional[MountInfo]:
