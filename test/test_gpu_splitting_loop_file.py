@@ -51,15 +51,11 @@ def _loop_file_plan(tmp_path, docker_mount: MountInfo | None = None) -> SetupPla
     )
 
 
-def _host_probes(docker_data_gib: int = 0, vram_mib: list[int] | None = None, node_images_present: bool = False):
-    # the read-only commands the plan runs: `du -sxb <docker-root>`, `docker images` and nvidia-smi (missing when
-    # vram_mib is None)
+def _host_probes(docker_data_gib: int = 0, vram_mib: list[int] | None = None):
+    # the read-only commands the plan runs: `du -sxb <docker-root>` and nvidia-smi (missing when vram_mib is None)
     def run_command(args, check=True, capture=True):
         if args[0] == "du":
             return CommandResult(args, f"{docker_data_gib * GIB}\t{args[-1]}\n", "", 0)
-        if args[:2] == ["docker", "images"]:
-            repositories = "daturaai/compute-subnet-executor-runner\ndaturaai/compute-subnet-executor\nwillfarrell/autoheal\n"
-            return CommandResult(args, repositories if node_images_present else "ubuntu\n", "", 0)
         if args[0] == "nvidia-smi":
             if vram_mib is None:
                 raise FileNotFoundError("nvidia-smi")
@@ -145,6 +141,7 @@ def test_loop_file_target_passes_the_summed_gpu_vram_to_the_plan(monkeypatch):
     preflight = _sample_preflight()
     monkeypatch.setattr(gpu_splitting, "load_mounted_filesystems", lambda *a: [])
     monkeypatch.setattr(gpu_splitting, "run_command", _host_probes(docker_data_gib=33, vram_mib=[81559, 81559]))
+    monkeypatch.setattr(gpu_splitting, "_node_images_present", lambda mine_dir: False)
     planned = {}
     monkeypatch.setattr(gpu_splitting, "plan_loop_file_target", lambda *args: planned.setdefault("args", args))
 
@@ -153,16 +150,35 @@ def test_loop_file_target_passes_the_summed_gpu_vram_to_the_plan(monkeypatch):
     assert planned["args"][3:] == (200 * GIB, 2 * 81559 * 1024**2, 33 * GIB, False)
 
 
-def test_loop_file_target_tells_the_plan_when_the_node_images_are_already_pulled(monkeypatch):
+def test_loop_file_target_tells_the_plan_when_the_node_images_are_already_pulled(monkeypatch, tmp_path):
     preflight = _sample_preflight()
     monkeypatch.setattr(gpu_splitting, "load_mounted_filesystems", lambda *a: [])
-    monkeypatch.setattr(gpu_splitting, "run_command", _host_probes(docker_data_gib=60, vram_mib=[81559], node_images_present=True))
+    monkeypatch.setattr(gpu_splitting, "run_command", _host_probes(docker_data_gib=60, vram_mib=[81559]))
+    asked = []
+    monkeypatch.setattr(gpu_splitting, "_node_images_present", lambda mine_dir: asked.append(mine_dir) or True)
     planned = {}
     monkeypatch.setattr(gpu_splitting, "plan_loop_file_target", lambda *args: planned.setdefault("args", args))
 
-    gpu_splitting._loop_file_target(preflight, None, None)
+    gpu_splitting._loop_file_target(preflight, None, None, tmp_path / "mine")
 
-    assert planned["args"][5:] == (60 * GIB, True)
+    assert planned["args"][5:] == (60 * GIB, True) and asked == [tmp_path / "mine"]
+
+
+@pytest.mark.parametrize("checkout_exists, answer", [(False, False), (True, True), (True, False)])
+def test_node_images_present_is_lium_mine_s_own_check_on_its_checkout(monkeypatch, tmp_path, capsys, checkout_exists, answer):
+    # the rule stays in one place: without the checkout the images count as still to be pulled and nothing is asked
+    from lium.cli.commands import mine
+
+    asked = []
+    monkeypatch.setattr(mine, "_node_images_present", lambda executor_dir: asked.append(executor_dir) or answer)
+    if checkout_exists:
+        (tmp_path / "neurons" / "executor").mkdir(parents=True)
+
+    present = gpu_splitting._node_images_present(tmp_path)
+
+    assert present is (checkout_exists and answer)
+    assert asked == ([tmp_path / "neurons" / "executor"] if checkout_exists else [])
+    assert ("No `lium mine` checkout" in capsys.readouterr().out) is not checkout_exists
 
 
 def test_loop_file_target_warns_and_plans_without_vram_when_nvidia_smi_is_missing(monkeypatch, capsys):

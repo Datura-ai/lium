@@ -204,7 +204,7 @@ def _docker_storage_limited() -> bool:
     return build_verification_result(run_command, inspect_docker_state(run_command).docker_root_dir).passed
 
 
-def _setup_docker_storage(auto: bool = False):
+def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None):
     """Offer to move Docker storage to an xfs pquota mount with `lium gpu-splitting setup`'s own plan and checks.
 
     One question is both the menu and the consent: every disk is listed and the person types the one to format, or
@@ -255,7 +255,7 @@ def _setup_docker_storage(auto: bool = False):
     if rejected:
         lines += ["", "Not offered:"] + [row(c, c.details) for c in rejected]
     if not offered:
-        _offer_and_run_image_file_setup(preflight, lines, manual)
+        _offer_and_run_image_file_setup(preflight, lines, manual, mine_dir)
         return
     lines += [
         "",
@@ -271,13 +271,13 @@ def _setup_docker_storage(auto: bool = False):
         console.warning(f"{typed} is not one of the disks listed above; nothing was changed.\n{manual}")
         return
     try:
-        _execute_setup(_build_setup_plan(preflight, typed))
+        _execute_setup(_build_setup_plan(preflight, typed, mine_dir=mine_dir))
     except RuntimeError as exc:
         # a refusal (containers running, Docker down, no backup space, target checks) stops only the storage setup
         console.warning(f"Docker storage was not set up: {exc}\n{manual}")
 
 
-def _offer_and_run_image_file_setup(preflight: "PreflightResult", lines: list[str], manual: str):
+def _offer_and_run_image_file_setup(preflight: "PreflightResult", lines: list[str], manual: str, mine_dir: Optional[Path]):
     """Single-disk host: offer Docker storage in an XFS image file (what `lium gpu-splitting setup` plans with no device).
 
     Typing `file` is the consent; anything else leaves the host as it is.
@@ -287,7 +287,7 @@ def _offer_and_run_image_file_setup(preflight: "PreflightResult", lines: list[st
     from ..mine.gpu_splitting import _build_setup_plan, _execute_setup
 
     try:
-        plan = _build_setup_plan(preflight, None)
+        plan = _build_setup_plan(preflight, None, mine_dir=mine_dir)
     except RuntimeError as exc:
         console.warning("\n".join(lines) + f"\n\n{exc}\n{manual}")
         return
@@ -1106,7 +1106,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             _check_prereqs(target_dir)
             storage_ok = _docker_storage_limited()
         if not storage_ok:
-            _setup_docker_storage(auto)   # outside the spinner: it prints the plan and may ask to confirm
+            _setup_docker_storage(auto, target_dir)   # outside the spinner: it prints the plan and may ask to confirm
         _check_free_disk(target_dir / "neurons" / "executor")
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.

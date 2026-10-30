@@ -38,6 +38,7 @@ from .storage import (
     MIN_DISK_TO_VRAM_RATE,
     MIN_TARGET_BYTES,
     NODE_FREE_DISK_GIB,
+    NODE_IMAGES_GIB,
     NON_LOCAL_TRANSPORTS,
     NoSafeTargetError,
     auto_select_target,
@@ -60,6 +61,9 @@ DEFAULT_DOCKER_ROOT = "/var/lib/docker"
 # the image file is mounted by path through a loop device; direct I/O is set by the docker.service drop-in;
 # nofail: without it a missing image file fails local-fs.target and the host boots into emergency mode
 LOOP_FILE_FSTAB_OPTIONS = "loop,pquota,noatime,nofail"
+# `lium mine --dir`'s default, relative to the working directory as there; its neurons/executor compose files name
+# the node images, which count against the free-space floor only until they are pulled
+DEFAULT_MINE_DIR = Path("compute-subnet")
 
 
 @dataclass
@@ -237,6 +241,7 @@ def _build_setup_plan(
     device: Optional[str],
     image_file: Optional[str] = None,
     image_size_gib: Optional[int] = None,
+    mine_dir: Optional[Path] = None,
 ) -> SetupPlan:
     """Build the full destructive plan without mutating the host.
 
@@ -274,7 +279,7 @@ def _build_setup_plan(
             device,
         )
     elif image_file or image_size_gib:
-        target = _loop_file_target(preflight, image_file, image_size_gib)
+        target = _loop_file_target(preflight, image_file, image_size_gib, mine_dir)
     else:
         try:
             target = auto_select_target(
@@ -290,7 +295,7 @@ def _build_setup_plan(
                     f"{exc}. {docker_root} is its own disk ({preflight.docker_mount.source}); format a spare disk "
                     "with --device, or pass --file/--size to use an image file anyway"
                 ) from exc
-            target = _loop_file_target(preflight, None, None)
+            target = _loop_file_target(preflight, None, None, mine_dir)
 
     loop_file = target.classification == "loop_file"
     if not loop_file:
@@ -369,11 +374,13 @@ def _destructive_actions(preflight: PreflightResult, target: TargetPlan, loop_fi
     return destructive_actions
 
 
-def _loop_file_target(preflight: PreflightResult, image_file: Optional[str], image_size_gib: Optional[int]) -> TargetPlan:
+def _loop_file_target(
+    preflight: PreflightResult, image_file: Optional[str], image_size_gib: Optional[int], mine_dir: Optional[Path] = None
+) -> TargetPlan:
     """Plan the XFS image file; `findmnt --json --bytes --list --real ...` via `load_mounted_filesystems(...)`,
     `nvidia-smi --query-gpu=memory.total ...` via `_total_gpu_vram_bytes()`, `du -sxb <docker-root>` via
     `_docker_data_bytes(...)` (that data is restored into the file, so it counts against the file's free space),
-    `docker images --format {{.Repository}}` via `_node_images_present()` (pulled images are in that data already)."""
+    `lium mine`'s node-image check on the checkout via `_node_images_present(...)` (pulled images are in that data)."""
     filesystems = load_mounted_filesystems(run_command, preflight.block_devices)
     total_vram_bytes = _total_gpu_vram_bytes()
     if total_vram_bytes is None:
@@ -388,7 +395,7 @@ def _loop_file_target(preflight: PreflightResult, image_file: Optional[str], ima
         image_size_gib * 1024**3 if image_size_gib else None,
         total_vram_bytes,
         _docker_data_bytes(preflight.docker_state.docker_root_dir),
-        _node_images_present(),
+        _node_images_present(mine_dir or DEFAULT_MINE_DIR),
     )
 
 
@@ -396,11 +403,20 @@ def _docker_data_bytes(docker_root: str) -> int:
     return int(run_command(["du", "-sxb", docker_root], True, True).stdout.split()[0])
 
 
-def _node_images_present() -> bool:
-    # the executor images are the ~NODE_IMAGES_GIB the listing floor adds; on a node that already runs them they are
-    # part of the Docker data `du` measured and must not be counted a second time
-    listed = run_command(["docker", "images", "--format", "{{.Repository}}"], False, True)
-    return listed.returncode == 0 and any(repo.startswith("daturaai/compute-subnet-executor") for repo in listed.stdout.split())
+def _node_images_present(mine_dir: Path) -> bool:
+    # `lium mine`'s own rule (its free-disk check): every image the node runs is local, read from the checkout's
+    # compose files; one stale executor image is not enough, and without the checkout they count as still to pull
+    executor_dir = mine_dir / "neurons" / "executor"
+    if not executor_dir.is_dir():
+        console.warning(
+            f"No `lium mine` checkout at {mine_dir}: the {NODE_IMAGES_GIB} GiB of node images count as still to be "
+            "pulled; pass --mine-dir if the node already runs them"
+        )
+        return False
+    # imported here as mine.py imports this module: inside the function, so neither import runs at load time
+    from ..commands.mine import _node_images_present as node_images_present_in_checkout
+
+    return node_images_present_in_checkout(executor_dir)
 
 
 def _total_gpu_vram_bytes() -> Optional[int]:
@@ -1362,21 +1378,29 @@ _IMAGE_SIZE_OPTION = click.option(
     f"{NODE_FREE_DISK_GIB} GiB free after the Docker data and the node images, and clear {MIN_DISK_TO_VRAM_RATE}x the "
     "host's GPU VRAM)",
 )
+_MINE_DIR_OPTION = click.option(
+    "--mine-dir", type=click.Path(path_type=Path),
+    help=f"The directory `lium mine --dir` used (default: {DEFAULT_MINE_DIR}); node images already pulled there are "
+    "not added to the free-space floor again",
+)
 
 
 @gpu_splitting_command.command("check")
 @click.option("--device", type=click.Path(path_type=Path))
 @_IMAGE_FILE_OPTION
 @_IMAGE_SIZE_OPTION
+@_MINE_DIR_OPTION
 @gpu_command_errors
-def gpu_splitting_check_command(device: Optional[Path], image_file: Optional[Path], image_size_gib: Optional[int]):
+def gpu_splitting_check_command(
+    device: Optional[Path], image_file: Optional[Path], image_size_gib: Optional[int], mine_dir: Optional[Path]
+):
     """Inspect the host and print the plan without making changes."""
     _print_gpu_splitting_requirements()
     with timed_step_status(1, 2, "Running preflight inspection"):
         preflight = _preflight()
     with timed_step_status(2, 2, "Resolving target"):
         plan = _build_setup_plan(
-            preflight, str(device) if device else None, str(image_file) if image_file else None, image_size_gib
+            preflight, str(device) if device else None, str(image_file) if image_file else None, image_size_gib, mine_dir
         )
 
     console.print(_docker_state_table(preflight))
@@ -1416,10 +1440,11 @@ def gpu_splitting_verify_command():
 @click.option("--device", type=click.Path(path_type=Path))
 @_IMAGE_FILE_OPTION
 @_IMAGE_SIZE_OPTION
+@_MINE_DIR_OPTION
 @click.option("--yes", is_flag=True, help="Skip interactive confirmation")
 @gpu_command_errors
 def gpu_splitting_setup_command(
-    device: Optional[Path], image_file: Optional[Path], image_size_gib: Optional[int], yes: bool
+    device: Optional[Path], image_file: Optional[Path], image_size_gib: Optional[int], mine_dir: Optional[Path], yes: bool
 ):
     """Perform end-to-end Docker storage setup for GPU splitting."""
     _print_gpu_splitting_requirements()
@@ -1427,7 +1452,7 @@ def gpu_splitting_setup_command(
         preflight = _preflight()
     with timed_step_status(2, 2, "Resolving target"):
         plan = _build_setup_plan(
-            preflight, str(device) if device else None, str(image_file) if image_file else None, image_size_gib
+            preflight, str(device) if device else None, str(image_file) if image_file else None, image_size_gib, mine_dir
         )
 
     try:

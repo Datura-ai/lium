@@ -212,7 +212,7 @@ def _storage_host(monkeypatch, *, root: bool = True, tty: bool = True, typed: st
     monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: tty))
     monkeypatch.setattr(Prompt, "ask", lambda *a, **k: calls.append("asked") or typed)
 
-    def plan(pf, device):
+    def plan(pf, device, mine_dir=None):
         calls.append(("plan", device))
         if plan_error:
             raise plan_error
