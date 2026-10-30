@@ -1158,7 +1158,11 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     # NAT forwards win over the range in the validator: kept as written unless a different range replaces them
     mappings = ""
     if parsed.get("RENTING_PORT_MAPPINGS") and answers["port_range"] == saved["RENTING_PORT_RANGE"].replace(" ", ""):
-        mappings = _env_value(saved_env, "RENTING_PORT_MAPPINGS")
+        # the value dotenv parsed (spaces around =, quotes, several lines), written back as one line of JSON
+        try:
+            mappings = json.dumps(json.loads(parsed["RENTING_PORT_MAPPINGS"]), separators=(",", ":"))
+        except ValueError:
+            raise click.UsageError(f"RENTING_PORT_MAPPINGS in {saved_env} is not valid JSON; fix or remove it and rerun.")
     target_dir = Path(dir_).absolute()
 
     TOTAL_STEPS = 8 if token else 6

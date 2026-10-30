@@ -505,21 +505,32 @@ def test_a_privileged_port_unprivileged_is_checked_by_listener(monkeypatch, list
 _MAP = "[[41000,51000],[41001,51001],[41002,51002]]"
 
 
-@pytest.mark.parametrize("flags, rentals, mappings, rng, up", [
-    ([], False, _MAP, "", "docker compose up -d"),                                          # unchanged rerun
-    (["--ssh-port", "2202"], False, _MAP, "", "docker compose up -d --force-recreate"),    # SSH change keeps the forwards
+_MAP_LINE = f"RENTING_PORT_MAPPINGS={_MAP}"
+
+
+@pytest.mark.parametrize("flags, rentals, mappings, rng, up, mapping_line", [
+    ([], False, _MAP, "", "docker compose up -d", _MAP_LINE),                               # unchanged rerun
+    (["--ssh-port", "2202"], False, _MAP, "", "docker compose up -d --force-recreate",
+     _MAP_LINE),                                                                            # SSH change keeps the forwards
     (["--renting-port-range", "41000-41100"], False, "", "41000-41100",
-     "docker compose up -d --force-recreate"),                                              # a chosen range replaces them
-    (["--ssh-port", "2202"], True, _MAP, "", "docker compose up -d --no-recreate"),        # restart deferred under rentals
+     "docker compose up -d --force-recreate", _MAP_LINE),                                   # a chosen range replaces them
+    (["--ssh-port", "2202"], True, _MAP, "", "docker compose up -d --no-recreate",
+     _MAP_LINE),                                                                            # restart deferred under rentals
+    (["--ssh-port", "2202"], False, _MAP, "", "docker compose up -d --force-recreate",
+     f"RENTING_PORT_MAPPINGS = '{_MAP}'"),                                                  # spaces around =
+    (["--ssh-port", "2202"], False, _MAP, "", "docker compose up -d --force-recreate",
+     "RENTING_PORT_MAPPINGS='" + _MAP.replace("],[", "],\n[") + "'"),                       # quoted JSON on several lines
 ])
 def test_a_rerun_keeps_renting_port_mappings_unless_a_range_replaces_them(
-    monkeypatch, tmp_path: Path, flags, rentals, mappings, rng, up
+    monkeypatch, tmp_path: Path, flags, rentals, mappings, rng, up, mapping_line
 ):
     saved = {"MINER_HOTKEY_SS58_ADDRESS": _HK, "INTERNAL_PORT": "8080", "EXTERNAL_PORT": "8081", "SSH_PORT": "2201",
              "SSH_PUBLIC_PORT": "2201", "RENTING_PORT_RANGE": "", "RENTING_PORT_MAPPINGS": _MAP}
     node = tmp_path / "repo" / "neurons" / "executor"
     node.mkdir(parents=True)
-    (node / ".env").write_text("".join(f"{k}={v}\n" for k, v in saved.items()))
+    (node / ".env").write_text(
+        "".join(f"{k}={v}\n" for k, v in saved.items() if k != "RENTING_PORT_MAPPINGS") + mapping_line + "\n"
+    )
     (node / ".env.template").write_text(
         "MINER_HOTKEY_SS58_ADDRESS=\nINTERNAL_PORT=8080\nEXTERNAL_PORT=8080\nSSH_PORT=2200\nSSH_PUBLIC_PORT=2200\n"
         "# RENTING_PORT_MAPPINGS=\"[[46681, 56681]]\"\n"
