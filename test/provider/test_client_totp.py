@@ -206,17 +206,25 @@ def test_set_email_asks_for_a_second_code(
     assert portal.posts[2] == ("/auth/set-email", {"email": "new@example.com", "totp_code": "222222"}, True)
 
 
-def test_set_email_of_an_account_without_an_authenticator_sends_no_code(
-    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore
+def test_set_email_of_an_account_without_an_authenticator_asks_nothing(
+    fake_signer: LocalKeypairSigner, tmp_token_store: TokenStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Today every account is this one: a terminal must not be asked for a code it does not have."""
+    from lium.cli.provider import _client
+
     token = _make_jwt(int(time.time()) + 3600)
     portal = _SequencedPortal(
         [_login_response_body(token, fake_signer.ss58_address), {"email": "new@example.com"}]
     )
     client = _build_client(portal, tmp_token_store, fake_signer)
+    monkeypatch.setattr(_client, "is_interactive", lambda: True)
+    asked: list[str] = []
+    monkeypatch.setattr(_client.click, "prompt", lambda text, **kw: asked.append(text) or "999999")
+    _client.attach_totp_code(client, None)
 
     client.set_email("new@example.com")
 
+    assert asked == []
     assert portal.posts[-1][1] == {"email": "new@example.com", "totp_code": None}
 
 

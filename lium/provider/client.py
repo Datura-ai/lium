@@ -136,6 +136,9 @@ class ProviderClient:
         # Asked for the authenticator code (or a recovery code) when the portal
         # answers a sign-in with ``mfa_required``; None refuses that sign-in.
         self.totp_code: Callable[[], str] | None = None
+        # True once a sign-in of this client needed a code: only such an account is asked again
+        # for a step-up (`set_email`), so an account without an authenticator is never prompted.
+        self._totp_in_use = False
         # ``http`` is built lazily so tests can inject a session and so we
         # don't open a connection pool until first request.
         self._http = http or PortalHTTP(
@@ -223,6 +226,7 @@ class ProviderClient:
                 code=PORTAL_AUTH_INVALID,
                 context={"provider_id": response.provider.id},
             )
+        self._totp_in_use = True
         totp_payload = {"mfa_token": response.mfa_token, "code": self.totp_code().strip()}
         try:
             return _login_response(
@@ -451,14 +455,13 @@ class ProviderClient:
 
         An account with an authenticator app spends one code on that sign-in
         and needs a second for the address itself, so the code source is
-        asked twice; each code is accepted once.
+        asked twice; each code is accepted once. An account without one is
+        asked nothing: the sign-in above says which it is.
         """
+        payload = _build_payload(SetEmailPayload, email=email)
         self.login(force=True)
-        payload = _build_payload(
-            SetEmailPayload,
-            email=email,
-            totp_code=self.totp_code().strip() if self.totp_code else None,
-        )
+        if self._totp_in_use and self.totp_code:
+            payload["totp_code"] = self.totp_code().strip()
         body = self._http.post(SET_EMAIL, json_body=payload)
         token = body.pop("token", None) if isinstance(body, dict) else None
         if isinstance(token, str) and token:
