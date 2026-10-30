@@ -704,9 +704,10 @@ def plan_loop_file_target(
     )
     free_floor = node_free_disk_floor_bytes(node_images_present)
     check_planned_loop_file_free_after_restore(what, size, docker_data_bytes, docker_root, free_floor)
-    if total_vram_bytes is not None and not disk_total_clears_vram_floor(xfs_usable_estimate_bytes(size), total_vram_bytes):
+    usable_bytes = xfs_usable_estimate_bytes(size)
+    if total_vram_bytes is not None and not disk_total_clears_vram_floor(usable_bytes, total_vram_bytes):
         raise RuntimeError(
-            f"{what}, about {xfs_usable_estimate_bytes(size) // gib} GiB of filesystem after XFS metadata; the validator "
+            f"{what}, about {usable_bytes // gib} GiB of filesystem after XFS metadata; the validator "
             f"pays no idle incentive for a node whose disk is under {MIN_DISK_TO_VRAM_RATE}x its GPU VRAM "
             f"({round(total_vram_bytes / gib, 1)} GiB here, {round(total_vram_bytes / gib, 1) * MIN_DISK_TO_VRAM_RATE:.1f} GiB "
             "needed). Free space, attach a spare disk, or pass --size"
@@ -763,12 +764,13 @@ def check_planned_loop_file_free_after_restore(
 ):
     """Refuse a planned image file that keeps under the listing floor free once the current Docker data is restored into it."""
     gib = 1024**3
-    free_after_restore = xfs_usable_estimate_bytes(size_bytes) - docker_data_bytes
+    usable_bytes = xfs_usable_estimate_bytes(size_bytes)
+    free_after_restore = usable_bytes - docker_data_bytes
     if free_after_restore >= free_floor_bytes:
         return
     raise RuntimeError(
         f"{what} and keep {max(free_after_restore, 0) // gib} GiB free once the {docker_data_bytes // gib} GiB of Docker "
-        f"data in {docker_root} move into it (after about {(size_bytes - xfs_usable_estimate_bytes(size_bytes)) // gib} GiB "
+        f"data in {docker_root} move into it (after about {(size_bytes - usable_bytes) // gib} GiB "
         f"of XFS metadata); it needs {free_floor_bytes // gib} GiB free: the file is the disk the node reports, "
         f"and the marketplace lists a node only with {NODE_FREE_DISK_GIB} GiB free {node_images_note(free_floor_bytes)}. "
         "Prune Docker (`docker system prune -a --volumes`), free space, attach a spare disk, or pass --size"

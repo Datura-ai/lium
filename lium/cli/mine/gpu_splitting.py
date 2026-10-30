@@ -714,13 +714,13 @@ def _write_sysfs(path: str, value: str):
 def _harden_loop_device(image_file: str):
     # the udev rule does this on every attach; applying it here too exercises the rule and covers an attach
     # whose uevent udev did not process
-    name = run_command(["losetup", "-j", image_file, "-n", "-O", "NAME"], True, True).stdout.strip().splitlines()[0]
-    run_command(["udevadm", "trigger", "--action=change", name], False, True)
+    loop_device = run_command(["losetup", "-j", image_file, "-n", "-O", "NAME"], True, True).stdout.strip().splitlines()[0]
+    run_command(["udevadm", "trigger", "--action=change", loop_device], False, True)
     run_command(["udevadm", "settle"], False, True)
-    _write_sysfs(f"/sys/block/{os.path.basename(name)}/queue/discard_max_bytes", "0")
+    _write_sysfs(f"/sys/block/{os.path.basename(loop_device)}/queue/discard_max_bytes", "0")
     # the kernel refuses direct I/O when the backing disk has 4K logical sectors; it is only a speed option
-    if run_command(["losetup", "--direct-io=on", name], False, True).returncode != 0:
-        console.warning(f"Direct I/O could not be turned on for {name}; the image file works without it, a bit slower")
+    if run_command(["losetup", "--direct-io=on", loop_device], False, True).returncode != 0:
+        console.warning(f"Direct I/O could not be turned on for {loop_device}; the image file works without it, a bit slower")
 
 
 def _write_text_file(path: str, contents: str):
@@ -1006,12 +1006,12 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
         data_restored = False
     if data_restored and original.target == docker_root:
         # the rsync branch starts Docker only once the mount table shows the original filesystem back at the root
-        back = _mount_at_or_none(docker_root)
-        if back is None or back.source != original.source:
+        restored_mount = _mount_at_or_none(docker_root)
+        if restored_mount is None or restored_mount.source != original.source:
             data_restored = False
             errors.append(
                 f"confirm {original.source} is mounted at {docker_root}: "
-                + ("`findmnt` failed" if back is None else f"{back.source} is mounted there")
+                + ("`findmnt` failed" if restored_mount is None else f"{restored_mount.source} is mounted there")
             )
 
     fstab_restored = True
