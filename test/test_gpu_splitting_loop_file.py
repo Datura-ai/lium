@@ -220,6 +220,7 @@ class _Commands(list):
     sysfs: dict[str, str]
     mounted: dict
     docker: dict
+    loop: dict
 
 
 def _loop_file_host(
@@ -238,6 +239,7 @@ def _loop_file_host(
     commands = _Commands()
     mounted = {"on_target": False, "original": True, "query_fails": False}
     docker = {"active": True}
+    loop = {"attached": False}   # the loop device backs the image only while it is mounted somewhere
     docker_root = plan.preflight.docker_state.docker_root_dir
     original_source = plan.preflight.docker_mount.source
 
@@ -255,7 +257,7 @@ def _loop_file_host(
 
     def _host_effect(args):
         if args[:2] == ["losetup", "-j"]:
-            return CommandResult(args=args, stdout="/dev/loop5\n", stderr="", returncode=0)
+            return CommandResult(args=args, stdout="/dev/loop5\n" if loop["attached"] else "", stderr="", returncode=0)
         if args[0] == "mv" and args[1] == docker_root:
             Path(args[1]).rename(args[2])
         if args[0] == "mv" and args[2] == docker_root:
@@ -268,6 +270,7 @@ def _loop_file_host(
             docker["active"] = True
         if args == ["mount", docker_root]:
             mounted["on_target"] = True
+            loop["attached"] = True
         if args[0] == "mount" and args[-2:] == [original_source, docker_root]:
             mounted["original"] = True
         if args == ["umount", docker_root]:
@@ -275,6 +278,7 @@ def _loop_file_host(
                 raise RuntimeError("umount: target is busy")
             if mounted["on_target"]:
                 mounted["on_target"] = False
+                loop["attached"] = False
             else:
                 mounted["original"] = False
         return CommandResult(args=args, stdout="", stderr="", returncode=0)
@@ -296,6 +300,7 @@ def _loop_file_host(
     commands.sysfs = sysfs
     commands.mounted = mounted
     commands.docker = docker
+    commands.loop = loop
     Path(docker_root).mkdir()
     (Path(docker_root) / "image-layers").write_text("x")
     return commands
@@ -695,6 +700,29 @@ def test_execute_setup_masks_docker_only_while_the_data_root_is_renamed_away(mon
         assert commands.index(["systemctl", "stop", "docker"]) < commands.index(mask) < commands.index(["mv", docker_root, plan.backup_dir])
         assert commands.index(["rsync", "-aHAX", "--numeric-ids", f"{plan.backup_dir}/", f"{docker_root}/"]) < commands.index(unmask)
         assert commands[-2:] == [unmask, ["systemctl", "start", "docker"]]
+
+
+def test_execute_setup_rollback_keeps_the_image_when_its_loop_device_is_still_attached(monkeypatch, tmp_path):
+    # the validation mount's umount failed: the file is attached to a loop device although the Docker root is not
+    # mounted on it; unlinked now it would keep its 180 GiB with no name to find them by
+    plan = _loop_file_plan(tmp_path)
+    commands = _loop_file_host(monkeypatch, plan)
+    docker_root = plan.preflight.docker_state.docker_root_dir
+
+    def mount_validation(*_):
+        commands.loop["attached"] = True
+        raise RuntimeError("umount: /mnt/lium-docker-validate: target is busy")
+
+    monkeypatch.setattr(gpu_splitting, "_mount_validation", mount_validation)
+
+    with pytest.raises(RuntimeError, match="target is busy") as exc_info:
+        gpu_splitting._execute_setup(plan)
+
+    assert Path(plan.target.resolved_target).exists()
+    assert f"remove {plan.target.resolved_target}: skipped, still attached to /dev/loop5" in str(exc_info.value)
+    assert f"The XFS image file {plan.target.resolved_target} was kept" in str(exc_info.value)
+    assert (Path(docker_root) / "image-layers").read_text() == "x"
+    assert commands[-1] == ["systemctl", "start", "docker"]
 
 
 def test_execute_setup_rolls_back_when_the_restore_leaves_under_the_listing_floor_free(monkeypatch, tmp_path):

@@ -1012,13 +1012,19 @@ def _rollback_setup(plan: SetupPlan, state: _SetupExecutionState, target_partiti
         _rollback_attempt(errors, f"restore {plan.daemon_json_path}", lambda: _restore_text_file(state.original_daemon_json))
 
     if state.loop_file_created:
-        if unmounted:
-            # an interrupted preallocation has already unlinked the file itself
-            state.loop_file_removed = _rollback_attempt(
-                errors, f"remove {target_partition}", lambda: os.path.lexists(target_partition) and os.unlink(target_partition)
-            )
-        else:
+        if not unmounted:
             errors.append(f"remove {target_partition}: skipped, still mounted at {docker_root}")
+        elif not os.path.lexists(target_partition):
+            state.loop_file_removed = True   # an interrupted preallocation has already unlinked the file itself
+        else:
+            # `unmounted` covers the Docker root only; the validation mount's umount can have failed, and a backing
+            # file unlinked while attached keeps its space with no name to find it by
+            attached = run_command(["losetup", "-j", target_partition, "-n", "-O", "NAME"], False, True)
+            if attached.returncode != 0 or attached.stdout.split():
+                devices = ", ".join(attached.stdout.split()) or "a loop device (`losetup -j` failed)"
+                errors.append(f"remove {target_partition}: skipped, still attached to {devices}; detach it before removing the file")
+            else:
+                state.loop_file_removed = _rollback_attempt(errors, f"remove {target_partition}", lambda: os.unlink(target_partition))
 
     if state.docker_restart_owed:
         if data_restored:
