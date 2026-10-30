@@ -160,6 +160,32 @@ def test_up_cluster_sends_an_idempotency_key(monkeypatch):
     assert order["json"]["enable_jupyter"] is False
 
 
+def test_up_cluster_hands_back_the_backup_notice(monkeypatch):
+    """DAH-5023: the cluster rented without the backup the account cannot fund yet; the answer says so."""
+    client = _Client(
+        routes={("POST", "/executors/cluster/rent"): {"success": True, "pod_ids": ["pod-0", "pod-1"], "backup_notice": "no backup"}},
+        ps_sequence=[_pods([_pod_payload(0), _pod_payload(1)])],
+    )
+    monkeypatch.setattr(client, "cluster_template", lambda: _template("0.0.7"))
+
+    assert client.up_cluster(["exec-0", "exec-1"], name="job").backup_notice == "no backup"
+
+
+def test_up_cluster_confirmed_but_not_listed_keeps_the_backup_notice(monkeypatch):
+    """DAH-5023: the members are rented and billing although no listing shows them, so the notice rides on the error."""
+    from lium.sdk.exceptions import ClusterNotListedError
+
+    client = _Client(
+        routes={("POST", "/executors/cluster/rent"): {"success": True, "pod_ids": ["pod-0", "pod-1"], "backup_notice": "no backup"}},
+        ps_sequence=[[]],
+    )
+    monkeypatch.setattr(client, "cluster_template", lambda: _template("0.0.7"))
+
+    with pytest.raises(ClusterNotListedError) as caught:
+        client.up_cluster(["exec-0", "exec-1"], name="job")
+    assert caught.value.confirmed and caught.value.backup_notice == "no backup"
+
+
 def test_up_cluster_resends_once_with_the_same_key_when_the_backend_honours_it(monkeypatch):
     answers = iter([LiumServerError("Server error: 504"), {"success": True, "pod_ids": ["pod-0", "pod-1"]}])
 
