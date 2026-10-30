@@ -51,14 +51,18 @@ def test_a_node_size_with_no_idle_pay_points_to_gpu_splitting(row, short, expect
     )
 
 
-def _partial_row() -> dict:
+def _partial_row(measured: str = "5 free ports", required: str = "at least 7 free ports") -> dict:
+    # what lium-platform main serves: port_limited_remainder is in SECURE_LISTING_IDLE_PAY_GATING_CODES
     entry = {
         "code": "port_limited_remainder",
         "kind": "idle_pay",
         "title": "Too few free ports for the free GPUs",
-        "message": "The partly rented node has 3 free ports for 7 free splits, one per split: idle pay for 3 of them only.",
-        "fix": "Open more ports to the node.",
-        "gating": False,
+        "message": f"The partly rented node has {measured}, so nobody can rent its free GPUs: no idle pay for them.",
+        "measured": measured,
+        "required": required,
+        "fix": "Open more ports in the node's port range, or wait for the rental to end. The rented GPUs keep earning.",
+        "gating": True,
+        "secure_requirement": True,
     }
     return {"id": "node-1", "blocking_reasons": [entry]}
 
@@ -66,13 +70,18 @@ def _partial_row() -> dict:
 @pytest.mark.parametrize(
     ("short", "expected"),
     [
-        (False, "Partial idle pay: The partly rented node has 3 free ports for 7 free splits"),
+        (False, "Partial idle pay: the free GPUs earn only for 5 free ports; full idle pay needs at least 7 free ports"),
         (True, "node-1: partial idle pay (too few free ports for the free GPUs); open more ports"),
     ],
 )
 def test_a_paying_port_limited_remainder_reads_partial_idle_pay(short, expected):
+    # stand check 404-08: the portal serves it with gating: true; it must not block (no panel, no exit 10)
+    row = _partial_row()
+    assert _blocking.node_reasons(row) == []
+    assert _blocking.blocking_panel(row) is None
+
     with _blocking.console.capture() as captured:
-        print_not_eligible([_partial_row()], short=short)
+        print_not_eligible([row], short=short)
 
     printed = " ".join(captured.get().split())
     assert expected in printed
@@ -80,11 +89,16 @@ def test_a_paying_port_limited_remainder_reads_partial_idle_pay(short, expected)
     assert "no action" not in printed.lower()
 
 
-def test_a_port_limited_remainder_without_a_served_verdict_never_claims_pay():
-    row = _partial_row()
-    del row["blocking_reasons"][0]["gating"]
+@pytest.mark.parametrize(
+    ("measured", "required"),
+    [("2 free ports", "at least 3 free ports"), ("3 free ports", "at least 3 free ports"), (None, None)],
+)
+def test_a_port_limited_remainder_that_pays_no_split_still_blocks(measured, required):
+    row = _partial_row(measured, required)
+    entry = row["blocking_reasons"][0]
+    entry.update(measured=measured, required=required)
 
+    assert [r["code"] for r in _blocking.node_reasons(row)] == ["port_limited_remainder"]
     with _blocking.console.capture() as captured:
         print_not_eligible([row], short=False)
-
-    assert "partial idle pay" not in " ".join(captured.get().split()).lower()
+    assert "partial idle pay" not in captured.get().lower()

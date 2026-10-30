@@ -15,6 +15,7 @@ code: the legacy fallback.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -61,8 +62,11 @@ NOT_GATED: dict[str, tuple[str, str]] = {
 }
 # The one not-gated code with something to do (GPU Splitting): the portal's served fix is printed as is.
 SPLIT_TO_EARN_CODE = "no_unrented_capacity_for_gpu_count"
-# a ``gating: false`` port-limited remainder still pays some free splits: partial idle pay, not "not eligible"
+# A port-limited remainder with 3+ free ports, fewer than its free splits, still pays that many splits
+# (lium-io validator ``_port_limited_remainder``): partial idle pay, whatever the portal's ``gating``
+# (it serves ``gating: true``). Below 3 ports, or at/above the required count, no split pays.
 PARTIAL_PAY_CODE = "port_limited_remainder"
+MIN_PORT_COUNT = 3
 _ALIASES = {
     "price_above_p90": "price_above_market_p90_soft_limit",
     "gpu_model_not_eligible": "gpu_model_not_eligible_for_unrented_incentive",
@@ -356,6 +360,19 @@ def _legacy_gating(code: str) -> bool:
     return code not in NOT_GATED
 
 
+def _port_count(value: Any) -> int | None:
+    match = re.search(r"\d+", str(value or ""))
+    return int(match.group()) if match else None
+
+
+def _partial_pay(code: str, measured: Any, required: Any) -> bool:
+    """A port-limited remainder whose served port counts show some free splits still paid."""
+    if code != PARTIAL_PAY_CODE:
+        return False
+    have, need = _port_count(measured), _port_count(required)
+    return have is not None and need is not None and MIN_PORT_COUNT <= have < need
+
+
 def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
     """One portal ``blocking_reasons`` entry as the fields the renderer prints.
 
@@ -381,13 +398,16 @@ def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
         if secure is None:
             secure = code in LEGACY_GATING_CODES
     requires = entry.get("requires")
+    measured = _first(entry, "measured", "measured_value")
+    required = _first(entry, "required", "required_value")
+    partial = _partial_pay(code, measured, required)
     return {
         "code": code,
         "kind": str(entry.get("kind") or "idle_pay"),
         "title": _first(entry, "title", "message") or code,
         "message": _first(entry, "message"),
-        "measured": _first(entry, "measured", "measured_value"),
-        "required": _first(entry, "required", "required_value"),
+        "measured": measured,
+        "required": required,
         "fix": _first(entry, "fix", "exact_fix", "fix_text", "remediation") or "",
         "fix_command": _first(entry, "fix_command"),
         "verify_command": _first(entry, "verify_command"),
@@ -396,7 +416,8 @@ def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
         "docs_url": _first(entry, "docs_url"),
         "secure": bool(secure),
         "gating": gating,
-        "blocks": gating or not idle_pay,
+        "blocks": (gating or not idle_pay) and not partial,
+        "partial": partial,
         "gating_source": "portal" if served is not None else "cli_legacy_fallback",
     }
 
@@ -577,8 +598,7 @@ def print_not_eligible(rows: Iterable[Any], *, short: bool) -> int:
         if not reasons:
             continue
         nodes += 1
-        # partial only when the portal itself served ``gating: false`` (it does so only while some splits pay)
-        partial = [r for r in reasons if r.get("code") == PARTIAL_PAY_CODE and r.get("gating_source") == "portal"]
+        partial = [r for r in reasons if r["partial"]]
         reasons = [r for r in reasons if r not in partial]
         if short:
             node_id = str(row.get("id") or row.get("executor_id") or "?")
@@ -595,7 +615,12 @@ def print_not_eligible(rows: Iterable[Any], *, short: bool) -> int:
             console.print(Text(f"  ◦ {node_id}: not eligible for idle pay ({words}); {action}", style="dim"))
             continue
         for reason in partial:
-            console.print(Text.from_markup(f"[bold]Partial idle pay:[/] {escape(str(reason['message'] or reason['title']))}"))
+            console.print(
+                Text.from_markup(
+                    f"[bold]Partial idle pay:[/] the free GPUs earn only for {escape(str(reason['measured']))};"
+                    f" full idle pay needs {escape(str(reason['required']))}"
+                )
+            )
             if reason["fix"]:
                 console.print(Padding(Text(str(reason["fix"])), (0, 0, 0, 2)))
         for reason in reasons:
