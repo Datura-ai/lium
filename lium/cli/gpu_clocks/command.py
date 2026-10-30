@@ -1,11 +1,10 @@
 """Gpu-clocks command implementation."""
 
 import json
-from typing import Optional, Tuple
 
 import click
 
-from lium.sdk import Lium, LiumGpuOperationError
+from lium.sdk import GpuClockOutcome, Lium, LiumGpuOperationError
 from lium.cli import ui
 from lium.cli.utils import (
     CliFailure,
@@ -18,7 +17,7 @@ from lium.cli.utils import (
 )
 
 
-def _clock_range(ctx, param, value: Optional[str]):
+def _clock_range(ctx: click.Context, param: click.Parameter, value: str | None) -> tuple[int, int] | None:
     if value is None:
         return None
     try:
@@ -42,7 +41,7 @@ def _clock_range(ctx, param, value: Optional[str]):
 @click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON")
 @handle_errors
 @narrate_on_stderr_under_json
-def gpu_clocks_command(target: str, lock: Optional[Tuple[int, int]], reset: bool, gpus: Tuple[int, ...], json_output: bool):
+def gpu_clocks_command(target: str, lock: tuple[int, int] | None, reset: bool, gpus: tuple[int, ...], json_output: bool):
     """Lock a pod's GPU clocks to a range, or reset them to the default.
 
     Nothing in the pod is stopped.
@@ -69,21 +68,21 @@ def gpu_clocks_command(target: str, lock: Optional[Tuple[int, int]], reset: bool
     except LiumGpuOperationError as e:
         # part of the change ran: show which GPUs are locked and which failed, then fail with the API's code
         if e.gpus and not (json_output or json_output_requested()):
-            _table(e.gpus)
+            _print_gpu_clock_table(e.gpus)
         raise sdk_error_failure(e, {"gpus": [g.to_dict() for g in e.gpus]})
 
     if json_output:
         click.echo(json.dumps(result.to_dict(), sort_keys=True))
     else:
-        _table(result.gpus)
+        _print_gpu_clock_table(result.gpus)
         ui.success(f"GPU clocks {'reset' if reset else 'locked'} on {pod.huid}")  # a failed GPU is a 409, above
 
 
-def _mhz(value) -> str:
+def _mhz(value: int | None) -> str:
     return "" if value is None else str(value)
 
 
-def _table(gpus) -> None:
+def _print_gpu_clock_table(gpus: list[GpuClockOutcome]) -> None:
     ui.table(
         ["GPU", "UUID", "Result", "Min MHz", "Max MHz", "Detail"],
         [[str(g.index), g.uuid, g.result, _mhz(g.applied_min_mhz), _mhz(g.applied_max_mhz), g.detail or ""]

@@ -4,12 +4,15 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import requests
 from click.testing import CliRunner
 
 from lium.cli.cli import cli
 from lium.cli.gpu_clocks import command as gpu_clocks_module
 from lium.cli.utils import EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, EXIT_POD_NOT_FOUND
-from lium.sdk import Config, GpuClockOutcome, GpuClockResult, Lium, LiumError, LiumGpuOperationError
+from lium.sdk import (
+    Config, GpuClockOutcome, GpuClockResult, Lium, LiumError, LiumGpuOperationError, LiumServerError,
+)
 
 OK = {
     "pod_id": "pod-uuid-1", "ok": True,
@@ -63,6 +66,19 @@ def test_sdk_refusal_carries_the_api_code(monkeypatch, status, code):
         Lium(Config(api_key="test")).lock_gpu_clocks(SimpleNamespace(id="p"), 1400, 1800)
     assert exc.value.code == code and len(calls) == 1
     assert not isinstance(exc.value, LiumGpuOperationError)
+
+
+def test_sdk_lost_answer_is_gpu_clocks_unavailable_sent_once(monkeypatch):
+    calls = []
+
+    def fake(*a, **kw):
+        calls.append(1)
+        raise requests.ConnectionError("reset by peer")
+
+    monkeypatch.setattr("lium.sdk.client.requests.request", fake)
+    with pytest.raises(LiumServerError) as exc:
+        Lium(Config(api_key="test")).reset_gpu_clocks(SimpleNamespace(id="p"))
+    assert exc.value.code == "gpu_clocks_unavailable" and "nvidia-smi" in exc.value.hint and len(calls) == 1
 
 
 def test_sdk_partly_failed_lock_keeps_every_gpu_on_the_error(monkeypatch):

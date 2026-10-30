@@ -521,6 +521,7 @@ GPU_RESET_POLL_TIMEOUT_SECONDS = 30
 # the server marks a reset `timeout` after 300 s; wait past that to read its own answer
 GPU_RESET_CLIENT_DEADLINE_SECONDS = 330
 GPU_RESET_MAY_STILL_RUN = "The reset may still finish; check the pod's GPUs (nvidia-smi) before you reset again"
+GPU_CLOCKS_MAY_HAVE_CHANGED = "The clocks may already have changed; check them in the pod (nvidia-smi -q -d CLOCK) before you try again"
 
 
 def _gpu_reset_result(pod: PodInfo, body: Dict[str, Any]) -> GpuResetResult:
@@ -909,7 +910,7 @@ class Lium:
         endpoint: str,
         base_url: Optional[str] = None,
         headers: Optional[Dict[str, str]] = None,
-        gpu_outcome: Callable[[Dict[str, Any]], Any] = _gpu_reset_outcome,
+        parse_gpu_outcome: Callable[[Dict[str, Any]], Any] = _gpu_reset_outcome,
         **kwargs,
     ) -> requests.Response:
         url = f"{base_url or self.config.base_url}/{endpoint.lstrip('/')}"
@@ -925,7 +926,7 @@ class Lium:
             **kwargs,
         )
         try:
-            self._raise_for_status(resp, key=self.config.api_key_description, gpu_outcome=gpu_outcome)
+            self._raise_for_status(resp, key=self.config.api_key_description, parse_gpu_outcome=parse_gpu_outcome)
         except Exception:
             # A streamed response (logs) that is never read keeps its socket
             # until garbage collection; the caller only gets the exception.
@@ -937,14 +938,14 @@ class Lium:
 
     @staticmethod
     def _raise_for_status(
-        resp: requests.Response, key: str = "", gpu_outcome: Callable[[Dict[str, Any]], Any] = _gpu_reset_outcome,
+        resp: requests.Response, key: str = "", parse_gpu_outcome: Callable[[Dict[str, Any]], Any] = _gpu_reset_outcome,
     ) -> None:
         """Map a non-2xx response to the SDK exception for its status.
 
         The single place this mapping lives; every HTTP path (``_request`` and
         the streaming ``logs``) goes through it so a 403 reads the same
         everywhere. ``key`` is the caller's ``api_key_description``; it is named
-        in the 401/403 message so the user knows which key to fix. ``gpu_outcome``
+        in the 401/403 message so the user knows which key to fix. ``parse_gpu_outcome``
         parses each GPU of a 409 GPU-operation failure (the caller's endpoint picks it).
         """
         if resp.ok:
@@ -980,7 +981,7 @@ class Lium:
             # a precheck refusal (``gpus: []``) stays a plain LiumError
             raise LiumGpuOperationError(
                 f"API error 409: {_response_error_message(resp)}",
-                gpus=[gpu_outcome(g) for g in data["gpus"]], container_restarted=data.get("container_restarted"), **context,
+                gpus=[parse_gpu_outcome(g) for g in data["gpus"]], container_restarted=data.get("container_restarted"), **context,
             )
         raise LiumError(f"API error {resp.status_code}: {_response_error_message(resp)}", **context)
 
@@ -2711,19 +2712,35 @@ class Lium:
             LiumGpuOperationError: 409, the change ran and a GPU failed; ``gpus`` says what each GPU has now.
             LiumError: 400/409 with the API's ``code`` (``invalid_clock_range``, ``pod_not_running``,
                 ``clock_lock_not_supported``, ``mig_enabled``, ``operation_in_progress``, ...);
-                ``LiumServerError`` on 503 ``gpu_clocks_unavailable``.
+                ``LiumServerError`` ``gpu_clocks_unavailable`` on a 503 or a lost answer (the clocks may
+                already have changed).
         """
-        return self._gpu_clocks(pod, {"gpu_indices": gpu_indices, "min_mhz": min_mhz, "max_mhz": max_mhz})
+        return self._gpu_clocks(pod, gpu_indices, min_mhz=min_mhz, max_mhz=max_mhz)
 
     def reset_gpu_clocks(self, pod: PodInfo, gpu_indices: Optional[List[int]] = None) -> GpuClockResult:
         """Return a pod's GPU clocks to the driver default; same response and errors as ``lock_gpu_clocks``."""
-        return self._gpu_clocks(pod, {"gpu_indices": gpu_indices, "reset": True})
+        return self._gpu_clocks(pod, gpu_indices, reset=True)
 
-    def _gpu_clocks(self, pod: PodInfo, body: Dict[str, Any]) -> GpuClockResult:
+    def _gpu_clocks(
+        self, pod: PodInfo, gpu_indices: Optional[List[int]],
+        min_mhz: Optional[int] = None, max_mhz: Optional[int] = None, reset: bool = False,
+    ) -> GpuClockResult:
+        body: Dict[str, Any] = {"gpu_indices": gpu_indices}
+        if reset:
+            body["reset"] = True
+        else:
+            body.update(min_mhz=min_mhz, max_mhz=max_mhz)
         # sent once (a lost answer must not stack a second operation); the backend waits up to 60 s
-        answer = self._request(
-            "POST", f"/pods/{pod.id}/gpu-clocks", json=body, retry=False, timeout=90, gpu_outcome=_gpu_clock_outcome,
-        ).json()
+        try:
+            answer = self._request(
+                "POST", f"/pods/{pod.id}/gpu-clocks", json=body, retry=False, timeout=90,
+                parse_gpu_outcome=_gpu_clock_outcome,
+            ).json()
+        except requests.RequestException as e:
+            raise LiumServerError(
+                f"GPU clocks: no answer from the server ({e})", code="gpu_clocks_unavailable",
+                hint=GPU_CLOCKS_MAY_HAVE_CHANGED,
+            ) from e
         return GpuClockResult(
             pod_id=str(answer.get("pod_id", pod.id)), ok=bool(answer.get("ok")),
             gpus=[_gpu_clock_outcome(g) for g in answer.get("gpus") or []],
