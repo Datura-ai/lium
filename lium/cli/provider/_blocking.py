@@ -427,11 +427,16 @@ def _all_reasons(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
     reasons = [normalise(entry) for entry in raw if isinstance(entry, Mapping)]
-    hides_secure = bool(row.get("secure_listing_requires_idle_pay"))
+    # the gate hides only a node listed as Secure (portal: effective_tier, else tier); Spot is never hidden
+    listed_as_secure = str(row.get("effective_tier") or row.get("tier") or "secure").lower() != "spot"
+    hides_secure = bool(row.get("secure_listing_requires_idle_pay")) and listed_as_secure
+    # the portal's idle_pay_state "not_paid" is the cycle's verdict (e.g. the resume hold, whose pause entry
+    # blocking_reasons filters out): nothing is paid, whatever the port counts say
+    not_paid = row.get("idle_pay_state") == "not_paid"
     for reason in reasons:
         # partial pay only when nothing else on the node excludes idle pay, and never over a served
         # gating entry once SECURE_LISTING_REQUIRES_IDLE_PAY hides the Secure node for it
-        if reason["partial"] and (len(reasons) > 1 or (hides_secure and reason["gating"])):
+        if reason["partial"] and (not_paid or len(reasons) > 1 or (hides_secure and reason["gating"])):
             reason.update(partial=False, blocks=reason["gating"] or reason["kind"] != "idle_pay")
     return reasons
 

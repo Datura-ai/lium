@@ -126,3 +126,24 @@ def test_with_secure_listing_requiring_idle_pay_a_gating_remainder_still_blocks(
     with _blocking.console.capture() as captured:
         print_not_eligible([row], short=False)
     assert "partial idle pay" not in captured.get().lower()
+
+
+def test_a_port_limited_remainder_on_a_node_marked_not_paid_claims_no_pay():
+    # resume hold: the cycle paid nothing; its new_rentals_paused entry is filtered from blocking_reasons
+    row = {**_partial_row(), "idle_pay_state": "not_paid"}
+
+    assert [r["code"] for r in _blocking.node_reasons(row)] == ["port_limited_remainder"]
+    with _blocking.console.capture() as captured:
+        print_not_eligible([row], short=False)
+    assert "partial idle pay" not in captured.get().lower()
+
+
+@pytest.mark.parametrize("tier", [{"effective_tier": "spot"}, {"tier": "spot"}, {"tier": "secure", "effective_tier": "spot"}])
+def test_with_secure_listing_requiring_idle_pay_a_spot_node_keeps_partial_idle_pay(tier):
+    # F-9: the gate never hides a Spot node, so its paying remainder is not blocked
+    row = {**_partial_row(), "secure_listing_requires_idle_pay": True, **tier}
+
+    assert _blocking.node_reasons(row) == []
+    with _blocking.console.capture() as captured:
+        print_not_eligible([row], short=False)
+    assert "partial idle pay" in captured.get().lower()
