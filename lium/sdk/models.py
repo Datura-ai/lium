@@ -538,6 +538,30 @@ class GpuResetResult(_Serializable):
 
 
 @dataclass
+class GpuClockOutcome(_Serializable):
+    """One GPU's result of :meth:`Lium.lock_gpu_clocks` / :meth:`Lium.reset_gpu_clocks`.
+
+    ``result`` is ``locked``, ``reset`` or ``failed``; ``applied_*_mhz`` are what the node set after clamping.
+    """
+
+    index: int
+    uuid: str
+    result: str
+    applied_min_mhz: Optional[int] = None
+    applied_max_mhz: Optional[int] = None
+    detail: Optional[str] = None
+
+
+@dataclass
+class GpuClockResult(_Serializable):
+    """What :meth:`Lium.lock_gpu_clocks` / :meth:`Lium.reset_gpu_clocks` return when every GPU succeeded."""
+
+    pod_id: str
+    ok: bool
+    gpus: List[GpuClockOutcome]
+
+
+@dataclass
 class WorkspaceInfo:
     """A workspace (a team with roles and a billing owner) as the API describes it."""
 
