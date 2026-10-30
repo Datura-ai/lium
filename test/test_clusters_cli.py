@@ -274,3 +274,34 @@ def test_clusters_up_confirmed_but_not_listed_keeps_the_backup_notice(monkeypatc
         envelope = json.loads(result.stderr.strip().splitlines()[-1])
         assert envelope["error"]["code"] == "cluster_rented_not_listed"
         assert envelope["data"]["backup_notice"] == NOTICE
+
+
+def _replacement(status: str, created_at: str = "2026-10-30T12:00:00Z") -> PodInfo:
+    pod = _pod(1, status=status)
+    pod.id, pod.created_at, pod.executor = "pod-1b", created_at, _node(5)
+    return pod
+
+
+@pytest.mark.parametrize(
+    "old_status, new_status, carrier",
+    [
+        ("RUNNING", "PENDING", "pod-1"),
+        ("RUNNING", "FAILED", "pod-1"),
+        ("RUNNING", "RUNNING", "pod-1b"),
+        ("DELETING", "RUNNING", "pod-1b"),
+        ("RUNNING", "DELETING", "pod-1"),
+    ],
+    ids=["pending", "failed", "running-old-not-yet-deleting", "running-old-deleting", "replacement-deleting"],
+)
+def test_a_node_being_replaced_is_one_node_in_the_launch_output(old_status, new_status, carrier):
+    # DAH-5442: during a replacement index 1 holds two pods; launchers must still see two nodes, ranks 0 and 1
+    old = _pod(1, status=old_status)
+    old.created_at = "2026-10-30T10:00:00Z"
+    cluster = Cluster(id="c-1", pods=[_pod(0), old, _replacement(new_status)])
+
+    assert [pod.id for pod in cluster.nodes] == ["pod-0", carrier]
+    assert cluster.size == 2
+    assert cluster.hostfile() == "10.42.0.1 slots=8\n10.42.0.2 slots=8\n"
+    assert cluster.torchrun_args(cluster.pods[2]) == (
+        "--nnodes 2 --node_rank 1 --master_addr 10.42.0.1 --master_port 29500"
+    )
