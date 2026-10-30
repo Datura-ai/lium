@@ -10,6 +10,7 @@ import sys
 import traceback
 from pathlib import Path
 import click
+import requests
 from lium.cli.interactive import is_interactive, noninteractive_reason
 from lium.cli.settings import config
 from datetime import datetime, timezone
@@ -364,6 +365,8 @@ _HINTS_BY_CODE: Dict[str, str] = {
     "invalid_gpu_index": "Pass a GPU index that 'nvidia-smi' shows inside the pod, or omit --gpu to reset all",
     "rate_limited": "Wait a few seconds and retry; back off if it repeats",
     "server_error": "Retry; if it persists, re-run with LIUM_DEBUG=1 and report the request",
+    "api_timeout": "Check the network (or LIUM_BASE_URL) and retry; if the command changes something "
+                   "(a rent, a removal, a top-up), check 'lium ps' or 'lium balance' first",
     # Raised by the non-interactive guard (lium/cli/ui.py confirm/prompt, DAH-2883).
     "confirmation_required": "Re-run with --yes",
     "input_required": "Pass the value as an option instead of answering a prompt",
@@ -660,6 +663,11 @@ def handle_errors(func):
                     or default_hint(code, exit_code))
             fail(e.code or code, str(e), exit_code, _api_error_data(e), hint,
                  request_id=e.request_id, prefix="Error: ")
+        except (requests.ConnectionError, requests.Timeout) as e:
+            # the API did not answer once the SDK's retries ran out (``ps()`` in every command):
+            # a network drop, not a bug, so no crash report (DAH-5438)
+            fail("api_timeout", f"The API did not answer ({e.__class__.__name__})", EXIT_API_ERROR,
+                 hint=_HINTS_BY_CODE["api_timeout"], prefix="Error: ")
         except Exception as e:
             # a bug, not a usage or API error: the only branch crash reporting sees (DAH-2057)
             reported = telemetry.report(e)
