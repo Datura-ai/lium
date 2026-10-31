@@ -294,3 +294,19 @@ def test_up_cluster_unanswered_order_stays_uncertain_through_the_cli(monkeypatch
     payload = json.loads(result.output)
     assert payload["error"]["code"] == "cluster_rent_uncertain"
     assert "Retry" not in result.output and "may be rented" in result.output
+
+
+@pytest.mark.parametrize("body, removed", [
+    ({"cluster_id": "c-1", "success": True, "message": "No member pod is left; the cluster is DELETED", "pods": []}, True),
+    ({"cluster_id": "c-1", "success": False, "pods": []}, False),
+    ({"cluster_id": "c-1", "success": True}, False),
+])
+def test_rm_cluster_repeated_delete_with_no_member_left_is_done(body, removed):
+    """DAH-5486: a repeated delete answers 200, success true, no rows; anything else without rows still raises."""
+    from lium.sdk.models import Cluster
+    client = _Client(routes={("DELETE", "/clusters/c-1"): body})
+    if removed:
+        assert client.rm_cluster(Cluster(id="c-1", pods=[])) == []
+    else:
+        with pytest.raises(LiumError, match="without per-member results"):
+            client.rm_cluster(Cluster(id="c-1", pods=[]))

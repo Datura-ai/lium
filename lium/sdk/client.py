@@ -3045,7 +3045,8 @@ class Lium:
         cluster id, checks ownership and API-key scope on every one of them before the first
         delete, then tears them down one by one; a member that failed is reported with ``success``
         false and its error text while the others are still removed, so nothing is left billing by
-        accident. Call again to retry the members that failed. The pinned ssh host key of every
+        accident. Call again to retry the members that failed; once no member is left the call returns
+        ``[]`` (a repeated delete is not an error). The pinned ssh host key of every
         member the server accepted is dropped, as :meth:`rm` does for a single pod.
 
         There is no per-pod fallback: a 404 from the route removes nothing and is raised.
@@ -3061,6 +3062,8 @@ class Lium:
         """
         data = self._request("DELETE", f"/clusters/{quote(str(cluster.id), safe='')}").json()
         rows = data.get("pods") if isinstance(data, dict) else None
+        if rows == [] and data.get("success") is True:
+            return []   # a repeated delete: no member is left, the cluster is already being (or was) removed
         if not isinstance(rows, list) or not rows:
             raise LiumError(f"Cluster {cluster.id}: the API answered without per-member results ({data!r})")
         results: List[Dict[str, Any]] = []
