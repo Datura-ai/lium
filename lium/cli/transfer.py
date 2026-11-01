@@ -2,7 +2,6 @@
 
 import json
 import math
-import shlex
 import uuid
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Optional
@@ -25,8 +24,8 @@ BILLING_KEY_HINT = ("Transfers need an API key with the billing scope: 'lium wor
 @click.option("--note", default=None, metavar="TEXT", help="A note the recipient sees")
 @click.option(
     "--idempotency-key", default=None, metavar="KEY",
-    help="Repeat a transfer whose answer was lost with the key it printed, once the Billing page shows no such "
-         "transfer. Omitted, a fresh one is made",
+    help="The Idempotency-Key header to send; a repeat of an answered transfer with it returns that answer. "
+         "Omitted, a fresh one is made",
 )
 @click.option("--yes", "-y", is_flag=True, help="Transfer without asking first (required with --json)")
 @click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON")
@@ -40,8 +39,8 @@ def transfer_command(to: str, amount: float, note: Optional[str], idempotency_ke
     yourself), insufficient_balance, recipient_unavailable (no such account). If the answer is lost
     (timeout, dropped connection, 5xx) the transfer may have happened: exit 6 with
     transfer_outcome_unknown and the idempotency key; check transfer history on the Billing page of
-    the account that owns the billing key, and repeat only if it is not there, and only with
-    `--idempotency-key <key>`. Never repeat it with a new key. AMOUNT is rounded to the cent as the
+    the account that owns the billing key and, if it is not there, contact support with the key.
+    Do not run it again, with that key or a new one. AMOUNT is rounded to the cent as the
     API does, before the question.
 
     \b
@@ -72,18 +71,16 @@ def transfer_command(to: str, amount: float, note: Optional[str], idempotency_ke
     try:
         result = billing_client().transfer_credits(to, amount, description=note, idempotency_key=key)
     except LiumChargeOutcomeUnknownError as e:
-        retry = f"lium transfer {shlex.quote(to)} {amount:.2f} --idempotency-key {shlex.quote(key)} --yes"
-        if note:
-            retry += f" --note {shlex.quote(note)}"
+        # no re-run advice: a backend that frees the key on a raised 500 would move the credit again
         raise CliFailure(
             "transfer_outcome_unknown",
             f"The transfer may or may not have happened. Idempotency key: {key}",
             EXIT_PERMISSION_DENIED,
             data={"idempotency_key": key, "amount": amount, "to": to,
                   **({"request_id": e.request_id} if e.request_id else {})},
-            hint="Check transfer history on the Billing page of the account that owns the billing key. If the "
-                 f"transfer is not there, re-run '{retry}' within 24 h, with this same key. "
-                 "If the outcome remains unclear, contact support; do not send it with a new key.",
+            hint="Do not run it again, with this key or a new one. Check transfer history on the Billing page of the "
+                 "account that owns the billing key; if the transfer is not there, contact support with idempotency "
+                 f"key {key}.",
         )
     except LiumScopeError as e:
         raise CliFailure("missing_scope", str(e), EXIT_PERMISSION_DENIED,

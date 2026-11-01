@@ -156,16 +156,14 @@ def test_cli_lost_answer_is_outcome_unknown_with_the_key(client, answer):
 
 
 @responses.activate
-def test_cli_lost_answer_retry_hint_keeps_the_note(client):
-    # a retry without the note has a different body: the backend answers idempotency_key_reused, not the first transfer
+def test_cli_lost_answer_advises_no_rerun_only_billing_and_support(client):
+    # until every backend keeps the key pending on a raised 500, a same-key re-run can move the credit again
     responses.post(URL, body=requests.Timeout("read timed out"))
 
     result = _run("friend@example.com", "25", "--note", "rent split", "--idempotency-key", "k-3", "--yes", "--json")
     hint = json.loads(result.stderr.strip().splitlines()[-1])["error"]["hint"]
-    assert "--idempotency-key k-3 --yes --note 'rent split'" in hint
-    assert "within 24 h" in hint
-    # no "moves it once" promise: a backend that frees the key on a raised 500 would run it again
-    assert "twice" not in hint and "once" not in hint
+    assert "lium transfer" not in hint and "once" not in hint and "twice" not in hint
+    assert "Do not run it again" in hint and "Billing page" in hint and "contact support" in hint and "k-3" in hint
 
 
 @pytest.mark.parametrize("answer", [requests.Timeout("read timed out"), 502, 409])
@@ -185,7 +183,7 @@ def test_sdk_lost_or_unrecorded_answer_is_outcome_unknown_with_the_key(client, a
 
     assert raised.value.code == "transfer_outcome_unknown"
     assert raised.value.idempotency_key == "k-9"
-    assert "lium ps" not in (raised.value.hint or "") and "new key" in raised.value.hint
+    assert "lium ps" not in (raised.value.hint or "") and "contact support" in raised.value.hint
     assert "moves the credit once" not in str(raised.value)
 
 
