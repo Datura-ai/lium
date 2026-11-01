@@ -11,7 +11,7 @@ from click.testing import CliRunner
 from lium.cli.cli import cli
 from lium.cli import transfer as transfer_module
 from lium.cli.utils import EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, EXIT_PERMISSION_DENIED
-from lium.sdk import Config, Lium
+from lium.sdk import Config, Lium, LiumChargeOutcomeUnknownError
 
 URL = "https://lium.io/api/users/me/transfer-credits"
 OK = {"sender_balance": 75.0, "transfer_id": "t-1"}
@@ -164,3 +164,61 @@ def test_cli_lost_answer_retry_hint_keeps_the_note(client):
     hint = json.loads(result.stderr.strip().splitlines()[-1])["error"]["hint"]
     assert "--idempotency-key k-3 --yes --note 'rent split'" in hint
     assert "within 24 h" in hint
+
+
+@pytest.mark.parametrize("answer", [requests.Timeout("read timed out"), 502, 409])
+@responses.activate
+def test_sdk_lost_or_unrecorded_answer_is_outcome_unknown_with_the_key(client, answer):
+    # 409 idempotency_outcome_unknown: a same-key repeat of a transfer whose answer the server could not record
+    if answer == 409:
+        responses.post(URL, status=409, json=_error("idempotency_outcome_unknown", "Answer not recorded",
+                                                    hint="Check `lium ps` before sending with a new key"))
+    elif isinstance(answer, int):
+        responses.post(URL, json=_error("server_error", "bad gateway"), status=answer)
+    else:
+        responses.post(URL, body=answer)
+
+    with pytest.raises(LiumChargeOutcomeUnknownError) as raised:
+        client.transfer_credits("friend@example.com", 25, idempotency_key="k-9")
+
+    assert raised.value.code == "transfer_outcome_unknown"
+    assert raised.value.idempotency_key == "k-9"
+    assert "lium ps" not in (raised.value.hint or "") and "new key" in raised.value.hint
+
+
+@responses.activate
+def test_cli_unrecorded_answer_keeps_exit_6_and_the_key(client):
+    responses.post(URL, status=409, json=_error("idempotency_outcome_unknown", "Answer not recorded",
+                                                hint="Check `lium ps` before sending with a new key"))
+
+    result = _run("friend@example.com", "25", "--idempotency-key", "k-9", "--yes", "--json")
+
+    assert result.exit_code == EXIT_PERMISSION_DENIED, result.output
+    last = json.loads(result.stderr.strip().splitlines()[-1])
+    assert last["error"]["code"] == "transfer_outcome_unknown"
+    assert last["data"]["idempotency_key"] == "k-9"
+    assert "Billing page" in last["error"]["hint"] and "lium balance" not in last["error"]["hint"]
+
+
+@pytest.mark.parametrize("typed, cents", [("0.015", "0.02"), ("1.005", "1.01"), ("2.675", "2.68"), ("25", "25.00")])
+@responses.activate
+def test_cli_confirms_sends_and_reports_the_amount_the_api_debits(client, monkeypatch, typed, cents):
+    monkeypatch.setattr(transfer_module.ui, "is_interactive", lambda: True)
+    responses.post(URL, json=OK)
+
+    result = _run("friend@example.com", typed, input="y\n")
+    as_json = _run("friend@example.com", typed, "--yes", "--json")
+
+    assert result.exit_code == 0 and as_json.exit_code == 0, result.output + as_json.output
+    assert f"Transfer ${cents} to friend@example.com?" in result.output
+    assert f"Sent ${cents} to friend@example.com" in result.output
+    assert json.loads(responses.calls[0].request.body)["amount"] == float(cents)
+    assert json.loads(as_json.stdout)["amount"] == float(cents)
+
+
+@pytest.mark.parametrize("typed", ["0.004", "1e400"])
+def test_cli_refuses_an_amount_below_a_cent_or_too_large_before_sending(client, typed):
+    with responses.RequestsMock() as mocked:
+        result = _run("friend@example.com", typed, "--yes", "--json")
+    assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
+    assert len(mocked.calls) == 0

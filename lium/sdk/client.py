@@ -99,6 +99,24 @@ from .utils import (
 from .api_keys import ApiKeysClient
 from .workspaces import WorkspacesClient
 
+
+TRANSFER_OUTCOME_UNKNOWN_HINT = (
+    "Check transfer history on the Billing page of the account that owns the billing key. If the outcome "
+    "remains unclear, contact support; do not send it with a new key."
+)
+
+
+def _transfer_outcome_unknown(key: str, exc: Exception) -> LiumChargeOutcomeUnknownError:
+    return LiumChargeOutcomeUnknownError(
+        "The transfer may or may not have happened: its answer was lost or not recorded. A repeat with the same "
+        "idempotency_key moves the credit once.",
+        idempotency_key=key,
+        code="transfer_outcome_unknown",
+        hint=TRANSFER_OUTCOME_UNKNOWN_HINT,
+        request_id=getattr(exc, "request_id", None),
+    )
+
+
 # The backend feature `Lium.rent` looks for on GET /version before using POST /executors/rent-by-spec.
 RENT_BY_SPEC = "rent_by_spec"
 # The backend feature that says GET /pods/{id}/record is served (lium-platform#1204).
@@ -5954,8 +5972,10 @@ class Lium:
         Raises:
             LiumError: ``code`` ``self_transfer`` (400), ``insufficient_balance`` (402) or
                 ``recipient_unavailable`` (409, a missing or deleted account).
-            LiumChargeOutcomeUnknownError: timeout, dropped connection or 5xx after the POST — the
-                transfer may have happened; repeat only with ``idempotency_key`` from the error.
+            LiumChargeOutcomeUnknownError: timeout, dropped connection, 5xx after the POST, or a 409
+                ``idempotency_outcome_unknown`` on a repeat — the transfer may have happened; check transfer
+                history on the Billing page of the account owning the key, repeat only with ``idempotency_key``
+                from the error, never with a new key.
         """
         if not math.isfinite(amount) or amount <= 0:
             raise LiumError("amount must be a positive, finite number of dollars.", code="invalid_arguments")
@@ -5969,14 +5989,12 @@ class Lium:
             ).json()
         except (LiumServerError, requests.RequestException) as exc:
             # the debit may have committed before the answer was lost: never "nothing happened"
-            raise LiumChargeOutcomeUnknownError(
-                "The transfer may or may not have happened: the API did not answer after it was posted. "
-                "Check the balance before trying again; a repeat with the same idempotency_key moves the "
-                "credit once.",
-                idempotency_key=key,
-                code="transfer_outcome_unknown",
-                request_id=getattr(exc, "request_id", None),
-            ) from exc
+            raise _transfer_outcome_unknown(key, exc) from exc
+        except LiumError as exc:
+            # the server's own "a transfer under this key may have happened": its rent-worded hint must not show
+            if exc.code != "idempotency_outcome_unknown":
+                raise
+            raise _transfer_outcome_unknown(key, exc) from exc
         body.setdefault("idempotency_key", key)
         return body
 

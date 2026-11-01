@@ -4,6 +4,7 @@ import json
 import math
 import shlex
 import uuid
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Optional
 
 import click
@@ -38,8 +39,10 @@ def transfer_command(to: str, amount: float, note: Optional[str], idempotency_ke
     `billing` scope. Errors exit non-zero with the API's code: self_transfer (sending to
     yourself), insufficient_balance, recipient_unavailable (no such account). If the answer is lost
     (timeout, dropped connection, 5xx) the transfer may have happened: exit 6 with
-    transfer_outcome_unknown and the idempotency key; check `lium balance`, then re-run with
-    `--idempotency-key <key>`, which cannot move the money twice.
+    transfer_outcome_unknown and the idempotency key; check transfer history on the Billing page of
+    the account that owns the billing key, and repeat only with `--idempotency-key <key>`, which
+    cannot move the money twice. Never repeat it with a new key. AMOUNT is rounded to the cent as the
+    API does, before the question.
 
     \b
     Examples:
@@ -48,6 +51,13 @@ def transfer_command(to: str, amount: float, note: Optional[str], idempotency_ke
     """
     if not math.isfinite(amount) or amount <= 0:
         raise CliFailure("invalid_arguments", "AMOUNT must be a positive number of dollars.", EXIT_CONFIGURATION_ERROR)
+    # the API's own rounding (str() first, half up): the confirmed, sent, debited and printed amounts agree
+    try:
+        amount = float(Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    except InvalidOperation:
+        raise CliFailure("invalid_arguments", "AMOUNT is too large.", EXIT_CONFIGURATION_ERROR)
+    if amount < 0.01:
+        raise CliFailure("invalid_arguments", "AMOUNT must be at least $0.01.", EXIT_CONFIGURATION_ERROR)
     question = f"Transfer ${amount:,.2f} to {to}? This cannot be undone."
     if not yes:
         if json_output:
@@ -62,7 +72,7 @@ def transfer_command(to: str, amount: float, note: Optional[str], idempotency_ke
     try:
         result = billing_client().transfer_credits(to, amount, description=note, idempotency_key=key)
     except LiumChargeOutcomeUnknownError as e:
-        retry = f"lium transfer {shlex.quote(to)} {format(amount, '.17g')} --idempotency-key {shlex.quote(key)} --yes"
+        retry = f"lium transfer {shlex.quote(to)} {amount:.2f} --idempotency-key {shlex.quote(key)} --yes"
         if note:
             retry += f" --note {shlex.quote(note)}"
         raise CliFailure(
@@ -71,8 +81,9 @@ def transfer_command(to: str, amount: float, note: Optional[str], idempotency_ke
             EXIT_PERMISSION_DENIED,
             data={"idempotency_key": key, "amount": amount, "to": to,
                   **({"request_id": e.request_id} if e.request_id else {})},
-            hint=f"Check 'lium balance' or 'lium billing history', then re-run '{retry}': "
-                 "within 24 h the same key cannot move the money twice. Do not retry without the key.",
+            hint="Check transfer history on the Billing page of the account that owns the billing key. If the "
+                 f"transfer is not there, re-run '{retry}': within 24 h the same key cannot move the money twice. "
+                 "If the outcome remains unclear, contact support; do not send it with a new key.",
         )
     except LiumScopeError as e:
         raise CliFailure("missing_scope", str(e), EXIT_PERMISSION_DENIED,
