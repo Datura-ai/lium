@@ -5958,24 +5958,26 @@ class Lium:
         """Move credit from this account's balance to another account (``POST /users/me/transfer-credits``).
 
         The key must hold the ``billing`` scope (:class:`LiumScopeError` otherwise). The request is sent
-        once with an ``Idempotency-Key`` header — yours, or a fresh ``uuid4`` — so a repeat with the same
-        key of a transfer that was answered returns that answer. After a lost answer do not repeat it: check
-        the Billing page and contact support.
+        once with an ``Idempotency-Key`` header — yours, or a fresh ``uuid4``. The platform keeps a transfer's
+        recorded answer for 24 h: within that time an identical request with the same key gets that answer
+        back; later the key is forgotten and a repeat transfers again. After a lost answer do not repeat it:
+        check the Billing page and contact support.
 
         Args:
             to: The recipient's e-mail (anything with an ``@``) or account id.
             amount: USD, at least $0.01.
             description: A note the recipient sees.
-            idempotency_key: Repeat with the same key to get the first transfer back. Omitted: the SDK makes one.
+            idempotency_key: Sent as ``Idempotency-Key``; within 24 h an identical repeat of an answered transfer
+                gets its answer back, later it transfers again. Omitted: the SDK makes one.
 
         Returns:
             ``{"sender_balance", "transfer_id", "idempotency_key"}``.
 
         Raises:
-            LiumError: ``code`` ``self_transfer`` (400), ``insufficient_balance`` (402) or
-                ``recipient_unavailable`` (409, a missing or deleted account).
+            LiumError: ``code`` ``self_transfer`` (400), ``insufficient_balance`` (402), ``not_found`` (404, no
+                account with that e-mail or id) or ``recipient_unavailable`` (409, a deleted or blocked account).
             LiumChargeOutcomeUnknownError: timeout, dropped connection, 5xx after the POST, or a 409
-                ``idempotency_outcome_unknown`` on a repeat — the transfer may have happened; check transfer
+                ``idempotency_outcome_unknown`` / ``idempotency_in_progress`` on a repeat — the transfer may have happened; check transfer
                 history on the Billing page of the account owning the key and, if it is not there, contact support
                 with ``idempotency_key`` from the error. Do not repeat it, with that key or a new one.
         """
@@ -5994,7 +5996,9 @@ class Lium:
             raise _transfer_outcome_unknown(key, exc) from exc
         except LiumError as exc:
             # the server's own "a transfer under this key may have happened": its rent-worded hint must not show
-            if exc.code != "idempotency_outcome_unknown":
+            # in progress: the first call may still commit, and a backend that frees its key on a raised 500 would
+            # run a retry again, so it is just as unresolved
+            if exc.code not in ("idempotency_outcome_unknown", "idempotency_in_progress"):
                 raise
             raise _transfer_outcome_unknown(key, exc) from exc
         body.setdefault("idempotency_key", key)

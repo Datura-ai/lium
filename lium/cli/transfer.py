@@ -24,8 +24,8 @@ BILLING_KEY_HINT = ("Transfers need an API key with the billing scope: 'lium wor
 @click.option("--note", default=None, metavar="TEXT", help="A note the recipient sees")
 @click.option(
     "--idempotency-key", default=None, metavar="KEY",
-    help="The Idempotency-Key header to send; a repeat of an answered transfer with it returns that answer. "
-         "Omitted, a fresh one is made",
+    help="The Idempotency-Key header to send. Within 24 h an identical repeat of an answered transfer gets "
+         "that answer back; later the key is forgotten and a repeat transfers again. Omitted, a fresh one is made",
 )
 @click.option("--yes", "-y", is_flag=True, help="Transfer without asking first (required with --json)")
 @click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON")
@@ -36,8 +36,9 @@ def transfer_command(to: str, amount: float, note: Optional[str], idempotency_ke
 
     Asks first; `--yes` skips the question and `--json` needs it. The API key must hold the
     `billing` scope. Errors exit non-zero with the API's code: self_transfer (sending to
-    yourself), insufficient_balance, recipient_unavailable (no such account). If the answer is lost
-    (timeout, dropped connection, 5xx) the transfer may have happened: exit 6 with
+    yourself), insufficient_balance, not_found (no account with that e-mail or id), recipient_unavailable
+    (a deleted or blocked account). If the answer is lost (timeout, dropped connection, 5xx, Ctrl-C,
+    or the same key still in progress) the transfer may have happened: exit 6 with
     transfer_outcome_unknown and the idempotency key; check transfer history on the Billing page of
     the account that owns the billing key and, if it is not there, contact support with the key.
     Do not run it again, with that key or a new one. AMOUNT is rounded to the cent as the
@@ -70,14 +71,16 @@ def transfer_command(to: str, amount: float, note: Optional[str], idempotency_ke
     key = idempotency_key or str(uuid.uuid4())  # made here so a lost answer can still name it
     try:
         result = billing_client().transfer_credits(to, amount, description=note, idempotency_key=key)
-    except LiumChargeOutcomeUnknownError as e:
-        # no re-run advice: a backend that frees the key on a raised 500 would move the credit again
+    except (LiumChargeOutcomeUnknownError, KeyboardInterrupt) as e:
+        # Ctrl-C after the POST may follow a commit too. No re-run advice: a backend that frees the key on a
+        # raised 500 would move the credit again
+        request_id = getattr(e, "request_id", None)
         raise CliFailure(
             "transfer_outcome_unknown",
             f"The transfer may or may not have happened. Idempotency key: {key}",
             EXIT_PERMISSION_DENIED,
             data={"idempotency_key": key, "amount": amount, "to": to,
-                  **({"request_id": e.request_id} if e.request_id else {})},
+                  **({"request_id": request_id} if request_id else {})},
             hint="Do not run it again, with this key or a new one. Check transfer history on the Billing page of the "
                  "account that owns the billing key; if the transfer is not there, contact support with idempotency "
                  f"key {key}.",

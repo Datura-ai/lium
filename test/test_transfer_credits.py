@@ -223,3 +223,79 @@ def test_cli_refuses_an_amount_below_a_cent_or_too_large_before_sending(client, 
         result = _run("friend@example.com", typed, "--yes", "--json")
     assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
     assert len(mocked.calls) == 0
+
+
+@pytest.mark.parametrize("code", ["idempotency_outcome_unknown", "idempotency_in_progress"])
+@responses.activate
+def test_an_unresolved_same_key_answer_keeps_the_key_and_sends_no_second_post(client, code):
+    # the first call timed out (it may commit); the same-key repeat finds it unresolved: pending, or still running
+    responses.post(URL, body=requests.Timeout("read timed out"))
+    responses.post(URL, status=409, json=_error(code, "unresolved", hint="retry in a moment"),
+                   headers={"Retry-After": "1"})
+
+    first = _run("friend@example.com", "25", "--idempotency-key", "k-5", "--yes", "--json")
+    again = _run("friend@example.com", "25", "--idempotency-key", "k-5", "--yes", "--json")
+
+    for result in (first, again):
+        assert result.exit_code == EXIT_PERMISSION_DENIED, result.output
+        last = json.loads(result.stderr.strip().splitlines()[-1])
+        assert last["error"]["code"] == "transfer_outcome_unknown"
+        assert last["data"]["idempotency_key"] == "k-5"
+        assert "retry" not in last["error"]["hint"].lower() and "Do not run it again" in last["error"]["hint"]
+    assert len(responses.calls) == 2  # one POST per run, never a retry of its own
+
+
+@responses.activate
+def test_ctrl_c_while_waiting_is_outcome_unknown_with_the_key_and_one_post(client):
+    def committed_then_interrupted(_request):
+        raise KeyboardInterrupt  # the server committed; the renter pressed Ctrl-C before the answer came
+
+    responses.add_callback(responses.POST, URL, callback=committed_then_interrupted)
+
+    result = _run("friend@example.com", "25", "--idempotency-key", "k-6", "--yes", "--json")
+
+    assert result.exit_code == EXIT_PERMISSION_DENIED, result.output
+    last = json.loads(result.stderr.strip().splitlines()[-1])
+    assert last["error"]["code"] == "transfer_outcome_unknown"
+    assert last["data"]["idempotency_key"] == "k-6"
+    assert "lium transfer" not in last["error"]["hint"]
+    assert len(responses.calls) == 1
+
+
+@pytest.mark.parametrize("recipient", ["missing@example.com", "3f1c0000-0000-0000-0000-00000000dead"])
+@pytest.mark.parametrize(
+    "status, code",
+    [(404, "not_found"), (409, "recipient_unavailable")],
+    ids=["missing", "deleted-or-blocked"],
+)
+@responses.activate
+def test_cli_recipient_refusals_pass_the_api_code_through(client, recipient, status, code):
+    responses.post(URL, status=status, json=_error(code, "refused"))
+
+    result = _run(recipient, "25", "--yes", "--json")
+
+    assert result.exit_code != 0, result.output
+    assert json.loads(result.stderr.strip().splitlines()[-1])["error"]["code"] == code
+    assert len(responses.calls) == 1
+
+
+@pytest.mark.parametrize("stored", ["retained", "pending"])
+@responses.activate
+def test_sdk_same_key_repeat_contract(client, stored):
+    # retained: the platform replays the recorded answer; pending: it refuses, and the SDK keeps it unresolved.
+    # An expired record (after 24 h) is forgotten server-side and the repeat transfers again: the help says so.
+    if stored == "retained":
+        responses.post(URL, json=OK, headers={"Idempotent-Replayed": "true"})
+        assert client.transfer_credits("friend@example.com", 25, idempotency_key="k-8")["transfer_id"] == "t-1"
+    else:
+        responses.post(URL, status=409, json=_error("idempotency_outcome_unknown", "pending"))
+        with pytest.raises(LiumChargeOutcomeUnknownError) as raised:
+            client.transfer_credits("friend@example.com", 25, idempotency_key="k-8")
+        assert raised.value.idempotency_key == "k-8"
+
+
+def test_the_replay_promise_is_limited_to_24_hours_on_both_surfaces():
+    help_text = CliRunner().invoke(cli, ["transfer", "--help"]).output
+    assert "Within 24 h" in help_text and "transfers again" in help_text
+    doc = Lium.transfer_credits.__doc__
+    assert "24 h" in doc and "transfers again" in doc
