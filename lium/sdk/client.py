@@ -5976,8 +5976,8 @@ class Lium:
                 ``recipient_unavailable`` (409, a missing or deleted account).
             LiumChargeOutcomeUnknownError: timeout, dropped connection, 5xx after the POST, or a 409
                 ``idempotency_outcome_unknown`` on a repeat — the transfer may have happened; check transfer
-                history on the Billing page of the account owning the key, repeat only with ``idempotency_key``
-                from the error, never with a new key.
+                history on the Billing page of the account owning the key and, if it is not there, contact support
+                with ``idempotency_key`` from the error. Do not repeat it, with that key or a new one.
         """
         if not math.isfinite(amount) or amount <= 0:
             raise LiumError("amount must be a positive, finite number of dollars.", code="invalid_arguments")

@@ -300,7 +300,8 @@ class LiumChargeOutcomeUnknownError(LiumError):
     charges the card before it answers, so the charge **may have gone through**: check the balance
     (or the transactions) before trying again. A repeat with the same ``idempotency_key`` returns the
     first charge, and the card is charged once; the key is on the exception.
-    :meth:`Lium.transfer_credits` raises it too (``code`` ``transfer_outcome_unknown``).
+    :meth:`Lium.transfer_credits` raises it too (``code`` ``transfer_outcome_unknown``); a transfer is not
+    repeated, with that key or a new one: check the Billing page and contact support with the key.
     """
 
     def __init__(
