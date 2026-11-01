@@ -11,7 +11,7 @@ from click.testing import CliRunner
 from lium.cli.cli import cli
 from lium.cli import transfer as transfer_module
 from lium.cli.utils import EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, EXIT_PERMISSION_DENIED
-from lium.sdk import Config, Lium, LiumChargeOutcomeUnknownError, LiumError
+from lium.sdk import Config, Lium, LiumChargeOutcomeUnknownError, LiumError, LiumTransferInterruptedError
 
 URL = "https://lium.io/api/users/me/transfer-credits"
 OK = {"sender_balance": 75.0, "transfer_id": "t-1"}
@@ -337,13 +337,17 @@ def test_sdk_same_key_answers_by_stored_record_and_body(client, stored, body, an
 
 
 @responses.activate
-def test_sdk_ctrl_c_after_the_post_keeps_the_generated_key(client):
+def test_sdk_ctrl_c_after_the_post_stays_an_interrupt_and_keeps_the_generated_key(client):
     responses.add_callback(responses.POST, URL, callback=lambda _request: (_ for _ in ()).throw(KeyboardInterrupt))
 
-    with pytest.raises(LiumChargeOutcomeUnknownError) as raised:
-        client.transfer_credits("friend@example.com", 25)
+    with pytest.raises(KeyboardInterrupt) as raised:
+        try:
+            client.transfer_credits("friend@example.com", 25)
+        except Exception:  # a script's broad handler must not swallow the abort
+            pytest.fail("Ctrl-C was turned into an Exception")
 
     sent = responses.calls[0].request.headers["Idempotency-Key"]
+    assert isinstance(raised.value, LiumTransferInterruptedError)
     assert raised.value.code == "transfer_outcome_unknown"
     assert raised.value.idempotency_key == sent
     assert "do not send it again" in raised.value.hint.lower()

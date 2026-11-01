@@ -42,6 +42,7 @@ from .exceptions import (
     LiumBudgetExceededError,
     LiumCardTopUpError,
     LiumChargeOutcomeUnknownError,
+    LiumTransferInterruptedError,
     LiumRentOutcomeUnknownError,
     LiumError,
     LiumGpuOperationError,
@@ -107,7 +108,7 @@ TRANSFER_OUTCOME_UNKNOWN_HINT = (
 )
 
 
-def _transfer_outcome_unknown(key: str, exc: BaseException) -> LiumChargeOutcomeUnknownError:
+def _transfer_outcome_unknown(key: str, exc: Exception) -> LiumChargeOutcomeUnknownError:
     return LiumChargeOutcomeUnknownError(
         "The transfer may or may not have happened: its answer was lost or not recorded. Do not repeat it; check the "
         "Billing page and contact support with the idempotency_key.",
@@ -5978,7 +5979,9 @@ class Lium:
                 account with that e-mail or id) or ``recipient_unavailable`` (409, a deleted or blocked account).
             LiumChargeOutcomeUnknownError: timeout, dropped connection, 5xx after the POST, or a 409
                 ``idempotency_outcome_unknown`` / ``idempotency_in_progress`` / ``idempotency_key_reused`` on a
-                repeat, or ``KeyboardInterrupt`` while waiting — the transfer may have happened; check transfer
+                repeat.
+            LiumTransferInterruptedError: Ctrl-C while waiting for the answer; a ``KeyboardInterrupt`` with the
+                same ``code``, ``idempotency_key`` and ``hint``. — the transfer may have happened; check transfer
                 history on the Billing page of the account owning the key and, if it is not there, contact support
                 with ``idempotency_key`` from the error. Do not repeat it, with that key or a new one.
         """
@@ -5992,9 +5995,15 @@ class Lium:
             body = self._request(
                 "POST", "/users/me/transfer-credits", json=payload, headers={**self.headers, "Idempotency-Key": key}
             ).json()
-        except (LiumServerError, requests.RequestException, KeyboardInterrupt) as exc:
-            # the debit may have committed before the answer was lost (or Ctrl-C ended the wait): never "nothing
-            # happened", and the key the caller may not have chosen is kept
+        except KeyboardInterrupt as exc:
+            # still a KeyboardInterrupt, so the abort propagates, but it carries the key the caller may not have chosen
+            raise LiumTransferInterruptedError(
+                "Interrupted after the transfer was posted: it may or may not have happened.",
+                idempotency_key=key,
+                hint=TRANSFER_OUTCOME_UNKNOWN_HINT,
+            ) from exc
+        except (LiumServerError, requests.RequestException) as exc:
+            # the debit may have committed before the answer was lost: never "nothing happened"
             raise _transfer_outcome_unknown(key, exc) from exc
         except LiumError as exc:
             # the server's own "a transfer under this key may have happened": its rent-worded hint must not show
