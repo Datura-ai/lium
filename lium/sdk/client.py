@@ -108,8 +108,8 @@ TRANSFER_OUTCOME_UNKNOWN_HINT = (
 
 def _transfer_outcome_unknown(key: str, exc: Exception) -> LiumChargeOutcomeUnknownError:
     return LiumChargeOutcomeUnknownError(
-        "The transfer may or may not have happened: its answer was lost or not recorded. A repeat with the same "
-        "idempotency_key moves the credit once.",
+        "The transfer may or may not have happened: its answer was lost or not recorded. Repeat it only once the "
+        "Billing page shows no such transfer, and then only with the same idempotency_key.",
         idempotency_key=key,
         code="transfer_outcome_unknown",
         hint=TRANSFER_OUTCOME_UNKNOWN_HINT,
@@ -5958,7 +5958,8 @@ class Lium:
 
         The key must hold the ``billing`` scope (:class:`LiumScopeError` otherwise). The request is sent
         once with an ``Idempotency-Key`` header — yours, or a fresh ``uuid4`` — so a repeat with the same
-        key moves the credit once (on a platform that honours the header).
+        key of a transfer that was answered returns that answer. After a lost answer that is not a guarantee:
+        check the Billing page before repeating.
 
         Args:
             to: The recipient's e-mail (anything with an ``@``) or account id.

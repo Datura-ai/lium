@@ -25,8 +25,8 @@ BILLING_KEY_HINT = ("Transfers need an API key with the billing scope: 'lium wor
 @click.option("--note", default=None, metavar="TEXT", help="A note the recipient sees")
 @click.option(
     "--idempotency-key", default=None, metavar="KEY",
-    help="Repeat a transfer whose answer was lost with the key it printed: it moves the credit once. "
-         "Omitted, a fresh one is made",
+    help="Repeat a transfer whose answer was lost with the key it printed, once the Billing page shows no such "
+         "transfer. Omitted, a fresh one is made",
 )
 @click.option("--yes", "-y", is_flag=True, help="Transfer without asking first (required with --json)")
 @click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON")
@@ -40,8 +40,8 @@ def transfer_command(to: str, amount: float, note: Optional[str], idempotency_ke
     yourself), insufficient_balance, recipient_unavailable (no such account). If the answer is lost
     (timeout, dropped connection, 5xx) the transfer may have happened: exit 6 with
     transfer_outcome_unknown and the idempotency key; check transfer history on the Billing page of
-    the account that owns the billing key, and repeat only with `--idempotency-key <key>`, which
-    cannot move the money twice. Never repeat it with a new key. AMOUNT is rounded to the cent as the
+    the account that owns the billing key, and repeat only if it is not there, and only with
+    `--idempotency-key <key>`. Never repeat it with a new key. AMOUNT is rounded to the cent as the
     API does, before the question.
 
     \b
@@ -82,7 +82,7 @@ def transfer_command(to: str, amount: float, note: Optional[str], idempotency_ke
             data={"idempotency_key": key, "amount": amount, "to": to,
                   **({"request_id": e.request_id} if e.request_id else {})},
             hint="Check transfer history on the Billing page of the account that owns the billing key. If the "
-                 f"transfer is not there, re-run '{retry}': within 24 h the same key cannot move the money twice. "
+                 f"transfer is not there, re-run '{retry}' within 24 h, with this same key. "
                  "If the outcome remains unclear, contact support; do not send it with a new key.",
         )
     except LiumScopeError as e:
