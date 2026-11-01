@@ -11,7 +11,7 @@ from click.testing import CliRunner
 from lium.cli.cli import cli
 from lium.cli import transfer as transfer_module
 from lium.cli.utils import EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, EXIT_PERMISSION_DENIED
-from lium.sdk import Config, Lium, LiumChargeOutcomeUnknownError
+from lium.sdk import Config, Lium, LiumChargeOutcomeUnknownError, LiumError
 
 URL = "https://lium.io/api/users/me/transfer-credits"
 OK = {"sender_balance": 75.0, "transfer_id": "t-1"}
@@ -299,3 +299,52 @@ def test_the_replay_promise_is_limited_to_24_hours_on_both_surfaces():
     assert "Within 24 h" in help_text and "transfers again" in help_text
     doc = Lium.transfer_credits.__doc__
     assert "24 h" in doc and "transfers again" in doc
+
+
+@pytest.mark.parametrize(
+    "stored, body, answer, unresolved",
+    [
+        ("pending", "same", (409, "idempotency_outcome_unknown"), True),
+        ("pending", "changed", (422, "idempotency_key_reused"), True),
+        ("completed", "same", (200, None), False),
+        ("completed", "changed", (422, "idempotency_key_reused"), True),
+        ("refused", "same", (402, "insufficient_balance"), False),  # the stored refusal replayed
+        ("refused", "changed", (200, None), False),  # a corrected retry runs
+    ],
+)
+@responses.activate
+def test_sdk_same_key_answers_by_stored_record_and_body(client, stored, body, answer, unresolved):
+    status, code = answer
+    if code is None:
+        responses.post(URL, json=OK)
+    else:
+        responses.post(URL, status=status, json=_error(code, "answer", hint="send it again with a new key"))
+    note = "changed" if body == "changed" else None
+
+    if unresolved:
+        with pytest.raises(LiumChargeOutcomeUnknownError) as raised:
+            client.transfer_credits("friend@example.com", 25, description=note, idempotency_key="k-4")
+        assert raised.value.code == "transfer_outcome_unknown" and raised.value.idempotency_key == "k-4"
+        assert "new key" not in str(raised.value) and "do not send it again" in raised.value.hint.lower()
+    elif code is None:
+        assert client.transfer_credits("friend@example.com", 25, description=note, idempotency_key="k-4")["transfer_id"]
+    else:
+        with pytest.raises(LiumError) as raised:
+            client.transfer_credits("friend@example.com", 25, description=note, idempotency_key="k-4")
+        assert not isinstance(raised.value, LiumChargeOutcomeUnknownError)
+        assert raised.value.code == code  # a definite refusal stays recoverable
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_sdk_ctrl_c_after_the_post_keeps_the_generated_key(client):
+    responses.add_callback(responses.POST, URL, callback=lambda _request: (_ for _ in ()).throw(KeyboardInterrupt))
+
+    with pytest.raises(LiumChargeOutcomeUnknownError) as raised:
+        client.transfer_credits("friend@example.com", 25)
+
+    sent = responses.calls[0].request.headers["Idempotency-Key"]
+    assert raised.value.code == "transfer_outcome_unknown"
+    assert raised.value.idempotency_key == sent
+    assert "do not send it again" in raised.value.hint.lower()
+    assert len(responses.calls) == 1
