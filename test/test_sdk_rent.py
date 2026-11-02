@@ -141,6 +141,19 @@ def test_rent_posts_the_spec_once_and_maps_the_pick(client):
     assert result.candidates == 3 and result.attempts == 2
     assert [a["id"] for a in result.alternatives] == ["exec-dear"]
     assert client.registered == [[KEY]]  # the keys were registered before the rent, as `up` does
+    assert result.backup_notice is None
+
+
+@responses.activate
+def test_rent_hands_back_the_backup_notice(client):
+    """DAH-5023: an account that cannot fund backup storage yet rents without one; the answer says so."""
+    _version(["rent_by_spec"])
+    responses.add(responses.GET, f"{BASE}/pods", json=[])
+    responses.add(responses.POST, f"{BASE}/executors/rent-by-spec", json={**RENTED, "backup_notice": "no backup"})
+
+    result = client.rent(gpu_type="H100", gpu_count=1, name="train-1", ssh_keys=[KEY])
+
+    assert result.backup_notice == "no backup"
 
 
 @responses.activate

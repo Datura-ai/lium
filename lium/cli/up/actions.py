@@ -280,8 +280,10 @@ class RentPodAction:
             result = lium.rent(**spec, max_price_per_gpu_hour=executor.price_per_gpu, **rental)
             pod_info, executor = result.pod, result.executor
             price_per_hour, gpu_count = result.price_per_hour, result.gpu_count
+            backup_notice = result.backup_notice
         else:
             pod_info = lium.up(executor_id=executor.id, gpu_count=requested_gpu_count, **rental)
+            backup_notice = pod_info.get("backup_notice")
 
         pod_id = pod_info.get('id') or pod_info.get('name', '')
         return ActionResult(
@@ -293,6 +295,7 @@ class RentPodAction:
                 "executor": executor,
                 "price_per_hour": price_per_hour,
                 "gpu_count": gpu_count,
+                "backup_notice": backup_notice,
             },
         )
 

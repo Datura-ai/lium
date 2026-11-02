@@ -94,10 +94,12 @@ class ClusterNotListedError(LiumError):
         pod_ids: The member pod ids the API returned; empty when the order was not confirmed.
         listed: The member ids the last listing showed.
         confirmed: Whether the API confirmed the order.
+        backup_notice: The rent answer's backup notice, if any: the members may run without backups.
     """
 
-    def __init__(self, message: str, *, pod_ids=(), listed=(), confirmed: bool = True):
+    def __init__(self, message: str, *, pod_ids=(), listed=(), confirmed: bool = True, backup_notice=None):
         super().__init__(message)
+        self.backup_notice = backup_notice
         self.pod_ids = list(pod_ids)
         self.listed = list(listed)
         self.confirmed = confirmed
