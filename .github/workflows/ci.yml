@@ -45,19 +45,22 @@ jobs:
       run: uv run pytest test/ -q -p no:cacheprovider --durations=10
 
   packaging:
-    # Did this change touch anything that changes how the binaries are packaged? The two macOS jobs bill at
-    # GitHub's 10x macOS rate and the arm64 Docker build repeats the amd64 one, so those three run only when a
-    # packaging input moved or on a manual dispatch. The amd64 Docker build and the wheel run on every push
-    # (the target-matrix test runs in `pytest`).
+    # Did this change touch anything that changes how the binaries are packaged? The binary builds (macOS bills at
+    # GitHub's 10x rate) run only when a packaging input moved or on a manual dispatch; any other PR gets pytest and
+    # the wheel only (DAH-5200; the target-matrix test runs in `pytest`, lium.spec collects every lium submodule, and
+    # the pre-release `gh workflow run ci.yml --ref main` builds all five legs). macOS Intel never builds on a PR: the
+    # dispatch run and release.yml build it.
     name: Packaging inputs changed?
     if: github.event_name != 'schedule'   # the daily cron is for e2e-live only
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: read
     outputs:
       full-matrix: ${{ steps.check.outputs.full-matrix }}
       linux-matrix: ${{ steps.check.outputs.linux-matrix }}
+      macos-matrix: ${{ steps.check.outputs.macos-matrix }}
     steps:
     - id: check
       env:
@@ -67,16 +70,17 @@ jobs:
       run: |
         amd64='{"runner":"ubuntu-latest","platform":"linux/amd64","asset_name":"lium-linux-amd64"}'
         arm64='{"runner":"ubuntu-24.04-arm","platform":"linux/arm64","asset_name":"lium-linux-arm64"}'
-        full() { echo "full-matrix=true" >> "$GITHUB_OUTPUT"; echo "linux-matrix=[$amd64,$arm64]" >> "$GITHUB_OUTPUT"; }
-        amd_only() { echo "full-matrix=false" >> "$GITHUB_OUTPUT"; echo "linux-matrix=[$amd64]" >> "$GITHUB_OUTPUT"; }
+        mac_arm='{"runner":"macos-14","asset_name":"lium-darwin-arm64","expected_machine":"arm64"}'
+        mac_intel='{"runner":"macos-15-intel","asset_name":"lium-darwin-amd64","expected_machine":"x86_64"}'
+        out() { printf 'full-matrix=%s\nlinux-matrix=%s\nmacos-matrix=%s\n' "$1" "$2" "$3" >> "$GITHUB_OUTPUT"; }
         # only a pull_request has a file list to inspect; any other event (a manual dispatch) builds everything
-        if [[ "$EVENT" != "pull_request" ]]; then full; exit 0; fi
+        if [[ "$EVENT" != "pull_request" ]]; then out true "[$amd64,$arm64]" "[$mac_arm,$mac_intel]"; exit 0; fi
         files="$(gh api --paginate "repos/${{ github.repository }}/pulls/$PR/files" -q '.[].filename')"
         printf '%s\n' "$files"
         if printf '%s\n' "$files" | grep -Eq '^(pyproject\.toml|uv\.lock|lium\.spec|lium_entry\.py|Dockerfile\.build|scripts/install\.sh|scripts/linux_bundle_report\.py|\.github/workflows/(ci|release)\.yml)$'; then
-          full
+          out true "[$amd64,$arm64]" "[$mac_arm]"
         else
-          amd_only
+          out false "[]" "[]"
         fi
 
   build-python:
@@ -84,6 +88,7 @@ jobs:
     needs: packaging
     if: github.event_name != 'schedule'   # the daily cron is for e2e-live only
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -114,14 +119,14 @@ jobs:
   build-linux-binary:
     name: Build Linux binary (${{ matrix.asset_name }})
     needs: packaging
-    if: github.event_name != 'schedule'   # the daily cron is for e2e-live only
-    # amd64 on every push, drafts included: the cheap smoke that catches an import or PyInstaller break. arm64
-    # joins the matrix only when `packaging` says so.
+    # only when `packaging` says so (an empty matrix cannot run, hence the full-matrix test)
+    if: github.event_name != 'schedule' && needs.packaging.outputs.full-matrix == 'true'
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.packaging.outputs.linux-matrix) }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -197,14 +202,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-        - runner: macos-14
-          asset_name: lium-darwin-arm64
-          expected_machine: arm64
-        - runner: macos-15-intel
-          asset_name: lium-darwin-amd64
-          expected_machine: x86_64
+        include: ${{ fromJSON(needs.packaging.outputs.macos-matrix) }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
     permissions:
       contents: read
     steps:
@@ -264,23 +264,6 @@ jobs:
           dist/${{ matrix.asset_name }}
         retention-days: 7
 
-  e2e-inputs:
-    # e2e-live never runs on a pull_request (DAH-4027, 16 Oct 2026): it was the one required check that flaked —
-    # 14 of 15 red heads went green on a rerun, on branches that did not touch what failed — and every PR queued
-    # behind its one repo-wide group renting real pods. The daily cron and a manual dispatch run it; on a PR the
-    # skipped job still satisfies the required `e2e-live` context.
-    name: e2e-live inputs changed?
-    runs-on: ubuntu-latest
-    permissions: {}
-    outputs:
-      run: ${{ steps.check.outputs.run }}
-    steps:
-    - id: check
-      env:
-        EVENT: ${{ github.event_name }}
-      run: |
-        if [[ "$EVENT" == "pull_request" ]]; then echo "run=false" >> "$GITHUB_OUTPUT"; else echo "run=true" >> "$GITHUB_OUTPUT"; fi
-
   # This checkout's CLI and SDK against a LIVE Lium API (the variable LIUM_E2E_API_URL, today https://lium.io/api;
   # staging when unset): balance → ls → up → RUNNING → exec (exit codes, the GPU paid for) → scp round trip →
   # billing → rm → gone → final charge, plus the error contract (wrong key 3, no key 2, unknown pod 5), then the
@@ -292,8 +275,11 @@ jobs:
   # Reproduce: E2E_API_KEY=… e2e/run.sh
   e2e-live:
     name: e2e-live
-    needs: e2e-inputs
-    if: needs.e2e-inputs.outputs.run == 'true'
+    # never on a pull_request (DAH-4027, 16 Oct 2026): it was the one required check that flaked — 14 of 15 red heads
+    # went green on a rerun — and every PR queued behind its repo-wide group renting real pods. The daily cron and a
+    # manual dispatch run it; on a PR the skipped job still satisfies the required `e2e-live` context. A plain `if:`
+    # rather than a gate job: a skipped job bills nothing, a gate job bills a rounded-up minute per PR push (DAH-5200).
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 65   # run.sh's own budget is 5 + 25 + 25 min; this and the step below sit above it
     permissions:
@@ -359,6 +345,7 @@ jobs:
     needs: [packaging, test, build-python]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions: {}   # aggregator only: reads job results, needs no token scopes (CodeQL actions/missing-workflow-permissions)
     steps:
     - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')

@@ -292,7 +292,8 @@ def test_mine_register_repeated_with_the_same_claim_does_not_recreate_the_execut
             executor["claim"] = mine._env_value(d / ".env", "MINER_ACCOUNT_CLAIM")
 
     monkeypatch.setattr(mine, "_start_executor", start)
-    monkeypatch.setattr(mine, "_executor_env_value", lambda d, key: executor["claim"])
+    monkeypatch.setattr(mine, "_executor_env_value", lambda d, key: executor["claim"] if key == "MINER_ACCOUNT_CLAIM"
+                        or executor["claim"] is None else mine._env_value(d / ".env", key))
     portal = _Portal()
     portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued"}}))
     portal.on("GET", "/executors", _listing())
@@ -397,3 +398,16 @@ def test_an_already_registered_node_behind_a_429_is_not_reported_as_another_acco
     record = reg.register_node(_http(portal), miner_hotkey=HOTKEY, gpu_type="NVIDIA L4", gpu_count=1,
                                ip_address="203.0.113.7", port=8080, price_per_gpu=0.11)
     assert record == reg.NodeRecord(node_id=None, already_registered=False)  # added; the list read is what failed
+
+
+def test_an_unknown_nvidia_model_without_price_asks_for_price_and_keeps_its_name(monkeypatch):
+    monkeypatch.setattr(reg, "fetch_shared_config", lambda: type("S", (), {"machine_prices": {"NVIDIA A100 80GB PCIe": 1.0}})())
+
+    with pytest.raises(reg.RegisterError) as e:
+        reg.resolve_price("NVIDIA A100-SXM4-40GB", None)
+
+    assert "--price" in str(e.value) and "--gpu-type" not in str(e.value)
+
+
+def test_an_unknown_nvidia_model_with_price_resolves_to_it():
+    assert reg.resolve_price("NVIDIA A100-SXM4-40GB", 0.30) == 0.30

@@ -6,7 +6,7 @@ import os
 
 import click
 
-from lium.cli.provider._client import build_client
+from lium.cli.provider._client import attach_totp_code, build_client
 from lium.cli.provider._overrides import with_provider_overrides
 from lium.cli.provider._render import (
     discord_incentive_warnings,
@@ -30,6 +30,12 @@ def portal_command() -> None:
     help="Bypass the local token cache and re-authenticate.",
 )
 @click.option(
+    "--totp-code",
+    metavar="CODE",
+    help="Authenticator code or recovery code, for an account with an authenticator app "
+    "(asked for in a terminal when omitted).",
+)
+@click.option(
     "--email",
     default=None,
     help="Sign in to an account made with e-mail (no key). The password is read from "
@@ -44,13 +50,13 @@ def portal_command() -> None:
 )
 @with_provider_overrides
 @click.pass_context
-def login(ctx: click.Context, force: bool, email: str | None, use_token: bool) -> None:
+def login(ctx: click.Context, force: bool, totp_code: str | None, email: str | None, use_token: bool) -> None:
     opts = (ctx.obj or {}).get("provider_opts") or {}
     if use_token:
         _login_token(ctx, click.prompt("API token", hide_input=True).strip())
         return
     if email:
-        _login_email(ctx, email)
+        _login_email(ctx, email, totp_code)
         return
     if not opts.get("hotkey"):
         ctx.exit(
@@ -63,7 +69,7 @@ def login(ctx: click.Context, force: bool, email: str | None, use_token: bool) -
             )
         )
 
-    client = build_client(ctx)
+    client = build_client(ctx, totp_code)
     try:
         response = client.login(force=force)
     except ProviderError as e:
@@ -94,11 +100,11 @@ def login(ctx: click.Context, force: bool, email: str | None, use_token: bool) -
     )
 
 
-def _login_email(ctx: click.Context, email: str) -> None:
+def _login_email(ctx: click.Context, email: str, totp_code: str | None) -> None:
     password = os.environ.get("LIUM_PROVIDER_PASSWORD") or click.prompt("Password", hide_input=True)
     opts = (ctx.obj or {}).get("provider_opts") or {}
     # the account id is only known after sign-in; the e-mail is a placeholder until then
-    client = ProviderClient(portal_url=opts.get("portal_url"), account=email)
+    client = attach_totp_code(ProviderClient(portal_url=opts.get("portal_url"), account=email), totp_code)
     try:
         response = client.login_email(email, password)
     except ProviderError as e:

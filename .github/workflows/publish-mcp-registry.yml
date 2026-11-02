@@ -20,6 +20,7 @@ jobs:
   publish:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       # `mcp-publisher login github-oidc` proves the io.github.Datura-ai namespace with this token.
       id-token: write

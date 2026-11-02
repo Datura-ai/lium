@@ -5,6 +5,7 @@ from rich.table import Table
 _STAGE_LABELS = {
     "WAITING_FOR_POD": "Waiting for pod",
     "PREPARING": "Preparing",
+    "SCANNING": "Scanning the backup",
     "RESTORING": "Restoring",
     "FINALIZING": "Finalizing",
 }
@@ -63,7 +64,7 @@ def _format_work(log) -> str:
     total_bytes = getattr(log, "total_bytes", None)
     processed_bytes = getattr(log, "processed_bytes", None)
 
-    if stage == "PREPARING" and total_files is not None:
+    if stage in ("PREPARING", "SCANNING") and total_files is not None:
         return f"{total_files:,} files discovered"
 
     details = []

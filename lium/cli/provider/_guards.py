@@ -67,7 +67,7 @@ def stop_if_dry_run(ctx: click.Context) -> None:
     params = {
         k: v
         for k, v in ctx.params.items()
-        if not k.startswith("_override") and "password" not in k
+        if not k.startswith("_override") and "password" not in k and k != "totp_code"
     }
     if opts.get("json"):
         render(ctx, {"dry_run": True, "command": ctx.command_path, "params": params})

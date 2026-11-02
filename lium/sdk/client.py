@@ -42,6 +42,7 @@ from .exceptions import (
     LiumBudgetExceededError,
     LiumCardTopUpError,
     LiumChargeOutcomeUnknownError,
+    LiumTransferInterruptedError,
     LiumRentOutcomeUnknownError,
     LiumError,
     LiumGpuOperationError,
@@ -101,6 +102,25 @@ from .utils import (
 from .api_keys import ApiKeysClient
 from .workspaces import WorkspacesClient
 
+
+TRANSFER_OUTCOME_UNKNOWN_HINT = (
+    "Do not send it again, with this key or a new one: a late commit can still land. Check transfer history on the "
+    "Billing page of the account that owns the billing key; if the transfer is not there, contact support with the "
+    "idempotency key."
+)
+
+
+def _transfer_outcome_unknown(key: str, exc: Exception) -> LiumChargeOutcomeUnknownError:
+    return LiumChargeOutcomeUnknownError(
+        "The transfer may or may not have happened: its answer was lost or not recorded. Do not repeat it; check the "
+        "Billing page and contact support with the idempotency_key.",
+        idempotency_key=key,
+        code="transfer_outcome_unknown",
+        hint=TRANSFER_OUTCOME_UNKNOWN_HINT,
+        request_id=getattr(exc, "request_id", None),
+    )
+
+
 # The backend feature `Lium.rent` looks for on GET /version before using POST /executors/rent-by-spec.
 RENT_BY_SPEC = "rent_by_spec"
 # The backend feature that says GET /pods/{id}/record is served (lium-platform#1204).
@@ -123,6 +143,8 @@ ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # checked with fullmatch: `$` 
 DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 
 IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# The rent answer's backup_notice repeated as a header (same text as the body field)
+BACKUP_NOTICE_HEADER = "X-Lium-Backup-Notice"
 # `request_same_origin` in `.utils` follows redirects for the credential-bearing HTTP paths of this package — renter SDK,
 # provider portal, signup (DAH-3543); `_MAX_REDIRECTS` stays as the name the tests read.
 _MAX_REDIRECTS = MAX_REDIRECTS
@@ -1154,7 +1176,16 @@ class Lium:
                 if isinstance(executor_dict.get("frequent_rent_failures"), bool) else None
             ),
             last_verified_at=executor_dict.get("last_verified_at"),
-            reliability_score=executor_dict.get("reliability_score"),
+            # the score lium.io shows: the node's own once the per-node gate sends it, none while it is new
+            reliability_score=(
+                None
+                if executor_dict.get("node_reliability_new")
+                else next(
+                    (executor_dict[k] for k in ("node_reliability_pct", "reliability_score")
+                     if executor_dict.get(k) is not None),
+                    None,
+                )
+            ),
         )
 
     def list_ssh_keys(self) -> List[SSHKey]:
@@ -1287,6 +1318,7 @@ class Lium:
         before_send: Optional[Callable[[Dict[str, Any]], None]] = None,
         termination_hours: Optional[int] = None,
         enable_backups: bool = True,
+        enable_jupyter: bool = False,
     ) -> Union[Dict[str, Any], PodInfo]:
         """Start a new pod on a specific node.
 
@@ -1333,7 +1365,10 @@ class Lium:
             gpu_count: Rent only this many of the node's GPUs (GPU splitting). ``None``
                 takes every GPU that is free on the node right now (the whole node when
                 none of it is rented). The API rejects a count above the free GPUs, below
-                the provider's minimum, or on nodes that do not allow splitting.
+                the provider's minimum, or on nodes that do not allow splitting; a count below
+                the free GPUs on a node listed whole-host-only (:attr:`ExecutorInfo.whole_host_only`)
+                raises ``ValueError`` after the node listing is read and before the rent request
+                is sent; requesting all its free GPUs rents as usual.
             idempotency_key: The ``Idempotency-Key`` the rent request carries (a new UUID when ``None``).
                 The API keeps a key only for a limited time and per account, so a key sent again later
                 can rent a second pod.
@@ -1372,6 +1407,7 @@ class Lium:
             before_send=before_send,
             termination_hours=termination_hours,
             enable_backups=enable_backups,
+            enable_jupyter=enable_jupyter,
         )
         if not wait:
             return created
@@ -1383,6 +1419,7 @@ class Lium:
                 f"did not become ready within {timeout}s; it is still billing — "
                 f"check 'lium ps' and remove it if unwanted"
             )
+        ready.backup_notice = created.get("backup_notice")  # wait_ready re-reads the pod from /pods, which has no notice
         return ready
 
     def _rent(
@@ -1408,6 +1445,7 @@ class Lium:
         posted: Optional[List[bool]] = None,
         build_context_sha256: Optional[str] = None,
         enable_backups: bool = True,
+        enable_jupyter: bool = False,
     ) -> Dict[str, Any]:
         """The rent call itself; :meth:`up` adds the optional wait on top.
 
@@ -1423,6 +1461,12 @@ class Lium:
         executor_info = self.get_executor(executor_id)
         if not executor_info:
             raise ValueError(self.executor_not_found_message(executor_id))
+        # Same check as `lium up -c` (DAH-5146): the API refuses a partial count on a node listed
+        # whole-host-only, so say so before anything is created or posted.
+        if gpu_count and getattr(executor_info, "whole_host_only", None):
+            free = executor_info.available_gpu_count or executor_info.gpu_count
+            if gpu_count < free:
+                raise ValueError(f"{executor_info.huid} rents whole only. Request all {free} GPUs.")
 
         # before the one-time template is created: a refusal here must leave nothing on the account
         ssh_material = ssh_keys or self.config.ssh_public_keys
@@ -1461,6 +1505,9 @@ class Lium:
             "restore_path": restore_path,
             "enable_backups": enable_backups,
         }
+        # said either way: the server installs Jupyter and holds its port when True, and a request that does not say
+        # gets that port held too (DAH-3698), which an SSH-only pod should not pay for
+        payload["enable_jupyter"] = bool(enable_jupyter)
         if gpu_count is not None:
             payload["gpu_count"] = gpu_count
         if termination_hours is not None:
@@ -1495,9 +1542,8 @@ class Lium:
         if posted is not None:
             posted.append(True)
         try:
-            response = self._request(
-                "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
-            ).json()
+            rent_reply = self._request("POST", rent_endpoint, json=payload, headers=rent_headers, retry=False)
+            response = rent_reply.json()
         except (requests.RequestException, LiumServerError, LiumRateLimitError) as first:
             # "Could not look" (the network that failed the POST fails ps() the
             # same way) must fall through to the second POST, not escape here.
@@ -1514,9 +1560,8 @@ class Lium:
                 return existing
             time.sleep(1)
             try:
-                response = self._request(
-                    "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
-                ).json()
+                rent_reply = self._request("POST", rent_endpoint, json=payload, headers=rent_headers, retry=False)
+                response = rent_reply.json()
             except Exception as second:
                 if (
                     isinstance(first, LiumRateLimitError)
@@ -1547,9 +1592,13 @@ class Lium:
                     request_id=getattr(second, "request_id", None),
                 ) from second
 
+        # Set when backups were asked for but the account cannot have one yet: the pod rents without it.
+        # The body field first; the server sends the same text as a header.
+        notice = (response or {}).get("backup_notice") or (getattr(rent_reply, "headers", None) or {}).get(BACKUP_NOTICE_HEADER)
+
         # API should return pod info
         if response and "id" in response:
-            return response
+            return {**response, "backup_notice": notice} if notice else response
 
         # The rent route answers {"success": true, "pod_id": ...}: the id is
         # exact, so the pod is read back by it rather than guessed by name. If
@@ -1558,7 +1607,7 @@ class Lium:
         pod_id = (response or {}).get("pod_id")
         if pod_id:
             existing = self._find_pod_by_id(str(pod_id), executor_info.id, attempts=3, interval=2)
-            return existing or {
+            pod = existing or {
                 "id": str(pod_id),
                 "name": name,
                 "status": "PENDING",
@@ -1566,6 +1615,9 @@ class Lium:
                 "ssh_cmd": None,
                 "executor_id": executor_info.id,
             }
+            if notice:
+                pod["backup_notice"] = notice
+            return pod
 
         # Fallback: find pod by name after creation
         existing = self._find_pod_by_name(
@@ -1655,7 +1707,10 @@ class Lium:
         pod_id = (response or {}).get("id") or (response or {}).get("pod_id")
         if not pod_id:
             raise still_unknown(ValueError("the answer named no pod"))
-        return {"id": str(pod_id), "name": error.pod_name, "executor_id": error.executor_id}
+        # the stored first answer carries the same backup_notice the lost response did
+        notice = (response or {}).get("backup_notice") or (getattr(resp, "headers", None) or {}).get(BACKUP_NOTICE_HEADER)
+        return {"id": str(pod_id), "name": error.pod_name, "executor_id": error.executor_id,
+                **({"backup_notice": notice} if notice else {})}
 
     def _list_pods_or_none(self) -> Optional[List[PodInfo]]:
         """``ps()`` for the rent lookups: ``None`` when the listing itself failed,
@@ -1967,6 +2022,7 @@ class Lium:
         dry_run: bool = False,
         termination_hours: Optional[int] = None,
         enable_backups: bool = True,
+        enable_jupyter: bool = False,
     ) -> RentResult:
         """Rent the cheapest available node that satisfies a spec, without listing the fleet.
 
@@ -2062,6 +2118,7 @@ class Lium:
             "restore_path": restore_path,
             "termination_hours": termination_hours,
             "enable_backups": enable_backups,
+            "enable_jupyter": enable_jupyter,
         }
         if self.supports(RENT_BY_SPEC):
             return self._rent_on_server(spec, rental, dry_run)
@@ -2104,6 +2161,7 @@ class Lium:
         }
         if rental["termination_hours"] is not None:
             payload["termination_hours"] = rental["termination_hours"]
+        payload["enable_jupyter"] = bool(rental.get("enable_jupyter"))
         gpu_count = int(spec.get("gpu_count") or 1)
         # A rent is billable and a lost response may have succeeded server-side, so it is never
         # retried blindly; a dry run rents nothing and keeps the retries. Pods that exist before
@@ -2174,6 +2232,7 @@ class Lium:
             attempts=int(data.get("attempts") or 0),
             dry_run=bool(data.get("dry_run", dry_run)),
             server_side=True,
+            backup_notice=data.get("backup_notice"),
         )
 
     def _rented_pod_result(
@@ -2235,6 +2294,7 @@ class Lium:
                 restore_path=rental["restore_path"],
                 termination_hours=rental["termination_hours"],
                 enable_backups=rental["enable_backups"],
+                enable_jupyter=rental["enable_jupyter"],
             )
         return RentResult(
             executor=executor,
@@ -2247,6 +2307,7 @@ class Lium:
             attempts=0 if dry_run else 1,
             dry_run=dry_run,
             server_side=False,
+            backup_notice=(pod or {}).get("backup_notice"),
         )
 
     def pod(
@@ -2852,6 +2913,8 @@ class Lium:
             "initial_port_count": ports,
             "enable_volume_encryption": enable_volume_encryption,
             "enable_backups": enable_backups,
+            # said, so a member holds no Jupyter port: an unsaid rent holds one (DAH-3698)
+            "enable_jupyter": False,
         }
         # Not retried blindly: a timeout may have rented the group anyway. A backend that honours
         # the Idempotency-Key (RENT_IDEMPOTENCY) gets the order once more with the same key and
@@ -2889,6 +2952,7 @@ class Lium:
             # a definite refusal: nothing was rented, so there is nothing to look for
             raise LiumError(f"Cluster rental refused: {response.get('message') or response}")
         pod_ids: List[str] = [str(p) for p in (response or {}).get("pod_ids") or []]
+        backup_notice = (response or {}).get("backup_notice")  # read now: a not-listed error below must carry it
 
         cluster, listed, listing_error = self._find_cluster(
             pod_ids=pod_ids, name=name, size=len(ids), attempts=3, interval=3, exclude=known_clusters,
@@ -2906,7 +2970,7 @@ class Lium:
                     f"Cluster rental of {len(ids)} nodes is confirmed (pods {', '.join(pod_ids)}) but the pod "
                     f"listing {shown}; the nodes are rented and billing: do not rent again, list the pods to "
                     "find the cluster",
-                    pod_ids=pod_ids, listed=listed, confirmed=True,
+                    pod_ids=pod_ids, listed=listed, confirmed=True, backup_notice=backup_notice,
                 )
             if listing_error is not None:
                 # No answer to the order and no listing either: the rent may have gone through.
@@ -2934,6 +2998,7 @@ class Lium:
             )
         if wait:
             cluster = self.wait_cluster_ready(cluster, timeout=timeout)
+        cluster.backup_notice = backup_notice
         return cluster
 
     def _cluster_ids_now(self) -> frozenset:
@@ -5995,6 +6060,73 @@ class Lium:
                 request_id=getattr(exc, "request_id", None),
             ) from exc
         # the key the charge was made under, whether or not the server echoes it back
+        body.setdefault("idempotency_key", key)
+        return body
+
+    def transfer_credits(
+        self,
+        to: str,
+        amount: float,
+        description: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Move credit from this account's balance to another account (``POST /users/me/transfer-credits``).
+
+        The key must hold the ``billing`` scope (:class:`LiumScopeError` otherwise). The request is sent
+        once with an ``Idempotency-Key`` header — yours, or a fresh ``uuid4``. The platform keeps a transfer's
+        recorded answer for 24 h: within that time an identical request with the same key gets that answer
+        back; later the key is forgotten and a repeat transfers again. After a lost answer do not repeat it:
+        check the Billing page and contact support.
+
+        Args:
+            to: The recipient's e-mail (anything with an ``@``) or account id.
+            amount: USD, at least $0.01.
+            description: A note the recipient sees.
+            idempotency_key: Sent as ``Idempotency-Key``; within 24 h an identical repeat of an answered transfer
+                gets its answer back, later it transfers again. Omitted: the SDK makes one.
+
+        Returns:
+            ``{"sender_balance", "transfer_id", "idempotency_key"}``.
+
+        Raises:
+            LiumError: ``code`` ``self_transfer`` (400), ``insufficient_balance`` (402), ``not_found`` (404, no
+                account with that e-mail or id) or ``recipient_unavailable`` (409, a deleted or blocked account).
+            LiumChargeOutcomeUnknownError: timeout, dropped connection, 5xx after the POST, or a 409
+                ``idempotency_outcome_unknown`` / ``idempotency_in_progress`` / ``idempotency_key_reused`` on a
+                repeat.
+            LiumTransferInterruptedError: Ctrl-C while waiting for the answer; a ``KeyboardInterrupt`` with the
+                same ``code``, ``idempotency_key`` and ``hint``. — the transfer may have happened; check transfer
+                history on the Billing page of the account owning the key and, if it is not there, contact support
+                with ``idempotency_key`` from the error. Do not repeat it, with that key or a new one.
+        """
+        if not math.isfinite(amount) or amount <= 0:
+            raise LiumError("amount must be a positive, finite number of dollars.", code="invalid_arguments")
+        key = idempotency_key or str(uuid.uuid4())
+        payload: Dict[str, Any] = {"receiver_email" if "@" in to else "receiver_id": to.strip(), "amount": amount}
+        if description:
+            payload["description"] = description
+        try:
+            body = self._request(
+                "POST", "/users/me/transfer-credits", json=payload, headers={**self.headers, "Idempotency-Key": key}
+            ).json()
+        except KeyboardInterrupt as exc:
+            # still a KeyboardInterrupt, so the abort propagates, but it carries the key the caller may not have chosen
+            raise LiumTransferInterruptedError(
+                "Interrupted after the transfer was posted: it may or may not have happened.",
+                idempotency_key=key,
+                hint=TRANSFER_OUTCOME_UNKNOWN_HINT,
+            ) from exc
+        except (LiumServerError, requests.RequestException) as exc:
+            # the debit may have committed before the answer was lost: never "nothing happened"
+            raise _transfer_outcome_unknown(key, exc) from exc
+        except LiumError as exc:
+            # the server's own "a transfer under this key may have happened": its rent-worded hint must not show
+            # in progress: the first call may still commit, and a backend that frees its key on a raised 500 would
+            # run a retry again, so it is just as unresolved. key_reused (422, a changed body under the key) cannot
+            # tell a pending first call from a done one: unresolved too
+            if exc.code not in ("idempotency_outcome_unknown", "idempotency_in_progress", "idempotency_key_reused"):
+                raise
+            raise _transfer_outcome_unknown(key, exc) from exc
         body.setdefault("idempotency_key", key)
         return body
 

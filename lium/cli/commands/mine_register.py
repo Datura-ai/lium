@@ -204,6 +204,13 @@ def resolve_price(gpu_type: str, explicit: float | None) -> float:
 
 
 def _unknown_gpu_message(gpu_type: str, known: list[str]) -> str:
+    if gpu_type.startswith("NVIDIA "):
+        # DAH-5088: the portal takes any NVIDIA model and prices it after the validator verifies the card
+        return (
+            f"The portal has no price yet for this host's GPU model ({gpu_type!r}). Re-run with --price <USD per GPU "
+            "per hour> to register it under this name; a price below the minimum the portal sets once the card is "
+            "verified keeps the node unlisted until you raise it."
+        )
     close = difflib.get_close_matches(gpu_type, known, n=3, cutoff=0.5)
     hint = ("Closest names the portal knows: " + "; ".join(close) + ". ") if close else ""
     return (

@@ -1,6 +1,6 @@
 {
   "name": "lium-zapier",
-  "version": "1.0.5",
+  "version": "2.0.0",
   "description": "Zapier integration for Lium, the GPU cloud: find GPU servers and manage your Lium pods.",
   "main": "index.js",
   "private": true,

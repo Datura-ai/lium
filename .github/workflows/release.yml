@@ -19,6 +19,7 @@ jobs:
   build-python:
     name: Build Python distribution
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -74,6 +75,7 @@ jobs:
   validate-binary-targets:
     name: Validate binary target matrix
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
@@ -105,6 +107,7 @@ jobs:
           platform: linux/arm64
           asset_name: lium-linux-arm64
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -184,6 +187,7 @@ jobs:
           asset_name: lium-darwin-amd64
           expected_machine: x86_64
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
     permissions:
       contents: read
     steps:
@@ -253,6 +257,7 @@ jobs:
     name: Full CI green on the release commit
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       actions: read
     steps:
@@ -274,6 +279,7 @@ jobs:
     - build-linux-binary
     - build-macos-binary
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: release
     permissions:
       contents: write
