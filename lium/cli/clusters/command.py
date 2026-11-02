@@ -337,7 +337,7 @@ def clusters_show_command(cluster: str, hostfile: bool, torchrun_rank: Optional[
         click.echo(found.hostfile(), nl=False)
         return
     if torchrun_rank is not None:
-        member = next((p for p in found.pods if p.cluster_node_index == torchrun_rank), None)
+        member = next((p for p in found.nodes if p.cluster_node_index == torchrun_rank), None)
         if member is None:
             raise CliFailure("invalid_arguments", f"Cluster {found.id} has no node with rank {torchrun_rank}.",
                              EXIT_CONFIGURATION_ERROR)
