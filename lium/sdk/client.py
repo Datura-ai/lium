@@ -984,7 +984,7 @@ class Lium:
             raise LiumServerError(f"Server error: {resp.status_code}", **context)
         data = _error_data(resp) if resp.status_code == 409 else {}
         if data.get("gpus"):
-            # a GPU operation ran and a GPU failed: keep each GPU's outcome (and container state) for the caller;
+            # a GPU operation ran and failed (a GPU, or the container restart): keep each GPU's outcome (and container state) for the caller;
             # a precheck refusal (``gpus: []``) stays a plain LiumError
             raise LiumGpuOperationError(
                 f"API error 409: {_response_error_message(resp)}",
@@ -2693,8 +2693,8 @@ class Lium:
             :class:`GpuResetResult`, one :class:`GpuResetOutcome` per GPU.
 
         Raises:
-            LiumGpuOperationError: the reset ran and a GPU failed; ``gpus`` and ``container_restarted`` say
-                what happened to each GPU.
+            LiumGpuOperationError: the reset operation failed and returned per-GPU outcomes. Inspect ``gpus`` and
+                ``container_restarted``; the container can fail to restart even when every GPU reset succeeds.
             LiumError: refusals with the API's ``code`` (``invalid_gpu_index``, ``mig_enabled``, ...).
             LiumServerError: ``gpu_reset_unavailable`` (the request was not sent, or the server gave up waiting)
                 or ``gpu_reset_timeout`` (this client gave up waiting or lost the connection); after both
