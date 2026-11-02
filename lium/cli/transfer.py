@@ -9,13 +9,23 @@ from typing import Optional
 import click
 from rich.markup import escape
 
-from lium.sdk import LiumChargeOutcomeUnknownError, LiumScopeError
+from lium.sdk import LiumChargeOutcomeUnknownError, LiumError, LiumScopeError
 from lium.cli import ui
 from lium.cli.topup.command import BILLING_KEY_ENV_VAR, billing_client
-from lium.cli.utils import EXIT_CONFIGURATION_ERROR, EXIT_PERMISSION_DENIED, CliFailure, handle_errors
+from lium.cli.utils import (
+    EXIT_CONFIGURATION_ERROR, EXIT_PERMISSION_DENIED, CliFailure, _api_error_data, _classify_sdk_error, handle_errors,
+)
 
 BILLING_KEY_HINT = ("Transfers need an API key with the billing scope: 'lium workspaces login', then "
                     f"'lium keys create payer --scope billing', and export the key as {BILLING_KEY_ENV_VAR}")
+# The generic hints for these codes say "retry" or point at nodes and pods; nothing was transferred
+REFUSAL_HINTS = {
+    "self_transfer": "The sender is the account that owns the billing key; send to another account's e-mail or id.",
+    "not_found": "No account has that e-mail or id. Check it with the recipient: the e-mail they sign in with, or "
+                 "their account id.",
+    "recipient_unavailable": "That account is deleted or blocked and cannot receive credit; ask the recipient for "
+                             "another account.",
+}
 
 
 @click.command("transfer")
@@ -89,6 +99,11 @@ def transfer_command(to: str, amount: float, note: Optional[str], idempotency_ke
         raise CliFailure("missing_scope", str(e), EXIT_PERMISSION_DENIED,
                          data={"scope": e.scope or "billing", **({"request_id": e.request_id} if e.request_id else {})},
                          hint=BILLING_KEY_HINT)
+    except LiumError as e:
+        if e.hint or e.code not in REFUSAL_HINTS:
+            raise
+        raise CliFailure(e.code, str(e), _classify_sdk_error(e)[1], data=_api_error_data(e),
+                         hint=REFUSAL_HINTS[e.code]) from e
 
     if json_output:
         click.echo(json.dumps({**result, "to": to, "amount": amount}, sort_keys=True))
