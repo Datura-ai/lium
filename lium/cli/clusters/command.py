@@ -397,7 +397,7 @@ def clusters_rm_command(cluster: str, yes: bool, output_format: str, json_output
             raise SystemExit(EXIT_API_ERROR)
         return
     if not results:
-        ui.success(escape(f"Cluster {found.id} has no member left; nothing is billing."))
+        ui.success(escape(f"Cluster {found.id} had no member yet; its delete is accepted and nothing is billing."))
     for r in results:
         # rank + huid, as the members table and `lium rm <huid>` use (an id prefix is not a name `lium rm` accepts)
         rank = f"rank {r['node_rank']} " if r.get("node_rank") is not None else ""
