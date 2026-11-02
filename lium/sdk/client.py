@@ -42,6 +42,7 @@ from .exceptions import (
     LiumBudgetExceededError,
     LiumCardTopUpError,
     LiumChargeOutcomeUnknownError,
+    LiumTransferInterruptedError,
     LiumRentOutcomeUnknownError,
     LiumError,
     LiumGpuOperationError,
@@ -98,6 +99,25 @@ from .utils import (
 )
 from .api_keys import ApiKeysClient
 from .workspaces import WorkspacesClient
+
+
+TRANSFER_OUTCOME_UNKNOWN_HINT = (
+    "Do not send it again, with this key or a new one: a late commit can still land. Check transfer history on the "
+    "Billing page of the account that owns the billing key; if the transfer is not there, contact support with the "
+    "idempotency key."
+)
+
+
+def _transfer_outcome_unknown(key: str, exc: Exception) -> LiumChargeOutcomeUnknownError:
+    return LiumChargeOutcomeUnknownError(
+        "The transfer may or may not have happened: its answer was lost or not recorded. Do not repeat it; check the "
+        "Billing page and contact support with the idempotency_key.",
+        idempotency_key=key,
+        code="transfer_outcome_unknown",
+        hint=TRANSFER_OUTCOME_UNKNOWN_HINT,
+        request_id=getattr(exc, "request_id", None),
+    )
+
 
 # The backend feature `Lium.rent` looks for on GET /version before using POST /executors/rent-by-spec.
 RENT_BY_SPEC = "rent_by_spec"
@@ -5971,6 +5991,73 @@ class Lium:
                 request_id=getattr(exc, "request_id", None),
             ) from exc
         # the key the charge was made under, whether or not the server echoes it back
+        body.setdefault("idempotency_key", key)
+        return body
+
+    def transfer_credits(
+        self,
+        to: str,
+        amount: float,
+        description: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Move credit from this account's balance to another account (``POST /users/me/transfer-credits``).
+
+        The key must hold the ``billing`` scope (:class:`LiumScopeError` otherwise). The request is sent
+        once with an ``Idempotency-Key`` header — yours, or a fresh ``uuid4``. The platform keeps a transfer's
+        recorded answer for 24 h: within that time an identical request with the same key gets that answer
+        back; later the key is forgotten and a repeat transfers again. After a lost answer do not repeat it:
+        check the Billing page and contact support.
+
+        Args:
+            to: The recipient's e-mail (anything with an ``@``) or account id.
+            amount: USD, at least $0.01.
+            description: A note the recipient sees.
+            idempotency_key: Sent as ``Idempotency-Key``; within 24 h an identical repeat of an answered transfer
+                gets its answer back, later it transfers again. Omitted: the SDK makes one.
+
+        Returns:
+            ``{"sender_balance", "transfer_id", "idempotency_key"}``.
+
+        Raises:
+            LiumError: ``code`` ``self_transfer`` (400), ``insufficient_balance`` (402), ``not_found`` (404, no
+                account with that e-mail or id) or ``recipient_unavailable`` (409, a deleted or blocked account).
+            LiumChargeOutcomeUnknownError: timeout, dropped connection, 5xx after the POST, or a 409
+                ``idempotency_outcome_unknown`` / ``idempotency_in_progress`` / ``idempotency_key_reused`` on a
+                repeat.
+            LiumTransferInterruptedError: Ctrl-C while waiting for the answer; a ``KeyboardInterrupt`` with the
+                same ``code``, ``idempotency_key`` and ``hint``. — the transfer may have happened; check transfer
+                history on the Billing page of the account owning the key and, if it is not there, contact support
+                with ``idempotency_key`` from the error. Do not repeat it, with that key or a new one.
+        """
+        if not math.isfinite(amount) or amount <= 0:
+            raise LiumError("amount must be a positive, finite number of dollars.", code="invalid_arguments")
+        key = idempotency_key or str(uuid.uuid4())
+        payload: Dict[str, Any] = {"receiver_email" if "@" in to else "receiver_id": to.strip(), "amount": amount}
+        if description:
+            payload["description"] = description
+        try:
+            body = self._request(
+                "POST", "/users/me/transfer-credits", json=payload, headers={**self.headers, "Idempotency-Key": key}
+            ).json()
+        except KeyboardInterrupt as exc:
+            # still a KeyboardInterrupt, so the abort propagates, but it carries the key the caller may not have chosen
+            raise LiumTransferInterruptedError(
+                "Interrupted after the transfer was posted: it may or may not have happened.",
+                idempotency_key=key,
+                hint=TRANSFER_OUTCOME_UNKNOWN_HINT,
+            ) from exc
+        except (LiumServerError, requests.RequestException) as exc:
+            # the debit may have committed before the answer was lost: never "nothing happened"
+            raise _transfer_outcome_unknown(key, exc) from exc
+        except LiumError as exc:
+            # the server's own "a transfer under this key may have happened": its rent-worded hint must not show
+            # in progress: the first call may still commit, and a backend that frees its key on a raised 500 would
+            # run a retry again, so it is just as unresolved. key_reused (422, a changed body under the key) cannot
+            # tell a pending first call from a done one: unresolved too
+            if exc.code not in ("idempotency_outcome_unknown", "idempotency_in_progress", "idempotency_key_reused"):
+                raise
+            raise _transfer_outcome_unknown(key, exc) from exc
         body.setdefault("idempotency_key", key)
         return body
 
