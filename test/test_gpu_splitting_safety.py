@@ -43,7 +43,7 @@ def _wipefs(monkeypatch, stdout=""):
 def test_setup_yes_without_device_refuses_before_any_change(monkeypatch):
     monkeypatch.setattr(gpu_splitting, "timed_step_status", _no_spinner)
     monkeypatch.setattr(gpu_splitting, "_preflight", _sample_preflight)
-    monkeypatch.setattr(gpu_splitting, "_build_setup_plan", lambda preflight, device: _sample_plan())
+    monkeypatch.setattr(gpu_splitting, "_build_setup_plan", lambda preflight, device, *_: _sample_plan())
     executed = []
     monkeypatch.setattr(gpu_splitting, "_execute_setup", executed.append)
 
