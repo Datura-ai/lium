@@ -25,6 +25,14 @@ def _cfg(exe: ExecutorInfo) -> str:
     return f"{exe.gpu_count}×{exe.gpu_type}"
 
 
+def _table_cfg(exe: ExecutorInfo) -> str:
+    """The table's Config: free/total on a partly rented node (2/8×H200), so `up <row> -c 8` is not tried there."""
+    free = getattr(exe, "available_gpu_count", None)
+    if free is not None and free < exe.gpu_count:
+        return f"{free}/{_cfg(exe)}"
+    return _cfg(exe)
+
+
 def _country_name(loc: Optional[Dict]) -> str:
     """Extract country name from location dict."""
     if not loc:
@@ -434,7 +442,7 @@ def build_executors_table(
         cells = {
             "": str(idx),
             "Id": huid_display,
-            "Config": _cfg(exe),
+            "Config": _table_cfg(exe),
             "Link": _link_display(exe),
             "Tier": _tier_display(exe),
             "Max CUDA": cuda_display,

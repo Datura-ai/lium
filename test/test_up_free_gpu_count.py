@@ -37,3 +37,12 @@ def test_auto_select_keeps_the_row_numbers_of_the_last_ls(monkeypatch):
     monkeypatch.setattr("lium.cli.ls.command.ls_store_executor", lambda **kwargs: pytest.fail("rewrote the ls rows"))
 
     assert _resolve(monkeypatch, NODES, count=2).ok
+
+
+@pytest.mark.parametrize(("free", "shown"), [(2, "2/4×H200"), (4, "4×H200"), (None, "4×H200")])
+def test_ls_table_config_names_the_free_gpus_of_a_partly_rented_node(free, shown):
+    # a renter read "8×H200" on a node with 2 free and its `up <node> -c 8` was refused (3 Nov)
+    from lium.cli.ls.display import _cfg, _table_cfg
+
+    node = SimpleNamespace(gpu_type="H200", gpu_count=4, available_gpu_count=free)
+    assert (_table_cfg(node), _cfg(node)) == (shown, "4×H200")  # JSON `config` keeps the host total
