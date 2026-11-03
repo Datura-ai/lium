@@ -2802,6 +2802,10 @@ class Lium:
                 f"GPU clocks: no answer from the server ({e})", code="gpu_clocks_unavailable",
                 hint=GPU_CLOCKS_MAY_HAVE_CHANGED,
             ) from e
+        except LiumServerError as e:
+            # a 5xx (the backend's 503 past its wait, a gateway 502/504) may come after the change was applied
+            e.hint = GPU_CLOCKS_MAY_HAVE_CHANGED
+            raise
         return GpuClockResult(
             pod_id=str(answer.get("pod_id", pod.id)), ok=bool(answer.get("ok")),
             gpus=[_gpu_clock_outcome(g) for g in answer.get("gpus") or []],

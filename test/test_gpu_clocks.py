@@ -10,6 +10,7 @@ from click.testing import CliRunner
 from lium.cli.cli import cli
 from lium.cli.gpu_clocks import command as gpu_clocks_module
 from lium.cli.utils import EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, EXIT_POD_NOT_FOUND
+from lium.sdk.client import GPU_CLOCKS_MAY_HAVE_CHANGED
 from lium.sdk import (
     Config, GpuClockOutcome, GpuClockResult, Lium, LiumError, LiumGpuOperationError, LiumServerError,
 )
@@ -57,15 +58,20 @@ def test_sdk_lock_and_reset_post_once_with_a_long_timeout(monkeypatch):
     assert kw1["timeout"] >= 90
 
 
-@pytest.mark.parametrize("status,code", [(409, "clock_lock_not_supported"), (503, "gpu_clocks_unavailable")])
-def test_sdk_refusal_carries_the_api_code(monkeypatch, status, code):
-    body = {"detail": {"code": code, "message": "no"}, "error": {"code": code, "message": "no"}}
+@pytest.mark.parametrize("reset", [False, True])
+@pytest.mark.parametrize("status,code", [
+    (409, "clock_lock_not_supported"), (502, None), (503, "gpu_clocks_unavailable"), (504, None)])
+def test_sdk_refusal_carries_the_api_code(monkeypatch, status, code, reset):
+    body = {"detail": {"code": code, "message": "no"}, "error": {"code": code, "message": "no"}} if code else {}
     calls = []
     monkeypatch.setattr("lium.sdk.client.requests.request", lambda *a, **kw: calls.append(1) or _Resp(status, body))
+    client, pod = Lium(Config(api_key="test")), SimpleNamespace(id="p")
     with pytest.raises(LiumError) as exc:
-        Lium(Config(api_key="test")).lock_gpu_clocks(SimpleNamespace(id="p"), 1400, 1800)
+        client.reset_gpu_clocks(pod) if reset else client.lock_gpu_clocks(pod, 1400, 1800)
     assert exc.value.code == code and len(calls) == 1
     assert not isinstance(exc.value, LiumGpuOperationError)
+    # a 5xx can come after the change was applied: say so instead of the generic retry hint
+    assert (exc.value.hint == GPU_CLOCKS_MAY_HAVE_CHANGED) == (status >= 500)
 
 
 def test_sdk_lost_answer_is_gpu_clocks_unavailable_sent_once(monkeypatch):
