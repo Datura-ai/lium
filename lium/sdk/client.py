@@ -6099,9 +6099,9 @@ class Lium:
         Raises:
             LiumError: ``code`` ``self_transfer`` (400), ``insufficient_balance`` (402), ``not_found`` (404, no
                 account with that e-mail or id) or ``recipient_unavailable`` (409, a deleted or blocked account).
-            LiumChargeOutcomeUnknownError: timeout, dropped connection, 5xx after the POST, or a 409
-                ``idempotency_outcome_unknown`` / ``idempotency_in_progress`` / ``idempotency_key_reused`` on a
-                repeat.
+                ``code`` ``transfer_outcome_unknown`` (with ``idempotency_key`` and ``hint``): timeout, dropped
+                connection, 5xx after the POST, or a 409 ``idempotency_outcome_unknown`` /
+                ``idempotency_in_progress`` / ``idempotency_key_reused`` on a repeat.
             LiumTransferInterruptedError: Ctrl-C while waiting for the answer; a ``KeyboardInterrupt`` with the
                 same ``code``, ``idempotency_key`` and ``hint``. — the transfer may have happened; check transfer
                 history on the Billing page of the account owning the key and, if it is not there, contact support

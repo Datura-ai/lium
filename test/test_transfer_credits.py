@@ -279,6 +279,28 @@ def test_cli_recipient_refusals_pass_the_api_code_through(client, recipient, sta
     assert len(responses.calls) == 1
 
 
+@pytest.mark.parametrize("status, code", [(400, "self_transfer"), (404, "not_found"), (409, "recipient_unavailable")])
+@responses.activate
+def test_cli_refusals_without_a_server_hint_get_a_transfer_hint(client, status, code):
+    # live 0.39.0 run: self_transfer said "Retry", not_found pointed at nodes and pods
+    responses.post(URL, status=status, json=_error(code, "refused"))
+
+    result = _run("friend@example.com", "25", "--yes", "--json")
+
+    error = json.loads(result.stderr.strip().splitlines()[-1])["error"]
+    assert result.exit_code == EXIT_API_ERROR, result.output
+    assert (error["code"], error["hint"]) == (code, transfer_module.REFUSAL_HINTS[code])
+
+
+@responses.activate
+def test_cli_a_server_hint_on_a_refusal_wins(client):
+    responses.post(URL, status=404, json=_error("not_found", "refused", hint="Ask the recipient to sign up first."))
+
+    result = _run("friend@example.com", "25", "--yes", "--json")
+
+    assert json.loads(result.stderr.strip().splitlines()[-1])["error"]["hint"] == "Ask the recipient to sign up first."
+
+
 @pytest.mark.parametrize("stored", ["retained", "pending"])
 @responses.activate
 def test_sdk_same_key_repeat_contract(client, stored):
