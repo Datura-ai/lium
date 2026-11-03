@@ -2804,7 +2804,7 @@ class Lium:
             ) from e
         except LiumServerError as e:
             # a 5xx (the backend's 503 past its wait, a gateway 502/504) may come after the change was applied
-            e.hint = GPU_CLOCKS_MAY_HAVE_CHANGED
+            e.code, e.hint = e.code or "gpu_clocks_unavailable", GPU_CLOCKS_MAY_HAVE_CHANGED
             raise
         return GpuClockResult(
             pod_id=str(answer.get("pod_id", pod.id)), ok=bool(answer.get("ok")),

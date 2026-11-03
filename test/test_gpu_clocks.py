@@ -62,13 +62,14 @@ def test_sdk_lock_and_reset_post_once_with_a_long_timeout(monkeypatch):
 @pytest.mark.parametrize("status,code", [
     (409, "clock_lock_not_supported"), (502, None), (503, "gpu_clocks_unavailable"), (504, None)])
 def test_sdk_refusal_carries_the_api_code(monkeypatch, status, code, reset):
+    # an uncoded gateway 502/504 is reported as gpu_clocks_unavailable, as docs/exit-codes.md says
     body = {"detail": {"code": code, "message": "no"}, "error": {"code": code, "message": "no"}} if code else {}
     calls = []
     monkeypatch.setattr("lium.sdk.client.requests.request", lambda *a, **kw: calls.append(1) or _Resp(status, body))
     client, pod = Lium(Config(api_key="test")), SimpleNamespace(id="p")
     with pytest.raises(LiumError) as exc:
         client.reset_gpu_clocks(pod) if reset else client.lock_gpu_clocks(pod, 1400, 1800)
-    assert exc.value.code == code and len(calls) == 1
+    assert exc.value.code == (code or "gpu_clocks_unavailable") and len(calls) == 1
     assert not isinstance(exc.value, LiumGpuOperationError)
     # a 5xx can come after the change was applied: say so instead of the generic retry hint
     assert (exc.value.hint == GPU_CLOCKS_MAY_HAVE_CHANGED) == (status >= 500)
