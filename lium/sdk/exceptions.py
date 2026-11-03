@@ -220,8 +220,10 @@ class LiumBudgetExceededError(LiumPermissionError):
 
 
 class LiumGpuOperationError(LiumError):
-    """A GPU reset or clock change ran on the node and at least one GPU failed (a reset's status ``failed``, or a
+    """A GPU reset or clock change ran on the node and failed (a reset's status ``failed``, or a
     409, that lists ``gpus``).
+
+    Inspect ``gpus`` and ``container_restarted``: the container can fail to restart even when every GPU reset succeeds.
 
     ``gpus`` is each GPU's outcome (:class:`GpuResetOutcome` from :meth:`Lium.reset_gpu`, :class:`GpuClockOutcome`
     from :meth:`Lium.lock_gpu_clocks` / :meth:`Lium.reset_gpu_clocks`), so the caller sees which GPUs failed and
