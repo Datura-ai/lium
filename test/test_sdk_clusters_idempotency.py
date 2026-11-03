@@ -294,3 +294,29 @@ def test_up_cluster_unanswered_order_stays_uncertain_through_the_cli(monkeypatch
     payload = json.loads(result.output)
     assert payload["error"]["code"] == "cluster_rent_uncertain"
     assert "Retry" not in result.output and "may be rented" in result.output
+
+
+
+@pytest.mark.parametrize("body, removed", [
+    ({"cluster_id": "c-1", "success": True, "message": "No member pod is left; the cluster is DELETING", "pods": []}, True),
+    ({"cluster_id": "c-1", "success": False, "pods": []}, False),
+    ({"cluster_id": "c-1", "success": True}, False),
+])
+def test_rm_cluster_of_a_provisioning_cluster_with_no_member_yet_is_done(body, removed):
+    """DAH-5486: deleting a cluster with no member yet answers 200, success true, no rows; anything else without rows raises."""
+    from lium.sdk.models import Cluster
+    client = _Client(routes={("DELETE", "/clusters/c-1"): body})
+    if removed:
+        assert client.rm_cluster(Cluster(id="c-1", pods=[])) == []
+    else:
+        with pytest.raises(LiumError, match="without per-member results"):
+            client.rm_cluster(Cluster(id="c-1", pods=[]))
+
+
+def test_rm_cluster_repeated_delete_keeps_the_404_as_not_found():
+    """DAH-5486: a repeated delete of a cluster already gone stays a 404, raised as LiumNotFoundError ("already gone")."""
+    from lium.sdk.exceptions import LiumNotFoundError
+    from lium.sdk.models import Cluster
+    client = _Client(routes={("DELETE", "/clusters/c-1"): LiumNotFoundError("Resource not found: Cluster not found")})
+    with pytest.raises(LiumNotFoundError, match="Cluster not found"):
+        client.rm_cluster(Cluster(id="c-1", pods=[]))
