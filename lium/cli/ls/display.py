@@ -231,14 +231,14 @@ def _sort_key_factory(name: str) -> Callable[[ExecutorInfo], Any]:
 # and the country. The rest is kept in priority order (1 first) while the terminal
 # has room, and dropped from the end when it has not — Rich would otherwise squeeze
 # every column evenly, which at 80 columns hides Id and prints the price as "0…".
-# Nominal widths: Id fits "★ golden-matrix-ff (DinD)", Location most country names;
-# both grow with the terminal. `ratio` is the nominal width plus the 2-char padding, so
-# Rich splits the slack in the proportion fit_columns reserved; with a smaller ratio a
-# no-slack fit gave Location 12 chars and "United States" folded onto a second line.
+# Nominal widths: Id fits "★ golden-matrix-ff (DinD)", Location most country names, Config
+# "2/8×H200"; all three grow with the terminal, so a wide one shows "1/8×RTXPRO6000" whole.
+# `ratio` is the nominal width plus the 2-char padding, so Rich splits the slack in the
+# proportion fit_columns reserved; with a smaller ratio a no-slack fit gave Location 12 chars and "United States" folded onto a second line.
 _COLUMNS = [
     ("", 3, None, dict(justify="right", width=3, no_wrap=True, style="dim")),
     ("Id", 25, None, dict(justify="left", ratio=27, min_width=25, overflow="fold")),
-    ("Config", 12, None, dict(justify="left", width=12, no_wrap=True)),
+    ("Config", 12, None, dict(justify="left", ratio=14, min_width=12, no_wrap=True)),
     ("Link", 9, 4, dict(justify="left", width=9, no_wrap=True)),
     ("Tier", 8, 1, dict(justify="left", width=8, no_wrap=True)),
     ("Max CUDA", 10, 5, dict(justify="right", width=10, no_wrap=True)),
