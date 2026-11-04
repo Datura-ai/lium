@@ -1380,8 +1380,10 @@ class Lium:
                 propagates.
             termination_hours: Sent with the rent (1 to 720): the server removes the pod this
                 many hours after it starts, even if this process never gets to schedule it.
-            enable_backups: Lium backs up a new pod's volume automatically by default;
-                ``False`` turns that off for this pod.
+            enable_backups: Lium backs up a new pod's volume automatically by default when the
+                account has a paid deposit or existing backup storage. Without either, the pod is
+                still rented but gets no backup, and the result's ``backup_notice`` says so: check
+                it. ``False`` turns the backup off for this pod.
 
         Returns:
             Pod metadata as returned by the rent API (id, name, status, ssh command,
@@ -6100,8 +6102,9 @@ class Lium:
             LiumError: ``code`` ``self_transfer`` (400), ``insufficient_balance`` (402), ``not_found`` (404, no
                 account with that e-mail or id) or ``recipient_unavailable`` (409, a deleted or blocked account).
                 ``code`` ``transfer_outcome_unknown`` (with ``idempotency_key`` and ``hint``): timeout, dropped
-                connection, 5xx after the POST, or a 409 ``idempotency_outcome_unknown`` /
-                ``idempotency_in_progress`` / ``idempotency_key_reused`` on a repeat.
+                connection, 5xx after the POST, or, on a repeat, a 409 ``idempotency_outcome_unknown`` /
+                ``idempotency_in_progress`` or a 422 ``idempotency_key_reused`` (the key reused with a changed
+                body, such as a different amount).
             LiumTransferInterruptedError: Ctrl-C while waiting for the answer; a ``KeyboardInterrupt`` with the
                 same ``code``, ``idempotency_key`` and ``hint``. — the transfer may have happened; check transfer
                 history on the Billing page of the account owning the key and, if it is not there, contact support
