@@ -1052,6 +1052,16 @@ def up_command(
                 click.echo(line)
         except KeyboardInterrupt:
             ui.dim("\nStopped following logs")
+        except CliFailure as exc:
+            # the server ended the log stream with an error frame; the pod still bills
+            raise CliFailure(
+                exc.code,
+                f"Pod {pod_name} (id: {pod_id}) is rented and billing, but its log stream ended: {exc.message}",
+                exc.exit_code,
+                data=billing_pod,
+                hint=f"Do not run 'lium up' again: the pod exists. Follow it with 'lium logs {pod_name} -f'; "
+                     f"'lium rm {pod_name}' removes it.",
+            ) from exc
         return
 
     # Standard mode: SSH into the pod
