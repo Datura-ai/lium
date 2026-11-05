@@ -10,7 +10,8 @@ idle-pay reason gates Secure; an idle-pay entry with ``gating: false`` (a code S
 blocks nothing: it prints as "Not eligible for idle pay: …" with its "No action: …" line. A reachability
 or last-error reason (``kind`` other than ``idle_pay``) blocks renting whatever its ``gating``. Only an
 entry the portal sends without ``gating`` (a portal from before the field) is decided here, from the
-code: the legacy fallback.
+code: the legacy fallback. A ``kind: advisory`` entry (e.g. ``SYSBOX_OUTDATED``) gates neither pay nor
+listing: it prints as a "Notice: …" line with its measured, required and fix, never in the panel.
 """
 
 from __future__ import annotations
@@ -66,6 +67,8 @@ SPLIT_TO_EARN_CODE = "no_unrented_capacity_for_gpu_count"
 # (lium-io validator ``_port_limited_remainder``): partial idle pay, whatever the portal's ``gating``
 # (it serves ``gating: true``). Below 3 ports, or at/above the required count, no split pays.
 PARTIAL_PAY_CODE = "port_limited_remainder"
+# A portal entry that never gates pay or listing (e.g. SYSBOX_OUTDATED): a notice, not a block.
+ADVISORY_KIND = "advisory"
 MIN_PORT_COUNT = 3
 _ALIASES = {
     "price_above_p90": "price_above_market_p90_soft_limit",
@@ -387,7 +390,8 @@ def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
     code = str(_first(entry, "code", "reason_code") or "")
     code = _ALIASES.get(code, code)
     secure = _first(entry, "secure", "secure_requirement", "blocks_secure", "gates_secure")
-    idle_pay = str(entry.get("kind") or "idle_pay") == "idle_pay"
+    kind = str(entry.get("kind") or "idle_pay")
+    idle_pay = kind == "idle_pay"
     served = None if entry.get("gating_source") == "cli_legacy_fallback" else entry.get("gating")
     if served is not None:
         gating = bool(served)
@@ -403,7 +407,7 @@ def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
     partial = _partial_pay(code, measured, required)
     return {
         "code": code,
-        "kind": str(entry.get("kind") or "idle_pay"),
+        "kind": kind,
         "title": _first(entry, "title", "message") or code,
         "message": _first(entry, "message"),
         "measured": measured,
@@ -416,7 +420,7 @@ def normalise(entry: Mapping[str, Any]) -> dict[str, Any]:
         "docs_url": _first(entry, "docs_url"),
         "secure": bool(secure),
         "gating": gating,
-        "blocks": (gating or not idle_pay) and not partial,
+        "blocks": (gating or not idle_pay) and not partial and kind != ADVISORY_KIND,
         "partial": partial,
         "gating_source": "portal" if served is not None else "cli_legacy_fallback",
     }
@@ -437,7 +441,7 @@ def _all_reasons(row: Mapping[str, Any]) -> list[dict[str, Any]]:
         # partial pay only when nothing else on the node excludes idle pay, and never over a served
         # gating entry once SECURE_LISTING_REQUIRES_IDLE_PAY hides the Secure node for it
         if reason["partial"] and (not_paid or len(reasons) > 1 or (hides_secure and reason["gating"])):
-            reason.update(partial=False, blocks=reason["gating"] or reason["kind"] != "idle_pay")
+            reason.update(partial=False, blocks=(reason["gating"] or reason["kind"] != "idle_pay") and reason["kind"] != ADVISORY_KIND)
     return reasons
 
 
@@ -448,7 +452,12 @@ def node_reasons(row: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 def not_eligible_reasons(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Why the node earns no idle pay while nothing needs fixing: the ``gating: false`` idle-pay entries."""
-    return [reason for reason in _all_reasons(row) if not reason["blocks"]]
+    return [reason for reason in _all_reasons(row) if not reason["blocks"] and reason["kind"] != ADVISORY_KIND]
+
+
+def advisory_reasons(row: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Notices that gate neither pay nor listing (``kind: advisory``)."""
+    return [reason for reason in _all_reasons(row) if reason["kind"] == ADVISORY_KIND]
 
 
 def needs_fallback(rows: Iterable[Mapping[str, Any]]) -> bool:
@@ -597,15 +606,34 @@ def _no_action(reason: Mapping[str, Any]) -> str:
     return f"No action: {fix}" if fix else ""
 
 
-def print_not_eligible(rows: Iterable[Any], *, short: bool) -> int:
-    """Print the "Not eligible for idle pay" reasons, never in red; ``short`` is one marker line per node (the tables).
+def _print_advisories(row: Mapping[str, Any], *, short: bool) -> None:
+    node_id = str(row.get("id") or row.get("executor_id") or "?")
+    for reason in advisory_reasons(row):
+        figures = " · ".join(
+            f"{label} {reason[key]}" for label, key in (("measured", "measured"), ("required", "required")) if reason.get(key) not in (None, "")
+        )
+        if short:
+            console.print(Text(f"  ◦ {node_id}: notice: {reason['title']}" + (f" ({figures})" if figures else ""), style="dim"))
+            continue
+        console.print(Text.from_markup(f"[bold]Notice:[/] {escape(str(reason['title']))}"))
+        for line in (reason.get("message"), figures, f"Fix: {reason['fix']}" if reason.get("fix") else None):
+            if line:
+                console.print(Padding(Text(str(line)), (0, 0, 0, 2)))
+        if reason.get("fix_command"):
+            console.print(Padding(Text(str(reason["fix_command"]), style="bold"), (0, 0, 0, 4)))
 
-    Returns how many nodes had one.
+
+def print_not_eligible(rows: Iterable[Any], *, short: bool) -> int:
+    """Print the "Not eligible for idle pay" reasons and the advisory notices, never in red; ``short`` is one
+    marker line per reason (the tables).
+
+    Returns how many nodes had a not-eligible reason.
     """
     nodes = 0
     for row in rows:
         if not isinstance(row, Mapping):
             continue
+        _print_advisories(row, short=short)
         reasons = not_eligible_reasons(row)
         if not reasons:
             continue
@@ -643,9 +671,11 @@ def print_not_eligible(rows: Iterable[Any], *, short: bool) -> int:
 
 
 __all__ = [
+    "ADVISORY_KIND",
     "LEGACY_GATING_CODES",
     "MIN_NVIDIA_DRIVER",
     "NOT_GATED",
+    "advisory_reasons",
     "attach",
     "blocked_count",
     "blocking_panel",
