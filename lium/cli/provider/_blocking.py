@@ -437,10 +437,12 @@ def _all_reasons(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     # the portal's idle_pay_state "not_paid" is the cycle's verdict (e.g. the resume hold, whose pause entry
     # blocking_reasons filters out): nothing is paid, whatever the port counts say
     not_paid = row.get("idle_pay_state") == "not_paid"
+    # an advisory excludes nothing from idle pay, so it never cancels partial pay
+    others = sum(reason["kind"] != ADVISORY_KIND for reason in reasons)
     for reason in reasons:
         # partial pay only when nothing else on the node excludes idle pay, and never over a served
         # gating entry once SECURE_LISTING_REQUIRES_IDLE_PAY hides the Secure node for it
-        if reason["partial"] and (not_paid or len(reasons) > 1 or (hides_secure and reason["gating"])):
+        if reason["partial"] and (not_paid or others > 1 or (hides_secure and reason["gating"])):
             reason.update(partial=False, blocks=(reason["gating"] or reason["kind"] != "idle_pay") and reason["kind"] != ADVISORY_KIND)
     return reasons
 
@@ -621,6 +623,13 @@ def _print_advisories(row: Mapping[str, Any], *, short: bool) -> None:
                 console.print(Padding(Text(str(line)), (0, 0, 0, 2)))
         if reason.get("fix_command"):
             console.print(Padding(Text(str(reason["fix_command"]), style="bold"), (0, 0, 0, 4)))
+        if reason.get("requires"):
+            console.print(Padding(Text.from_markup(f"[bold]Requires:[/] {escape(' · '.join(reason['requires']))}"), (0, 0, 0, 2)))
+        if reason.get("verify_command"):
+            console.print(Padding(Text.from_markup("[bold]Verify:[/]"), (0, 0, 0, 2)))
+            console.print(Padding(Text(str(reason["verify_command"]), style="bold"), (0, 0, 0, 4)))
+        if reason.get("docs_url"):
+            console.print(Padding(Text(f"Docs: {reason['docs_url']}"), (0, 0, 0, 2)))
 
 
 def print_not_eligible(rows: Iterable[Any], *, short: bool) -> int:
