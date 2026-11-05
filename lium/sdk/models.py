@@ -415,6 +415,8 @@ class Template(_Serializable):
     status: str
     # The template's image can mount an encrypted local volume; set by the API.
     supports_volume_encryption: bool = False
+    # Lium's own template: the API sends no owner (user_id) for it.
+    official: bool = False
 
 
 @dataclass

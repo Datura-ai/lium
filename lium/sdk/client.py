@@ -3191,34 +3191,32 @@ class Lium:
         data = self._request("GET", "/executors/default-docker-image", params=params).json()
         return data
 
-    def _select_fallback_template(self) -> Optional[Template]:
-        """Pick a reasonable default template (prefer PyTorch, else first available)."""
+    def _select_fallback_template(self, max_cuda_version: Optional[float] = None) -> Optional[Template]:
+        """Pick the official PyTorch template a node with no default image can run.
+
+        Only Lium's own `daturaai/pytorch` templates count: any user can publish a PYTORCH-category template, and a date
+        tag such as 26022026 outranked 2.12.0, so a node with no default image got a community ComfyUI
+        image with no torch (DAH-5795). The newest CUDA the driver supports wins; a driver older than
+        every official image gets the lowest-CUDA one."""
         templates = self.templates()
         if not templates:
             return None
 
-        def is_pytorch(template: Template) -> bool:
-            category = (template.category or "").upper()
-            image = (template.docker_image or "").lower()
-            return "PYTORCH" in category or "pytorch" in image
+        def cuda_of(template: Template) -> float:
+            match = re.search(r"cuda(\d+\.\d+)", template.docker_image_tag or "")
+            return float(match.group(1)) if match else 0.0
 
-        pytorch_templates = [t for t in templates if is_pytorch(t)]
+        def torch_of(template: Template) -> tuple:
+            match = re.match(r"(\d+)\.(\d+)\.(\d+)", template.docker_image_tag or "")
+            return tuple(int(part) for part in match.groups()) if match else ()
 
-        if pytorch_templates:
-            def version_key(template: Template):
-                tag = template.docker_image_tag or ""
-                version_part = tag.split('-')[0]
-                parts = []
-                for piece in version_part.split('.'):
-                    if piece.isdigit():
-                        parts.append(int(piece))
-                    else:
-                        break
-                return tuple(parts)
-
-            return max(pytorch_templates, key=version_key)
-
-        return templates[0]
+        official = [t for t in templates if t.official and t.docker_image == "daturaai/pytorch" and cuda_of(t)]
+        if not official:
+            return templates[0]
+        runnable = [t for t in official if max_cuda_version is None or cuda_of(t) <= max_cuda_version]
+        if runnable:
+            return max(runnable, key=lambda t: (cuda_of(t), torch_of(t)))
+        return min(official, key=lambda t: (cuda_of(t), tuple(-v for v in torch_of(t))))
 
     def _template_offers_volume_encryption(
         self, template_id: Optional[str], template: Optional[Template] = None
@@ -3264,7 +3262,7 @@ class Lium:
             if template:
                 return template
 
-        fallback = self._select_fallback_template()
+        fallback = self._select_fallback_template(executor.max_cuda_version)
         if fallback:
             return fallback
 
@@ -3297,6 +3295,7 @@ class Lium:
                 category=d.get("category", "general"),
                 status=d.get("status", "unknown"),
                 supports_volume_encryption=bool(d.get("supports_volume_encryption")),
+                official=d.get("user_id") is None,
             )
             for d in data
         ]
