@@ -60,6 +60,9 @@ class ExecutorInfo(_Serializable):
     # True when the API listed the node with min_gpu_count_for_rental null: it rents whole only
     # (every GPU), so a partial count is refused. None = the API did not say.
     whole_host_only: Optional[bool] = None
+    # The same for a rent without Jupyter (``min_gpu_count_for_ssh_only_rental`` null): it holds one port
+    # fewer, so it can split where a Jupyter rent cannot. Falls back to ``whole_host_only`` without the field.
+    whole_host_only_ssh_only: Optional[bool] = None
 
     # How the GPUs are wired to each other, as Lium's `nvidia-smi topo` check saw them:
     # {"gpu_count", "gpu_pairs", "nvlink", "nvlink_links", "nvlink_pairs", "nvlink_active_links",

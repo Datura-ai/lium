@@ -11,6 +11,7 @@ the whole machine.
 
 from types import SimpleNamespace
 
+import pytest
 from click.testing import CliRunner
 
 from lium.cli.cli import cli
@@ -230,7 +231,7 @@ def test_up_partial_count_on_a_whole_host_only_node_is_refused_before_renting(mo
 
     def whole_host_only(*args, **kwargs):
         executor = plain(*args, **kwargs)
-        executor.whole_host_only = True
+        executor.whole_host_only = executor.whole_host_only_ssh_only = True
         return executor
 
     monkeypatch.setitem(globals(), "_executor", whole_host_only)
@@ -241,13 +242,30 @@ def test_up_partial_count_on_a_whole_host_only_node_is_refused_before_renting(mo
     assert _FakeLium.up_kwargs == {}
 
 
+@pytest.mark.parametrize("jupyter, refused", [((), False), (("--jupyter",), True)])
+def test_up_partial_count_uses_the_ssh_only_minimum_without_jupyter(monkeypatch, jupyter, refused):
+    """A node whole-only for a Jupyter rent but splittable SSH-only (DAH-5806): -c 2 rents without --jupyter."""
+    plain = _executor
+
+    def ssh_only_split(*args, **kwargs):
+        executor = plain(*args, **kwargs)
+        executor.whole_host_only, executor.whole_host_only_ssh_only = True, False
+        return executor
+
+    monkeypatch.setitem(globals(), "_executor", ssh_only_split)
+    result = _run_up(monkeypatch, "-c", "2", *jupyter, node_gpus=8, billed=2, visible=2, by_node=True)
+
+    assert ("rents whole only. Request all 8 GPUs." in result.output) is refused
+    assert (_FakeLium.up_kwargs.get("gpu_count") == 2) is not refused
+
+
 def test_up_whole_host_only_without_a_partial_count_leaves_the_count_to_the_backend(monkeypatch):
     """Listed gpu_count can differ from the GPU rows the API counts: no refusal, no count sent."""
     plain = _executor
 
     def whole_host_only(*args, **kwargs):
         executor = plain(*args, **kwargs)
-        executor.whole_host_only = True
+        executor.whole_host_only = executor.whole_host_only_ssh_only = True
         return executor
 
     monkeypatch.setitem(globals(), "_executor", whole_host_only)
@@ -264,7 +282,7 @@ def test_up_whole_host_only_explicit_count_is_sent_as_given(monkeypatch):
 
     def whole_host_only(*args, **kwargs):
         executor = plain(*args, **kwargs)
-        executor.whole_host_only = True
+        executor.whole_host_only = executor.whole_host_only_ssh_only = True
         return executor
 
     monkeypatch.setitem(globals(), "_executor", whole_host_only)
