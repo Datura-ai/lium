@@ -696,6 +696,32 @@ def test_reboot_reports_a_failed_item_after_finishing_the_batch(monkeypatch):
     assert result.exit_code == EXIT_GENERAL_ERROR
 
 
+def test_reboot_volume_id_takes_the_huid_lium_volumes_shows(monkeypatch):
+    """`lium volumes` prints HUIDs; the API takes the volume's ID, so the HUID is resolved first."""
+    sent = []
+
+    class _RebootLium:
+        def __init__(self, *a, **kw):
+            pass
+
+        def ps(self):
+            return [_pod()]
+
+        def reboot(self, pod, volume_id=None):
+            sent.append(volume_id)
+
+    monkeypatch.setattr(reboot_module, "Lium", _RebootLium)
+    vid = "548b9ccb-ff4a-4091-9d5b-efad2b7140fb"
+    monkeypatch.setattr(reboot_module, "resolve_volume_huid", lambda h: vid if h == "swift-fox-7f" else None)
+
+    assert CliRunner().invoke(cli, ["reboot", "my-pod", "--volume-id", "swift-fox-7f"]).exit_code == 0
+    assert CliRunner().invoke(cli, ["reboot", "my-pod", "--volume-id", vid]).exit_code == 0
+    assert sent == [vid, vid]
+    missing = CliRunner().invoke(cli, ["reboot", "my-pod", "--volume-id", "no-such-vol-00"])
+    assert missing.exit_code == EXIT_CONFIGURATION_ERROR
+    assert sent == [vid, vid]
+
+
 def test_reset_gpu_of_a_missing_pod_fails(monkeypatch):
     """reset-gpu names one pod — a miss fails like reboot's, before any reset is sent."""
     from lium.cli.reset_gpu import command as reset_gpu_module
