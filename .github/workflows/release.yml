@@ -268,28 +268,32 @@ jobs:
         SHA: ${{ github.sha }}
       run: |
         set -u
+        # one line per manual ci.yml run on the release commit: "<status>:<conclusion>"
         runs() {
           gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&event=workflow_dispatch&per_page=50" \
-            --jq '.workflow_runs | map(.status + ":" + (.conclusion // "")) | join(" ")'
+            --jq '.workflow_runs[] | .status + ":" + (.conclusion // "")'
         }
-        before=-1
+        # base = finished runs when we started watching one (someone else's or ours); -1 = not watching yet
+        base=-1
+        r=""
         for _ in $(seq 1 90); do
-          r=$(runs) || r=""
-          case " $r " in *" completed:success "*) echo "ci.yml green on $SHA"; exit 0;; esac
-          if ! printf '%s' "$r" | grep -qE '(queued|in_progress|waiting|pending|requested):'; then
-            n=$(printf '%s' "$r" | wc -w)
-            if [ "$before" -ge 0 ] && [ "$n" -gt "$before" ]; then
-              echo "::error::ci.yml on $SHA finished without success ($r); fix it, then re-run this workflow"; exit 1
-            fi
-            if [ "$before" -lt 0 ]; then
-              echo "no green or running ci.yml run on $SHA: starting one on $RELEASE_TAG"
-              gh workflow run ci.yml --ref "$RELEASE_TAG"
-              before=$n
-            fi
+          if ! r=$(runs); then
+            echo "::warning::could not read the ci.yml runs; trying again"; sleep 30; continue
+          fi
+          if printf '%s\n' "$r" | grep -qx 'completed:success'; then echo "ci.yml green on $SHA"; exit 0; fi
+          done_n=$(printf '%s\n' "$r" | grep -c '^completed:' || true)
+          if printf '%s\n' "$r" | grep -qv -e '^completed:' -e '^$'; then
+            [ "$base" -ge 0 ] || { echo "ci.yml already running on $SHA: waiting for it"; base=$done_n; }
+          elif [ "$base" -ge 0 ] && [ "$done_n" -gt "$base" ]; then
+            echo "::error::ci.yml on $SHA finished without success: $(echo $r); fix it, then re-run this workflow"; exit 1
+          elif [ "$base" -lt 0 ]; then
+            echo "no green or running ci.yml run on $SHA: starting one on $RELEASE_TAG"
+            gh workflow run ci.yml -R "$GITHUB_REPOSITORY" --ref "$RELEASE_TAG" || { echo "::error::could not start ci.yml on $RELEASE_TAG"; exit 1; }
+            base=$done_n
           fi
           sleep 30
         done
-        echo "::error::ci.yml on $SHA did not finish in 45 min ($r)"; exit 1
+        echo "::error::ci.yml on $SHA did not finish in 45 min: $(echo $r)"; exit 1
 
   release-assets:
     name: Publish GitHub release assets
