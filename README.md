@@ -719,9 +719,10 @@ check, an sdist/wheel build and the binary-target matrix check (`test/test_relea
 builds (Linux amd64/arm64 in Docker, macOS arm64) run only when a packaging input changes (`pyproject.toml`,
 `uv.lock`, `lium.spec`, `lium_entry.py`, `Dockerfile.build`, `scripts/install.sh`, `scripts/linux_bundle_report.py`,
 `ci.yml`, `release.yml`); macOS Intel never builds on a PR. A manual dispatch (`gh workflow run ci.yml --ref <branch>`)
-builds all five targets and runs the live e2e (`./e2e/run.sh`, see `e2e/README.md`), which otherwise runs once a day
-on a schedule and never on a PR. `ci-ok` (the aggregate of the test, packaging,
-wheel and target-matrix jobs) and `e2e-live` are the two status checks the `main` ruleset requires.
+runs the tests, the wheel and the live e2e (`./e2e/run.sh`, see `e2e/README.md`); `-f binaries=true` also builds
+all four binary targets. The live e2e otherwise runs once a day on a schedule and never on a PR. `ci-ok` (red when
+the `pytest` job, which also runs the packaging check and the wheel build, fails; skipped, which passes, when it is
+green) and `e2e-live` are the two status checks the `main` ruleset requires.
 
 
 ## License

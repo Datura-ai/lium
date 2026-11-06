@@ -6,7 +6,7 @@
 # the PR shows green CI and "BLOCKED" with no visible reason (lium-platform #76/#78/#81, 7 Sep 2026). This workflow:
 #   - analyses every PR whatever its base branch,
 #   - re-analyses on `edited` when the base branch changes (a retarget), so no push is needed,
-#   - runs on merge-queue groups (`merge_group`) and keeps the weekly schedule,
+#   - runs on merge-queue groups (`merge_group`) and keeps the weekly schedule (main is analysed there, not on every push),
 #   - keeps default setup's languages, `default` query suite and `/language:<lang>` categories, so alerts carry over.
 #
 # Cut-over: code scanning rejects SARIF from a workflow while default setup is enabled, so until default setup is
@@ -21,8 +21,8 @@
 name: CodeQL
 
 on:
-  push:
-    branches: [main]
+  # No push to main (DAH-5832): the PR was analysed already, and the weekly run on main below refreshes the base
+  # analysis the PR alerts are compared with. Every push to main analysed both languages again.
   pull_request:
     branches: ['**']
     # `edited` fires when the base branch changes (a retarget); the job skips title/body-only edits below.
