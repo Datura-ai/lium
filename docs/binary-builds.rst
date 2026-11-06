@@ -88,7 +88,7 @@ What the macOS bundles ship
 ---------------------------
 
 Both macOS jobs run ``uv sync --frozen`` and PyInstaller on GitHub's runners
-(``macos-14`` for arm64, ``macos-15-intel`` for x86_64). ``cryptography`` 49 and
+(``macos-15`` for arm64, ``macos-15-intel`` for x86_64). ``cryptography`` 49 and
 later publish no macOS Intel wheel, so on the Intel runner uv builds it from
 source; the job sets ``OPENSSL_STATIC=1`` and ``OPENSSL_DIR=$(brew --prefix
 openssl@3)`` first, so OpenSSL is linked into ``_rust.abi3.so`` instead of being
