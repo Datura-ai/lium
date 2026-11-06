@@ -263,14 +263,12 @@ def test_a_stray_word_in_the_command_stops_before_the_install(monkeypatch) -> No
     assert "Unexpected '12'" in result.output
 
 
-def test_node_check_options_with_values_pass_the_stray_word_check(monkeypatch) -> None:
+def test_a_word_after_the_debug_flag_stops_before_the_install(monkeypatch) -> None:
     from click.testing import CliRunner
 
-    def past_the_check(**_):  # the first call after the check: stop there
-        raise SystemExit(7)
+    monkeypatch.setattr(mine, "_validate_executor", lambda *a, **k: pytest.fail("reached the node check"))
 
-    monkeypatch.setattr(mine, "_show_setup_summary", past_the_check)
+    result = CliRunner().invoke(mine.mine_command, ["--auto", "-k", "hk", "--debug", "12"])
 
-    result = CliRunner().invoke(mine.mine_command, ["-v", "--gpu-utilization-limit", "100", "--gpu-max-count=8", "--debug"])
-
-    assert result.exit_code == 7
+    assert result.exit_code == 2
+    assert "Unexpected '12'" in result.output
