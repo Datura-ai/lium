@@ -250,3 +250,27 @@ def test_failed_preflight_pull_stops_with_its_error() -> None:
     with pytest.raises(Exception, match="toomanyrequests: rate limit"):
         mine._finish_preflight_pull(pull)
     mine._finish_preflight_pull(subprocess.Popen("true", shell=True, text=True, stderr=subprocess.PIPE))
+
+
+def test_a_stray_word_in_the_command_stops_before_the_install(monkeypatch) -> None:
+    from click.testing import CliRunner
+
+    monkeypatch.setattr(mine, "_validate_executor", lambda *a, **k: pytest.fail("reached the node check"))
+
+    result = CliRunner().invoke(mine.mine_command, ["--auto", "-k", "hk", "--gpu-utilization-limit", "100", "12"])
+
+    assert result.exit_code == 2
+    assert "Unexpected '12'" in result.output
+
+
+def test_node_check_options_with_values_pass_the_stray_word_check(monkeypatch) -> None:
+    from click.testing import CliRunner
+
+    def past_the_check(**_):  # the first call after the check: stop there
+        raise SystemExit(7)
+
+    monkeypatch.setattr(mine, "_show_setup_summary", past_the_check)
+
+    result = CliRunner().invoke(mine.mine_command, ["-v", "--gpu-utilization-limit", "100", "--gpu-max-count=8", "--debug"])
+
+    assert result.exit_code == 7
