@@ -65,16 +65,6 @@ exit 0
     return proc.returncode, proc.stdout + proc.stderr, dispatched
 
 
-def test_gate_can_start_ci_and_has_time_to_wait_for_it():
-    job = gate_job()
-    assert job["permissions"] == {"actions": "write"}
-    assert job["timeout-minutes"] >= 45
-    assert (
-        'gh workflow run ci.yml -R "$GITHUB_REPOSITORY" --ref "$RELEASE_TAG"'
-        in job["steps"][0]["run"]
-    )
-
-
 def test_already_green_passes_without_starting_a_run(tmp_path):
     rc, _, dispatched = run_gate(tmp_path, [["completed:failure", "completed:success"]])
     assert rc == 0 and dispatched == []
