@@ -252,22 +252,44 @@ jobs:
           dist/${{ matrix.asset_name }}.tar.gz.sha256
 
   # PR CI no longer rents pods (ci.yml e2e-live), so a release ships only a commit whose full CI, live e2e
-  # included, went green from `gh workflow run ci.yml --ref main` before tagging (the daily cron skips pytest and the builds).
+  # included, went green from a manual (workflow_dispatch) ci.yml run (the daily cron skips pytest and the builds).
+  # v0.41.7 (6 Nov 2026) was cut 2 min after its PR merged, before anyone had run that, and failed here. This job
+  # now starts the run itself on the release tag (the same commit) when none is green or running, and waits for it.
   ci-green:
     name: Full CI green on the release commit
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 50
     permissions:
-      actions: read
+      actions: write
     steps:
     - env:
         GH_TOKEN: ${{ github.token }}
         SHA: ${{ github.sha }}
       run: |
-        n=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&status=success" \
-          --jq '[.workflow_runs[] | select(.event == "workflow_dispatch")] | length')
-        [ "$n" -gt 0 ] || { echo "::error::no green workflow_dispatch ci.yml run on $SHA: run gh workflow run ci.yml --ref main, then re-run this workflow"; exit 1; }
+        set -u
+        runs() {
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&event=workflow_dispatch&per_page=50" \
+            --jq '.workflow_runs | map(.status + ":" + (.conclusion // "")) | join(" ")'
+        }
+        before=-1
+        for _ in $(seq 1 90); do
+          r=$(runs) || r=""
+          case " $r " in *" completed:success "*) echo "ci.yml green on $SHA"; exit 0;; esac
+          if ! printf '%s' "$r" | grep -qE '(queued|in_progress|waiting|pending|requested):'; then
+            n=$(printf '%s' "$r" | wc -w)
+            if [ "$before" -ge 0 ] && [ "$n" -gt "$before" ]; then
+              echo "::error::ci.yml on $SHA finished without success ($r); fix it, then re-run this workflow"; exit 1
+            fi
+            if [ "$before" -lt 0 ]; then
+              echo "no green or running ci.yml run on $SHA: starting one on $RELEASE_TAG"
+              gh workflow run ci.yml --ref "$RELEASE_TAG"
+              before=$n
+            fi
+          fi
+          sleep 30
+        done
+        echo "::error::ci.yml on $SHA did not finish in 45 min ($r)"; exit 1
 
   release-assets:
     name: Publish GitHub release assets
