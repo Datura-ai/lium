@@ -1166,6 +1166,12 @@ class Lium:
                 if "min_gpu_count_for_rental" in executor_dict
                 else None
             ),
+            whole_host_only_ssh_only=(
+                executor_dict["min_gpu_count_for_ssh_only_rental"] is None
+                if "min_gpu_count_for_ssh_only_rental" in executor_dict
+                else (executor_dict["min_gpu_count_for_rental"] is None
+                      if "min_gpu_count_for_rental" in executor_dict else None)
+            ),
             interconnect=interconnect,
             nvlink=nvlink,
             gpu_power_limited=gpu_power_limited,
@@ -1366,7 +1372,8 @@ class Lium:
                 takes every GPU that is free on the node right now (the whole node when
                 none of it is rented). The API rejects a count above the free GPUs, below
                 the provider's minimum, or on nodes that do not allow splitting; a count below
-                the free GPUs on a node listed whole-host-only (:attr:`ExecutorInfo.whole_host_only`)
+                the free GPUs on a node listed whole-host-only (:attr:`ExecutorInfo.whole_host_only` with
+                ``enable_jupyter``, :attr:`ExecutorInfo.whole_host_only_ssh_only` without)
                 raises ``ValueError`` after the node listing is read and before the rent request
                 is sent; requesting all its free GPUs rents as usual.
             idempotency_key: The ``Idempotency-Key`` the rent request carries (a new UUID when ``None``).
@@ -1465,7 +1472,9 @@ class Lium:
             raise ValueError(self.executor_not_found_message(executor_id))
         # Same check as `lium up -c` (DAH-5146): the API refuses a partial count on a node listed
         # whole-host-only, so say so before anything is created or posted.
-        if gpu_count and getattr(executor_info, "whole_host_only", None):
+        # a rent without Jupyter holds one port fewer, so its own minimum applies (DAH-5806)
+        whole = "whole_host_only" if enable_jupyter else "whole_host_only_ssh_only"
+        if gpu_count and getattr(executor_info, whole, None):
             free = executor_info.available_gpu_count or executor_info.gpu_count
             if gpu_count < free:
                 raise ValueError(f"{executor_info.huid} rents whole only. Request all {free} GPUs.")

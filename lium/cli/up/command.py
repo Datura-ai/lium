@@ -595,7 +595,8 @@ def up_command(
                 f"-c {rent_count}: {executor.huid} has {executor.gpu_count} GPU(s).",
                 EXIT_CONFIGURATION_ERROR,
             )
-        if getattr(executor, "whole_host_only", None):
+        # without --jupyter the rent is SSH-only and holds one port fewer, so its own minimum applies
+        if getattr(executor, "whole_host_only" if jupyter else "whole_host_only_ssh_only", None):
             # The backend counts the GPU rows and is the authority on "whole"; the listed
             # gpu_count can differ from them. Refuse only a count clearly below what the listing
             # says is free. Any other explicit -c is sent as given (the API refuses it if it is
