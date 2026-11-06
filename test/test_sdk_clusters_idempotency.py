@@ -160,6 +160,32 @@ def test_up_cluster_sends_an_idempotency_key(monkeypatch):
     assert order["json"]["enable_jupyter"] is False
 
 
+def test_up_cluster_hands_back_the_backup_notice(monkeypatch):
+    """DAH-5023: the cluster rented without the backup the account cannot fund yet; the answer says so."""
+    client = _Client(
+        routes={("POST", "/executors/cluster/rent"): {"success": True, "pod_ids": ["pod-0", "pod-1"], "backup_notice": "no backup"}},
+        ps_sequence=[_pods([_pod_payload(0), _pod_payload(1)])],
+    )
+    monkeypatch.setattr(client, "cluster_template", lambda: _template("0.0.7"))
+
+    assert client.up_cluster(["exec-0", "exec-1"], name="job").backup_notice == "no backup"
+
+
+def test_up_cluster_confirmed_but_not_listed_keeps_the_backup_notice(monkeypatch):
+    """DAH-5023: the members are rented and billing although no listing shows them, so the notice rides on the error."""
+    from lium.sdk.exceptions import ClusterNotListedError
+
+    client = _Client(
+        routes={("POST", "/executors/cluster/rent"): {"success": True, "pod_ids": ["pod-0", "pod-1"], "backup_notice": "no backup"}},
+        ps_sequence=[[]],
+    )
+    monkeypatch.setattr(client, "cluster_template", lambda: _template("0.0.7"))
+
+    with pytest.raises(ClusterNotListedError) as caught:
+        client.up_cluster(["exec-0", "exec-1"], name="job")
+    assert caught.value.confirmed and caught.value.backup_notice == "no backup"
+
+
 def test_up_cluster_resends_once_with_the_same_key_when_the_backend_honours_it(monkeypatch):
     answers = iter([LiumServerError("Server error: 504"), {"success": True, "pod_ids": ["pod-0", "pod-1"]}])
 
@@ -268,3 +294,29 @@ def test_up_cluster_unanswered_order_stays_uncertain_through_the_cli(monkeypatch
     payload = json.loads(result.output)
     assert payload["error"]["code"] == "cluster_rent_uncertain"
     assert "Retry" not in result.output and "may be rented" in result.output
+
+
+
+@pytest.mark.parametrize("body, removed", [
+    ({"cluster_id": "c-1", "success": True, "message": "No member pod is left; the cluster is DELETING", "pods": []}, True),
+    ({"cluster_id": "c-1", "success": False, "pods": []}, False),
+    ({"cluster_id": "c-1", "success": True}, False),
+])
+def test_rm_cluster_of_a_provisioning_cluster_with_no_member_yet_is_done(body, removed):
+    """DAH-5486: deleting a cluster with no member yet answers 200, success true, no rows; anything else without rows raises."""
+    from lium.sdk.models import Cluster
+    client = _Client(routes={("DELETE", "/clusters/c-1"): body})
+    if removed:
+        assert client.rm_cluster(Cluster(id="c-1", pods=[])) == []
+    else:
+        with pytest.raises(LiumError, match="without per-member results"):
+            client.rm_cluster(Cluster(id="c-1", pods=[]))
+
+
+def test_rm_cluster_repeated_delete_keeps_the_404_as_not_found():
+    """DAH-5486: a repeated delete of a cluster already gone stays a 404, raised as LiumNotFoundError ("already gone")."""
+    from lium.sdk.exceptions import LiumNotFoundError
+    from lium.sdk.models import Cluster
+    client = _Client(routes={("DELETE", "/clusters/c-1"): LiumNotFoundError("Resource not found: Cluster not found")})
+    with pytest.raises(LiumNotFoundError, match="Cluster not found"):
+        client.rm_cluster(Cluster(id="c-1", pods=[]))

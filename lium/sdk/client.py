@@ -42,6 +42,7 @@ from .exceptions import (
     LiumBudgetExceededError,
     LiumCardTopUpError,
     LiumChargeOutcomeUnknownError,
+    LiumTransferInterruptedError,
     LiumRentOutcomeUnknownError,
     LiumError,
     LiumGpuOperationError,
@@ -73,6 +74,8 @@ from .models import (
     Cluster,
     ClusterOffer,
     ExecutorInfo,
+    GpuClockOutcome,
+    GpuClockResult,
     GpuResetOutcome,
     GpuResetResult,
     GpuStats,
@@ -99,6 +102,25 @@ from .utils import (
 from .api_keys import ApiKeysClient
 from .workspaces import WorkspacesClient
 
+
+TRANSFER_OUTCOME_UNKNOWN_HINT = (
+    "Do not send it again, with this key or a new one: a late commit can still land. Check transfer history on the "
+    "Billing page of the account that owns the billing key; if the transfer is not there, contact support with the "
+    "idempotency key."
+)
+
+
+def _transfer_outcome_unknown(key: str, exc: Exception) -> LiumChargeOutcomeUnknownError:
+    return LiumChargeOutcomeUnknownError(
+        "The transfer may or may not have happened: its answer was lost or not recorded. Do not repeat it; check the "
+        "Billing page and contact support with the idempotency_key.",
+        idempotency_key=key,
+        code="transfer_outcome_unknown",
+        hint=TRANSFER_OUTCOME_UNKNOWN_HINT,
+        request_id=getattr(exc, "request_id", None),
+    )
+
+
 # The backend feature `Lium.rent` looks for on GET /version before using POST /executors/rent-by-spec.
 RENT_BY_SPEC = "rent_by_spec"
 # The backend feature that says GET /pods/{id}/record is served (lium-platform#1204).
@@ -121,6 +143,8 @@ ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # checked with fullmatch: `$` 
 DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 
 IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# The rent answer's backup_notice repeated as a header (same text as the body field)
+BACKUP_NOTICE_HEADER = "X-Lium-Backup-Notice"
 # `request_same_origin` in `.utils` follows redirects for the credential-bearing HTTP paths of this package — renter SDK,
 # provider portal, signup (DAH-3543); `_MAX_REDIRECTS` stays as the name the tests read.
 _MAX_REDIRECTS = MAX_REDIRECTS
@@ -506,11 +530,20 @@ def _gpu_reset_outcome(gpu: Dict[str, Any]) -> GpuResetOutcome:
     )
 
 
+def _gpu_clock_outcome(gpu: Dict[str, Any]) -> GpuClockOutcome:
+    return GpuClockOutcome(
+        index=int(gpu.get("index", -1)), uuid=gpu.get("uuid") or "", result=gpu.get("result") or "",
+        applied_min_mhz=gpu.get("applied_min_mhz"), applied_max_mhz=gpu.get("applied_max_mhz"),
+        detail=gpu.get("detail"),
+    )
+
+
 GPU_RESET_POLL_SECONDS = 3
 GPU_RESET_POLL_TIMEOUT_SECONDS = 30
 # the server marks a reset `timeout` after 300 s; wait past that to read its own answer
 GPU_RESET_CLIENT_DEADLINE_SECONDS = 330
 GPU_RESET_MAY_STILL_RUN = "The reset may still finish; check the pod's GPUs (nvidia-smi) before you reset again"
+GPU_CLOCKS_MAY_HAVE_CHANGED = "The clocks may already have changed; check them in the pod (nvidia-smi -q -d CLOCK) before you try again"
 
 
 def _gpu_reset_result(pod: PodInfo, body: Dict[str, Any]) -> GpuResetResult:
@@ -899,6 +932,7 @@ class Lium:
         endpoint: str,
         base_url: Optional[str] = None,
         headers: Optional[Dict[str, str]] = None,
+        parse_gpu_outcome: Callable[[Dict[str, Any]], Any] = _gpu_reset_outcome,
         **kwargs,
     ) -> requests.Response:
         url = f"{base_url or self.config.base_url}/{endpoint.lstrip('/')}"
@@ -914,7 +948,7 @@ class Lium:
             **kwargs,
         )
         try:
-            self._raise_for_status(resp, key=self.config.api_key_description)
+            self._raise_for_status(resp, key=self.config.api_key_description, parse_gpu_outcome=parse_gpu_outcome)
         except Exception:
             # A streamed response (logs) that is never read keeps its socket
             # until garbage collection; the caller only gets the exception.
@@ -925,13 +959,16 @@ class Lium:
         return resp
 
     @staticmethod
-    def _raise_for_status(resp: requests.Response, key: str = "") -> None:
+    def _raise_for_status(
+        resp: requests.Response, key: str = "", parse_gpu_outcome: Callable[[Dict[str, Any]], Any] = _gpu_reset_outcome,
+    ) -> None:
         """Map a non-2xx response to the SDK exception for its status.
 
         The single place this mapping lives; every HTTP path (``_request`` and
         the streaming ``logs``) goes through it so a 403 reads the same
         everywhere. ``key`` is the caller's ``api_key_description``; it is named
-        in the 401/403 message so the user knows which key to fix.
+        in the 401/403 message so the user knows which key to fix. ``parse_gpu_outcome``
+        parses each GPU of a 409 GPU-operation failure (the caller's endpoint picks it).
         """
         if resp.ok:
             return
@@ -962,11 +999,11 @@ class Lium:
             raise LiumServerError(f"Server error: {resp.status_code}", **context)
         data = _error_data(resp) if resp.status_code == 409 else {}
         if data.get("gpus"):
-            # a GPU operation ran and a GPU failed: keep each GPU's outcome (and container state) for the caller;
+            # a GPU operation ran and failed (a GPU, or the container restart): keep each GPU's outcome (and container state) for the caller;
             # a precheck refusal (``gpus: []``) stays a plain LiumError
             raise LiumGpuOperationError(
                 f"API error 409: {_response_error_message(resp)}",
-                gpus=[_gpu_reset_outcome(g) for g in data["gpus"]], container_restarted=data.get("container_restarted"), **context,
+                gpus=[parse_gpu_outcome(g) for g in data["gpus"]], container_restarted=data.get("container_restarted"), **context,
             )
         raise LiumError(f"API error {resp.status_code}: {_response_error_message(resp)}", **context)
 
@@ -1344,8 +1381,10 @@ class Lium:
                 propagates.
             termination_hours: Sent with the rent (1 to 720): the server removes the pod this
                 many hours after it starts, even if this process never gets to schedule it.
-            enable_backups: Lium backs up a new pod's volume automatically by default;
-                ``False`` turns that off for this pod.
+            enable_backups: Lium backs up a new pod's volume automatically by default when the
+                account has a paid deposit or existing backup storage. Without either, the pod is
+                still rented but gets no backup, and the result's ``backup_notice`` says so: check
+                it. ``False`` turns the backup off for this pod.
             verify_gpus: With ``wait=True``, compare the requested and billed GPU
                 counts, then count GPUs visible inside the pod with ``nvidia-smi -L``.
                 A mismatch or an unavailable check raises :class:`LiumError`.
@@ -1390,6 +1429,7 @@ class Lium:
                 f"did not become ready within {timeout}s; it is still billing — "
                 f"check 'lium ps' and remove it if unwanted"
             )
+        ready.backup_notice = created.get("backup_notice")  # wait_ready re-reads the pod from /pods, which has no notice
         if verify_gpus:
             self._verify_rented_gpu_count(ready, requested=gpu_count)
         return ready
@@ -1574,9 +1614,8 @@ class Lium:
         if posted is not None:
             posted.append(True)
         try:
-            response = self._request(
-                "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
-            ).json()
+            rent_reply = self._request("POST", rent_endpoint, json=payload, headers=rent_headers, retry=False)
+            response = rent_reply.json()
         except (requests.RequestException, LiumServerError, LiumRateLimitError) as first:
             # "Could not look" (the network that failed the POST fails ps() the
             # same way) must fall through to the second POST, not escape here.
@@ -1593,9 +1632,8 @@ class Lium:
                 return existing
             time.sleep(1)
             try:
-                response = self._request(
-                    "POST", rent_endpoint, json=payload, headers=rent_headers, retry=False
-                ).json()
+                rent_reply = self._request("POST", rent_endpoint, json=payload, headers=rent_headers, retry=False)
+                response = rent_reply.json()
             except Exception as second:
                 if (
                     isinstance(first, LiumRateLimitError)
@@ -1626,9 +1664,13 @@ class Lium:
                     request_id=getattr(second, "request_id", None),
                 ) from second
 
+        # Set when backups were asked for but the account cannot have one yet: the pod rents without it.
+        # The body field first; the server sends the same text as a header.
+        notice = (response or {}).get("backup_notice") or (getattr(rent_reply, "headers", None) or {}).get(BACKUP_NOTICE_HEADER)
+
         # API should return pod info
         if response and "id" in response:
-            return response
+            return {**response, "backup_notice": notice} if notice else response
 
         # The rent route answers {"success": true, "pod_id": ...}: the id is
         # exact, so the pod is read back by it rather than guessed by name. If
@@ -1637,7 +1679,7 @@ class Lium:
         pod_id = (response or {}).get("pod_id")
         if pod_id:
             existing = self._find_pod_by_id(str(pod_id), executor_info.id, attempts=3, interval=2)
-            return existing or {
+            pod = existing or {
                 "id": str(pod_id),
                 "name": name,
                 "status": "PENDING",
@@ -1645,6 +1687,9 @@ class Lium:
                 "ssh_cmd": None,
                 "executor_id": executor_info.id,
             }
+            if notice:
+                pod["backup_notice"] = notice
+            return pod
 
         # Fallback: find pod by name after creation
         existing = self._find_pod_by_name(
@@ -1734,7 +1779,10 @@ class Lium:
         pod_id = (response or {}).get("id") or (response or {}).get("pod_id")
         if not pod_id:
             raise still_unknown(ValueError("the answer named no pod"))
-        return {"id": str(pod_id), "name": error.pod_name, "executor_id": error.executor_id}
+        # the stored first answer carries the same backup_notice the lost response did
+        notice = (response or {}).get("backup_notice") or (getattr(resp, "headers", None) or {}).get(BACKUP_NOTICE_HEADER)
+        return {"id": str(pod_id), "name": error.pod_name, "executor_id": error.executor_id,
+                **({"backup_notice": notice} if notice else {})}
 
     def _list_pods_or_none(self) -> Optional[List[PodInfo]]:
         """``ps()`` for the rent lookups: ``None`` when the listing itself failed,
@@ -2256,6 +2304,7 @@ class Lium:
             attempts=int(data.get("attempts") or 0),
             dry_run=bool(data.get("dry_run", dry_run)),
             server_side=True,
+            backup_notice=data.get("backup_notice"),
         )
 
     def _rented_pod_result(
@@ -2330,6 +2379,7 @@ class Lium:
             attempts=0 if dry_run else 1,
             dry_run=dry_run,
             server_side=False,
+            backup_notice=(pod or {}).get("backup_notice"),
         )
 
     def pod(
@@ -2730,8 +2780,8 @@ class Lium:
             :class:`GpuResetResult`, one :class:`GpuResetOutcome` per GPU.
 
         Raises:
-            LiumGpuOperationError: the reset ran and a GPU failed; ``gpus`` and ``container_restarted`` say
-                what happened to each GPU.
+            LiumGpuOperationError: the reset operation failed and returned per-GPU outcomes. Inspect ``gpus`` and
+                ``container_restarted``; the container can fail to restart even when every GPU reset succeeds.
             LiumError: refusals with the API's ``code`` (``invalid_gpu_index``, ``mig_enabled``, ...).
             LiumServerError: ``gpu_reset_unavailable`` (the request was not sent, or the server gave up waiting)
                 or ``gpu_reset_timeout`` (this client gave up waiting or lost the connection); after both
@@ -2774,6 +2824,64 @@ class Lium:
         finally:
             self._release_ssh(pod)  # a failed reset stops the container too; held connections are dead
         return _gpu_reset_result(pod, body)
+
+    def lock_gpu_clocks(
+        self, pod: PodInfo, min_mhz: int, max_mhz: int, gpu_indices: Optional[List[int]] = None,
+    ) -> GpuClockResult:
+        """Lock a pod's GPU core clocks to ``min_mhz``..``max_mhz``. Nothing in the pod is stopped.
+
+        ``POST /pods/{id}/gpu-clocks``.
+
+        Args:
+            pod: Pod whose GPU clocks to lock.
+            min_mhz: Lowest core clock in MHz.
+            max_mhz: Highest core clock in MHz.
+            gpu_indices: Pod GPU indices as ``nvidia-smi`` numbers them inside the pod; ``None`` means all.
+
+        Returns:
+            :class:`GpuClockResult`, one :class:`GpuClockOutcome` per GPU.
+
+        Raises:
+            LiumGpuOperationError: 409, the change ran and a GPU failed; ``gpus`` says what each GPU has now.
+            LiumError: 400/409 with the API's ``code`` (``invalid_clock_range``, ``pod_not_running``,
+                ``clock_lock_not_supported``, ``mig_enabled``, ``operation_in_progress``, ...);
+                ``LiumServerError`` ``gpu_clocks_unavailable`` on a 503 or a lost answer (the clocks may
+                already have changed).
+        """
+        return self._gpu_clocks(pod, gpu_indices, min_mhz=min_mhz, max_mhz=max_mhz)
+
+    def reset_gpu_clocks(self, pod: PodInfo, gpu_indices: Optional[List[int]] = None) -> GpuClockResult:
+        """Return a pod's GPU clocks to the driver default; same response and errors as ``lock_gpu_clocks``."""
+        return self._gpu_clocks(pod, gpu_indices, reset=True)
+
+    def _gpu_clocks(
+        self, pod: PodInfo, gpu_indices: Optional[List[int]],
+        min_mhz: Optional[int] = None, max_mhz: Optional[int] = None, reset: bool = False,
+    ) -> GpuClockResult:
+        body: Dict[str, Any] = {"gpu_indices": gpu_indices}
+        if reset:
+            body["reset"] = True
+        else:
+            body.update(min_mhz=min_mhz, max_mhz=max_mhz)
+        # sent once (a lost answer must not stack a second operation); the backend waits up to 60 s
+        try:
+            answer = self._request(
+                "POST", f"/pods/{pod.id}/gpu-clocks", json=body, retry=False, timeout=90,
+                parse_gpu_outcome=_gpu_clock_outcome,
+            ).json()
+        except requests.RequestException as e:
+            raise LiumServerError(
+                f"GPU clocks: no answer from the server ({e})", code="gpu_clocks_unavailable",
+                hint=GPU_CLOCKS_MAY_HAVE_CHANGED,
+            ) from e
+        except LiumServerError as e:
+            # a 5xx (the backend's 503 past its wait, a gateway 502/504) may come after the change was applied
+            e.code, e.hint = e.code or "gpu_clocks_unavailable", GPU_CLOCKS_MAY_HAVE_CHANGED
+            raise
+        return GpuClockResult(
+            pod_id=str(answer.get("pod_id", pod.id)), ok=bool(answer.get("ok")),
+            gpus=[_gpu_clock_outcome(g) for g in answer.get("gpus") or []],
+        )
 
     # -- multi-node clusters ---------------------------------------------------------------------
 
@@ -2920,6 +3028,7 @@ class Lium:
             # a definite refusal: nothing was rented, so there is nothing to look for
             raise LiumError(f"Cluster rental refused: {response.get('message') or response}")
         pod_ids: List[str] = [str(p) for p in (response or {}).get("pod_ids") or []]
+        backup_notice = (response or {}).get("backup_notice")  # read now: a not-listed error below must carry it
 
         cluster, listed, listing_error = self._find_cluster(
             pod_ids=pod_ids, name=name, size=len(ids), attempts=3, interval=3, exclude=known_clusters,
@@ -2937,7 +3046,7 @@ class Lium:
                     f"Cluster rental of {len(ids)} nodes is confirmed (pods {', '.join(pod_ids)}) but the pod "
                     f"listing {shown}; the nodes are rented and billing: do not rent again, list the pods to "
                     "find the cluster",
-                    pod_ids=pod_ids, listed=listed, confirmed=True,
+                    pod_ids=pod_ids, listed=listed, confirmed=True, backup_notice=backup_notice,
                 )
             if listing_error is not None:
                 # No answer to the order and no listing either: the rent may have gone through.
@@ -2965,6 +3074,7 @@ class Lium:
             )
         if wait:
             cluster = self.wait_cluster_ready(cluster, timeout=timeout)
+        cluster.backup_notice = backup_notice
         return cluster
 
     def _cluster_ids_now(self) -> frozenset:
@@ -3100,13 +3210,15 @@ class Lium:
         cluster id, checks ownership and API-key scope on every one of them before the first
         delete, then tears them down one by one; a member that failed is reported with ``success``
         false and its error text while the others are still removed, so nothing is left billing by
-        accident. Call again to retry the members that failed. The pinned ssh host key of every
+        accident. Call again to retry the members that failed. A cluster still provisioning with no member
+        yet answers ``[]``: the delete is accepted and nothing is billing. The pinned ssh host key of every
         member the server accepted is dropped, as :meth:`rm` does for a single pod.
 
         There is no per-pod fallback: a 404 from the route removes nothing and is raised.
 
         Raises:
-            LiumNotFoundError: no pod carries the id (the cluster is already gone), or the server
+            LiumNotFoundError: no pod carries the id (the cluster is already gone, as on a repeated
+                delete), or the server
                 has no ``DELETE /clusters/{id}`` route yet. Nothing was removed.
             LiumPermissionError: a member belongs to another user, or the API key lacks the
                 ``manage`` scope for a pod it did not create. Nothing was removed.
@@ -3116,6 +3228,8 @@ class Lium:
         """
         data = self._request("DELETE", f"/clusters/{quote(str(cluster.id), safe='')}").json()
         rows = data.get("pods") if isinstance(data, dict) else None
+        if rows == [] and data.get("success") is True:
+            return []   # a still-provisioning cluster with no member yet: the delete is accepted, nothing to report per member
         if not isinstance(rows, list) or not rows:
             raise LiumError(f"Cluster {cluster.id}: the API answered without per-member results ({data!r})")
         results: List[Dict[str, Any]] = []
@@ -3147,34 +3261,32 @@ class Lium:
         data = self._request("GET", "/executors/default-docker-image", params=params).json()
         return data
 
-    def _select_fallback_template(self) -> Optional[Template]:
-        """Pick a reasonable default template (prefer PyTorch, else first available)."""
+    def _select_fallback_template(self, max_cuda_version: Optional[float] = None) -> Optional[Template]:
+        """Pick the official PyTorch template a node with no default image can run.
+
+        Only Lium's own `daturaai/pytorch` templates count: any user can publish a PYTORCH-category template, and a date
+        tag such as 26022026 outranked 2.12.0, so a node with no default image got a community ComfyUI
+        image with no torch (DAH-5795). The newest CUDA the driver supports wins; a driver older than
+        every official image gets the lowest-CUDA one."""
         templates = self.templates()
         if not templates:
             return None
 
-        def is_pytorch(template: Template) -> bool:
-            category = (template.category or "").upper()
-            image = (template.docker_image or "").lower()
-            return "PYTORCH" in category or "pytorch" in image
+        def cuda_of(template: Template) -> float:
+            match = re.search(r"cuda(\d+\.\d+)", template.docker_image_tag or "")
+            return float(match.group(1)) if match else 0.0
 
-        pytorch_templates = [t for t in templates if is_pytorch(t)]
+        def torch_of(template: Template) -> tuple:
+            match = re.match(r"(\d+)\.(\d+)\.(\d+)", template.docker_image_tag or "")
+            return tuple(int(part) for part in match.groups()) if match else ()
 
-        if pytorch_templates:
-            def version_key(template: Template):
-                tag = template.docker_image_tag or ""
-                version_part = tag.split('-')[0]
-                parts = []
-                for piece in version_part.split('.'):
-                    if piece.isdigit():
-                        parts.append(int(piece))
-                    else:
-                        break
-                return tuple(parts)
-
-            return max(pytorch_templates, key=version_key)
-
-        return templates[0]
+        official = [t for t in templates if t.official and t.docker_image == "daturaai/pytorch" and cuda_of(t)]
+        if not official:
+            return templates[0]
+        runnable = [t for t in official if max_cuda_version is None or cuda_of(t) <= max_cuda_version]
+        if runnable:
+            return max(runnable, key=lambda t: (cuda_of(t), torch_of(t)))
+        return min(official, key=lambda t: (cuda_of(t), tuple(-v for v in torch_of(t))))
 
     def _template_offers_volume_encryption(
         self, template_id: Optional[str], template: Optional[Template] = None
@@ -3220,7 +3332,7 @@ class Lium:
             if template:
                 return template
 
-        fallback = self._select_fallback_template()
+        fallback = self._select_fallback_template(executor.max_cuda_version)
         if fallback:
             return fallback
 
@@ -3253,6 +3365,7 @@ class Lium:
                 category=d.get("category", "general"),
                 status=d.get("status", "unknown"),
                 supports_volume_encryption=bool(d.get("supports_volume_encryption")),
+                official=d.get("user_id") is None,
             )
             for d in data
         ]
@@ -6026,6 +6139,74 @@ class Lium:
                 request_id=getattr(exc, "request_id", None),
             ) from exc
         # the key the charge was made under, whether or not the server echoes it back
+        body.setdefault("idempotency_key", key)
+        return body
+
+    def transfer_credits(
+        self,
+        to: str,
+        amount: float,
+        description: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Move credit from this account's balance to another account (``POST /users/me/transfer-credits``).
+
+        The key must hold the ``billing`` scope (:class:`LiumScopeError` otherwise). The request is sent
+        once with an ``Idempotency-Key`` header — yours, or a fresh ``uuid4``. The platform keeps a transfer's
+        recorded answer for 24 h: within that time an identical request with the same key gets that answer
+        back; later the key is forgotten and a repeat transfers again. After a lost answer do not repeat it:
+        check the Billing page and contact support.
+
+        Args:
+            to: The recipient's e-mail (anything with an ``@``) or account id.
+            amount: USD, at least $0.01.
+            description: A note the recipient sees.
+            idempotency_key: Sent as ``Idempotency-Key``; within 24 h an identical repeat of an answered transfer
+                gets its answer back, later it transfers again. Omitted: the SDK makes one.
+
+        Returns:
+            ``{"sender_balance", "transfer_id", "idempotency_key"}``.
+
+        Raises:
+            LiumError: ``code`` ``self_transfer`` (400), ``insufficient_balance`` (402), ``not_found`` (404, no
+                account with that e-mail or id) or ``recipient_unavailable`` (409, a deleted or blocked account).
+                ``code`` ``transfer_outcome_unknown`` (with ``idempotency_key`` and ``hint``): timeout, dropped
+                connection, 5xx after the POST, or, on a repeat, a 409 ``idempotency_outcome_unknown`` /
+                ``idempotency_in_progress`` or a 422 ``idempotency_key_reused`` (the key reused with a changed
+                body, such as a different amount).
+            LiumTransferInterruptedError: Ctrl-C while waiting for the answer; a ``KeyboardInterrupt`` with the
+                same ``code``, ``idempotency_key`` and ``hint``. — the transfer may have happened; check transfer
+                history on the Billing page of the account owning the key and, if it is not there, contact support
+                with ``idempotency_key`` from the error. Do not repeat it, with that key or a new one.
+        """
+        if not math.isfinite(amount) or amount <= 0:
+            raise LiumError("amount must be a positive, finite number of dollars.", code="invalid_arguments")
+        key = idempotency_key or str(uuid.uuid4())
+        payload: Dict[str, Any] = {"receiver_email" if "@" in to else "receiver_id": to.strip(), "amount": amount}
+        if description:
+            payload["description"] = description
+        try:
+            body = self._request(
+                "POST", "/users/me/transfer-credits", json=payload, headers={**self.headers, "Idempotency-Key": key}
+            ).json()
+        except KeyboardInterrupt as exc:
+            # still a KeyboardInterrupt, so the abort propagates, but it carries the key the caller may not have chosen
+            raise LiumTransferInterruptedError(
+                "Interrupted after the transfer was posted: it may or may not have happened.",
+                idempotency_key=key,
+                hint=TRANSFER_OUTCOME_UNKNOWN_HINT,
+            ) from exc
+        except (LiumServerError, requests.RequestException) as exc:
+            # the debit may have committed before the answer was lost: never "nothing happened"
+            raise _transfer_outcome_unknown(key, exc) from exc
+        except LiumError as exc:
+            # the server's own "a transfer under this key may have happened": its rent-worded hint must not show
+            # in progress: the first call may still commit, and a backend that frees its key on a raised 500 would
+            # run a retry again, so it is just as unresolved. key_reused (422, a changed body under the key) cannot
+            # tell a pending first call from a done one: unresolved too
+            if exc.code not in ("idempotency_outcome_unknown", "idempotency_in_progress", "idempotency_key_reused"):
+                raise
+            raise _transfer_outcome_unknown(key, exc) from exc
         body.setdefault("idempotency_key", key)
         return body
 

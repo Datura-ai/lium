@@ -3,6 +3,7 @@
 import json
 from typing import Generator
 
+from lium.cli.utils import CliFailure, EXIT_API_ERROR
 from lium.sdk import Lium, PodInfo
 
 
@@ -33,6 +34,9 @@ class StreamLogsAction:
                     data = json.loads(line[6:])
                     if "log" in data:
                         yield data["log"]
+                    elif "error" in data:
+                        # the server ends the stream with one error frame (e.g. the node is unreachable)
+                        raise CliFailure("logs_stream_failed", data["error"], EXIT_API_ERROR)
                 except json.JSONDecodeError:
                     yield line
             else:

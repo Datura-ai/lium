@@ -92,16 +92,22 @@ def load_daemon_json(path: str = "/etc/docker/daemon.json") -> dict:
         raise RuntimeError(f"{path} contains invalid JSON: {exc}") from exc
 
 
-def merge_overlay2(existing: dict) -> tuple[dict, bool]:
+def merge_overlay2(existing: dict, disable_containerd_snapshotter: bool = False) -> tuple[dict, bool]:
     """Merge `storage-driver=overlay2` without dropping unrelated keys.
 
     No commands are run here. This helper is intentionally narrow so setup only
-    changes the single Docker option required by the GPU-splitting storage
+    changes the Docker options required by the GPU-splitting storage
     prerequisites.
     """
     merged = dict(existing)
     changed = merged.get("storage-driver") != "overlay2"
     merged["storage-driver"] = "overlay2"
+    if disable_containerd_snapshotter:
+        # Docker 29 defaults to the containerd image store; its `overlayfs` driver ignores --storage-opt size
+        features = dict(merged.get("features") or {})
+        changed = changed or features.get("containerd-snapshotter") is not False
+        features["containerd-snapshotter"] = False
+        merged["features"] = features
     return merged, changed
 
 
@@ -111,7 +117,7 @@ def build_verification_result(runner: Runner, docker_root_dir: str = "/var/lib/d
     Commands delegated through helpers:
 
     - `docker info --format '{{json .}}'` via `inspect_docker_state(...)`
-    - `findmnt --json --target <docker-root>` via `load_mount_info(...)`
+    - `findmnt --json --canonicalize --evaluate --target <docker-root>` via `load_mount_info(...)`
 
     This is used by both `lium gpu-splitting verify` and the final step of
     `gpu-splitting setup`.

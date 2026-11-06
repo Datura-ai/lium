@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import re as _re
 import time
-from typing import Any
+from typing import Any, Callable
 
 from lium.provider._routes import (
     DISCORD_OAUTH_URL,
@@ -35,6 +35,7 @@ from lium.provider._routes import (
     EXECUTORS,
     LOGIN_EMAIL,
     LOGIN_FLEXIBLE,
+    LOGIN_TOTP,
     MACHINE_REQUEST_BY_ID,
     MACHINE_REQUESTS,
     MACHINES,
@@ -57,6 +58,9 @@ from lium.provider.errors import (
     ARG_INVALID,
     PORTAL_AUTH_EXPIRED,
     PORTAL_AUTH_INVALID,
+    PORTAL_AUTH_TOTP_INVALID,
+    PORTAL_AUTH_TOTP_REQUIRED,
+    PORTAL_FORBIDDEN,
     ProviderAuthError,
     ProviderConfigError,
     ProviderError,
@@ -129,6 +133,12 @@ class ProviderClient:
         self._signer: Signer | None = signer
         self._token_store = token_store or TokenStore()
         self._cached_token: CachedToken | None = None
+        # Asked for the authenticator code (or a recovery code) when the portal
+        # answers a sign-in with ``mfa_required``; None refuses that sign-in.
+        self.totp_code: Callable[[], str] | None = None
+        # True once a sign-in of this client needed a code: only such an account is asked again
+        # for a step-up (`set_email`), so an account without an authenticator is never prompted.
+        self._totp_in_use = False
         # ``http`` is built lazily so tests can inject a session and so we
         # don't open a connection pool until first request.
         self._http = http or PortalHTTP(
@@ -183,16 +193,18 @@ class ProviderClient:
                 with_refresh_retry(lambda: self._token_store.clear(signer.ss58_address))
 
         payload = build_login_payload(signer)
-        body = self._http.post(LOGIN_FLEXIBLE, json_body=payload, auth=False)
-        try:
-            response = LoginResponse.model_validate(body)
-        except Exception as e:
+        response = _login_response(
+            self._http.post(LOGIN_FLEXIBLE, json_body=payload, auth=False)
+        )
+        self._totp_in_use = response.mfa_required
+        if response.mfa_required:
+            response = self._finish_totp_sign_in(response)
+        if not response.token:
             raise ProviderAuthError(
-                "portal returned an unexpected login response shape",
+                "portal sign-in returned no session token",
                 code=PORTAL_AUTH_INVALID,
-                cause=e,
-                context={"body": _summarise_body(body)},
-            ) from e
+                context={"provider_id": response.provider.id},
+            )
 
         self._cached_token = with_refresh_retry(
             lambda: self._token_store.save(
@@ -201,21 +213,50 @@ class ProviderClient:
         )
         return response
 
+    def _finish_totp_sign_in(self, response: LoginResponse) -> LoginResponse:
+        """Send the authenticator code for a sign-in the portal answered with ``mfa_required``."""
+        if self.totp_code is None:
+            raise ProviderAuthError(
+                "this account has an authenticator app: pass --totp-code, or run "
+                "`lium provider portal login` in a terminal to be asked for the code",
+                code=PORTAL_AUTH_TOTP_REQUIRED,
+            )
+        if not response.mfa_token:
+            raise ProviderAuthError(
+                "portal asked for an authenticator code without a challenge",
+                code=PORTAL_AUTH_INVALID,
+                context={"provider_id": response.provider.id},
+            )
+        totp_payload = {"mfa_token": response.mfa_token, "code": self.totp_code().strip()}
+        try:
+            return _login_response(
+                self._http.post(LOGIN_TOTP, json_body=totp_payload, auth=False)
+            )
+        except ProviderAuthError as e:
+            # the portal answers a wrong code with 403, which elsewhere means a refused action
+            if e.code != PORTAL_FORBIDDEN:
+                raise
+            raise ProviderAuthError(
+                "wrong or expired authenticator code", code=PORTAL_AUTH_TOTP_INVALID, context=e.context
+            ) from e
+
     def login_email(self, email: str, password: str) -> LoginResponse:
         """``POST /auth/login-email``: sign in to an account made with e-mail (no key of its own).
 
         The session is cached under the account id (``miner_hotkey``), which then stands in for the hotkey.
         """
-        body = self._http.post(LOGIN_EMAIL, json_body={"email": email, "password": password}, auth=False)
-        try:
-            response = LoginResponse.model_validate(body)
-        except Exception as e:
+        response = _login_response(
+            self._http.post(LOGIN_EMAIL, json_body={"email": email, "password": password}, auth=False)
+        )
+        self._totp_in_use = response.mfa_required
+        if response.mfa_required:
+            response = self._finish_totp_sign_in(response)
+        if not response.token:
             raise ProviderAuthError(
-                "portal returned an unexpected login response shape",
+                "portal sign-in returned no session token",
                 code=PORTAL_AUTH_INVALID,
-                cause=e,
-                context={"body": _summarise_body(body)},
-            ) from e
+                context={"provider_id": response.provider.id},
+            )
         self.account = response.provider.miner_hotkey
         self._cached_token = with_refresh_retry(
             lambda: self._token_store.save(self.account, response.token, provider_id=response.provider.id)
@@ -412,10 +453,27 @@ class ProviderClient:
         address ends every earlier session and the answer carries the
         caller's new ``token``: it is stored in place of the old one and
         left out of the returned profile, which callers may print.
+
+        An account with an authenticator app spends one code on that sign-in
+        and needs a second for the address itself, so the code source is
+        asked twice; each code is accepted once. An account without one is
+        asked nothing: the sign-in above says which it is.
         """
         payload = _build_payload(SetEmailPayload, email=email)
         self.login(force=True)
-        body = self._http.post(SET_EMAIL, json_body=payload)
+        if self._totp_in_use and self.totp_code:
+            payload = _build_payload(
+                SetEmailPayload, email=email, totp_code=self.totp_code().strip()
+            )
+        try:
+            body = self._http.post(SET_EMAIL, json_body=payload)
+        except ProviderAuthError as e:
+            # the portal refuses a wrong step-up code with the same 403 it uses for a forbidden action
+            if not (self._totp_in_use and e.code == PORTAL_FORBIDDEN):
+                raise
+            raise ProviderAuthError(
+                "wrong or expired authenticator code", code=PORTAL_AUTH_TOTP_INVALID, context=e.context
+            ) from e
         token = body.pop("token", None) if isinstance(body, dict) else None
         if isinstance(token, str) and token:
             ss58 = self.signer.ss58_address
@@ -887,6 +945,18 @@ def _notice_period_hint(exc: Exception) -> str | None:
             names.append(_NOTICE_PERIOD_FIELD_HINTS["period_in_minute"])
             names.append(_NOTICE_PERIOD_FIELD_HINTS["permanent_removal"])
     return "Check " + "; ".join(dict.fromkeys(names)) if names else None
+
+
+def _login_response(body: Any) -> LoginResponse:
+    try:
+        return LoginResponse.model_validate(body)
+    except Exception as e:
+        raise ProviderAuthError(
+            "portal returned an unexpected login response shape",
+            code=PORTAL_AUTH_INVALID,
+            cause=e,
+            context={"body": _summarise_body(body)},
+        ) from e
 
 
 def _summarise_body(body: Any, *, max_chars: int = 240) -> str:

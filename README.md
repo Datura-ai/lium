@@ -239,6 +239,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium rm <POD>` - Remove/stop a pod (`--name-only` to refuse `lium ps` row numbers in scripts; `--format json` prints what was removed with its estimated spend; `--rating 1-5 --feedback "..."` rates the node in the same call)
 - `lium reboot <POD>` - Reboot a pod
 - `lium reset-gpu <POD> [--gpu N ...]` - Reset a pod's hung GPUs; stops the pod's processes, keeps its files; waits 1-2 min for the result
+- `lium gpu-clocks <POD> --lock MIN,MAX | --reset [--gpu N ...]` - Lock a pod's GPU core clocks to a MHz range, or reset them to the default; the pod keeps running
 - `lium audit [--pod POD] [--since 24h] [--key ID]` - Who did what to the account's pods, and when: every rent, reboot, edit and delete with the session or API key that requested it (add `--json` for machine-readable output)
 - `lium audit --account [--action pod.] [--source cli] [--since 7d] [--cursor <next_cursor>]` - The account audit log: every request that changed something (pods, keys, logins, balance, settings, team members) with the client and IP it came from; your own IPs only, 90 days (`--json` prints the page with `next_cursor`)
 - `lium update <POD> --jupyter <PORT>` - Install Jupyter Notebook on a pod, served on that internal port (`--jupyter` is the only update; without it the command prints `No updates specified`)
@@ -246,6 +247,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium fund` - Fund account with TAO from your wallet (`--alpha -k <hotkey> -a <USD>` pays with alpha stake instead; add `--netuid <N>` to pay from any subnet Lium accepts, the primary subnet otherwise)
 - `lium topup create -a <USD> -c <COIN> -n <NETWORK>` - Top up with a stablecoin (`lium topup currencies` lists them)
 - `lium topup card -a <USD> [--card <pm_id>] [--yes]` - Charge a card saved on the account, with no browser; the API key needs the `billing` scope (not released: the platform switch is off). Asks first; `--yes` skips the question and `--json` needs it. Sent once with an idempotency key; a lost answer or a 202 without a payment_intent_id exits 6 ("the charge may have gone through" / "still being confirmed") with the key and the same amount to re-run with, never a bare retry. A 202 with a payment_intent_id is success (exit 0). The same key with a different amount is a new charge. A 3-D Secure step-up (`CARD_AUTHENTICATION_REQUIRED` with a URL) exits 6 with the URL to confirm at, the transaction id and the exact re-run with the same `--idempotency-key`; a new key would open a second payment
+- `lium transfer <EMAIL|USER_ID> <USD> [--note TEXT] [--yes] [--json]` - Send part of your balance to another account; the API key needs the `billing` scope. Asks first; `--yes` skips the question and `--json` needs it. Fails non-zero with the API's code: `self_transfer`, `insufficient_balance`, `not_found` (no account with that e-mail or id), `recipient_unavailable` (a deleted or blocked account), or `missing_scope` (exit 6, with how to make a billing key). AMOUNT is rounded to the cent (half up, as the API does) before the question. A lost or unrecorded answer (also Ctrl-C while waiting, or the same key still in progress) exits 6 with `transfer_outcome_unknown` and the key: check transfer history on the Billing page of the account that owns the billing key, and if it is not there contact support with the key; do not run it again, with that key or a new one
 - `lium ssh-keys list|sync` - SSH public keys registered on the account
 
 `ls`, `ps`, `spend`, `templates`, `balance` and `describe` all accept `--format json` (and `--json`); `rm` accepts `--format json`; `up` accepts `--json`. All of them print a JSON error envelope on stderr when the command fails, so the same flag works across commands in scripts.
@@ -384,10 +386,15 @@ lium mine --register <TOKEN> --wait 0          # add the node, do not wait for t
 # Node behind CGNAT or a port-forwarding VPS: register the VPS address and forwarded port
 lium mine --auto --hotkey <HOTKEY> --ip <VPS_IP> --external-port <FORWARDED_PORT> --internal-port 8080
 
+# Second node behind the same public IP: forward its own service, SSH and renting ports to it
+lium mine --register <TOKEN> --external-port 8081 --ssh-port 2201 --renting-port-range 41000-41100
+
 # Provider-portal automation (same surface as the portal frontend)
 lium config set provider.coldkey miner-prod        # one-time: persist wallet identity
 lium config set provider.hotkey  miner-1
 lium provider portal login                         # JWT exchange via hotkey signature
+lium provider portal login --totp-code <CODE>     # account with an authenticator app (a terminal asks instead)
+lium provider config set-email <EMAIL> --totp-code <CODE>  # signs in, then asks for a second code
 lium provider status                               # registration, portal session, nodes, weights
 lium provider node list --limit 50
 lium provider node add --gpu-type "NVIDIA H200 NVL" --gpu-count 8 \

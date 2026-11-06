@@ -226,3 +226,82 @@ def test_clusters_rm_403_is_permission_denied_exit_6(monkeypatch, tmp_path):
     assert result.exit_code == 6, result.output
     error = json.loads(result.stderr)["error"]
     assert error["code"] == "permission_denied" and "You do not have permission" in error["message"]
+
+
+NOTICE = "Backups need a paid deposit: this cluster rents without a backup."
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+@pytest.mark.parametrize("failure", [None, "wait", "member", "ttl"])
+def test_clusters_up_keeps_the_backup_notice_whatever_fails_after_the_rent(monkeypatch, tmp_path, fmt, failure):
+    """DAH-5023: the cluster rented and bills whatever fails next, so its backup notice is never lost."""
+    from lium.sdk import PodStartError
+
+    overrides = {"up_result": Cluster(id="c-1", pods=[_pod(0), _pod(1)], backup_notice=NOTICE)}
+    if failure == "wait":
+        overrides["wait_result"] = TimeoutError("Cluster c-1 not ready after 900s: job=PENDING")
+    elif failure == "member":
+        overrides["wait_result"] = PodStartError("member failed", pod_id="pod-1", status="FAILED")
+    elif failure == "ttl":
+        overrides["schedule_fail_on"] = "pod-1"
+    _patch(monkeypatch, tmp_path, **overrides)
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--ttl", "2h", "--format", fmt)
+
+    assert (result.exit_code == 0) is (failure is None), result.output
+    if fmt == "table":
+        assert NOTICE in _flat(result.output)
+    elif failure in (None, "ttl"):  # a document on stdout
+        assert json.loads(result.stdout)["backup_notice"] == NOTICE
+    else:  # the error envelope on stderr
+        assert json.loads(result.stderr.strip().splitlines()[-1])["data"]["backup_notice"] == NOTICE
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_clusters_up_confirmed_but_not_listed_keeps_the_backup_notice(monkeypatch, tmp_path, fmt):
+    """DAH-5023: a confirmed rent the listing does not show yet still bills, so its backup notice is shown."""
+    from lium.sdk.exceptions import ClusterNotListedError
+
+    error = ClusterNotListedError("confirmed but not listed", pod_ids=["pod-0", "pod-1"], backup_notice=NOTICE)
+    _patch(monkeypatch, tmp_path, up_result=error)
+
+    result = _run("up", FABRIC, "--nodes", "2", "-n", "job", "-y", "--format", fmt)
+
+    assert result.exit_code != 0, result.output
+    if fmt == "table":
+        assert NOTICE in _flat(result.output)
+    else:
+        envelope = json.loads(result.stderr.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "cluster_rented_not_listed"
+        assert envelope["data"]["backup_notice"] == NOTICE
+
+
+def _replacement(status: str, created_at: str = "2026-10-30T12:00:00Z") -> PodInfo:
+    pod = _pod(1, status=status)
+    pod.id, pod.created_at, pod.executor = "pod-1b", created_at, _node(5)
+    return pod
+
+
+@pytest.mark.parametrize(
+    "old_status, new_status, carrier",
+    [
+        ("RUNNING", "PENDING", "pod-1"),
+        ("RUNNING", "FAILED", "pod-1"),
+        ("RUNNING", "RUNNING", "pod-1b"),
+        ("DELETING", "RUNNING", "pod-1b"),
+        ("RUNNING", "DELETING", "pod-1"),
+    ],
+    ids=["pending", "failed", "running-old-not-yet-deleting", "running-old-deleting", "replacement-deleting"],
+)
+def test_a_node_being_replaced_is_one_node_in_the_launch_output(old_status, new_status, carrier):
+    # DAH-5442: during a replacement index 1 holds two pods; launchers must still see two nodes, ranks 0 and 1
+    old = _pod(1, status=old_status)
+    old.created_at = "2026-10-30T10:00:00Z"
+    cluster = Cluster(id="c-1", pods=[_pod(0), old, _replacement(new_status)])
+
+    assert [pod.id for pod in cluster.nodes] == ["pod-0", carrier]
+    assert cluster.size == 2
+    assert cluster.hostfile() == "10.42.0.1 slots=8\n10.42.0.2 slots=8\n"
+    assert cluster.torchrun_args(cluster.pods[2]) == (
+        "--nnodes 2 --node_rank 1 --master_addr 10.42.0.1 --master_port 29500"
+    )

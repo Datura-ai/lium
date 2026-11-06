@@ -158,6 +158,8 @@ class RentResult:
     attempts: int = 0
     dry_run: bool = False
     server_side: bool = False
+    # set when backups were asked for but the account cannot have one yet: the pod rents without it
+    backup_notice: Optional[str] = None
 
 
 @dataclass
@@ -210,6 +212,9 @@ class PodInfo(_Serializable):
     # Where the validator mounted the rental volume (`local_volume_path` on the /pods row); None before
     # the pod has started or from an older server. It can differ from the template's volume.
     local_volume_path: Optional[str] = None
+    # Set by ``Lium.up(wait=True)`` when backups were asked for but the account cannot have one yet:
+    # the pod rented without it. Never on a /pods row.
+    backup_notice: Optional[str] = None
 
     def eta_hint(self) -> Optional[str]:
         """One line for a pod that is still starting, e.g. ``est. ready in ~18 s (phase: pulling image)``.
@@ -314,6 +319,10 @@ class ClusterOffer:
         return sorted(self.nodes, key=lambda n: (n.price_per_hour, n.id))[:count]
 
 
+def _carries_the_node(pod: PodInfo) -> tuple:
+    return (pod.status.upper() == "RUNNING", pod.created_at or "")
+
+
 @dataclass
 class Cluster:
     """The pods of one multi-node rental, in node-rank order.
@@ -324,17 +333,32 @@ class Cluster:
 
     id: str
     pods: List[PodInfo]
+    # set on the cluster up_cluster returns when backups were asked for but the account cannot have one yet
+    backup_notice: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.pods = sorted(self.pods, key=lambda p: (p.cluster_node_index is None, p.cluster_node_index or 0))
 
     @property
+    def nodes(self) -> List[PodInfo]:
+        """One pod per node index, in rank order. While a node is being replaced its index holds two pods: the
+        running one carries the node (the old pod until its successor starts), else the newest."""
+        by_index: Dict[Any, PodInfo] = {}
+        for i, pod in enumerate(self.pods):
+            index = pod.cluster_node_index if pod.cluster_node_index is not None else ("unindexed", i)
+            held = by_index.get(index)
+            if held is None or _carries_the_node(pod) > _carries_the_node(held):
+                by_index[index] = pod
+        return list(by_index.values())
+
+    @property
     def size(self) -> int:
-        return len(self.pods)
+        return len(self.nodes)
 
     @property
     def master(self) -> Optional[PodInfo]:
-        return self.pods[0] if self.pods else None
+        nodes = self.nodes
+        return nodes[0] if nodes else None
 
     @property
     def master_addr(self) -> Optional[str]:
@@ -354,15 +378,18 @@ class Cluster:
         return sum(p.executor.price_per_hour for p in self.pods if p.executor)
 
     def node_rank(self, pod: PodInfo) -> int:
-        for rank, member in enumerate(self.pods):
-            if member.id == pod.id:
+        for rank, member in enumerate(self.nodes):
+            if member.id == pod.id or (
+                member.cluster_node_index is not None and member.cluster_node_index == pod.cluster_node_index
+                and any(p.id == pod.id for p in self.pods)
+            ):
                 return rank
         raise ValueError(f"Pod {pod.name or pod.id} is not a member of cluster {self.id}")
 
     def hostfile(self, slots: Optional[int] = None) -> str:
         """An ``mpirun``/DeepSpeed hostfile: one ``<overlay ip> slots=<gpus>`` line per node."""
         lines = []
-        for pod in self.pods:
+        for pod in self.nodes:
             n = slots if slots is not None else (pod.executor.gpu_count if pod.executor else 1)
             lines.append(f"{pod.cluster_overlay_ip or pod.host} slots={n}")
         return "\n".join(lines) + "\n"
@@ -388,6 +415,8 @@ class Template(_Serializable):
     status: str
     # The template's image can mount an encrypted local volume; set by the API.
     supports_volume_encryption: bool = False
+    # Lium's own template: the API sends no owner (user_id) for it.
+    official: bool = False
 
 
 @dataclass
@@ -528,6 +557,30 @@ class GpuResetResult(_Serializable):
     ok: bool
     container_restarted: bool
     gpus: List[GpuResetOutcome]
+
+
+@dataclass
+class GpuClockOutcome(_Serializable):
+    """One GPU's result of :meth:`Lium.lock_gpu_clocks` / :meth:`Lium.reset_gpu_clocks`.
+
+    ``result`` is ``locked``, ``reset`` or ``failed``; ``applied_*_mhz`` are what the node set after clamping.
+    """
+
+    index: int
+    uuid: str
+    result: str
+    applied_min_mhz: Optional[int] = None
+    applied_max_mhz: Optional[int] = None
+    detail: Optional[str] = None
+
+
+@dataclass
+class GpuClockResult(_Serializable):
+    """What :meth:`Lium.lock_gpu_clocks` / :meth:`Lium.reset_gpu_clocks` return when every GPU succeeded."""
+
+    pod_id: str
+    ok: bool
+    gpus: List[GpuClockOutcome]
 
 
 @dataclass

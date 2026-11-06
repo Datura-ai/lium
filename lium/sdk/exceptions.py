@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .models import GpuResetOutcome
+    from .models import GpuClockOutcome, GpuResetOutcome
 
 class LiumError(Exception):
     """Base exception for Lium SDK.
@@ -94,10 +94,12 @@ class ClusterNotListedError(LiumError):
         pod_ids: The member pod ids the API returned; empty when the order was not confirmed.
         listed: The member ids the last listing showed.
         confirmed: Whether the API confirmed the order.
+        backup_notice: The rent answer's backup notice, if any: the members may run without backups.
     """
 
-    def __init__(self, message: str, *, pod_ids=(), listed=(), confirmed: bool = True):
+    def __init__(self, message: str, *, pod_ids=(), listed=(), confirmed: bool = True, backup_notice=None):
         super().__init__(message)
+        self.backup_notice = backup_notice
         self.pod_ids = list(pod_ids)
         self.listed = list(listed)
         self.confirmed = confirmed
@@ -218,25 +220,29 @@ class LiumBudgetExceededError(LiumPermissionError):
 
 
 class LiumGpuOperationError(LiumError):
-    """A GPU reset ran on the node and at least one GPU failed (status ``failed``, or a 409, that lists ``gpus``).
+    """A GPU reset or clock change ran on the node and failed (a reset's status ``failed``, or a
+    409, that lists ``gpus``).
 
-    ``gpus`` is each GPU's outcome (:class:`GpuResetOutcome` from :meth:`Lium.reset_gpu`), so the caller sees
-    which GPUs failed; ``container_restarted`` says whether the pod's container was started again (``None`` when
-    the server did not say). ``code`` is the API's (``reset_not_supported``, ...).
+    Inspect ``gpus`` and ``container_restarted``: the container can fail to restart even when every GPU reset succeeds.
+
+    ``gpus`` is each GPU's outcome (:class:`GpuResetOutcome` from :meth:`Lium.reset_gpu`, :class:`GpuClockOutcome`
+    from :meth:`Lium.lock_gpu_clocks` / :meth:`Lium.reset_gpu_clocks`), so the caller sees which GPUs failed and
+    which stay locked; ``container_restarted`` says whether a reset started the pod's container again (``None``
+    when the server did not say, always for clocks). ``code`` is the API's (``reset_not_supported``, ...).
     """
 
     def __init__(
         self,
         message: str,
         *,
-        gpus: list[GpuResetOutcome] | None = None,
+        gpus: list[GpuResetOutcome | GpuClockOutcome] | None = None,
         container_restarted: bool | None = None,
         code: str | None = None,
         hint: str | None = None,
         request_id: str | None = None,
     ) -> None:
         super().__init__(message, code=code, hint=hint, request_id=request_id)
-        self.gpus: list[GpuResetOutcome] = list(gpus or [])
+        self.gpus: list[GpuResetOutcome | GpuClockOutcome] = list(gpus or [])
         self.container_restarted = container_restarted
 
 
@@ -300,6 +306,8 @@ class LiumChargeOutcomeUnknownError(LiumError):
     charges the card before it answers, so the charge **may have gone through**: check the balance
     (or the transactions) before trying again. A repeat with the same ``idempotency_key`` returns the
     first charge, and the card is charged once; the key is on the exception.
+    :meth:`Lium.transfer_credits` raises it too (``code`` ``transfer_outcome_unknown``); a transfer is not
+    repeated, with that key or a new one: check the Billing page and contact support with the key.
     """
 
     def __init__(
@@ -313,6 +321,21 @@ class LiumChargeOutcomeUnknownError(LiumError):
     ) -> None:
         super().__init__(message, code=code, hint=hint, request_id=request_id)
         self.idempotency_key = idempotency_key
+
+class LiumTransferInterruptedError(KeyboardInterrupt):
+    """Ctrl-C ended :meth:`Lium.transfer_credits` after its POST: the transfer may have happened. A
+    ``KeyboardInterrupt``, so the abort still propagates (``except Exception`` does not swallow it), carrying
+    what a :class:`LiumChargeOutcomeUnknownError` would: ``code`` ``transfer_outcome_unknown``, the sent
+    ``idempotency_key`` and the no-repeat ``hint``.
+    """
+
+    def __init__(self, message: str, *, idempotency_key: str, hint: str) -> None:
+        super().__init__(message)
+        self.code = "transfer_outcome_unknown"
+        self.idempotency_key = idempotency_key
+        self.hint = hint
+        self.request_id = None
+
 
 class LiumRentOutcomeUnknownError(LiumError):
     """A rent (:meth:`Lium.up`) was posted and its outcome could not be established: the first request got
@@ -362,4 +385,5 @@ __all__ = [
     "LiumCardTopUpError",
     "LiumChargeOutcomeUnknownError",
     "LiumRentOutcomeUnknownError",
+    "LiumTransferInterruptedError",
 ]
