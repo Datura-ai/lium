@@ -132,7 +132,7 @@ jobs:
     # Dockerfile.build installs lockfile dependencies before COPY . . `load` puts the image
     # in the engine for the extract and the report.
     - name: Build Linux bundle in Docker
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@v7
       with:
         context: .
         file: Dockerfile.build
