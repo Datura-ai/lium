@@ -3496,12 +3496,29 @@ class Lium:
             return None
         return sorted({t for t in (extract_gpu_type(n) for n in names) if re.fullmatch(r"[A-Z]*\d{2,4}[A-Z]*", t)})
 
-    def request_machine(self, gpu: str, count: Optional[int] = None) -> Dict[str, Any]:
+    def request_machine(
+        self,
+        gpu: str,
+        count: Optional[int] = None,
+        *,
+        auto_rent: bool = False,
+        max_price_per_gpu_hour: Optional[float] = None,
+        hours: Optional[int] = None,
+        template_id: Optional[str] = None,
+        ssh_public_keys: Optional[List[str]] = None,
+        start_after: Optional[datetime] = None,
+        start_before: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
         """Ask providers for a GPU type that is sold out (``POST /machine-requests``).
 
         ``gpu`` is a short type (``B300``, ``4090``) or a full catalog name. The providers who
         list that type may be notified, and the request shows in ``lium.io/machine-requests``. A short
         type that covers several catalog names must be given by one of them.
+
+        With ``auto_rent`` the server rents the cheapest matching node itself, once one lists at or below
+        ``max_price_per_gpu_hour`` within ``start_after``..``start_before`` (UTC), for ``hours``, with the
+        template (ID, HUID or name) and SSH keys given (default: the configured keys). It needs ``count``,
+        a paid top-up on the account, the personal workspace and, through an API key, the ``rent`` scope.
 
         Returns:
             The API's answer: ``provider_notified_count`` and, when present, ``confirmation``.
@@ -3519,6 +3536,20 @@ class Lium:
         payload: Dict[str, Any] = {"machine_name": machine_name}
         if count:
             payload["gpu_count"] = count
+        if auto_rent:
+            template = self.get_template(template_id) if template_id else None
+            if template is None:
+                raise ValueError(f"No template matches '{template_id}'" if template_id else "auto_rent needs a template")
+            payload.update(
+                auto_rent=True,
+                max_price_per_gpu_hour=max_price_per_gpu_hour,
+                hours=hours,
+                template_id=template.id,
+                ssh_public_keys=ssh_public_keys or self.config.ssh_public_keys,
+            )
+        for key, value in (("start_after", start_after), ("start_before", start_before)):
+            if value is not None:
+                payload[key] = value.isoformat()
         return self._request("POST", "/machine-requests", json=payload).json()
 
     def get_template(self, template_id: str) -> Optional[Template]:
