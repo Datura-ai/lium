@@ -306,7 +306,8 @@ def register_node(
     """``POST /executors`` with the register token, then find the node's id in the account's list.
 
     A node that is already in the portal at this address (a re-run of ``lium mine`` on the same host) is not
-    an error: the portal refuses the duplicate and the existing record is what gets polled.
+    an error: the portal refuses the duplicate and the existing record is what gets polled. One with other GPUs is
+    a second machine behind the same IP registering on the first one's port: that is refused, naming the flags.
     """
     payload = {
         "gpu_type": gpu_type,
@@ -334,14 +335,21 @@ def register_node(
             raise RegisterError(f"The portal refused the node: {detail}") from e
 
     if already:
-        node_id = find_node_id_after_add(http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port)
-        if node_id is None:
+        row = find_node_after_add(http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port)
+        if row is None:
             # the portal's duplicate check is global (find_by_ip_and_port has no account filter)
             raise RegisterError(
                 f"A node at {ip_address}:{port} is already in the portal but not in this account's node list "
                 "(another account may hold it). Remove it there first, or contact support if that account is not yours."
             )
-        return NodeRecord(node_id=node_id, already_registered=True)
+        if _is_another_host(row, gpu_type=gpu_type, gpu_count=gpu_count):
+            raise RegisterError(
+                f"{ip_address}:{port} is already your node {row.get('id')} ({row.get('gpu_count')}x "
+                f"{row.get('gpu_type')}), and this host has {gpu_count}x {gpu_type}. If this is a second machine "
+                "behind the same public IP, forward its own ports on the router and re-run with them, e.g. "
+                "--external-port 8081 --ssh-port 2201 --renting-port-range 41000-41100. The node was not registered."
+            )
+        return NodeRecord(node_id=str(row.get("id")), already_registered=True)
     try:
         node_id = find_node_id_after_add(http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port)
     except ProviderError:  # rate limited: the add went through, only the list read did not
@@ -354,24 +362,42 @@ FIND_NODE_RETRY_S = 5.0
 FIND_NODE_MAX_WAIT_S = 30.0  # bounds a portal Retry-After
 
 
+def _is_another_host(row: dict, *, gpu_type: str, gpu_count: int) -> bool:
+    """The portal's node at this address reports other GPUs than this host: a second machine behind the same IP,
+    not a re-run on the same host."""
+    # shortcut: two machines with the same model and count still read as a re-run; a host fingerprint the portal
+    # returns would tell them apart if that case shows up.
+    if not row.get("gpu_type") or not row.get("gpu_count"):
+        return False
+    return str(row["gpu_type"]) != gpu_type or str(row["gpu_count"]) != str(gpu_count)
+
+
 def find_node_id_after_add(
     http: PortalHTTP, *, miner_hotkey: str, ip_address: str, port: int, sleep: Callable[[float], None] = time.sleep
 ) -> str | None:
-    """``find_node_id`` with retries: the list can lag the write, and a portal hiccup must not fail an add that succeeded.
+    """The id of ``find_node_after_add``'s row."""
+    row = find_node_after_add(http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port, sleep=sleep)
+    return str(row.get("id")) if row is not None else None
+
+
+def find_node_after_add(
+    http: PortalHTTP, *, miner_hotkey: str, ip_address: str, port: int, sleep: Callable[[float], None] = time.sleep
+) -> dict | None:
+    """``find_node`` with retries: the list can lag the write, and a portal hiccup must not fail an add that succeeded.
 
     A 429 that outlasts the retries is raised, never read as "not in the list" (DAH-5161)."""
     for attempt in range(FIND_NODE_ATTEMPTS):
         wait = FIND_NODE_RETRY_S
         try:
-            node_id = find_node_id(http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port)
+            row = find_node(http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port)
         except ProviderError as e:
             if e.code == PORTAL_RATE_LIMIT:
                 if attempt == FIND_NODE_ATTEMPTS - 1:
                     raise
                 wait = max(wait, min((e.context or {}).get("retry_after") or 0, FIND_NODE_MAX_WAIT_S))
-            node_id = None
-        if node_id is not None:
-            return node_id
+            row = None
+        if row is not None:
+            return row
         if attempt < FIND_NODE_ATTEMPTS - 1:
             sleep(wait)
     return None
@@ -387,7 +413,15 @@ def _known_gpu_types() -> list[str]:
 def find_node_id(
     http: PortalHTTP, *, miner_hotkey: str, ip_address: str, port: int, max_pages: int = 10
 ) -> str | None:
-    """The id of the account's node at ``ip_address:port`` from ``GET /executors``, or None. The register token goes
+    """The id of ``find_node``'s row, or None."""
+    row = find_node(http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port, max_pages=max_pages)
+    return str(row.get("id")) if row is not None else None
+
+
+def find_node(
+    http: PortalHTTP, *, miner_hotkey: str, ip_address: str, port: int, max_pages: int = 10
+) -> dict | None:
+    """The account's node at ``ip_address:port`` from ``GET /executors``, or None. The register token goes
     along: the portal blanks every node's address but its owner's."""
     for page in range(1, max_pages + 1):
         body = http.get(
@@ -401,7 +435,7 @@ def find_node_id(
             if not isinstance(row, dict):
                 continue
             if str(row.get("executor_ip_address")) == ip_address and str(row.get("executor_ip_port")) == str(port):
-                return str(row.get("id"))
+                return row
         if len(rows) < 100:
             return None
     return None
