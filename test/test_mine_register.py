@@ -445,3 +445,16 @@ def test_a_rerun_on_the_same_host_is_still_already_registered() -> None:
     record = reg.register_node(_http(portal), miner_hotkey=HOTKEY, gpu_type="NVIDIA L4", gpu_count=1,
                                ip_address="203.0.113.7", port=8080, price_per_gpu=0.11)
     assert record == reg.NodeRecord(node_id="node-1", already_registered=True)
+
+
+@pytest.mark.parametrize(("fields", "host_type", "host_count", "another"), [
+    ({"gpu_type": "NVIDIA A10 Tensor Core GPU", "gpu_count": 1}, "NVIDIA A10", 1, False),  # declared alias
+    ({"gpu_type": None, "gpu_count": None, "executor_info": {"machine_name": "NVIDIA A10 Tensor Core GPU", "gpu_count": 1}},
+     "NVIDIA A10", 1, False),  # measured alias
+    ({"gpu_type": "NVIDIA H100 PCIe", "gpu_count": 8}, "NVIDIA H100 80GB HBM3", 8, False),  # SXM on a PCIe adapter
+    ({"gpu_type": "NVIDIA A10 Tensor Core GPU", "gpu_count": 1}, "NVIDIA L4", 1, True),  # another model
+    ({"gpu_type": "NVIDIA A10 Tensor Core GPU", "gpu_count": 1}, "NVIDIA A10", 2, True),  # another count
+    ({"gpu_type": None, "gpu_count": None}, "NVIDIA L4", 1, False),  # nothing known: a re-run
+])
+def test_another_host_compares_gpu_names_through_the_validator_aliases(fields, host_type, host_count, another) -> None:
+    assert reg._is_another_host(fields, gpu_type=host_type, gpu_count=host_count) is another

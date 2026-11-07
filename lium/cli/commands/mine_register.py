@@ -372,13 +372,37 @@ def _node_gpus(row: dict) -> tuple[str | None, int | None]:
     return (str(gpu_type) if gpu_type else None), (int(count) if str(count or "").isdigit() else None)
 
 
+# The validator's names for one card (lium-io neurons/validators/src/services/gpu_spec_table.py NORMALIZATION_MAP):
+# nvidia-smi on this host may say "NVIDIA A10" where the portal shows the canonical "NVIDIA A10 Tensor Core GPU".
+_GPU_ALIASES = {
+    "Tesla V100-SXM2-16GB": "NVIDIA Tesla V100 Tensor Core GPU",
+    "Tesla V100-SXM2-32GB": "NVIDIA Tesla V100 Tensor Core GPU",
+    "Tesla V100-PCIE-16GB": "NVIDIA Tesla V100 Tensor Core GPU",
+    "Tesla V100-PCIE-32GB": "NVIDIA Tesla V100 Tensor Core GPU",
+    "Tesla H100 80GB HBM3": "NVIDIA H100 80GB HBM3",
+    "Tesla T4": "NVIDIA T4 Tensor Core GPU",
+    "NVIDIA T4": "NVIDIA T4 Tensor Core GPU",
+    "NVIDIA A10": "NVIDIA A10 Tensor Core GPU",
+    "NVIDIA A10G": "NVIDIA A10 Tensor Core GPU",
+}
+# the validator lists an H100 SXM module on a PCIe adapter board as H100 PCIe (is_sxm_on_pcie_adapter)
+_SAME_CARD = {frozenset({"NVIDIA H100 80GB HBM3", "NVIDIA H100 PCIe"})}
+
+
+def _same_gpu_model(a: str, b: str) -> bool:
+    ca, cb = (_GPU_ALIASES.get(x.strip(), x.strip()) for x in (a, b))
+    return ca == cb or frozenset({ca, cb}) in _SAME_CARD
+
+
 def _is_another_host(row: dict, *, gpu_type: str, gpu_count: int) -> bool:
     """The portal's node at this address has other GPUs than this host (each known field compared on its own):
     a second machine behind the same IP, not a re-run on the same host."""
     # shortcut: two machines with the same model and count still read as a re-run; a host fingerprint the portal
     # returns would tell them apart if that case shows up.
     node_type, node_count = _node_gpus(row)
-    return (node_type is not None and node_type != gpu_type) or (node_count is not None and node_count != gpu_count)
+    return (node_type is not None and not _same_gpu_model(node_type, gpu_type)) or (
+        node_count is not None and node_count != gpu_count
+    )
 
 
 def find_node_id_after_add(
