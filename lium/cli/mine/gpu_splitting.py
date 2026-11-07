@@ -40,6 +40,7 @@ from .storage import (
     NODE_FREE_DISK_GIB,
     NODE_IMAGES_GIB,
     NON_LOCAL_TRANSPORTS,
+    SINGLE_DISK_HINT,
     NoSafeTargetError,
     auto_select_target,
     check_planned_loop_file_free_after_restore,
@@ -51,6 +52,7 @@ from .storage import (
     load_mounted_filesystems,
     load_mount_info,
     node_images_note,
+    on_same_disk,
     plan_loop_file_target,
     resolve_explicit_target,
 )
@@ -291,10 +293,14 @@ def _build_setup_plan(
         except NoSafeTargetError as exc:
             if preflight.docker_mount.target == docker_root:
                 # an image file elsewhere would move Docker off its own disk and leave that disk unused
-                raise RuntimeError(
+                message = (
                     f"{exc}. {docker_root} is its own disk ({preflight.docker_mount.source}); format a spare disk "
                     "with --device, or pass --file/--size to use an image file anyway"
-                ) from exc
+                )
+                if on_same_disk(preflight.docker_mount.source, preflight.root_mount.source):
+                    # a Docker partition on the system disk cannot be reformatted while the OS runs from that disk
+                    message += f". {SINGLE_DISK_HINT}"
+                raise RuntimeError(message) from exc
             target = _loop_file_target(preflight, None, None, mine_dir)
 
     loop_file = target.classification == "loop_file"

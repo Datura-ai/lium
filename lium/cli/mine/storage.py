@@ -199,6 +199,18 @@ def _mount_device(source: str) -> str:
     return source.split("[", 1)[0]
 
 
+SINGLE_DISK_DOC_URL = "https://docs.lium.io/providers/nodes/docker-storage#single-disk-hosts"
+SINGLE_DISK_HINT = (
+    "On a single-disk host, reinstall the OS with one root partition over the whole disk "
+    f"(no separate Docker partition, no unallocated space): {SINGLE_DISK_DOC_URL}"
+)
+
+
+def on_same_disk(source_a: str, source_b: str) -> bool:
+    """True when two mount sources are partitions of one disk (`/dev/nvme0n1p2`, `/dev/nvme0n1p3`)."""
+    return _root_disk_name(_mount_device(source_a)) == _root_disk_name(_mount_device(source_b))
+
+
 def _is_protected_device(device: BlockDevice, root_mount: MountInfo, docker_mount: MountInfo) -> bool:
     root_source = _mount_device(root_mount.source)
     docker_source = _mount_device(docker_mount.source)
@@ -703,15 +715,22 @@ def plan_loop_file_target(
         f"{reserve // gib} GiB kept for the system)"
     )
     free_floor = node_free_disk_floor_bytes(node_images_present)
-    check_planned_loop_file_free_after_restore(what, size, docker_data_bytes, docker_root, free_floor)
     usable_bytes = xfs_usable_estimate_bytes(size)
-    if total_vram_bytes is not None and not disk_total_clears_vram_floor(usable_bytes, total_vram_bytes):
-        raise RuntimeError(
-            f"{what}, about {usable_bytes // gib} GiB of filesystem after XFS metadata; the validator "
-            f"pays no idle incentive for a node whose disk is under {MIN_DISK_TO_VRAM_RATE}x its GPU VRAM "
-            f"({round(total_vram_bytes / gib, 1)} GiB here, {round(total_vram_bytes / gib, 1) * MIN_DISK_TO_VRAM_RATE:.1f} GiB "
-            "needed). Free space, attach a spare disk, or pass --size"
-        )
+    try:
+        check_planned_loop_file_free_after_restore(what, size, docker_data_bytes, docker_root, free_floor)
+        if total_vram_bytes is not None and not disk_total_clears_vram_floor(usable_bytes, total_vram_bytes):
+            raise RuntimeError(
+                f"{what}, about {usable_bytes // gib} GiB of filesystem after XFS metadata; the validator "
+                f"pays no idle incentive for a node whose disk is under {MIN_DISK_TO_VRAM_RATE}x its GPU VRAM "
+                f"({round(total_vram_bytes / gib, 1)} GiB here, "
+                f"{round(total_vram_bytes / gib, 1) * MIN_DISK_TO_VRAM_RATE:.1f} GiB needed). "
+                "Free space, attach a spare disk, or pass --size"
+            )
+    except RuntimeError as exc:
+        if holder.target != "/":
+            raise
+        # root too small for the file: on one disk, the space is often in another partition or left unallocated
+        raise RuntimeError(f"{exc}. {SINGLE_DISK_HINT}") from None
     if size > room:
         raise RuntimeError(
             f"--size {size // gib} GiB does not fit on {holder.target}: {holder.avail_bytes // gib} GiB free minus "

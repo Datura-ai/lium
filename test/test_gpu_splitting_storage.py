@@ -591,6 +591,16 @@ def test_plan_loop_file_floor_adds_the_node_images_only_while_they_are_not_pulle
             plan_loop_file_target(filesystems, "/var/lib/docker", docker_data_bytes=40 * GIB)
 
 
+@pytest.mark.parametrize("target, single_disk", [("/", True), ("/data", False)])
+def test_plan_loop_file_space_refusal_points_single_disk_hosts_to_one_root_partition(target, single_disk):
+    # ticket-1091: root too small for the file usually means the disk's space sits in another partition or unallocated
+    filesystems = [_filesystem(target, 150, size_gib=180)] + ([_filesystem("/", 10, size_gib=50)] if target != "/" else [])
+    with pytest.raises(RuntimeError, match="needs 140 GiB free") as refused:
+        plan_loop_file_target(filesystems, "/var/lib/docker")
+
+    assert ("one root partition" in str(refused.value) and storage.SINGLE_DISK_DOC_URL in str(refused.value)) is single_disk
+
+
 def test_plan_loop_file_refuses_a_file_under_1_5x_the_gpu_vram():
     with pytest.raises(RuntimeError, match="about 246 GiB of filesystem after XFS metadata.*640.0 GiB here, 960.0 GiB needed"):
         plan_loop_file_target([_filesystem("/", 300)], "/var/lib/docker", total_vram_bytes=8 * 80 * 1024**3)
