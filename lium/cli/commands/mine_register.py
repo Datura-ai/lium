@@ -343,9 +343,10 @@ def register_node(
                 "(another account may hold it). Remove it there first, or contact support if that account is not yours."
             )
         if _is_another_host(row, gpu_type=gpu_type, gpu_count=gpu_count):
+            node_type, node_count = _node_gpus(row)
             raise RegisterError(
-                f"{ip_address}:{port} is already your node {row.get('id')} ({row.get('gpu_count')}x "
-                f"{row.get('gpu_type')}), and this host has {gpu_count}x {gpu_type}. If this is a second machine "
+                f"{ip_address}:{port} is already your node {row.get('id')} ({node_count or '?'}x "
+                f"{node_type or 'unknown GPU'}), and this host has {gpu_count}x {gpu_type}. If this is a second machine "
                 "behind the same public IP, forward its own ports on the router and re-run with them, e.g. "
                 "--external-port 8081 --ssh-port 2201 --renting-port-range 41000-41100. The node was not registered."
             )
@@ -362,14 +363,22 @@ FIND_NODE_RETRY_S = 5.0
 FIND_NODE_MAX_WAIT_S = 30.0  # bounds a portal Retry-After
 
 
+def _node_gpus(row: dict) -> tuple[str | None, int | None]:
+    """The node's GPU model and count: the declared fields, else what the validator measured (``executor_info``),
+    as the portal's node table shows them. A node synced from a central miner has no declared fields."""
+    info = row.get("executor_info") if isinstance(row.get("executor_info"), dict) else {}
+    gpu_type = row.get("gpu_type") or info.get("machine_name") or None
+    count = row.get("gpu_count") or info.get("gpu_count") or None
+    return (str(gpu_type) if gpu_type else None), (int(count) if str(count or "").isdigit() else None)
+
+
 def _is_another_host(row: dict, *, gpu_type: str, gpu_count: int) -> bool:
-    """The portal's node at this address reports other GPUs than this host: a second machine behind the same IP,
-    not a re-run on the same host."""
+    """The portal's node at this address has other GPUs than this host (each known field compared on its own):
+    a second machine behind the same IP, not a re-run on the same host."""
     # shortcut: two machines with the same model and count still read as a re-run; a host fingerprint the portal
     # returns would tell them apart if that case shows up.
-    if not row.get("gpu_type") or not row.get("gpu_count"):
-        return False
-    return str(row["gpu_type"]) != gpu_type or str(row["gpu_count"]) != str(gpu_count)
+    node_type, node_count = _node_gpus(row)
+    return (node_type is not None and node_type != gpu_type) or (node_count is not None and node_count != gpu_count)
 
 
 def find_node_id_after_add(

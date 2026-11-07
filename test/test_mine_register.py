@@ -420,14 +420,22 @@ def _listing_with_gpus(gpu_type: str, gpu_count: int) -> _Resp:
     ], "total": 1})
 
 
-def test_a_second_machine_on_the_first_ones_address_is_refused_with_the_port_flags() -> None:
+@pytest.mark.parametrize("fields", [
+    {"gpu_type": "NVIDIA GeForce RTX 5060 Ti", "gpu_count": 1},
+    {"gpu_type": None, "gpu_count": None, "executor_info": {"machine_name": "NVIDIA L4", "gpu_count": 1}},
+    {"gpu_type": None, "gpu_count": 1},
+])
+def test_a_second_machine_on_the_first_ones_address_is_refused_with_the_port_flags(fields) -> None:
     portal = _Portal()
     portal.on("POST", "/executors", _Resp(400, {"detail": {"message": f"Node node-1 {reg._ALREADY_EXISTS} on your account"}}))
-    portal.on("GET", "/executors", _listing_with_gpus("NVIDIA GeForce RTX 5060 Ti", 1))
-    with pytest.raises(reg.RegisterError, match=r"--external-port 8081") as err:
+    portal.on("GET", "/executors", _Resp(200, {"data": [
+        {"id": "node-1", "executor_ip_address": "203.0.113.7", "executor_ip_port": "8080", **fields},
+    ]}))
+    with pytest.raises(reg.RegisterError) as err:
         reg.register_node(_http(portal), miner_hotkey=HOTKEY, gpu_type="NVIDIA GeForce RTX 5060", gpu_count=2,
                           ip_address="203.0.113.7", port=8080, price_per_gpu=0.11)
-    assert "1x NVIDIA GeForce RTX 5060 Ti" in str(err.value) and "not registered" in str(err.value)
+    assert all(flag in str(err.value) for flag in ("--external-port", "--ssh-port", "--renting-port-range"))
+    assert "not registered" in str(err.value)
 
 
 def test_a_rerun_on_the_same_host_is_still_already_registered() -> None:
