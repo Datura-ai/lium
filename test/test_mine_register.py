@@ -27,8 +27,14 @@ ACCOUNT_ID = "acct_7f3c2a"
 NOW = 1_800_000_000
 
 
-def _token(exp: int | None = NOW + 3600, hotkey: str | None = HOTKEY, opt_in: bool | None = True,
-           node_hotkey: str | None = None, node_claim: str | None = None, **extra) -> str:
+def _token(
+    exp: int | None = NOW + 3600,
+    hotkey: str | None = HOTKEY,
+    opt_in: bool | None = True,
+    node_hotkey: str | None = None,
+    node_claim: str | None = None,
+    **extra,
+) -> str:
     # the portal's fastapi_jwt layout (lium-platform#291): the miner's to_json() plus "scope" under "subject", exp on top;
     # lium-platform#294 adds "node_hotkey" = the miner's listing_hotkey (its own key, or the pool's when custodied)
     subject = {"id": "acct-1", "opt_in_status": opt_in, "scope": "node:register"}
@@ -41,7 +47,9 @@ def _token(exp: int | None = NOW + 3600, hotkey: str | None = HOTKEY, opt_in: bo
     claims = {"subject": subject, "type": "access", **extra}
     if exp is not None:
         claims["exp"] = exp
-    return pyjwt.encode(claims, "not-the-portal-secret-but-long-enough-32b", algorithm="HS256")
+    return pyjwt.encode(
+        claims, "not-the-portal-secret-but-long-enough-32b", algorithm="HS256"
+    )
 
 
 _orig_confirm = reg.confirm_register_token
@@ -82,50 +90,91 @@ def test_parse_register_token_refuses_garbage_and_a_token_without_an_account() -
 def test_parse_register_token_accepts_flat_claims_and_no_expiry() -> None:
     flat = pyjwt.encode({"miner_hotkey": HOTKEY}, "k" * 32, algorithm="HS256")
     t = reg.parse_register_token(flat, now=NOW)
-    assert t.miner_hotkey == HOTKEY and t.exp is None and t.seconds_left() is None and t.opt_in_status is None
+    assert (
+        t.miner_hotkey == HOTKEY
+        and t.exp is None
+        and t.seconds_left() is None
+        and t.opt_in_status is None
+    )
 
 
-def test_parse_register_token_node_identity_is_the_account_key_unless_the_token_names_another() -> None:
+def test_parse_register_token_node_identity_is_the_account_key_unless_the_token_names_another() -> (
+    None
+):
     """lium-platform#294: ``node_hotkey`` is what the executor reports under. An own-key token (with or without
     the claim) keeps the account's key; a custodied token pairs an opaque account id with the pool's key."""
     own_without_claim = reg.parse_register_token(_token(), now=NOW)
     own_with_claim = reg.parse_register_token(_token(node_hotkey=HOTKEY), now=NOW)
-    assert (own_without_claim.miner_hotkey, own_without_claim.node_hotkey) == (HOTKEY, HOTKEY)
+    assert (own_without_claim.miner_hotkey, own_without_claim.node_hotkey) == (
+        HOTKEY,
+        HOTKEY,
+    )
     assert (own_with_claim.miner_hotkey, own_with_claim.node_hotkey) == (HOTKEY, HOTKEY)
-    custodied = reg.parse_register_token(_token(hotkey=ACCOUNT_ID, node_hotkey=POOL_HOTKEY), now=NOW)
+    custodied = reg.parse_register_token(
+        _token(hotkey=ACCOUNT_ID, node_hotkey=POOL_HOTKEY), now=NOW
+    )
     assert (custodied.miner_hotkey, custodied.node_hotkey) == (ACCOUNT_ID, POOL_HOTKEY)
 
 
 def test_parse_register_token_reads_the_node_claim_and_drops_a_non_hex_one() -> None:
     claim = "ab12" * 8
-    assert reg.parse_register_token(_token(node_claim=claim), now=NOW).account_claim == claim
+    assert (
+        reg.parse_register_token(_token(node_claim=claim), now=NOW).account_claim
+        == claim
+    )
     assert reg.parse_register_token(_token(), now=NOW).account_claim is None
     # it is written into .env verbatim: a newline must never get there
-    assert reg.parse_register_token(_token(node_claim="ab12\nSSH_PORT=1"), now=NOW).account_claim is None
+    assert (
+        reg.parse_register_token(
+            _token(node_claim="ab12\nSSH_PORT=1"), now=NOW
+        ).account_claim
+        is None
+    )
 
 
 def test_register_path_writes_the_account_claim_to_env(tmp_path: Path) -> None:
     (tmp_path / ".env").write_text("MINER_HOTKEY_SS58_ADDRESS=x\n")
-    mine._apply_env_overrides(tmp_path, "8080", "8080", "2200", "", "", account_claim="ab12" * 8)
-    assert "MINER_ACCOUNT_CLAIM=" + "ab12" * 8 in (tmp_path / ".env").read_text().splitlines()
+    mine._apply_env_overrides(
+        tmp_path, "8080", "8080", "2200", "", "", account_claim="ab12" * 8
+    )
+    assert (
+        "MINER_ACCOUNT_CLAIM=" + "ab12" * 8
+        in (tmp_path / ".env").read_text().splitlines()
+    )
 
 
 def test_rerun_without_register_keeps_the_account_claim(tmp_path: Path) -> None:
     """A later `lium mine` without --register rebuilds .env from the template; the claim must survive it."""
-    (tmp_path / ".env.template").write_text("MINER_HOTKEY_SS58_ADDRESS=\nMINER_ACCOUNT_CLAIM=\nSSH_PORT=2200\n")
-    (tmp_path / ".env").write_text("MINER_HOTKEY_SS58_ADDRESS=x\nMINER_ACCOUNT_CLAIM=" + "ab12" * 8 + "\n")
+    (tmp_path / ".env.template").write_text(
+        "MINER_HOTKEY_SS58_ADDRESS=\nMINER_ACCOUNT_CLAIM=\nSSH_PORT=2200\n"
+    )
+    (tmp_path / ".env").write_text(
+        "MINER_HOTKEY_SS58_ADDRESS=x\nMINER_ACCOUNT_CLAIM=" + "ab12" * 8 + "\n"
+    )
     mine._setup_executor_env(tmp_path, hotkey=HOTKEY)
-    mine._apply_env_overrides(tmp_path, "8080", "8080", "2200", "", "", account_claim=None)
-    assert "MINER_ACCOUNT_CLAIM=" + "ab12" * 8 in (tmp_path / ".env").read_text().splitlines()
+    mine._apply_env_overrides(
+        tmp_path, "8080", "8080", "2200", "", "", account_claim=None
+    )
+    assert (
+        "MINER_ACCOUNT_CLAIM=" + "ab12" * 8
+        in (tmp_path / ".env").read_text().splitlines()
+    )
     # a template without the key still gets it
     (tmp_path / ".env.template").write_text("MINER_HOTKEY_SS58_ADDRESS=\n")
     mine._setup_executor_env(tmp_path, hotkey=HOTKEY)
-    assert "MINER_ACCOUNT_CLAIM=" + "ab12" * 8 in (tmp_path / ".env").read_text().splitlines()
+    assert (
+        "MINER_ACCOUNT_CLAIM=" + "ab12" * 8
+        in (tmp_path / ".env").read_text().splitlines()
+    )
 
 
-def test_recreate_waits_for_a_new_healthy_container(tmp_path: Path, monkeypatch) -> None:
+def test_recreate_waits_for_a_new_healthy_container(
+    tmp_path: Path, monkeypatch
+) -> None:
     """After --force-recreate the old container can still read healthy; the wait must not return on it."""
-    ps = iter(["old\n", "old\n", "new\n"])  # before up, then the old container lingers once, then the new one
+    ps = iter(
+        ["old\n", "old\n", "new\n"]
+    )  # before up, then the old container lingers once, then the new one
     inspected = []
 
     def fake_run(cmd, check=True, capture=True, cwd=None):
@@ -142,11 +191,15 @@ def test_recreate_waits_for_a_new_healthy_container(tmp_path: Path, monkeypatch)
     assert inspected == ["new"]
 
 
-def test_parse_register_token_refuses_a_custodied_token_without_a_usable_node_identity() -> None:
+def test_parse_register_token_refuses_a_custodied_token_without_a_usable_node_identity() -> (
+    None
+):
     """Negative control: an opaque account id with no ``node_hotkey`` (or a non-SS58 one) cannot fill the .env."""
     for claim in (None, "", "0xnot-ss58"):
         with pytest.raises(reg.RegisterError, match="no usable node identity"):
-            reg.parse_register_token(_token(hotkey=ACCOUNT_ID, node_hotkey=claim), now=NOW)
+            reg.parse_register_token(
+                _token(hotkey=ACCOUNT_ID, node_hotkey=claim), now=NOW
+            )
 
 
 # --- host facts ------------------------------------------------------------------------------------------------------
@@ -156,7 +209,11 @@ def test_parse_register_token_refuses_a_custodied_token_without_a_usable_node_id
 
 
 class _Snapshot:
-    machine_prices = {"NVIDIA L4": 0.11, "NVIDIA A10 Tensor Core GPU": 0.2, "NVIDIA GeForce RTX 4090": 0.3}
+    machine_prices = {
+        "NVIDIA L4": 0.11,
+        "NVIDIA A10 Tensor Core GPU": 0.2,
+        "NVIDIA GeForce RTX 4090": 0.3,
+    }
 
 
 # --- portal calls ----------------------------------------------------------------------------------------------------
@@ -190,27 +247,62 @@ class _Portal:
 
 
 def _http(portal: _Portal) -> PortalHTTP:
-    return PortalHTTP(base_url="https://portal.example", token_provider=lambda: "TOKEN", session=portal)  # type: ignore[arg-type]
+    return PortalHTTP(
+        base_url="https://portal.example",
+        token_provider=lambda: "TOKEN",
+        session=portal,
+    )  # type: ignore[arg-type]
 
 
-def _listing(node_id: str = "node-1", ip: str = "203.0.113.7", port: int = 8080) -> _Resp:
-    return _Resp(200, {"success": True, "data": [
-        {"id": node_id, "executor_ip_address": ip, "executor_ip_port": str(port)},
-    ], "total": 1})
+def _listing(
+    node_id: str = "node-1", ip: str = "203.0.113.7", port: int = 8080
+) -> _Resp:
+    return _Resp(
+        200,
+        {
+            "success": True,
+            "data": [
+                {
+                    "id": node_id,
+                    "executor_ip_address": ip,
+                    "executor_ip_port": str(port),
+                },
+            ],
+            "total": 1,
+        },
+    )
 
 
 def test_register_node_posts_and_finds_the_id_with_the_token() -> None:
     portal = _Portal()
-    portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued"}}))
+    portal.on(
+        "POST",
+        "/executors",
+        _Resp(200, {"success": True, "data": {"message": "queued"}}),
+    )
     portal.on("GET", "/executors", _listing())
-    record = reg.register_node(_http(portal), miner_hotkey=HOTKEY, gpu_type="NVIDIA L4", gpu_count=1,
-                               ip_address="203.0.113.7", port=8080, price_per_gpu=0.11)
+    record = reg.register_node(
+        _http(portal),
+        miner_hotkey=HOTKEY,
+        gpu_type="NVIDIA L4",
+        gpu_count=1,
+        ip_address="203.0.113.7",
+        port=8080,
+        price_per_gpu=0.11,
+    )
     assert record == reg.NodeRecord(node_id="node-1", already_registered=False)
     post, get = portal.calls
     assert post["headers"]["Authorization"] == "Bearer TOKEN"
-    assert post["json"] == {"gpu_type": "NVIDIA L4", "ip_address": "203.0.113.7", "port": 8080,
-                            "price_per_gpu": 0.11, "gpu_count": 1}
-    assert get["headers"]["Authorization"] == "Bearer TOKEN"  # the portal shows the address to the owner only
+    assert post["json"] == {
+        "gpu_type": "NVIDIA L4",
+        "ip_address": "203.0.113.7",
+        "port": 8080,
+        "price_per_gpu": 0.11,
+        "gpu_count": 1,
+    }
+    assert (
+        get["headers"]["Authorization"] == "Bearer TOKEN"
+    )  # the portal shows the address to the owner only
     assert get["params"] == {"miner_hotkey": HOTKEY, "page": 1, "limit": 100}
 
 
@@ -225,7 +317,9 @@ def _status(status: str, message: str = "", last_error: dict | None = None) -> _
 _TEMPLATE = "MINER_HOTKEY_SS58_ADDRESS=\nINTERNAL_PORT=8080\nEXTERNAL_PORT=8080\nSSH_PORT=2200\nSSH_PUBLIC_PORT=2200\n"
 
 
-def _stub_host(monkeypatch, tmp_path: Path, *, nvidia_smi: str = "NVIDIA L4, 23034\n") -> tuple[Path, Path]:
+def _stub_host(
+    monkeypatch, tmp_path: Path, *, nvidia_smi: str = "NVIDIA L4, 23034\n"
+) -> tuple[Path, Path]:
     """Steps 1–6 with every host action stubbed: the clone drops an executor ``.env.template``, install/prereqs/start/
     validate/port checks are no-ops, ``nvidia-smi`` answers ``nvidia_smi``, the public IP is TEST-NET. Returns
     ``(target, executor_dir)``; the portal is the caller's."""
@@ -237,21 +331,38 @@ def _stub_host(monkeypatch, tmp_path: Path, *, nvidia_smi: str = "NVIDIA L4, 230
         (executor_dir / ".env.template").write_text(_TEMPLATE)
 
     monkeypatch.setattr(mine, "_clone_or_update_repo", fake_clone)
-    for name in ("_install_executor_tools", "_check_prereqs", "_check_free_disk", "_start_executor", "_validate_executor", "_check_ports_free"):
+    for name in (
+        "_install_executor_tools",
+        "_check_prereqs",
+        "_check_free_disk",
+        "_start_executor",
+        "_validate_executor",
+        "_check_ports_free",
+    ):
         monkeypatch.setattr(mine, name, lambda *a, **k: None)
     monkeypatch.setattr(mine, "_docker_storage_limited", lambda: True)
 
     class _Pull:
-        def poll(self): return 0
-        def wait(self): return 0
+        def poll(self):
+            return 0
+
+        def wait(self):
+            return 0
+
     monkeypatch.setattr(mine, "_start_preflight_pull", lambda: _Pull())
-    monkeypatch.setattr(mine, "_run", lambda cmd, **k: (nvidia_smi, "") if "nvidia-smi" in cmd else ("", ""))
+    monkeypatch.setattr(
+        mine,
+        "_run",
+        lambda cmd, **k: (nvidia_smi, "") if "nvidia-smi" in cmd else ("", ""),
+    )
     monkeypatch.setattr(mine, "_get_public_ip", lambda: "203.0.113.7")
     monkeypatch.setattr(reg, "fetch_shared_config", _Snapshot)
     return target, executor_dir
 
 
-def test_mine_register_never_formats_a_disk_for_the_storage_limit(monkeypatch, tmp_path: Path) -> None:
+def test_mine_register_never_formats_a_disk_for_the_storage_limit(
+    monkeypatch, tmp_path: Path
+) -> None:
     """--register implies --auto, and the portal's command runs unattended: on a host whose Docker cannot cap a
     container's disk it prints the manual setup command and installs on, it never plans or runs the disk setup."""
     import lium.cli.mine.gpu_splitting as gs
@@ -262,24 +373,37 @@ def test_mine_register_never_formats_a_disk_for_the_storage_limit(monkeypatch, t
     monkeypatch.setattr(gs, "_preflight", lambda: touched.append("preflight"))
     monkeypatch.setattr(gs, "_execute_setup", lambda plan: touched.append("execute"))
     portal = _Portal()
-    portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued"}}))
+    portal.on(
+        "POST",
+        "/executors",
+        _Resp(200, {"success": True, "data": {"message": "queued"}}),
+    )
     portal.on("GET", "/executors", _listing())
     portal.on("GET", "/executors/node-1", _status("AVAILABLE"))
     monkeypatch.setattr(reg, "build_http", lambda url, token: _http(portal))
     monkeypatch.setattr(reg, "wait_until_listed", _wait_no_sleep)
 
-
     result = CliRunner().invoke(
         mine.mine_command,
-        ["--register", _token(exp=int(time.time()) + 3600), "--dir", str(target),
-         "--portal-url", "https://provider-api.example", "--wait", "5"],
+        [
+            "--register",
+            _token(exp=int(time.time()) + 3600),
+            "--dir",
+            str(target),
+            "--portal-url",
+            "https://provider-api.example",
+            "--wait",
+            "5",
+        ],
     )
     assert result.exit_code == 0, result.output
     assert touched == []
     assert "lium gpu-splitting setup --device" in result.output
 
 
-def test_mine_register_repeated_with_the_same_claim_does_not_recreate_the_executor(monkeypatch, tmp_path: Path) -> None:
+def test_mine_register_repeated_with_the_same_claim_does_not_recreate_the_executor(
+    monkeypatch, tmp_path: Path
+) -> None:
     """A recreate restarts the executor under its rentals; only a claim the executor does not already run with needs
     one, so a rerun after a restart skipped under rentals still recreates though .env already holds the claim."""
     target, _ = _stub_host(monkeypatch, tmp_path)
@@ -292,23 +416,46 @@ def test_mine_register_repeated_with_the_same_claim_does_not_recreate_the_execut
             executor["claim"] = mine._env_value(d / ".env", "MINER_ACCOUNT_CLAIM")
 
     monkeypatch.setattr(mine, "_start_executor", start)
-    monkeypatch.setattr(mine, "_executor_env_value", lambda d, key: executor["claim"] if key == "MINER_ACCOUNT_CLAIM"
-                        or executor["claim"] is None else mine._env_value(d / ".env", key))
+    monkeypatch.setattr(
+        mine,
+        "_executor_env_value",
+        lambda d, key: (
+            executor["claim"]
+            if key == "MINER_ACCOUNT_CLAIM" or executor["claim"] is None
+            else mine._env_value(d / ".env", key)
+        ),
+    )
     portal = _Portal()
-    portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued"}}))
+    portal.on(
+        "POST",
+        "/executors",
+        _Resp(200, {"success": True, "data": {"message": "queued"}}),
+    )
     portal.on("GET", "/executors", _listing())
     portal.on("GET", "/executors/node-1", _status("AVAILABLE"))
     monkeypatch.setattr(reg, "build_http", lambda url, token: _http(portal))
     monkeypatch.setattr(reg, "wait_until_listed", _wait_no_sleep)
 
-
-    for claim, rentals in (("ab12" * 8, False), ("ab12" * 8, False), ("cd34" * 8, True), ("cd34" * 8, False),
-                           ("cd34" * 8, False)):
+    for claim, rentals in (
+        ("ab12" * 8, False),
+        ("ab12" * 8, False),
+        ("cd34" * 8, True),
+        ("cd34" * 8, False),
+        ("cd34" * 8, False),
+    ):
         executor["rentals"] = rentals
         result = CliRunner().invoke(
             mine.mine_command,
-            ["--register", _token(exp=int(time.time()) + 3600, node_claim=claim), "--dir", str(target),
-             "--portal-url", "https://provider-api.example", "--wait", "5"],
+            [
+                "--register",
+                _token(exp=int(time.time()) + 3600, node_claim=claim),
+                "--dir",
+                str(target),
+                "--portal-url",
+                "https://provider-api.example",
+                "--wait",
+                "5",
+            ],
         )
         assert result.exit_code == 0, result.output
     assert recreates == [False, False, True, True, False]
@@ -328,16 +475,30 @@ _orig_wait = reg.wait_until_listed
 _PROBE = "/executors/00000000-0000-0000-0000-000000000000"
 
 
-@pytest.mark.parametrize("resp, refused", [
-    (_Resp(404, {"detail": "Not found node"}), None),
-    (_Resp(404, {"detail": {"message": "Not found node", "code": "node_not_found"}}), None),
-    (_Resp(404, {"detail": {"code": "node_not_found"}}), None),
-    (_Resp(404, {"detail": {"message": "Not found node"}}), None),
-    (_Resp(404, {"detail": {"message": "Not Found", "code": "route_not_found"}}), "did not answer as the portal"),
-    (_Resp(401, {"detail": "Invalid or expired token"}), "The portal refused the register token (Invalid or expired token)"),
-    (_Resp(404, {"detail": "Not Found"}), "did not answer as the portal"),
-    (_Resp(200, {"id": "x"}), "did not answer as the portal"),
-])
+@pytest.mark.parametrize(
+    "resp, refused",
+    [
+        (_Resp(404, {"detail": "Not found node"}), None),
+        (
+            _Resp(
+                404, {"detail": {"message": "Not found node", "code": "node_not_found"}}
+            ),
+            None,
+        ),
+        (_Resp(404, {"detail": {"code": "node_not_found"}}), None),
+        (_Resp(404, {"detail": {"message": "Not found node"}}), None),
+        (
+            _Resp(404, {"detail": {"message": "Not Found", "code": "route_not_found"}}),
+            "did not answer as the portal",
+        ),
+        (
+            _Resp(401, {"detail": "Invalid or expired token"}),
+            "The portal refused the register token (Invalid or expired token)",
+        ),
+        (_Resp(404, {"detail": "Not Found"}), "did not answer as the portal"),
+        (_Resp(200, {"id": "x"}), "did not answer as the portal"),
+    ],
+)
 def test_confirm_register_token_asks_the_portal_with_the_token(resp, refused) -> None:
     portal = _Portal()
     portal.on("GET", _PROBE, resp)
@@ -349,15 +510,25 @@ def test_confirm_register_token_asks_the_portal_with_the_token(resp, refused) ->
     assert portal.calls[0]["headers"]["Authorization"] == "Bearer TOKEN"
 
 
-def test_mine_register_refuses_a_token_the_portal_rejects_before_touching_the_host(monkeypatch) -> None:
+def test_mine_register_refuses_a_token_the_portal_rejects_before_touching_the_host(
+    monkeypatch,
+) -> None:
     calls: list[str] = []
-    monkeypatch.setattr(mine, "_clone_or_update_repo", lambda *a, **k: calls.append("clone"))
+    monkeypatch.setattr(
+        mine, "_clone_or_update_repo", lambda *a, **k: calls.append("clone")
+    )
     monkeypatch.setattr(reg, "confirm_register_token", _orig_confirm)
     portal = _Portal()
     portal.on("GET", _PROBE, _Resp(401, {"detail": "Invalid or expired token"}))
     monkeypatch.setattr(reg, "build_http", lambda url, token: _http(portal))
-    result = CliRunner().invoke(mine.mine_command, ["--register", _token(exp=int(time.time()) + 3600)])
-    assert result.exit_code == 1 and "refused the register token" in result.output and calls == []
+    result = CliRunner().invoke(
+        mine.mine_command, ["--register", _token(exp=int(time.time()) + 3600)]
+    )
+    assert (
+        result.exit_code == 1
+        and "refused the register token" in result.output
+        and calls == []
+    )
 
 
 def _rate_limited(retry_after: str = "7") -> _Resp:
@@ -371,37 +542,78 @@ def test_a_429_on_the_node_list_is_rate_limiting_not_a_missing_node() -> None:
     portal.on("GET", "/executors", _rate_limited())
     slept: list[float] = []
     with pytest.raises(reg.ProviderError, match=r"rate limit, retry in 7 s") as err:
-        reg.find_node_id_after_add(_http(portal), miner_hotkey=HOTKEY, ip_address="203.0.113.7", port=8080,
-                                   sleep=slept.append)
+        reg.find_node_id_after_add(
+            _http(portal),
+            miner_hotkey=HOTKEY,
+            ip_address="203.0.113.7",
+            port=8080,
+            sleep=slept.append,
+        )
     assert err.value.code == "PORTAL_RATE_LIMIT"
-    assert slept == [7.0] * (reg.FIND_NODE_ATTEMPTS - 1)  # waits out Retry-After (>= the 5 s default) between tries
+    assert slept == [7.0] * (
+        reg.FIND_NODE_ATTEMPTS - 1
+    )  # waits out Retry-After (>= the 5 s default) between tries
 
 
 def test_a_429_then_the_listing_finds_the_node() -> None:
     portal = _Portal()
     portal.on("GET", "/executors", _rate_limited("120"), _listing())
     slept: list[float] = []
-    assert reg.find_node_id_after_add(_http(portal), miner_hotkey=HOTKEY, ip_address="203.0.113.7", port=8080,
-                                      sleep=slept.append) == "node-1"
+    assert (
+        reg.find_node_id_after_add(
+            _http(portal),
+            miner_hotkey=HOTKEY,
+            ip_address="203.0.113.7",
+            port=8080,
+            sleep=slept.append,
+        )
+        == "node-1"
+    )
     assert slept == [reg.FIND_NODE_MAX_WAIT_S]  # a long Retry-After is bounded
 
 
-def test_an_already_registered_node_behind_a_429_is_not_reported_as_another_accounts(monkeypatch) -> None:
+def test_an_already_registered_node_behind_a_429_is_not_reported_as_another_accounts(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(reg, "FIND_NODE_ATTEMPTS", 1)
     portal = _Portal()
     portal.on("POST", "/executors", _Resp(400, {"detail": reg._ALREADY_EXISTS}))
     portal.on("GET", "/executors", _rate_limited())
     with pytest.raises(reg.ProviderError, match="rate limit"):
-        reg.register_node(_http(portal), miner_hotkey=HOTKEY, gpu_type="NVIDIA L4", gpu_count=1,
-                          ip_address="203.0.113.7", port=8080, price_per_gpu=0.11)
-    portal.queues[("POST", "/executors")] = [_Resp(200, {"success": True, "data": {"message": "queued"}})]
-    record = reg.register_node(_http(portal), miner_hotkey=HOTKEY, gpu_type="NVIDIA L4", gpu_count=1,
-                               ip_address="203.0.113.7", port=8080, price_per_gpu=0.11)
-    assert record == reg.NodeRecord(node_id=None, already_registered=False)  # added; the list read is what failed
+        reg.register_node(
+            _http(portal),
+            miner_hotkey=HOTKEY,
+            gpu_type="NVIDIA L4",
+            gpu_count=1,
+            ip_address="203.0.113.7",
+            port=8080,
+            price_per_gpu=0.11,
+        )
+    portal.queues[("POST", "/executors")] = [
+        _Resp(200, {"success": True, "data": {"message": "queued"}})
+    ]
+    record = reg.register_node(
+        _http(portal),
+        miner_hotkey=HOTKEY,
+        gpu_type="NVIDIA L4",
+        gpu_count=1,
+        ip_address="203.0.113.7",
+        port=8080,
+        price_per_gpu=0.11,
+    )
+    assert record == reg.NodeRecord(
+        node_id=None, already_registered=False
+    )  # added; the list read is what failed
 
 
-def test_an_unknown_nvidia_model_without_price_asks_for_price_and_keeps_its_name(monkeypatch):
-    monkeypatch.setattr(reg, "fetch_shared_config", lambda: type("S", (), {"machine_prices": {"NVIDIA A100 80GB PCIe": 1.0}})())
+def test_an_unknown_nvidia_model_without_price_asks_for_price_and_keeps_its_name(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        reg,
+        "fetch_shared_config",
+        lambda: type("S", (), {"machine_prices": {"NVIDIA A100 80GB PCIe": 1.0}})(),
+    )
 
     with pytest.raises(reg.RegisterError) as e:
         reg.resolve_price("NVIDIA A100-SXM4-40GB", None)
@@ -414,27 +626,83 @@ def test_an_unknown_nvidia_model_with_price_resolves_to_it():
 
 
 def _listing_with_gpus(gpu_type: str, gpu_count: int) -> _Resp:
-    return _Resp(200, {"success": True, "data": [
-        {"id": "node-1", "executor_ip_address": "203.0.113.7", "executor_ip_port": "8080",
-         "gpu_type": gpu_type, "gpu_count": gpu_count},
-    ], "total": 1})
+    return _Resp(
+        200,
+        {
+            "success": True,
+            "data": [
+                {
+                    "id": "node-1",
+                    "executor_ip_address": "203.0.113.7",
+                    "executor_ip_port": "8080",
+                    "gpu_type": gpu_type,
+                    "gpu_count": gpu_count,
+                },
+            ],
+            "total": 1,
+        },
+    )
 
 
-@pytest.mark.parametrize("fields", [
-    {"gpu_type": "NVIDIA GeForce RTX 5060 Ti", "gpu_count": 1},
-    {"gpu_type": None, "gpu_count": None, "executor_info": {"machine_name": "NVIDIA L4", "gpu_count": 1}},
-    {"gpu_type": None, "gpu_count": 1},
-])
-def test_a_second_machine_on_the_first_ones_address_is_refused_with_the_port_flags(fields) -> None:
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"gpu_type": "NVIDIA GeForce RTX 5060 Ti", "gpu_count": 1},
+        {
+            "gpu_type": None,
+            "gpu_count": None,
+            "executor_info": {"machine_name": "NVIDIA L4", "gpu_count": 1},
+        },
+        {"gpu_type": None, "gpu_count": 1},
+    ],
+)
+def test_a_second_machine_on_the_first_ones_address_is_refused_with_the_port_flags(
+    fields,
+) -> None:
     portal = _Portal()
-    portal.on("POST", "/executors", _Resp(400, {"detail": {"message": f"Node node-1 {reg._ALREADY_EXISTS} on your account"}}))
-    portal.on("GET", "/executors", _Resp(200, {"data": [
-        {"id": "node-1", "executor_ip_address": "203.0.113.7", "executor_ip_port": "8080", **fields},
-    ]}))
+    portal.on(
+        "POST",
+        "/executors",
+        _Resp(
+            400,
+            {
+                "detail": {
+                    "message": f"Node node-1 {reg._ALREADY_EXISTS} on your account"
+                }
+            },
+        ),
+    )
+    portal.on(
+        "GET",
+        "/executors",
+        _Resp(
+            200,
+            {
+                "data": [
+                    {
+                        "id": "node-1",
+                        "executor_ip_address": "203.0.113.7",
+                        "executor_ip_port": "8080",
+                        **fields,
+                    },
+                ]
+            },
+        ),
+    )
     with pytest.raises(reg.RegisterError) as err:
-        reg.register_node(_http(portal), miner_hotkey=HOTKEY, gpu_type="NVIDIA GeForce RTX 5060", gpu_count=2,
-                          ip_address="203.0.113.7", port=8080, price_per_gpu=0.11)
-    assert all(flag in str(err.value) for flag in ("--external-port", "--ssh-port", "--renting-port-range"))
+        reg.register_node(
+            _http(portal),
+            miner_hotkey=HOTKEY,
+            gpu_type="NVIDIA GeForce RTX 5060",
+            gpu_count=2,
+            ip_address="203.0.113.7",
+            port=8080,
+            price_per_gpu=0.11,
+        )
+    assert all(
+        flag in str(err.value)
+        for flag in ("--external-port", "--ssh-port", "--renting-port-range")
+    )
     assert "not registered" in str(err.value)
 
 
@@ -442,19 +710,70 @@ def test_a_rerun_on_the_same_host_is_still_already_registered() -> None:
     portal = _Portal()
     portal.on("POST", "/executors", _Resp(400, {"detail": reg._ALREADY_EXISTS}))
     portal.on("GET", "/executors", _listing_with_gpus("NVIDIA L4", 1))
-    record = reg.register_node(_http(portal), miner_hotkey=HOTKEY, gpu_type="NVIDIA L4", gpu_count=1,
-                               ip_address="203.0.113.7", port=8080, price_per_gpu=0.11)
+    record = reg.register_node(
+        _http(portal),
+        miner_hotkey=HOTKEY,
+        gpu_type="NVIDIA L4",
+        gpu_count=1,
+        ip_address="203.0.113.7",
+        port=8080,
+        price_per_gpu=0.11,
+    )
     assert record == reg.NodeRecord(node_id="node-1", already_registered=True)
 
 
-@pytest.mark.parametrize(("fields", "host_type", "host_count", "another"), [
-    ({"gpu_type": "NVIDIA A10 Tensor Core GPU", "gpu_count": 1}, "NVIDIA A10", 1, False),  # declared alias
-    ({"gpu_type": None, "gpu_count": None, "executor_info": {"machine_name": "NVIDIA A10 Tensor Core GPU", "gpu_count": 1}},
-     "NVIDIA A10", 1, False),  # measured alias
-    ({"gpu_type": "NVIDIA H100 PCIe", "gpu_count": 8}, "NVIDIA H100 80GB HBM3", 8, False),  # SXM on a PCIe adapter
-    ({"gpu_type": "NVIDIA A10 Tensor Core GPU", "gpu_count": 1}, "NVIDIA L4", 1, True),  # another model
-    ({"gpu_type": "NVIDIA A10 Tensor Core GPU", "gpu_count": 1}, "NVIDIA A10", 2, True),  # another count
-    ({"gpu_type": None, "gpu_count": None}, "NVIDIA L4", 1, False),  # nothing known: a re-run
-])
-def test_another_host_compares_gpu_names_through_the_validator_aliases(fields, host_type, host_count, another) -> None:
-    assert reg._is_another_host(fields, gpu_type=host_type, gpu_count=host_count) is another
+@pytest.mark.parametrize(
+    ("fields", "host_type", "host_count", "another"),
+    [
+        (
+            {"gpu_type": "NVIDIA A10 Tensor Core GPU", "gpu_count": 1},
+            "NVIDIA A10",
+            1,
+            False,
+        ),  # declared alias
+        (
+            {
+                "gpu_type": None,
+                "gpu_count": None,
+                "executor_info": {
+                    "machine_name": "NVIDIA A10 Tensor Core GPU",
+                    "gpu_count": 1,
+                },
+            },
+            "NVIDIA A10",
+            1,
+            False,
+        ),  # measured alias
+        (
+            {"gpu_type": "NVIDIA H100 PCIe", "gpu_count": 8},
+            "NVIDIA H100 80GB HBM3",
+            8,
+            True,
+        ),  # SXM and PCIe H100 differ
+        (
+            {"gpu_type": "NVIDIA A10 Tensor Core GPU", "gpu_count": 1},
+            "NVIDIA L4",
+            1,
+            True,
+        ),  # another model
+        (
+            {"gpu_type": "NVIDIA A10 Tensor Core GPU", "gpu_count": 1},
+            "NVIDIA A10",
+            2,
+            True,
+        ),  # another count
+        (
+            {"gpu_type": None, "gpu_count": None},
+            "NVIDIA L4",
+            1,
+            False,
+        ),  # nothing known: a re-run
+    ],
+)
+def test_another_host_compares_gpu_names_through_the_validator_aliases(
+    fields, host_type, host_count, another
+) -> None:
+    assert (
+        reg._is_another_host(fields, gpu_type=host_type, gpu_count=host_count)
+        is another
+    )
