@@ -88,7 +88,9 @@ def parse_register_token(token: str, *, now: int | None = None) -> RegisterToken
     """
     token = (token or "").strip()
     try:
-        claims = pyjwt.decode(token, options={"verify_signature": False, "verify_exp": False})
+        claims = pyjwt.decode(
+            token, options={"verify_signature": False, "verify_exp": False}
+        )
     except pyjwt.PyJWTError as e:
         raise RegisterError(
             "The register token is not one the portal issued. Copy the whole command from the portal's "
@@ -163,11 +165,15 @@ def parse_nvidia_smi(output: str) -> GpuInventory:
         if name:
             rows.append((name, mem_mib))
     if not rows:
-        raise RegisterError("nvidia-smi reports no GPU on this host; the node was not registered.")
+        raise RegisterError(
+            "nvidia-smi reports no GPU on this host; the node was not registered."
+        )
     names = sorted({name for name, _ in rows})
     if len(names) > 1:
         raise RegisterError(
-            "This host has more than one GPU model (" + ", ".join(names) + "). The portal lists one model per "
+            "This host has more than one GPU model ("
+            + ", ".join(names)
+            + "). The portal lists one model per "
             "node: register one model at a time with `lium provider node add --gpu-type ... --gpu-count ...`."
         )
     vram_gb = round(max(mem for _, mem in rows) / 1024)
@@ -182,7 +188,9 @@ def executor_port(executor_dir: Path) -> int:
             value = line.split("=", 1)[1].split("#", 1)[0].strip()
             if value.isdigit():
                 return int(value)
-    raise RegisterError(f"EXTERNAL_PORT is missing from {env_f}; the node was not registered.")
+    raise RegisterError(
+        f"EXTERNAL_PORT is missing from {env_f}; the node was not registered."
+    )
 
 
 def resolve_price(gpu_type: str, explicit: float | None) -> float:
@@ -200,7 +208,9 @@ def resolve_price(gpu_type: str, explicit: float | None) -> float:
     try:
         return default_price_for_gpu(snapshot, gpu_type)
     except ProviderError as e:
-        raise RegisterError(_unknown_gpu_message(gpu_type, sorted(snapshot.machine_prices))) from e
+        raise RegisterError(
+            _unknown_gpu_message(gpu_type, sorted(snapshot.machine_prices))
+        ) from e
 
 
 def _unknown_gpu_message(gpu_type: str, known: list[str]) -> str:
@@ -212,7 +222,9 @@ def _unknown_gpu_message(gpu_type: str, known: list[str]) -> str:
             "verified keeps the node unlisted until you raise it."
         )
     close = difflib.get_close_matches(gpu_type, known, n=3, cutoff=0.5)
-    hint = ("Closest names the portal knows: " + "; ".join(close) + ". ") if close else ""
+    hint = (
+        ("Closest names the portal knows: " + "; ".join(close) + ". ") if close else ""
+    )
     return (
         f"The portal does not list the GPU model this host reports ({gpu_type!r}). {hint}"
         "Re-run with --gpu-type '<portal name>' to register under that name, or ask support to add the model."
@@ -230,8 +242,12 @@ def _is_not_found_node(e: ProviderError) -> bool:
     body = (e.context or {}).get("body")
     detail = body.get("detail") if isinstance(body, dict) else None
     if isinstance(detail, dict):
-        return detail.get("code") == _NOT_FOUND_NODE_CODE or detail.get("message") == _NOT_FOUND_NODE
+        return (
+            detail.get("code") == _NOT_FOUND_NODE_CODE
+            or detail.get("message") == _NOT_FOUND_NODE
+        )
     return detail == _NOT_FOUND_NODE
+
 
 _NOT_THE_PORTAL = (
     "Could not confirm the register token: the portal address did not answer as the portal. "
@@ -256,7 +272,9 @@ def confirm_register_token(http: PortalHTTP) -> None:
     except ProviderError as e:
         if (e.context or {}).get("status") in (401, 403):
             raise RegisterError(
-                "The portal refused the register token (" + _detail(e) + "). Open the Add Node page again and copy "
+                "The portal refused the register token ("
+                + _detail(e)
+                + "). Open the Add Node page again and copy "
                 "the new command; a token is valid for one hour."
             ) from e
         raise RegisterError(
@@ -282,7 +300,9 @@ def _detail(e: ProviderError) -> str:
         if isinstance(detail, dict):
             return " ".join(str(v) for v in detail.values())
         if isinstance(detail, list):
-            return " ".join(str(d.get("msg", d)) if isinstance(d, dict) else str(d) for d in detail)
+            return " ".join(
+                str(d.get("msg", d)) if isinstance(d, dict) else str(d) for d in detail
+            )
     return str(body) if body else str(e)
 
 
@@ -302,11 +322,13 @@ def register_node(
     ip_address: str,
     port: int,
     price_per_gpu: float,
+    nvlink_pairs: int | None = None,
 ) -> NodeRecord:
     """``POST /executors`` with the register token, then find the node's id in the account's list.
 
     A node that is already in the portal at this address (a re-run of ``lium mine`` on the same host) is not
-    an error: the portal refuses the duplicate and the existing record is what gets polled.
+    an error: the portal refuses the duplicate and the existing record is what gets polled. One with other GPUs is
+    a second machine behind the same IP registering on the first one's port: that is refused, naming the flags.
     """
     payload = {
         "gpu_type": gpu_type,
@@ -324,27 +346,49 @@ def register_node(
         if status == 400 and _ALREADY_EXISTS in detail:
             already = True
         elif status == 400 and _UNSUPPORTED_GPU in detail:
-            raise RegisterError(_unknown_gpu_message(gpu_type, _known_gpu_types())) from e
+            raise RegisterError(
+                _unknown_gpu_message(gpu_type, _known_gpu_types())
+            ) from e
         elif status in (401, 403):
             raise RegisterError(
-                "The portal refused the register token (" + detail + "). Open the Add Node page again and copy "
+                "The portal refused the register token ("
+                + detail
+                + "). Open the Add Node page again and copy "
                 "the new command; a token is valid for one hour."
             ) from e
         else:
             raise RegisterError(f"The portal refused the node: {detail}") from e
 
     if already:
-        node_id = find_node_id_after_add(http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port)
-        if node_id is None:
+        row = find_node_after_add(
+            http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port
+        )
+        if row is None:
             # the portal's duplicate check is global (find_by_ip_and_port has no account filter)
             raise RegisterError(
                 f"A node at {ip_address}:{port} is already in the portal but not in this account's node list "
                 "(another account may hold it). Remove it there first, or contact support if that account is not yours."
             )
-        return NodeRecord(node_id=node_id, already_registered=True)
+        if _is_another_host(
+            row,
+            gpu_type=_listed_gpu_model(gpu_type, gpu_count, nvlink_pairs),
+            gpu_count=gpu_count,
+        ):
+            node_type, node_count = _node_gpus(row)
+            raise RegisterError(
+                f"{ip_address}:{port} is already your node {row.get('id')} ({node_count or '?'}x "
+                f"{node_type or 'unknown GPU'}), and this host has {gpu_count}x {gpu_type}. If this is a second machine "
+                "behind the same public IP, forward its own ports on the router and re-run with them, e.g. "
+                "--external-port 8081 --ssh-port 2201 --renting-port-range 41000-41100. The node was not registered."
+            )
+        return NodeRecord(node_id=str(row.get("id")), already_registered=True)
     try:
-        node_id = find_node_id_after_add(http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port)
-    except ProviderError:  # rate limited: the add went through, only the list read did not
+        node_id = find_node_id_after_add(
+            http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port
+        )
+    except (
+        ProviderError
+    ):  # rate limited: the add went through, only the list read did not
         node_id = None
     return NodeRecord(node_id=node_id, already_registered=False)
 
@@ -354,24 +398,121 @@ FIND_NODE_RETRY_S = 5.0
 FIND_NODE_MAX_WAIT_S = 30.0  # bounds a portal Retry-After
 
 
+def _node_gpus(row: dict) -> tuple[str | None, int | None]:
+    """The node's GPU model and count: the declared fields, else what the validator measured (``executor_info``),
+    as the portal's node table shows them. A node synced from a central miner has no declared fields."""
+    info = (
+        row.get("executor_info") if isinstance(row.get("executor_info"), dict) else {}
+    )
+    gpu_type = row.get("gpu_type") or info.get("machine_name") or None
+    count = (
+        info.get("gpu_count") or row.get("gpu_count") or None
+    )  # measured inventory wins over a declared edit
+    return (str(gpu_type) if gpu_type else None), (
+        int(count) if str(count or "").isdigit() else None
+    )
+
+
+# The validator's names for one card (lium-io neurons/validators/src/services/gpu_spec_table.py NORMALIZATION_MAP):
+# nvidia-smi on this host may say "NVIDIA A10" where the portal shows the canonical "NVIDIA A10 Tensor Core GPU".
+_GPU_ALIASES = {
+    "Tesla V100-SXM2-16GB": "NVIDIA Tesla V100 Tensor Core GPU",
+    "Tesla V100-SXM2-32GB": "NVIDIA Tesla V100 Tensor Core GPU",
+    "Tesla V100-PCIE-16GB": "NVIDIA Tesla V100 Tensor Core GPU",
+    "Tesla V100-PCIE-32GB": "NVIDIA Tesla V100 Tensor Core GPU",
+    "Tesla H100 80GB HBM3": "NVIDIA H100 80GB HBM3",
+    "Tesla T4": "NVIDIA T4 Tensor Core GPU",
+    "NVIDIA T4": "NVIDIA T4 Tensor Core GPU",
+    "NVIDIA A10": "NVIDIA A10 Tensor Core GPU",
+    "NVIDIA A10G": "NVIDIA A10 Tensor Core GPU",
+}
+
+
+def read_nvlink_pairs(run: Callable[[str], tuple[str, str]]) -> int | None:
+    """NVLink pairs in ``nvidia-smi topo -m`` (``NV<n>`` cells, each pair shown twice); None if it cannot be read."""
+    try:
+        out, _ = run("nvidia-smi topo -m")
+    except Exception:  # noqa: BLE001 - an unreadable topology only skips the adapter relabel, never the registration
+        return None
+    # matrix rows start with "GPU<n>"; the header row starts with whitespace
+    rows = [ln for ln in out.splitlines() if ln.startswith("GPU")]
+    return sum(len(re.findall(r"\bNV\d+\b", ln)) for ln in rows) // 2 if rows else None
+
+
+def _listed_gpu_model(gpu_type: str, gpu_count: int, nvlink_pairs: int | None) -> str:
+    """The name the validator lists this host under: an H100 SXM on PCIe adapter boards (several GPUs, no NVLink
+    pair, lium-io gpu_spec_table.is_sxm_on_pcie_adapter) is listed as H100 PCIe; an HGX board keeps its name."""
+    if (
+        gpu_count > 1
+        and nvlink_pairs == 0
+        and _GPU_ALIASES.get(gpu_type.strip(), gpu_type.strip())
+        == "NVIDIA H100 80GB HBM3"
+    ):
+        return "NVIDIA H100 PCIe"
+    return gpu_type
+
+
+def _same_gpu_model(a: str, b: str) -> bool:
+    ca, cb = (_GPU_ALIASES.get(x.strip(), x.strip()) for x in (a, b))
+    return ca == cb
+
+
+def _is_another_host(row: dict, *, gpu_type: str, gpu_count: int) -> bool:
+    """The portal's node at this address has other GPUs than this host (each known field compared on its own):
+    a second machine behind the same IP, not a re-run on the same host."""
+    # shortcut: two machines with the same model and count still read as a re-run; a host fingerprint the portal
+    # returns would tell them apart if that case shows up.
+    node_type, node_count = _node_gpus(row)
+    return (node_type is not None and not _same_gpu_model(node_type, gpu_type)) or (
+        node_count is not None and node_count != gpu_count
+    )
+
+
 def find_node_id_after_add(
-    http: PortalHTTP, *, miner_hotkey: str, ip_address: str, port: int, sleep: Callable[[float], None] = time.sleep
+    http: PortalHTTP,
+    *,
+    miner_hotkey: str,
+    ip_address: str,
+    port: int,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> str | None:
-    """``find_node_id`` with retries: the list can lag the write, and a portal hiccup must not fail an add that succeeded.
+    """The id of ``find_node_after_add``'s row."""
+    row = find_node_after_add(
+        http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port, sleep=sleep
+    )
+    return str(row.get("id")) if row is not None else None
+
+
+def find_node_after_add(
+    http: PortalHTTP,
+    *,
+    miner_hotkey: str,
+    ip_address: str,
+    port: int,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict | None:
+    """``find_node`` with retries: the list can lag the write, and a portal hiccup must not fail an add that succeeded.
 
     A 429 that outlasts the retries is raised, never read as "not in the list" (DAH-5161)."""
     for attempt in range(FIND_NODE_ATTEMPTS):
         wait = FIND_NODE_RETRY_S
         try:
-            node_id = find_node_id(http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port)
+            row = find_node(
+                http, miner_hotkey=miner_hotkey, ip_address=ip_address, port=port
+            )
         except ProviderError as e:
             if e.code == PORTAL_RATE_LIMIT:
                 if attempt == FIND_NODE_ATTEMPTS - 1:
                     raise
-                wait = max(wait, min((e.context or {}).get("retry_after") or 0, FIND_NODE_MAX_WAIT_S))
-            node_id = None
-        if node_id is not None:
-            return node_id
+                wait = max(
+                    wait,
+                    min(
+                        (e.context or {}).get("retry_after") or 0, FIND_NODE_MAX_WAIT_S
+                    ),
+                )
+            row = None
+        if row is not None:
+            return row
         if attempt < FIND_NODE_ATTEMPTS - 1:
             sleep(wait)
     return None
@@ -385,9 +526,33 @@ def _known_gpu_types() -> list[str]:
 
 
 def find_node_id(
-    http: PortalHTTP, *, miner_hotkey: str, ip_address: str, port: int, max_pages: int = 10
+    http: PortalHTTP,
+    *,
+    miner_hotkey: str,
+    ip_address: str,
+    port: int,
+    max_pages: int = 10,
 ) -> str | None:
-    """The id of the account's node at ``ip_address:port`` from ``GET /executors``, or None. The register token goes
+    """The id of ``find_node``'s row, or None."""
+    row = find_node(
+        http,
+        miner_hotkey=miner_hotkey,
+        ip_address=ip_address,
+        port=port,
+        max_pages=max_pages,
+    )
+    return str(row.get("id")) if row is not None else None
+
+
+def find_node(
+    http: PortalHTTP,
+    *,
+    miner_hotkey: str,
+    ip_address: str,
+    port: int,
+    max_pages: int = 10,
+) -> dict | None:
+    """The account's node at ``ip_address:port`` from ``GET /executors``, or None. The register token goes
     along: the portal blanks every node's address but its owner's."""
     for page in range(1, max_pages + 1):
         body = http.get(
@@ -400,8 +565,10 @@ def find_node_id(
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            if str(row.get("executor_ip_address")) == ip_address and str(row.get("executor_ip_port")) == str(port):
-                return str(row.get("id"))
+            if str(row.get("executor_ip_address")) == ip_address and str(
+                row.get("executor_ip_port")
+            ) == str(port):
+                return row
         if len(rows) < 100:
             return None
     return None
@@ -462,9 +629,13 @@ def wait_until_listed(
     """
     start = clock()
     last: NodeStatus | None = None
-    last_settled: NodeStatus | None = None   # the last reading that was not OFFLINE
-    offline_since: float | None = None       # clock at the first OFFLINE reading of the current run of them
-    offline_confirmed = False                # an OFFLINE reading OFFLINE_CONFIRM_S or more after that first one
+    last_settled: NodeStatus | None = None  # the last reading that was not OFFLINE
+    offline_since: float | None = (
+        None  # clock at the first OFFLINE reading of the current run of them
+    )
+    offline_confirmed = (
+        False  # an OFFLINE reading OFFLINE_CONFIRM_S or more after that first one
+    )
     while True:
         try:
             current = read_status(http, node_id)
@@ -482,13 +653,17 @@ def wait_until_listed(
             else:
                 offline_since, offline_confirmed = None, False
                 last_settled = current
-            if current.listed or (current.needs_fix and (current.status != "OFFLINE" or offline_confirmed)):
+            if current.listed or (
+                current.needs_fix and (current.status != "OFFLINE" or offline_confirmed)
+            ):
                 return current
         elapsed = clock() - start
         # an OFFLINE first read inside the last minute of the wait gets its minute: the deadline stretches by
         # OFFLINE_CONFIRM_S at most, so a single stale reading is never reported as the fix
         pending_offline = offline_since is not None and not offline_confirmed
-        if elapsed >= timeout_s and not (pending_offline and elapsed < timeout_s + OFFLINE_CONFIRM_S):
+        if elapsed >= timeout_s and not (
+            pending_offline and elapsed < timeout_s + OFFLINE_CONFIRM_S
+        ):
             if pending_offline:
                 # one OFFLINE reading and then only failed reads until the stretched deadline: not a fix
                 return last_settled or NodeStatus(status="UNKNOWN", message="", fix="")
@@ -517,11 +692,15 @@ def public_ipv4_or_fail(ip: str) -> str:
 
 
 def build_http(portal_api_url: str | None, token: str) -> PortalHTTP:
-    return PortalHTTP(base_url=portal_api_url or DEFAULT_PORTAL_URL, token_provider=lambda: token)
+    return PortalHTTP(
+        base_url=portal_api_url or DEFAULT_PORTAL_URL, token_provider=lambda: token
+    )
 
 
 def read_gpu_inventory(run: Callable[[str], tuple[str, str]]) -> GpuInventory:
-    out, _ = run("nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits")
+    out, _ = run(
+        "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits"
+    )
     return parse_nvidia_smi(out)
 
 
@@ -537,7 +716,9 @@ def status_line(status: NodeStatus, elapsed_s: float) -> str:
     return text
 
 
-def result_summary(status: NodeStatus, *, node_url: str, waited_s: float) -> tuple[str, int]:
+def result_summary(
+    status: NodeStatus, *, node_url: str, waited_s: float
+) -> tuple[str, int]:
     """(message, exit code) for the end of the wait: 0 listed · 1 named fix · 2 still pending."""
     mins = int(waited_s // 60)
     if status.listed:
@@ -548,7 +729,10 @@ def result_summary(status: NodeStatus, *, node_url: str, waited_s: float) -> tup
         fix = " ".join(dict.fromkeys(parts)) or "see the node page"
         return (f"FIX ({status.status}): {fix}\n{node_url}", 1)
     if status.status == "UNKNOWN":
-        return (f"Could not read the node's status from the portal for {mins} min; the node stays registered: {node_url}", 2)
+        return (
+            f"Could not read the node's status from the portal for {mins} min; the node stays registered: {node_url}",
+            2,
+        )
     if status.status in ("VALIDATION_PENDING", "NOT_DETECTED"):
         tail = f" Last note from the portal: {status.fix}" if status.fix else ""
         return (
@@ -580,6 +764,7 @@ __all__: list[str] = [
     "portal_web_url",
     "public_ipv4_or_fail",
     "read_gpu_inventory",
+    "read_nvlink_pairs",
     "read_status",
     "register_node",
     "resolve_price",
