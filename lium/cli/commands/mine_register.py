@@ -322,6 +322,7 @@ def register_node(
     ip_address: str,
     port: int,
     price_per_gpu: float,
+    nvlink_pairs: int | None = None,
 ) -> NodeRecord:
     """``POST /executors`` with the register token, then find the node's id in the account's list.
 
@@ -368,7 +369,11 @@ def register_node(
                 f"A node at {ip_address}:{port} is already in the portal but not in this account's node list "
                 "(another account may hold it). Remove it there first, or contact support if that account is not yours."
             )
-        if _is_another_host(row, gpu_type=gpu_type, gpu_count=gpu_count):
+        if _is_another_host(
+            row,
+            gpu_type=_listed_gpu_model(gpu_type, gpu_count, nvlink_pairs),
+            gpu_count=gpu_count,
+        ):
             node_type, node_count = _node_gpus(row)
             raise RegisterError(
                 f"{ip_address}:{port} is already your node {row.get('id')} ({node_count or '?'}x "
@@ -400,7 +405,9 @@ def _node_gpus(row: dict) -> tuple[str | None, int | None]:
         row.get("executor_info") if isinstance(row.get("executor_info"), dict) else {}
     )
     gpu_type = row.get("gpu_type") or info.get("machine_name") or None
-    count = row.get("gpu_count") or info.get("gpu_count") or None
+    count = (
+        info.get("gpu_count") or row.get("gpu_count") or None
+    )  # measured inventory wins over a declared edit
     return (str(gpu_type) if gpu_type else None), (
         int(count) if str(count or "").isdigit() else None
     )
@@ -421,9 +428,31 @@ _GPU_ALIASES = {
 }
 
 
+def read_nvlink_pairs(run: Callable[[str], tuple[str, str]]) -> int | None:
+    """NVLink pairs in ``nvidia-smi topo -m`` (``NV<n>`` cells, each pair shown twice); None if it cannot be read."""
+    try:
+        out, _ = run("nvidia-smi topo -m")
+    except Exception:  # noqa: BLE001 - an unreadable topology only skips the adapter relabel, never the registration
+        return None
+    # matrix rows start with "GPU<n>"; the header row starts with whitespace
+    rows = [ln for ln in out.splitlines() if ln.startswith("GPU")]
+    return sum(len(re.findall(r"\bNV\d+\b", ln)) for ln in rows) // 2 if rows else None
+
+
+def _listed_gpu_model(gpu_type: str, gpu_count: int, nvlink_pairs: int | None) -> str:
+    """The name the validator lists this host under: an H100 SXM on PCIe adapter boards (several GPUs, no NVLink
+    pair, lium-io gpu_spec_table.is_sxm_on_pcie_adapter) is listed as H100 PCIe; an HGX board keeps its name."""
+    if (
+        gpu_count > 1
+        and nvlink_pairs == 0
+        and _GPU_ALIASES.get(gpu_type.strip(), gpu_type.strip())
+        == "NVIDIA H100 80GB HBM3"
+    ):
+        return "NVIDIA H100 PCIe"
+    return gpu_type
+
+
 def _same_gpu_model(a: str, b: str) -> bool:
-    # an H100 SXM on a PCIe adapter board, which the validator lists as H100 PCIe, reads as another model here; its
-    # re-run passes --gpu-type 'NVIDIA H100 PCIe' (no blanket H100 equivalence: that would pass a different machine)
     ca, cb = (_GPU_ALIASES.get(x.strip(), x.strip()) for x in (a, b))
     return ca == cb
 
@@ -735,6 +764,7 @@ __all__: list[str] = [
     "portal_web_url",
     "public_ipv4_or_fail",
     "read_gpu_inventory",
+    "read_nvlink_pairs",
     "read_status",
     "register_node",
     "resolve_price",

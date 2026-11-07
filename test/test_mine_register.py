@@ -777,3 +777,90 @@ def test_another_host_compares_gpu_names_through_the_validator_aliases(
         reg._is_another_host(fields, gpu_type=host_type, gpu_count=host_count)
         is another
     )
+
+
+@pytest.mark.parametrize(
+    ("fields", "host_count", "another"),
+    [
+        (
+            {"gpu_count": 4, "executor_info": {"gpu_count": 8}},
+            8,
+            False,
+        ),  # declared edit, measured matches
+        (
+            {"gpu_count": 4, "executor_info": {"gpu_count": 8}},
+            4,
+            True,
+        ),  # measured conflicts
+        (
+            {"gpu_count": 4, "executor_info": {}},
+            4,
+            False,
+        ),  # no measurement: declared governs
+        (
+            {"gpu_count": None, "executor_info": {"gpu_count": 8}},
+            8,
+            False,
+        ),  # no declaration
+        ({"gpu_count": None, "executor_info": {}}, 2, False),  # neither known
+    ],
+)
+def test_measured_gpu_count_governs_over_a_declared_edit(
+    fields, host_count, another
+) -> None:
+    row = {"gpu_type": "NVIDIA L4", **fields}
+    assert (
+        reg._is_another_host(row, gpu_type="NVIDIA L4", gpu_count=host_count) is another
+    )
+
+
+_TOPO_ADAPTER = (
+    "\tGPU0\tGPU1\tCPU Affinity\nGPU0\t X \tPIX\t0-31\nGPU1\tPIX\t X \t0-31\n"
+)
+_TOPO_HGX = "\tGPU0\tGPU1\tCPU Affinity\nGPU0\t X \tNV18\t0-31\nGPU1\tNV18\t X \t0-31\n"
+
+
+def test_read_nvlink_pairs_counts_nv_cells_once_per_pair() -> None:
+    assert reg.read_nvlink_pairs(lambda c: (_TOPO_ADAPTER, "")) == 0
+    assert reg.read_nvlink_pairs(lambda c: (_TOPO_HGX, "")) == 1
+    assert reg.read_nvlink_pairs(lambda c: ("", "")) is None
+
+    def boom(c):
+        raise RuntimeError("nvidia-smi failed")
+
+    assert reg.read_nvlink_pairs(boom) is None
+
+
+@pytest.mark.parametrize(
+    ("node_type", "nvlink_pairs", "refused"),
+    [
+        ("NVIDIA H100 PCIe", 0, False),  # adapter host re-run: listed as PCIe, matches
+        ("NVIDIA H100 PCIe", 4, True),  # a real SXM (HGX) host against a PCIe node
+        ("NVIDIA H100 PCIe", None, True),  # no NVLink reading: no relabel
+        ("NVIDIA H100 80GB HBM3", 4, False),  # HGX re-run keeps its name
+    ],
+)
+def test_h100_adapter_host_is_compared_as_the_pcie_card_it_is_listed_as(
+    node_type, nvlink_pairs, refused
+) -> None:
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(400, {"detail": reg._ALREADY_EXISTS}))
+    portal.on("GET", "/executors", _listing_with_gpus(node_type, 8))
+
+    def call():
+        return reg.register_node(
+            _http(portal),
+            miner_hotkey=HOTKEY,
+            gpu_type="NVIDIA H100 80GB HBM3",
+            gpu_count=8,
+            ip_address="203.0.113.7",
+            port=8080,
+            price_per_gpu=0.11,
+            nvlink_pairs=nvlink_pairs,
+        )
+
+    if refused:
+        with pytest.raises(reg.RegisterError, match="not registered"):
+            call()
+    else:
+        assert call() == reg.NodeRecord(node_id="node-1", already_registered=True)
