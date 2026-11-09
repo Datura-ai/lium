@@ -10,7 +10,11 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '17 6 * * *'   # the live e2e once a day against the configured API even when nobody pushes
+  # release.yml calls this on the release tag: pytest and e2e-live gate the publish; release.yml builds the artifacts
+  workflow_call:
 
+# Called from release.yml, github.workflow and github.ref are the caller's (its name, the tag ref), so a release's
+# group never matches a PR, main, cron or manual run: neither cancels the other.
 concurrency:
   group: ci-build-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -74,6 +78,8 @@ jobs:
         mac_intel='{"runner":"macos-15-intel","asset_name":"lium-darwin-amd64","expected_machine":"x86_64"}'
         out() { printf 'full-matrix=%s\nlinux-matrix=%s\nmacos-matrix=%s\n' "$1" "$2" "$3" >> "$GITHUB_OUTPUT"; }
         # only a pull_request has a file list to inspect; any other event (a manual dispatch) builds everything
+        # a release (release.yml calling this) builds every binary in release.yml itself
+        if [[ "$EVENT" == "release" ]]; then out false "[]" "[]"; exit 0; fi
         if [[ "$EVENT" != "pull_request" ]]; then out true "[$amd64,$arm64]" "[$mac_arm,$mac_intel]"; exit 0; fi
         files="$(gh api --paginate "repos/${{ github.repository }}/pulls/$PR/files" -q '.[].filename')"
         printf '%s\n' "$files"
@@ -86,7 +92,8 @@ jobs:
   build-python:
     name: Build Python distribution
     needs: packaging
-    if: github.event_name != 'schedule'   # the daily cron is for e2e-live only
+    # the daily cron is for e2e-live only; a release builds the wheel in release.yml (same artifact name)
+    if: github.event_name != 'schedule' && github.event_name != 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
