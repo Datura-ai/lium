@@ -1,6 +1,7 @@
 """Reboot command implementation."""
 
 from typing import Optional
+from uuid import UUID
 import click
 
 from lium.sdk import Lium
@@ -11,6 +12,7 @@ from lium.cli.utils import (
     EXIT_GENERAL_ERROR,
     EXIT_POD_NOT_FOUND,
     handle_errors,
+    resolve_volume_huid,
 )
 from . import validation, parsing
 from .actions import RebootPodsAction
@@ -19,7 +21,7 @@ from .actions import RebootPodsAction
 @click.command("reboot")
 @click.argument("targets", required=False)
 @click.option("--all", "-a", is_flag=True, help="Reboot all active pods")
-@click.option("--volume-id", help="Volume ID to attach when rebooting")
+@click.option("--volume-id", help="Volume to attach when rebooting: its HUID (as `lium volumes` shows) or its ID")
 @handle_errors
 def reboot_command(targets: Optional[str], all: bool, volume_id: Optional[str]):
     """Reboot GPU pods."""
@@ -48,7 +50,7 @@ def reboot_command(targets: Optional[str], all: bool, volume_id: Optional[str]):
     selected_pods = parsed.get("selected_pods")
 
     # Execute
-    payload_volume_id = volume_id.strip() if volume_id else None
+    payload_volume_id = _volume_api_id(volume_id.strip()) if volume_id and volume_id.strip() else None
     ctx = {"pods": selected_pods, "lium": lium, "volume_id": payload_volume_id}
 
     action = RebootPodsAction()
@@ -64,3 +66,20 @@ def reboot_command(targets: Optional[str], all: bool, volume_id: Optional[str]):
             EXIT_GENERAL_ERROR,
         )
     ui.success(f"Reboot requested for {', '.join(rebooted)}")
+
+
+def _volume_api_id(volume: str) -> str:
+    """The API takes the volume's ID; `lium volumes` shows its HUID, so accept either."""
+    try:
+        UUID(volume)
+        return volume
+    except ValueError:
+        pass
+    volume_id = resolve_volume_huid(volume)
+    if not volume_id:
+        raise CliFailure(
+            "invalid_arguments",
+            f"Volume with HUID '{volume}' not found in your volumes (see 'lium volumes').",
+            EXIT_CONFIGURATION_ERROR,
+        )
+    return volume_id
