@@ -174,7 +174,8 @@ _DISK_SYSTEM_RESERVE_KIB = 20 * 1024 * 1024  # what the rent keeps off the free 
 def _pod_disk_kib(executor: ExecutorInfo, free_kib: Any) -> Optional[float]:
     """The disk a pod renting the node's free GPUs gets: (free − 20 GB) × its GPU share, as the web node card shows."""
     free = _intish(free_kib)
-    if free is None or not executor.gpu_count:
+    # a node without storage_limit_supported sets no per-pod limit: the pod can use all its free disk
+    if free is None or not executor.gpu_count or not (executor.specs or {}).get("storage_limit_supported"):
         return free
     if free < 8192:  # already GiB, as _maybe_gi_from_big_number reads it
         free *= 1024 * 1024

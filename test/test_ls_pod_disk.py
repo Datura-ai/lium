@@ -12,7 +12,7 @@ def _info(**extra):
 
 
 def test_pod_disk_is_the_free_gpus_share_of_the_free_disk_less_the_reserve():
-    exe = _info(available_gpu_count=2, specs={"hard_disk": {"free": 820 * GIB, "total": 1000 * GIB}})
+    exe = _info(available_gpu_count=2, specs={"hard_disk": {"free": 820 * GIB, "total": 1000 * GIB}, "storage_limit_supported": True})
 
     row = _specs_row(exe)
 
@@ -21,8 +21,14 @@ def test_pod_disk_is_the_free_gpus_share_of_the_free_disk_less_the_reserve():
 
 
 def test_a_whole_free_node_gets_the_free_disk_less_the_reserve():
-    assert _specs_row(_info(available_gpu_count=8, specs={"hard_disk": {"free": 820 * GIB}}))["PodDisk"] == "800"
+    assert _specs_row(_info(available_gpu_count=8, specs={"hard_disk": {"free": 820 * GIB}, "storage_limit_supported": True}))["PodDisk"] == "800"
 
 
 def test_no_free_figure_shows_a_dash():
     assert _specs_row(_info(specs={"hard_disk": {}}))["PodDisk"] == "—"
+
+
+def test_a_node_with_no_per_pod_limit_shows_all_its_free_disk():
+    exe = _info(available_gpu_count=2, specs={"hard_disk": {"free": 820 * GIB}, "storage_limit_supported": False})
+
+    assert _specs_row(exe)["PodDisk"] == "820"
