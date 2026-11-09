@@ -426,3 +426,29 @@ def test_parse_register_token_reads_a_dev_stack_and_its_central_miner() -> None:
     assert reg.parse_register_token(tok(dev_stack=True, central_miner_hotkey="x; rm -rf /"), now=NOW).central_miner_hotkey is None
     prod = reg.parse_register_token(tok(), now=NOW)
     assert prod.dev_stack is False and prod.central_miner_hotkey is None
+
+
+def test_a_dev_stack_token_starts_the_dev_runner_and_a_plain_rerun_keeps_it(monkeypatch, tmp_path: Path) -> None:
+    """DAH-6051: a staging/dev portal's token puts the runner commands on docker-compose.dev.yml, and a rerun with
+    no token still does (the choice is read back from .env)."""
+    central = "5E9mXBKNan8FbRGs71LnXaP8dAVkCVViDvkhbuNsfLwBzLsi"  # gitleaks:allow (public ss58 address)
+    target, _ = _stub_host(monkeypatch, tmp_path)
+    monkeypatch.setattr(mine, "_RUNNER_FILE_OPT", "")   # restored after the test; the command sets it
+    started: list[str] = []
+    monkeypatch.setattr(mine, "_start_executor", lambda d, recreate=False: started.append(mine._RUNNER_FILE_OPT))
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued"}}))
+    portal.on("GET", "/executors", _listing())
+    portal.on("GET", "/executors/node-1", _status("AVAILABLE"))
+    monkeypatch.setattr(reg, "build_http", lambda url, token: _http(portal))
+    monkeypatch.setattr(reg, "wait_until_listed", _wait_no_sleep)
+    subject = {"miner_hotkey": HOTKEY, "opt_in_status": True, "scope": "node:register", "dev_stack": True,
+               "central_miner_hotkey": central}
+    token = pyjwt.encode({"subject": subject, "exp": int(time.time()) + 3600}, "k" * 32, algorithm="HS256")
+
+    result = CliRunner().invoke(mine.mine_command, ["--register", token, "--dir", str(target),
+                                                    "--portal-url", "https://provider-api.example", "--wait", "5"])
+    assert result.exit_code == 0, result.output
+    result = CliRunner().invoke(mine.mine_command, ["--auto", "-k", HOTKEY, "--dir", str(target)])
+    assert result.exit_code == 0, result.output
+    assert started == ["-f docker-compose.dev.yml "] * 2
