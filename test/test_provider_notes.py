@@ -1,5 +1,6 @@
 """DAH-5995: the notes a provider shows renters reach ExecutorInfo."""
 
+from lium.cli.ls.display import compact_executor
 from lium.sdk import Config, Lium
 
 
@@ -24,3 +25,10 @@ def test_the_notes_are_read_off_the_listing():
 
 def test_an_older_api_without_the_field_reads_none():
     assert _map().provider_notes is None
+
+
+def test_lium_ls_json_carries_the_notes():
+    assert compact_executor(_map(provider_notes=["May reboot occasionally"]), False, 1)["provider_notes"] == [
+        "May reboot occasionally"
+    ]
+    assert compact_executor(_map(), False, 1)["provider_notes"] is None
