@@ -1141,6 +1141,14 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     if help_:
         click.echo(ctx.get_help())
         raise SystemExit(0)   # not ctx.exit(): handle_errors would report click's Exit as an unexpected error
+    # Extra args go to the preflight image at step 6; a stray word there fails only after the install.
+    # --debug is the image's one flag; every other --name takes the next word as its value.
+    for prev, arg in zip([""] + ctx.args, ctx.args):
+        if not arg.startswith("-") and not (prev.startswith("--") and "=" not in prev and prev != "--debug"):
+            raise click.UsageError(
+                f"Unexpected {arg!r} in the command: it is not a value of any option. Node-check options "
+                "go as `--name value`, e.g. `--gpu-utilization-limit 100`."
+            )
     from . import mine_register as reg
 
     if verbose:
