@@ -176,6 +176,17 @@ def test_a_late_sysbox_installer_failure_with_the_runtime_present_is_printed_as_
     assert len(warnings) == 1 and "kernel too old" in warnings[0]
 
 
+def test_prereqs_name_newgrp_when_the_session_lacks_the_docker_group(monkeypatch):
+    # install_executor_on_ubuntu.sh just added the user to the group; this process does not have it yet
+    denied = "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock"
+    ran = []
+    monkeypatch.setattr(mine, "_exists", lambda cmd: True)
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or ("", denied))
+    with pytest.raises(Exception, match="newgrp docker"):
+        mine._check_prereqs(Path("/tmp/compute"))
+    assert not any("sysbox" in c.lower() for c in ran)  # the sysbox installer never ran
+
+
 def test_prereqs_pass_with_sysbox(monkeypatch):
     _prereq_host(monkeypatch, '{"runc":{"path":"runc"},"sysbox-runc":{"path":"/usr/bin/sysbox-runc"}}')
     mine._check_prereqs()

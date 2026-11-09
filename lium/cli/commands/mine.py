@@ -154,6 +154,13 @@ def _check_prereqs(compute_dir: Path | None = None):
     # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
     # provider learns it from the preflight or a validator cycle later. The installer also installs the
     # NVIDIA Container Toolkit, so it runs before the toolkit check.
+    # the installer adds the user to the docker group, but this session keeps the groups it started with; without
+    # this check a socket permission error reads as "no sysbox runtime" and starts the sysbox installer
+    if _exists("docker") and "permission denied" in _run("docker info", check=False)[1].lower():
+        raise Exception(
+            "Docker is installed, but this session may not use it yet (permission denied on the Docker socket).\n"
+            "Run `newgrp docker` (or log out and back in), then run `lium mine` again."
+        )
     failure = _install_sysbox(compute_dir) if compute_dir and not _has_sysbox() else ""
 
     if not _exists("nvidia-container-cli"):
