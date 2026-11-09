@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, List, Optional
 from rich.table import Table
 
 from lium.sdk import ExecutorInfo
+from lium.sdk.decorators import _rentable
 from lium.cli.utils import console, calculate_pareto_frontier
 
 
@@ -167,13 +168,26 @@ def _first_gpu_detail(specs: Optional[Dict]) -> Dict:
     return details[0] if details else {}
 
 
+_DISK_SYSTEM_RESERVE_KIB = 20 * 1024 * 1024  # what the rent keeps off the free disk before it splits it
+
+
+def _pod_disk_kib(executor: ExecutorInfo, free_kib: Any) -> Optional[float]:
+    """The disk a pod renting the node's free GPUs gets: (free − 20 GB) × its GPU share, as the web node card shows."""
+    free = _intish(free_kib)
+    if free is None or not executor.gpu_count:
+        return free
+    if free < 8192:  # already GiB, as _maybe_gi_from_big_number reads it
+        free *= 1024 * 1024
+    return max(free - _DISK_SYSTEM_RESERVE_KIB, 0) * _rentable(executor) / executor.gpu_count
+
+
 def _specs_row(executor: ExecutorInfo) -> Dict[str, str]:
     """Extract display fields from an executor."""
     specs = executor.specs
     download, download_source = network_speed(executor, "download")
     upload, upload_source = network_speed(executor, "upload")
     if not specs:
-        row = {k: "—" for k in ["VRAM", "RAM", "CPUs", "Disk", "DiskTotal", "Country", "Ports"]}
+        row = {k: "—" for k in ["VRAM", "RAM", "CPUs", "Disk", "PodDisk", "DiskTotal", "Country", "Ports"]}
         row.update(Upload=_speed_cell(upload, upload_source), Download=_speed_cell(download, download_source))
         return row
 
@@ -188,6 +202,7 @@ def _specs_row(executor: ExecutorInfo) -> Dict[str, str]:
         # free, not total: a pod gets a share of the host's FREE disk (≈ (free − 20 GB) × its GPU share,
         # 2/3 as the /root volume + 1/3 as /workspace), so the total is the one number a renter never sees
         "Disk": _maybe_gi_from_big_number(disk.get("free")),
+        "PodDisk": _maybe_gi_from_big_number(_pod_disk_kib(executor, disk.get("free"))),
         "DiskTotal": _maybe_gi_from_big_number(disk.get("total")),
         "Country": _country_name(specs.get("location")),
         "Upload": _speed_cell(upload, upload_source),
@@ -247,7 +262,7 @@ _COLUMNS = [
     ("VRAM (Gb)", 11, 3, dict(justify="right", width=11, no_wrap=True)),
     ("RAM (Gb)", 10, 7, dict(justify="right", width=10, no_wrap=True)),
     ("CPUs", 5, 8, dict(justify="right", width=5, no_wrap=True)),
-    ("Disk free (Gb)", 14, 9, dict(justify="right", width=14, no_wrap=True)),
+    ("Your disk (Gb)", 14, 9, dict(justify="right", width=14, no_wrap=True)),
     ("Upload (Mbps)", 14, 6, dict(justify="right", width=14, no_wrap=True)),
     ("Download (Mbps)", 16, 2, dict(justify="right", width=16, no_wrap=True)),
     ("Ports", 5, 10, dict(justify="left", ratio=7, min_width=5, overflow="fold")),
@@ -333,6 +348,8 @@ def compact_executor(exe: ExecutorInfo, is_pareto: bool, index: int) -> Dict[str
         "ram_gb": _intish(s["RAM"]),
         "cpu_count": _intish(s["CPUs"]),
         "disk_gb": _intish(s["Disk"]),
+        # what one pod renting the free GPUs gets of disk_gb (the table's Your disk column)
+        "pod_disk_gb": _intish(s["PodDisk"]),
         "disk_total_gb": _intish(s["DiskTotal"]),
         "upload_mbps": _intish(upload),
         "download_mbps": _intish(download),
@@ -451,7 +468,7 @@ def build_executors_table(
             "VRAM (Gb)": s["VRAM"],
             "RAM (Gb)": s["RAM"],
             "CPUs": s["CPUs"],
-            "Disk free (Gb)": s["Disk"],
+            "Your disk (Gb)": s["PodDisk"],
             "Upload (Mbps)": s["Upload"],
             "Download (Mbps)": dl_display,
             "Ports": s["Ports"],
