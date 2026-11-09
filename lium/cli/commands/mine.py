@@ -413,6 +413,8 @@ def _setup_executor_env(
 
     # a re-run without --register rebuilds .env from the template; keep the claim the earlier --register wrote
     old_claim = _env_value(env_f, "MINER_ACCOUNT_CLAIM")
+    # DAH-6051: and a dev stack's choice and central miner, which only a --register run writes
+    old_stack = {k: v for k in (_DEV_STACK_KEY, "DEFAULT_MINER_HOTKEY") if (v := _env_value(env_f, k))}
 
     # read, rewrite, preserve
     src_lines = env_t.read_text().splitlines()
@@ -461,6 +463,7 @@ def _setup_executor_env(
     }
     if old_claim:
         required["MINER_ACCOUNT_CLAIM"] = old_claim
+    required.update(old_stack)
     for k, v in required.items():
         if k not in seen and not any(l.startswith(f"{k}=") for l in out_lines):
             out_lines.append(f"{k}={v}")
@@ -597,9 +600,9 @@ _COMPOSE_SERVICES = (("", "executor-runner"), ("-f docker-compose.app.yml ", "ex
 
 # DAH-6051: "-f docker-compose.dev.yml " when the register token is a staging/dev portal's (its runner pins the dev
 # executor build). Both files name the same project and services, so only the runner's own commands take it.
-# shortcut: set from the token only, so a rerun on a dev-stack host without --register goes back to the prod runner;
-# persist the choice in .env if staging hosts get rerun that way.
+# The token's choice is kept in .env (_DEV_STACK_KEY), so a rerun without --register keeps the dev runner.
 _RUNNER_FILE_OPT = ""
+_DEV_STACK_KEY = "LIUM_DEV_STACK"
 
 
 def _compose_diagnostics(executor_dir: Path, tail: int = 30) -> str:
@@ -726,7 +729,7 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = F
 def _apply_env_overrides(
     executor_dir: Path,
     internal: str, external: str, ssh: str, ssh_pub: str, rng: str, account_claim: str | None = None,
-    mappings: str = "", central_miner_hotkey: str | None = None,
+    mappings: str = "", central_miner_hotkey: str | None = None, dev_stack: bool | None = None,
 ):
     env_f = executor_dir / ".env"
     content = env_f.read_text().splitlines()
@@ -751,7 +754,11 @@ def _apply_env_overrides(
         set_or_append("MINER_ACCOUNT_CLAIM", account_claim)
     if mappings:   # the template rebuild dropped them
         set_or_append("RENTING_PORT_MAPPINGS", mappings)
-    if central_miner_hotkey:   # DAH-6051: a dev stack's central miner; the executor's default is mainnet's
+    if dev_stack is not None:   # DAH-6051: a token decides; no token (None) keeps what .env holds
+        content = [l for l in content if not l.startswith((f"{_DEV_STACK_KEY}=", "DEFAULT_MINER_HOTKEY="))]
+        if dev_stack:
+            set_or_append(_DEV_STACK_KEY, "1")
+    if central_miner_hotkey:   # a dev stack's central miner; the executor's default is mainnet's
         set_or_append("DEFAULT_MINER_HOTKEY", central_miner_hotkey)
     env_f.write_text("\n".join(content) + "\n")
 
@@ -1200,8 +1207,6 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
         # what the executor reports under: the account's own key, or the portal's for an account without one
         # (lium-platform#294) — the SS58 check in _setup_executor_env applies to this value, not to the account id
         hotkey = token.node_hotkey
-        global _RUNNER_FILE_OPT
-        _RUNNER_FILE_OPT = "-f docker-compose.dev.yml " if token.dev_stack else ""
         auto = True
         left = token.seconds_left()
         if left is not None and left < 15 * 60:
@@ -1240,6 +1245,9 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             raise click.UsageError(f"RENTING_PORT_MAPPINGS in {saved_env} is not valid JSON; fix or remove it and rerun.")
     _check_renting_ports_apart(answers, mappings)
     target_dir = Path(dir_).absolute()
+    global _RUNNER_FILE_OPT
+    dev_stack = token.dev_stack if token else _env_value(target_dir / "neurons" / "executor" / ".env", _DEV_STACK_KEY) == "1"
+    _RUNNER_FILE_OPT = "-f docker-compose.dev.yml " if dev_stack else ""
 
     TOTAL_STEPS = 8 if token else 6
 
@@ -1285,6 +1293,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 account_claim=token.account_claim if token else None,
                 mappings=mappings,
                 central_miner_hotkey=token.central_miner_hotkey if token else None,
+                dev_stack=token.dev_stack if token else None,
             )
 
         with timed_step_status(5, TOTAL_STEPS, "Starting node"):
