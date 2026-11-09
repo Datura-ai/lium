@@ -156,7 +156,8 @@ def _check_prereqs(compute_dir: Path | None = None):
     # NVIDIA Container Toolkit, so it runs before the toolkit check.
     # the installer adds the user to the docker group, but this session keeps the groups it started with; without
     # this check a socket permission error reads as "no sysbox runtime" and starts the sysbox installer
-    if _exists("docker") and "permission denied" in _run("docker info", check=False)[1].lower():
+    # only the socket error: a root-owned ~/.docker/config.json also says "permission denied", and Docker still works
+    if _exists("docker") and "permission denied while trying to connect" in _run("docker info", check=False)[1].lower():
         raise Exception(
             "Docker is installed, but this session may not use it yet (permission denied on the Docker socket).\n"
             "Run `newgrp docker` (or log out and back in), then run `lium mine` again."
