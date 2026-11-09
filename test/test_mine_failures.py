@@ -692,3 +692,14 @@ def test_one_host_port_for_service_and_ssh_is_a_usage_error(monkeypatch, tmp_pat
     else:
         assert result.exit_code == 2, result.output
         assert "both 8081" in result.output
+
+
+def test_a_dev_stack_central_miner_lands_in_env(tmp_path: Path):
+    """DAH-6051: the executor trusts DEFAULT_MINER_HOTKEY; on a dev stack it must be that stack's central miner."""
+    env = tmp_path / ".env"
+    env.write_text("INTERNAL_PORT=8080\n")
+    central = "5E9mXBKNan8FbRGs71LnXaP8dAVkCVViDvkhbuNsfLwBzLsi"  # gitleaks:allow (public ss58 address)
+    mine._apply_env_overrides(tmp_path, internal="8080", external="8080", ssh="2200", ssh_pub="", rng="",
+                              central_miner_hotkey=central)
+    assert f"DEFAULT_MINER_HOTKEY={central}" in env.read_text().splitlines()
+    assert "DEFAULT_MINER_HOTKEY" in mine._RESTART_KEYS   # a changed one recreates a running executor

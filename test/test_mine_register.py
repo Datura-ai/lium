@@ -411,3 +411,18 @@ def test_an_unknown_nvidia_model_without_price_asks_for_price_and_keeps_its_name
 
 def test_an_unknown_nvidia_model_with_price_resolves_to_it():
     assert reg.resolve_price("NVIDIA A100-SXM4-40GB", 0.30) == 0.30
+
+
+def test_parse_register_token_reads_a_dev_stack_and_its_central_miner() -> None:
+    """DAH-6051: a staging/dev portal's token names the dev runner and that stack's central miner (SS58 only)."""
+    central = "5E9mXBKNan8FbRGs71LnXaP8dAVkCVViDvkhbuNsfLwBzLsi"  # gitleaks:allow (public ss58 address)
+
+    def tok(**sub):
+        subject = {"miner_hotkey": HOTKEY, "scope": "node:register", **sub}
+        return pyjwt.encode({"subject": subject, "exp": NOW + 3600}, "k" * 32, algorithm="HS256")
+
+    t = reg.parse_register_token(tok(dev_stack=True, central_miner_hotkey=central), now=NOW)
+    assert t.dev_stack is True and t.central_miner_hotkey == central
+    assert reg.parse_register_token(tok(dev_stack=True, central_miner_hotkey="x; rm -rf /"), now=NOW).central_miner_hotkey is None
+    prod = reg.parse_register_token(tok(), now=NOW)
+    assert prod.dev_stack is False and prod.central_miner_hotkey is None

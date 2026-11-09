@@ -337,7 +337,7 @@ def _node_images_present(executor_dir: Path) -> bool:
     """Every image this run would pull is already local. The runner image carries the compose file with the executor
     digest the runner injects at build, so that file, not the unrendered docker-compose.app.yml, names the images."""
     try:
-        images = set(_run("docker compose config --images", cwd=str(executor_dir))[0].split())
+        images = set(_run(f"docker compose {_RUNNER_FILE_OPT}config --images", cwd=str(executor_dir))[0].split())
         runner = next(i for i in images if "executor-runner" in i)
         # inspect first: docker run pulls a missing image, which is the download this check exists to precede
         # (not --pull=never, which Docker before 20.10 rejects)
@@ -595,6 +595,12 @@ def _check_ports_free(ports: dict[str, int], executor_dir: Optional[Path] = None
 # the file it loaded (`no such service` otherwise), so each file is asked for its own service.
 _COMPOSE_SERVICES = (("", "executor-runner"), ("-f docker-compose.app.yml ", "executor"))
 
+# DAH-6051: "-f docker-compose.dev.yml " when the register token is a staging/dev portal's (its runner pins the dev
+# executor build). Both files name the same project and services, so only the runner's own commands take it.
+# shortcut: set from the token only, so a rerun on a dev-stack host without --register goes back to the prod runner;
+# persist the choice in .env if staging hosts get rerun that way.
+_RUNNER_FILE_OPT = ""
+
 
 def _compose_diagnostics(executor_dir: Path, tail: int = 30) -> str:
     """``docker compose ps -a`` of both files + the last log lines of ``executor-runner`` and ``executor``.
@@ -606,10 +612,12 @@ def _compose_diagnostics(executor_dir: Path, tail: int = 30) -> str:
     """
     parts = []
     for file_opt, _service in _COMPOSE_SERVICES:
+        file_opt = file_opt or _RUNNER_FILE_OPT
         ps, _ = _run(f"docker compose {file_opt}ps -a", check=False, cwd=str(executor_dir))
         if ps.strip():
             parts.append(f"--- docker compose {file_opt}ps -a ---\n" + ps.strip())
     for file_opt, service in _COMPOSE_SERVICES:
+        file_opt = file_opt or _RUNNER_FILE_OPT
         logs, err = _run(
             f"docker compose {file_opt}logs --no-color --tail {tail} {service}",
             check=False,
@@ -640,7 +648,7 @@ def _executor_env_value(executor_dir: Path, key: str) -> Optional[str]:
 
 # .env keys the executor reads only at container start (env_file); a rerun that changes one must recreate it
 _RESTART_KEYS = ("MINER_ACCOUNT_CLAIM", "INTERNAL_PORT", "EXTERNAL_PORT", "SSH_PORT", "SSH_PUBLIC_PORT", "RENTING_PORT_RANGE",
-                 "RENTING_PORT_MAPPINGS")
+                 "RENTING_PORT_MAPPINGS", "DEFAULT_MINER_HOTKEY")
 
 
 def _restart_value(key: str, value: str):
@@ -681,11 +689,11 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = F
         recreate = False
     # after --force-recreate the old container can still report healthy; wait for one with a new ID
     old_id = _run(ps_cmd, check=False, cwd=str(executor_dir))[0].strip() if recreate else ""
-    command = "docker compose up -d --force-recreate" if recreate else "docker compose up -d"
+    command = f"docker compose {_RUNNER_FILE_OPT}up -d" + (" --force-recreate" if recreate else "")
     if rentals:
         # even a plain `up -d` recreates a runner whose config changed, and the runner force-recreates the executor;
         # under rentals compose only starts what is missing
-        command = "docker compose up -d --no-recreate"
+        command = f"docker compose {_RUNNER_FILE_OPT}up -d --no-recreate"
     _run(command, capture=True, cwd=str(executor_dir))
 
     # Wait for the executor service to be fully healthy
@@ -718,7 +726,7 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = F
 def _apply_env_overrides(
     executor_dir: Path,
     internal: str, external: str, ssh: str, ssh_pub: str, rng: str, account_claim: str | None = None,
-    mappings: str = "",
+    mappings: str = "", central_miner_hotkey: str | None = None,
 ):
     env_f = executor_dir / ".env"
     content = env_f.read_text().splitlines()
@@ -743,6 +751,8 @@ def _apply_env_overrides(
         set_or_append("MINER_ACCOUNT_CLAIM", account_claim)
     if mappings:   # the template rebuild dropped them
         set_or_append("RENTING_PORT_MAPPINGS", mappings)
+    if central_miner_hotkey:   # DAH-6051: a dev stack's central miner; the executor's default is mainnet's
+        set_or_append("DEFAULT_MINER_HOTKEY", central_miner_hotkey)
     env_f.write_text("\n".join(content) + "\n")
 
 def _check_renting_ports_apart(answers: dict, mappings: str = "") -> None:
@@ -1190,6 +1200,8 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
         # what the executor reports under: the account's own key, or the portal's for an account without one
         # (lium-platform#294) — the SS58 check in _setup_executor_env applies to this value, not to the account id
         hotkey = token.node_hotkey
+        global _RUNNER_FILE_OPT
+        _RUNNER_FILE_OPT = "-f docker-compose.dev.yml " if token.dev_stack else ""
         auto = True
         left = token.seconds_left()
         if left is not None and left < 15 * 60:
@@ -1272,6 +1284,7 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
                 rng=answers["port_range"],
                 account_claim=token.account_claim if token else None,
                 mappings=mappings,
+                central_miner_hotkey=token.central_miner_hotkey if token else None,
             )
 
         with timed_step_status(5, TOTAL_STEPS, "Starting node"):
