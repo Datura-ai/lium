@@ -4,8 +4,8 @@
 `next_version.py --check` refuses a release whose code changed since the last tag with no changelog entry, but only at
 release time, after the PR merged (v0.41.9 failed that way after #425). This runs the same rule on the PR: a change
 under next_version.CODE_PATHS needs a `changelog.d/<name>.md` fragment (changelog.d/README.md) or a CHANGELOG.md edit
-in the same PR. The `no-changelog` label lets a PR with nothing to tell through (the release then needs
-`allow-version-skip`).
+in the same PR. Dependabot's PRs (`--author dependabot[bot]`) are routine dependency bumps and pass without one; the
+`no-changelog` label lets any other PR with nothing to tell through (the release then needs `allow-version-skip`).
 
 stdin: one `<status>\t<path>` line per changed file (the PR files API: added, modified, removed, renamed, …).
 Exit 1 and name the code files when the entry is missing.
@@ -13,9 +13,12 @@ Exit 1 and name the code files when the entry is missing.
 
 from __future__ import annotations
 
+import argparse
 import sys
 
 from next_version import CODE_PATHS
+
+EXEMPT_AUTHORS = frozenset({"dependabot[bot]"})
 
 
 def is_code(path: str) -> bool:
@@ -43,6 +46,13 @@ def missing_entry(files: list[tuple[str, str]]) -> list[str]:
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument(
+        "--author", default="", help="the PR author's login; dependabot[bot] is exempt"
+    )
+    if ap.parse_args().author in EXEMPT_AUTHORS:
+        print("changelog entry: not needed for a dependabot[bot] PR")
+        return 0
     files = [
         tuple(line.split("\t", 1))
         for line in sys.stdin.read().splitlines()

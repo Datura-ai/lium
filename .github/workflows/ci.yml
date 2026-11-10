@@ -84,12 +84,13 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
         PR: ${{ github.event.pull_request.number }}
+        AUTHOR: ${{ github.event.pull_request.user.login }}   # the author, not github.actor: a human re-run keeps it
       run: |
         if gh api "repos/${{ github.repository }}/pulls/$PR" -q '.labels[].name' | grep -qx 'no-changelog'; then
           echo "labelled no-changelog: skipped"; exit 0
         fi
         gh api --paginate "repos/${{ github.repository }}/pulls/$PR/files" -q '.[] | "\(.status)\t\(.filename)"' \
-          | python3 scripts/pr_changelog_check.py
+          | python3 scripts/pr_changelog_check.py --author "$AUTHOR"
 
     # the lowest supported Python only: the builds below cover 3.12
     - uses: astral-sh/setup-uv@v7

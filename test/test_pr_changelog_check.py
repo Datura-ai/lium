@@ -11,9 +11,9 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "pr_changelog_check.py"
 
 
-def run(lines: list[str]) -> subprocess.CompletedProcess[str]:
+def run(lines: list[str], author: str = "someone") -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(SCRIPT)],
+        [sys.executable, str(SCRIPT), "--author", author],
         input="".join(f"{line}\n" for line in lines),
         capture_output=True,
         text=True,
@@ -66,3 +66,12 @@ def test_shipped_code_without_an_entry_fails_and_names_the_files(
 )
 def test_an_entry_or_no_shipped_code_passes(lines: list[str]) -> None:
     assert run(lines).returncode == 0
+
+
+def test_a_dependabot_bump_needs_no_entry_but_a_person_does() -> None:
+    bump = ["modified\tpyproject.toml", "modified\tuv.lock"]
+
+    assert run(bump, author="dependabot[bot]").returncode == 0
+    assert (
+        run(bump, author="dependabot").returncode == 1
+    )  # only the bot account, not a look-alike login
