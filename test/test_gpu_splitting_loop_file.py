@@ -20,7 +20,7 @@ from lium.cli.mine.models import (
     SetupPlan,
     TargetPlan,
 )
-from lium.cli.mine.storage import NoSafeTargetError
+from lium.cli.mine.storage import SINGLE_DISK_DOC_URL, NoSafeTargetError
 
 GIB = 1024**3
 
@@ -116,6 +116,19 @@ def test_plan_skips_the_image_file_fallback_when_docker_has_its_own_disk(monkeyp
 
     with pytest.raises(RuntimeError, match=r"its own disk \(/dev/sdc1\); format a spare disk with --device"):
         gpu_splitting._build_setup_plan(preflight, None)
+
+
+@pytest.mark.parametrize("docker_source, single_disk", [("/dev/nvme0n1p3", True), ("/dev/sdc1", False)])
+def test_docker_partition_refusal_points_single_disk_hosts_to_one_root_partition(monkeypatch, docker_source, single_disk):
+    # ticket-1091: a Docker partition on the system disk is protected, so the fix is reinstalling with one root partition
+    preflight = _sample_preflight()
+    preflight.docker_mount = MountInfo(target="/var/lib/docker", source=docker_source, fstype="ext4", options=["rw"])
+    monkeypatch.setattr(gpu_splitting, "auto_select_target", lambda *a: (_ for _ in ()).throw(NoSafeTargetError("none")))
+
+    with pytest.raises(RuntimeError) as refused:
+        gpu_splitting._build_setup_plan(preflight, None)
+
+    assert ("one root partition" in str(refused.value) and SINGLE_DISK_DOC_URL in str(refused.value)) is single_disk
 
 
 def test_harden_loop_device_only_warns_when_direct_io_is_refused(monkeypatch):

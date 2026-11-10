@@ -191,7 +191,7 @@ def test_release_workflow_builds_from_the_published_tag():
     assert triggers["release"] == {"types": ["published"]}
     assert triggers["workflow_dispatch"] is None  # build-only fallback, no version input
     for job_name, job in workflow["jobs"].items():
-        for step in job["steps"]:
+        for step in job.get("steps", []):  # `ci` calls ci.yml: no steps of its own
             if step.get("uses", "").startswith("actions/checkout@"):
                 assert step.get("with", {}).get("fetch-depth") == 0, job_name
 

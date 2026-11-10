@@ -3,9 +3,8 @@
 The version is the git tag. Publishing a GitHub release on a tag `vX.Y.Z` runs `.github/workflows/release.yml`, which
 builds the wheel and the binaries from that tag and uploads them; `publish-pypi.yml` then publishes the tag to PyPI
 if it is on `main`. Nothing in the tree is bumped. Create the release with `--prerelease` so `latest` moves
-only once the assets are up. Before tagging, run `gh workflow run ci.yml --ref main` and wait for it to go green:
-PR CI skips the live e2e, so `release.yml` publishes nothing until a `gh workflow run ci.yml` run passed
-on the release commit. The `lium` CLI and the
+only once the assets are up. PR CI skips the live e2e, so `release.yml` runs the full `ci.yml` (pytest and the live
+e2e) on the tag alongside the builds and publishes nothing unless it is green; re-run the failed jobs after a fix. The `lium` CLI and the
 `lium.sdk` Python SDK ship in the same `lium.io` package, so one tag versions both.
 
 ## Choosing the version

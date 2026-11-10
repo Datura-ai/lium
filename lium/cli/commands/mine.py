@@ -154,6 +154,14 @@ def _check_prereqs(compute_dir: Path | None = None):
     # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
     # provider learns it from the preflight or a validator cycle later. The installer also installs the
     # NVIDIA Container Toolkit, so it runs before the toolkit check.
+    # the installer adds the user to the docker group, but this session keeps the groups it started with; without
+    # this check a socket permission error reads as "no sysbox runtime" and starts the sysbox installer
+    # only the socket error: a root-owned ~/.docker/config.json also says "permission denied", and Docker still works
+    if _exists("docker") and "permission denied while trying to connect" in _run("docker info", check=False)[1].lower():
+        raise Exception(
+            "Docker is installed, but this session may not use it yet (permission denied on the Docker socket).\n"
+            "Run `newgrp docker` (or log out and back in), then run `lium mine` again."
+        )
     failure = _install_sysbox(compute_dir) if compute_dir and not _has_sysbox() else ""
 
     if not _exists("nvidia-container-cli"):
@@ -1141,6 +1149,14 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     if help_:
         click.echo(ctx.get_help())
         raise SystemExit(0)   # not ctx.exit(): handle_errors would report click's Exit as an unexpected error
+    # Extra args go to the preflight image at step 6; a stray word there fails only after the install.
+    # --debug is the image's one flag; every other --name takes the next word as its value.
+    for prev, arg in zip([""] + ctx.args, ctx.args):
+        if not arg.startswith("-") and not (prev.startswith("--") and "=" not in prev and prev != "--debug"):
+            raise click.UsageError(
+                f"Unexpected {arg!r} in the command: it is not a value of any option. Node-check options "
+                "go as `--name value`, e.g. `--gpu-utilization-limit 100`."
+            )
     from . import mine_register as reg
 
     if verbose:

@@ -180,7 +180,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        - runner: macos-14
+        - runner: macos-15
           asset_name: lium-darwin-arm64
           expected_machine: arm64
         - runner: macos-15-intel
@@ -251,29 +251,23 @@ jobs:
           dist/${{ matrix.asset_name }}.tar.gz
           dist/${{ matrix.asset_name }}.tar.gz.sha256
 
-  # PR CI no longer rents pods (ci.yml e2e-live), so a release ships only a commit whose full CI, live e2e
-  # included, went green from `gh workflow run ci.yml --ref main` before tagging (the daily cron skips pytest and the builds).
-  ci-green:
-    name: Full CI green on the release commit
+  # PR CI skips the live e2e (ci.yml e2e-live), so the release runs the full CI itself on the tag, alongside the
+  # builds above, and publishes only when it is green (v0.41.7, 6 Nov 2026, was cut before anyone had run it).
+  # Under a release ci.yml builds nothing: the jobs above build the wheel and every binary.
+  ci:
+    name: Full CI
     if: github.event_name == 'release'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit   # LIUM_E2E_API_KEY for e2e-live
     permissions:
-      actions: read
-    steps:
-    - env:
-        GH_TOKEN: ${{ github.token }}
-        SHA: ${{ github.sha }}
-      run: |
-        n=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&status=success" \
-          --jq '[.workflow_runs[] | select(.event == "workflow_dispatch")] | length')
-        [ "$n" -gt 0 ] || { echo "::error::no green workflow_dispatch ci.yml run on $SHA: run gh workflow run ci.yml --ref main, then re-run this workflow"; exit 1; }
+      contents: read
+      pull-requests: read   # ci.yml packaging asks for it; it reads no PR under a release
 
   release-assets:
     name: Publish GitHub release assets
     if: github.event_name == 'release'
     needs:
-    - ci-green
+    - ci
     - build-python
     - validate-binary-targets
     - build-linux-binary

@@ -639,3 +639,47 @@ def test_up_refuses_a_partial_count_on_a_whole_host_only_node_before_posting(cli
         with pytest.raises(ValueError, match="rents whole only. Request all 2 GPUs"):
             call()
         assert not any(c.request.method == "POST" for c in responses.calls)
+
+
+# What the API lists for an 8-GPU node with provider minimum 1 (DAH-5806), the same table as the website's
+# gpuCountFilter test: a rent with Jupyter holds SSH + Jupyter, one without only SSH.
+SPLIT_TABLE = [
+    # free GPUs, min_gpu_count_for_rental, min_gpu_count_for_ssh_only_rental
+    (5, 5, 5), (5, 5, 1), (5, 1, 1), (8, None, None), (8, None, 1), (8, 1, 1),
+]
+
+
+@pytest.mark.parametrize("free, default_min, ssh_min", SPLIT_TABLE)
+def test_whole_host_only_is_read_per_rent_shape(client, free, default_min, ssh_min):
+    node = {**_node("n", gpu_count=8), "available_gpu_count": free,
+            "min_gpu_count_for_rental": default_min, "min_gpu_count_for_ssh_only_rental": ssh_min}
+    info = client._dict_to_executor_info(node)
+    assert info.whole_host_only is (default_min is None)
+    assert info.whole_host_only_ssh_only is (ssh_min is None)
+
+
+def test_an_api_without_the_ssh_only_minimum_falls_back_to_the_default_one(client):
+    node = {**_node("n", gpu_count=8), "min_gpu_count_for_rental": None}
+    assert client._dict_to_executor_info(node).whole_host_only_ssh_only is True
+    assert client._dict_to_executor_info(_node("n", gpu_count=8)).whole_host_only_ssh_only is None
+
+
+@pytest.mark.parametrize("enable_jupyter, posted", [(False, True), (True, False)])
+@responses.activate
+def test_a_node_that_splits_only_without_jupyter_rents_part_ssh_only(client, enable_jupyter, posted):
+    node = {**_node("two", gpu_count=8), "min_gpu_count_for_rental": None, "min_gpu_count_for_ssh_only_rental": 1}
+    responses.add(responses.GET, f"{BASE}/executors", json=[node])
+    _template()
+    responses.add(responses.POST, f"{BASE}/executors/two/rent", json={"id": "pod-uuid-9", "name": "p"})
+
+    call = lambda: client.up(  # noqa: E731
+        executor_id="two", name="p", template_id="22222222-2222-4222-8222-222222222222", ssh_keys=[KEY],
+        gpu_count=1, enable_jupyter=enable_jupyter,
+    )
+    if posted:
+        call()
+        assert responses.calls[-1].request.url == f"{BASE}/executors/two/rent"
+    else:
+        with pytest.raises(ValueError, match="rents whole only. Request all 8 GPUs"):
+            call()
+        assert not any(c.request.method == "POST" for c in responses.calls)

@@ -447,7 +447,7 @@ lium scp my-pod /root/output.log ./downloads -d  # Download into ./downloads dir
 lium reboot my-pod                           # Reboot a single pod
 lium reboot 1,2                              # Reboot pods 1 and 2 (no confirmation prompt)
 lium reboot all                              # Reboot all active pods
-lium reboot my-pod --volume-id <VOLUME_ID>   # Reboot with a specific volume ID
+lium reboot my-pod --volume-id <VOLUME_HUID>  # Reboot with a volume attached (HUID from `lium volumes`, or its ID)
 
 # Sync directories to pods
 lium rsync my-pod ./project                    # Sync to /root/project
@@ -720,9 +720,10 @@ builds (Linux amd64/arm64 in Docker, macOS arm64) run only when a packaging inpu
 `uv.lock`, `lium.spec`, `lium_entry.py`, `Dockerfile.build`, `scripts/install.sh`, `scripts/linux_bundle_report.py`,
 `ci.yml`, `release.yml`); macOS Intel never builds on a PR. A manual dispatch (`gh workflow run ci.yml --ref <branch>`)
 runs the tests, the wheel and the live e2e (`./e2e/run.sh`, see `e2e/README.md`); `-f binaries=true` also builds
-all four binary targets. The live e2e otherwise runs once a day on a schedule and never on a PR. `ci-ok` (red when
-the `pytest` job, which also runs the packaging check and the wheel build, fails; skipped, which passes, when it is
-green) and `e2e-live` are the two status checks the `main` ruleset requires.
+all four binary targets. The live e2e otherwise runs once a day on a schedule and never on a PR. `release.yml` calls
+it on the release tag (pytest and the live e2e; the release builds the artifacts itself) and publishes only when it is
+green. `ci-ok` (red when the `pytest` job, which also runs the packaging check and the wheel build, fails; skipped,
+which passes, when it is green) and `e2e-live` are the two status checks the `main` ruleset requires.
 
 
 ## License

@@ -17,7 +17,11 @@ on:
         default: false
   schedule:
     - cron: '17 6 * * *'   # the live e2e once a day against the configured API even when nobody pushes
+  # release.yml calls this on the release tag: pytest and e2e-live gate the publish; release.yml builds the artifacts
+  workflow_call:
 
+# Called from release.yml, github.workflow and github.ref are the caller's (its name, the tag ref), so a release's
+# group never matches a PR, main, cron or manual run: neither cancels the other.
 concurrency:
   group: ci-build-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -53,7 +57,7 @@ jobs:
       run: |
         amd64='{"runner":"ubuntu-latest","platform":"linux/amd64","asset_name":"lium-linux-amd64"}'
         arm64='{"runner":"ubuntu-24.04-arm","platform":"linux/arm64","asset_name":"lium-linux-arm64"}'
-        mac_arm='{"runner":"macos-14","asset_name":"lium-darwin-arm64","expected_machine":"arm64"}'
+        mac_arm='{"runner":"macos-15","asset_name":"lium-darwin-arm64","expected_machine":"arm64"}'
         mac_intel='{"runner":"macos-15-intel","asset_name":"lium-darwin-amd64","expected_machine":"x86_64"}'
         out() { printf 'full-matrix=%s\nlinux-matrix=%s\nmacos-matrix=%s\n' "$1" "$2" "$3" >> "$GITHUB_OUTPUT"; }
         # only a pull_request has a file list to inspect; a manual dispatch builds everything when asked to
@@ -87,10 +91,13 @@ jobs:
     - name: Run the test suite
       run: uv run pytest test/ -q -p no:cacheprovider --durations=10
 
+    # a release (release.yml calling this) builds the wheel itself under the same artifact name
     - name: Build package
+      if: github.event_name != 'release'
       run: uv build --sdist --wheel --out-dir dist/
 
     - name: Upload Python artifact
+      if: github.event_name != 'release'
       uses: actions/upload-artifact@v4
       with:
         name: python-dist
