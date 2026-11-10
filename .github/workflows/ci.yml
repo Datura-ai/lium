@@ -5,8 +5,8 @@ on:
   # reports blocks the merge button (a docs-only PR would sit unmergeable). Which heavy
   # build jobs run for a given change is decided per job, not here.
   pull_request:
-  # `gh workflow run ci.yml --ref <branch>` runs pytest, the wheel and the live e2e on the branch head (the pre-release
-  # run release.yml requires). `-f binaries=true` adds the full binary matrix — the on-demand path for a PR whose diff
+  # `gh workflow run ci.yml --ref <branch>` runs pytest, the wheel and the live e2e on the branch head.
+  # `-f binaries=true` adds the full binary matrix — the on-demand path for a PR whose diff
   # does not touch a packaging input. Without it the dispatch builds no binaries: release.yml builds and smoke-tests
   # all four itself before it publishes anything (DAH-5832).
   workflow_dispatch:
