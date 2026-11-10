@@ -323,6 +323,7 @@ def register_node(
     port: int,
     price_per_gpu: float,
     nvlink_pairs: int | None = None,
+    vram_gb: int | None = None,
 ) -> NodeRecord:
     """``POST /executors`` with the register token, then find the node's id in the account's list.
 
@@ -372,7 +373,10 @@ def register_node(
         # before its first validation the node keeps the raw name this host sent, after it the listed one
         if all(
             _is_another_host(row, gpu_type=name, gpu_count=gpu_count)
-            for name in (gpu_type, _listed_gpu_model(gpu_type, gpu_count, nvlink_pairs))
+            for name in (
+                gpu_type,
+                _listed_gpu_model(gpu_type, gpu_count, nvlink_pairs, vram_gb),
+            )
         ):
             node_type, node_count = _node_gpus(row)
             raise RegisterError(
@@ -439,7 +443,14 @@ def read_nvlink_pairs(run: Callable[[str], tuple[str, str]]) -> int | None:
     return sum(len(re.findall(r"\bNV\d+\b", ln)) for ln in rows) // 2 if rows else None
 
 
-def _listed_gpu_model(gpu_type: str, gpu_count: int, nvlink_pairs: int | None) -> str:
+# lium-io gpu_spec_table.classify_gpu_model: a plain RTX 4090 in the 48 GB VRAM window (0.90-1.05 x 49152 MiB)
+# is listed as the 48GB model while RTX_4090_48GB_MODEL_ENABLED is on
+_RTX_4090_48GB_WINDOW_GB = (49152 * 0.90 / 1024, 49152 * 1.05 / 1024)
+
+
+def _listed_gpu_model(
+    gpu_type: str, gpu_count: int, nvlink_pairs: int | None, vram_gb: int | None = None
+) -> str:
     """The name the validator lists this host under: an H100 SXM on PCIe adapter boards (several GPUs, no NVLink
     pair, lium-io gpu_spec_table.is_sxm_on_pcie_adapter) is listed as H100 PCIe; an HGX board keeps its name."""
     if (
@@ -449,6 +460,13 @@ def _listed_gpu_model(gpu_type: str, gpu_count: int, nvlink_pairs: int | None) -
         == "NVIDIA H100 80GB HBM3"
     ):
         return "NVIDIA H100 PCIe"
+    if (
+        _GPU_ALIASES.get(gpu_type.strip(), gpu_type.strip())
+        == "NVIDIA GeForce RTX 4090"
+        and vram_gb is not None
+        and _RTX_4090_48GB_WINDOW_GB[0] <= vram_gb <= _RTX_4090_48GB_WINDOW_GB[1]
+    ):
+        return "NVIDIA GeForce RTX 4090 48GB"
     return gpu_type
 
 

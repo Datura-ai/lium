@@ -870,3 +870,50 @@ def test_h100_adapter_host_is_compared_as_the_pcie_card_it_is_listed_as(
             call()
     else:
         assert call() == reg.NodeRecord(node_id="node-1", already_registered=True)
+
+
+@pytest.mark.parametrize(
+    ("node_type", "vram_gb", "refused"),
+    [
+        (
+            "NVIDIA GeForce RTX 4090 48GB",
+            48,
+            False,
+        ),  # validated 48 GB host re-run: listed as the 48GB model
+        (
+            "NVIDIA GeForce RTX 4090",
+            48,
+            False,
+        ),  # not validated yet, or the flag off: the raw name
+        (
+            "NVIDIA GeForce RTX 4090 48GB",
+            24,
+            True,
+        ),  # a 24 GB card is not the 48 GB node
+        ("NVIDIA GeForce RTX 4090 48GB", None, True),  # no VRAM reading: no relabel
+    ],
+)
+def test_rtx_4090_48gb_host_is_compared_as_the_model_it_is_listed_as(
+    node_type, vram_gb, refused
+) -> None:
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(400, {"detail": reg._ALREADY_EXISTS}))
+    portal.on("GET", "/executors", _listing_with_gpus(node_type, 2))
+
+    def call():
+        return reg.register_node(
+            _http(portal),
+            miner_hotkey=HOTKEY,
+            gpu_type="NVIDIA GeForce RTX 4090",
+            gpu_count=2,
+            ip_address="203.0.113.7",
+            port=8080,
+            price_per_gpu=0.11,
+            vram_gb=vram_gb,
+        )
+
+    if refused:
+        with pytest.raises(reg.RegisterError, match="not registered"):
+            call()
+    else:
+        assert call() == reg.NodeRecord(node_id="node-1", already_registered=True)
