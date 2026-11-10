@@ -727,7 +727,7 @@ def plan_loop_file_target(
                 "Free space, attach a spare disk, or pass --size"
             )
     except RuntimeError as exc:
-        if holder.target != "/":
+        if requested or holder.target != "/":
             raise
         # root too small for the file: on one disk, the space is often in another partition or left unallocated
         raise RuntimeError(f"{exc}. {SINGLE_DISK_HINT}") from None
