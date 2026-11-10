@@ -1097,3 +1097,55 @@ def test_a_validated_48gb_rtx_4090_rerun_is_accepted_below_the_cli_window() -> N
         else:
             with pytest.raises(reg.RegisterError, match="not registered"):
                 call()
+
+
+@pytest.mark.parametrize(
+    ("machine_name", "mib", "ok"),
+    [
+        (
+            "NVIDIA GeForce RTX 4090",
+            49140,
+            True,
+        ),  # validated with the flag off: plain name, 48 GB card
+        ("NVIDIA GeForce RTX 4090", 32000, True),  # odd size the validator keeps plain
+        ("NVIDIA GeForce RTX 4090", 24564, True),
+        ("NVIDIA GeForce RTX 4090 48GB", 49140, True),
+        (
+            "NVIDIA GeForce RTX 4090 48GB",
+            24564,
+            False,
+        ),  # a 24 GB card is not the 48 GB node
+    ],
+)
+def test_a_validated_rtx_4090_rerun_matches_either_listed_name(
+    machine_name, mib, ok
+) -> None:
+    row = {
+        "id": "node-1",
+        "executor_ip_address": "203.0.113.7",
+        "executor_ip_port": "8080",
+        "gpu_type": "NVIDIA GeForce RTX 4090",
+        "gpu_count": 1,
+        "executor_info": {"machine_name": machine_name, "gpu_count": 1},
+    }
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(400, {"detail": reg._ALREADY_EXISTS}))
+    portal.on("GET", "/executors", _Resp(200, {"success": True, "data": [row]}))
+
+    def call():
+        return reg.register_node(
+            _http(portal),
+            miner_hotkey=HOTKEY,
+            gpu_type="NVIDIA GeForce RTX 4090",
+            gpu_count=1,
+            ip_address="203.0.113.7",
+            port=8080,
+            price_per_gpu=0.11,
+            vram_mib=mib,
+        )
+
+    if ok:
+        assert call() == reg.NodeRecord(node_id="node-1", already_registered=True)
+    else:
+        with pytest.raises(reg.RegisterError, match="not registered"):
+            call()

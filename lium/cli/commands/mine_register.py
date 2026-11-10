@@ -385,13 +385,14 @@ def register_node(
             if isinstance(row.get("executor_info"), dict)
             else {}
         )
-        if info.get(
-            "machine_name"
-        ):  # validated: the validator's measured name is the listed one
-            another = _is_another_host(
-                {**row, "gpu_type": info["machine_name"]},
-                gpu_type=listed,
-                gpu_count=gpu_count,
+        if info.get("machine_name"):  # validated: compare the validator's measured name
+            # the H100 adapter relabel is hardware (NVLink), so its raw name must not match an HGX node; the
+            # RTX 4090 48GB relabel depends on the validator's flag and VRAM reading, so either name may be listed
+            adapter = listed == "NVIDIA H100 PCIe" and not _same_gpu_model(hw, listed)
+            measured = {**row, "gpu_type": info["machine_name"]}
+            another = all(
+                _is_another_host(measured, gpu_type=n, gpu_count=gpu_count)
+                for n in ((listed,) if adapter else (hw, listed))
             )
         else:  # before its first validation the node keeps the raw name this host sent
             another = all(
