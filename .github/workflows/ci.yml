@@ -77,6 +77,20 @@ jobs:
       with:
         fetch-depth: 0   # hatch-vcs: the version is git describe against the tags
 
+    # next_version.py --check refuses a release whose shipped code has no changelog entry; catch it on the PR instead
+    # of at release time (v0.41.9 failed after #425 merged without one). The label is read live, so a re-run sees it.
+    - name: Changelog entry for shipped code
+      if: github.event_name == 'pull_request'
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR: ${{ github.event.pull_request.number }}
+      run: |
+        if gh api "repos/${{ github.repository }}/pulls/$PR" -q '.labels[].name' | grep -qx 'no-changelog'; then
+          echo "labelled no-changelog: skipped"; exit 0
+        fi
+        gh api --paginate "repos/${{ github.repository }}/pulls/$PR/files" -q '.[] | "\(.status)\t\(.filename)"' \
+          | python3 scripts/pr_changelog_check.py
+
     # the lowest supported Python only: the builds below cover 3.12
     - uses: astral-sh/setup-uv@v7
       with:
