@@ -917,3 +917,61 @@ def test_rtx_4090_48gb_host_is_compared_as_the_model_it_is_listed_as(
             call()
     else:
         assert call() == reg.NodeRecord(node_id="node-1", already_registered=True)
+
+
+@pytest.mark.parametrize(
+    ("node_type", "label", "refused"),
+    [
+        ("NVIDIA L4", "NVIDIA L4", False),  # pending, label = hardware
+        (
+            "NVIDIA L4",
+            "NVIDIA A10 Tensor Core GPU",
+            False,
+        ),  # same host re-run with a wrong label
+        (
+            "NVIDIA A10 Tensor Core GPU",
+            "NVIDIA A10",
+            True,
+        ),  # aliased label of the other node, L4 hardware
+        (
+            "NVIDIA A10 Tensor Core GPU",
+            "NVIDIA A10 Tensor Core GPU",
+            True,
+        ),  # conflicting: label matches, hardware not
+        (
+            "NVIDIA H100 PCIe",
+            "NVIDIA H100 PCIe",
+            False,
+        ),  # validated adapter host listed under its listed name
+    ],
+)
+def test_a_gpu_type_label_cannot_hide_another_machine(
+    node_type, label, refused
+) -> None:
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(400, {"detail": reg._ALREADY_EXISTS}))
+    portal.on(
+        "GET",
+        "/executors",
+        _listing_with_gpus(node_type, 1 if "H100" not in node_type else 4),
+    )
+    hw = "NVIDIA H100 80GB HBM3" if "H100" in node_type else "NVIDIA L4"
+
+    def call():
+        return reg.register_node(
+            _http(portal),
+            miner_hotkey=HOTKEY,
+            gpu_type=label,
+            gpu_count=4 if "H100" in hw else 1,
+            ip_address="203.0.113.7",
+            port=8080,
+            price_per_gpu=0.11,
+            nvlink_pairs=0,
+            detected_gpu_type=hw,
+        )
+
+    if refused:
+        with pytest.raises(reg.RegisterError, match="not registered"):
+            call()
+    else:
+        assert call() == reg.NodeRecord(node_id="node-1", already_registered=True)

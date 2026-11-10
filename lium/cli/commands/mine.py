@@ -1394,6 +1394,7 @@ def _register_and_wait(
                 price_per_gpu=price_per_gpu,
                 nvlink_pairs=reg.read_nvlink_pairs(_run),
                 vram_gb=inventory.vram_gb,
+                detected_gpu_type=inventory.gpu_type,
             )
     except Exception as e:   # RegisterError, a portal error, nvidia-smi exiting non-zero, an unreadable .env: same shape as steps 1–6
         console.error(f"❌ {escape(str(e))}")

@@ -324,6 +324,7 @@ def register_node(
     price_per_gpu: float,
     nvlink_pairs: int | None = None,
     vram_gb: int | None = None,
+    detected_gpu_type: str | None = None,
 ) -> NodeRecord:
     """``POST /executors`` with the register token, then find the node's id in the account's list.
 
@@ -370,18 +371,17 @@ def register_node(
                 f"A node at {ip_address}:{port} is already in the portal but not in this account's node list "
                 "(another account may hold it). Remove it there first, or contact support if that account is not yours."
             )
+        # compare the measured GPU, never a --gpu-type label (a label cannot hide another machine);
         # before its first validation the node keeps the raw name this host sent, after it the listed one
+        hw = detected_gpu_type or gpu_type
         if all(
             _is_another_host(row, gpu_type=name, gpu_count=gpu_count)
-            for name in (
-                gpu_type,
-                _listed_gpu_model(gpu_type, gpu_count, nvlink_pairs, vram_gb),
-            )
+            for name in (hw, _listed_gpu_model(hw, gpu_count, nvlink_pairs, vram_gb))
         ):
             node_type, node_count = _node_gpus(row)
             raise RegisterError(
                 f"{ip_address}:{port} is already your node {row.get('id')} ({node_count or '?'}x "
-                f"{node_type or 'unknown GPU'}), and this host has {gpu_count}x {gpu_type}. If this is a second machine "
+                f"{node_type or 'unknown GPU'}), and this host has {gpu_count}x {hw}. If this is a second machine "
                 "behind the same public IP, forward its own ports on the router and re-run with them, e.g. "
                 "--external-port 8081 --ssh-port 2201 --renting-port-range 41000-41100. The node was not registered."
             )
