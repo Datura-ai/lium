@@ -985,7 +985,11 @@ def test_a_48gb_rtx_4090_at_the_low_window_edge_is_listed_as_48gb() -> None:
         == "NVIDIA GeForce RTX 4090 48GB"
     )
     assert (
-        reg._listed_gpu_model(inv.gpu_type, 1, None, 44236) == "NVIDIA GeForce RTX 4090"
+        reg._listed_gpu_model(inv.gpu_type, 1, None, 25805) == "NVIDIA GeForce RTX 4090"
+    )
+    assert (
+        reg._listed_gpu_model(inv.gpu_type, 1, None, 44000)
+        == "NVIDIA GeForce RTX 4090 48GB"
     )
 
 
@@ -1060,3 +1064,36 @@ def test_a_validated_node_without_a_measured_count_keeps_its_declared_count() ->
             price_per_gpu=0.11,
             nvlink_pairs=2,
         )
+
+
+def test_a_validated_48gb_rtx_4090_rerun_is_accepted_below_the_cli_window() -> None:
+    row = {
+        "id": "node-1",
+        "executor_ip_address": "203.0.113.7",
+        "executor_ip_port": "8080",
+        "gpu_type": "NVIDIA GeForce RTX 4090",
+        "gpu_count": 1,
+        "executor_info": {
+            "machine_name": "NVIDIA GeForce RTX 4090 48GB",
+            "gpu_count": 1,
+        },
+    }
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(400, {"detail": reg._ALREADY_EXISTS}))
+    portal.on("GET", "/executors", _Resp(200, {"success": True, "data": [row]}))
+    for mib, ok in ((44000, True), (24564, False)):
+        call = lambda: reg.register_node(  # noqa: E731
+            _http(portal),
+            miner_hotkey=HOTKEY,
+            gpu_type="NVIDIA GeForce RTX 4090",
+            gpu_count=1,
+            ip_address="203.0.113.7",
+            port=8080,
+            price_per_gpu=0.11,
+            vram_mib=mib,
+        )
+        if ok:
+            assert call() == reg.NodeRecord(node_id="node-1", already_registered=True)
+        else:
+            with pytest.raises(reg.RegisterError, match="not registered"):
+                call()

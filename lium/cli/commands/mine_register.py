@@ -464,12 +464,9 @@ def read_nvlink_pairs(run: Callable[[str], tuple[str, str]]) -> int | None:
     return sum(len(re.findall(r"\bNV\d+\b", ln)) for ln in rows) // 2 if rows else None
 
 
-# lium-io gpu_spec_table.classify_gpu_model: a plain RTX 4090 in the 48 GB VRAM window (0.90-1.05 x 49152 MiB)
-# is listed as the 48GB model while RTX_4090_48GB_MODEL_ENABLED is on
-_RTX_4090_48GB_WINDOW_MIB = (
-    round(49152 * 0.90),
-    round(49152 * 1.05),
-)  # vram_window_for_size
+# lium-io classify_gpu_model names a plain RTX 4090 with 48 GB VRAM "...48GB" while RTX_4090_48GB_MODEL_ENABLED is on;
+# any reading above the 24 GB card's window counts, since the validator's own reading can sit outside the window this host computes
+_RTX_4090_24GB_MAX_MIB = round(24576 * 1.05)
 
 
 def _listed_gpu_model(
@@ -488,7 +485,7 @@ def _listed_gpu_model(
         _GPU_ALIASES.get(gpu_type.strip(), gpu_type.strip())
         == "NVIDIA GeForce RTX 4090"
         and vram_mib is not None
-        and _RTX_4090_48GB_WINDOW_MIB[0] <= vram_mib <= _RTX_4090_48GB_WINDOW_MIB[1]
+        and vram_mib > _RTX_4090_24GB_MAX_MIB
     ):
         return "NVIDIA GeForce RTX 4090 48GB"
     return gpu_type
