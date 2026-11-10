@@ -389,7 +389,9 @@ def register_node(
             "machine_name"
         ):  # validated: the validator's measured name is the listed one
             another = _is_another_host(
-                {"executor_info": info}, gpu_type=listed, gpu_count=gpu_count
+                {**row, "gpu_type": info["machine_name"]},
+                gpu_type=listed,
+                gpu_count=gpu_count,
             )
         else:  # before its first validation the node keeps the raw name this host sent
             another = all(

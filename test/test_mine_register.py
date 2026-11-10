@@ -1041,3 +1041,22 @@ def test_h100_adapter_and_hgx_hosts_are_told_apart_once_measured(
             call()
     else:
         assert call() == reg.NodeRecord(node_id="node-1", already_registered=True)
+
+
+def test_a_validated_node_without_a_measured_count_keeps_its_declared_count() -> None:
+    row = _measured_row("NVIDIA H100 80GB HBM3", count=8)
+    del row["executor_info"]["gpu_count"]
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(400, {"detail": reg._ALREADY_EXISTS}))
+    portal.on("GET", "/executors", _Resp(200, {"success": True, "data": [row]}))
+    with pytest.raises(reg.RegisterError, match="not registered"):
+        reg.register_node(
+            _http(portal),
+            miner_hotkey=HOTKEY,
+            gpu_type="NVIDIA H100 80GB HBM3",
+            gpu_count=4,
+            ip_address="203.0.113.7",
+            port=8080,
+            price_per_gpu=0.11,
+            nvlink_pairs=2,
+        )
