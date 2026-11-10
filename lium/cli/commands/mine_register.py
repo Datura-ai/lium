@@ -369,10 +369,10 @@ def register_node(
                 f"A node at {ip_address}:{port} is already in the portal but not in this account's node list "
                 "(another account may hold it). Remove it there first, or contact support if that account is not yours."
             )
-        if _is_another_host(
-            row,
-            gpu_type=_listed_gpu_model(gpu_type, gpu_count, nvlink_pairs),
-            gpu_count=gpu_count,
+        # before its first validation the node keeps the raw name this host sent, after it the listed one
+        if all(
+            _is_another_host(row, gpu_type=name, gpu_count=gpu_count)
+            for name in (gpu_type, _listed_gpu_model(gpu_type, gpu_count, nvlink_pairs))
         ):
             node_type, node_count = _node_gpus(row)
             raise RegisterError(

@@ -838,6 +838,12 @@ def test_read_nvlink_pairs_counts_nv_cells_once_per_pair() -> None:
         ("NVIDIA H100 PCIe", 4, True),  # a real SXM (HGX) host against a PCIe node
         ("NVIDIA H100 PCIe", None, True),  # no NVLink reading: no relabel
         ("NVIDIA H100 80GB HBM3", 4, False),  # HGX re-run keeps its name
+        (
+            "NVIDIA H100 80GB HBM3",
+            0,
+            False,
+        ),  # adapter host re-run before its first validation: still the raw name
+        ("NVIDIA A100 80GB PCIe", 0, True),  # another model is another host
     ],
 )
 def test_h100_adapter_host_is_compared_as_the_pcie_card_it_is_listed_as(
