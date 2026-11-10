@@ -873,28 +873,28 @@ def test_h100_adapter_host_is_compared_as_the_pcie_card_it_is_listed_as(
 
 
 @pytest.mark.parametrize(
-    ("node_type", "vram_gb", "refused"),
+    ("node_type", "vram_mib", "refused"),
     [
         (
             "NVIDIA GeForce RTX 4090 48GB",
-            48,
+            44237,
             False,
         ),  # validated 48 GB host re-run: listed as the 48GB model
         (
             "NVIDIA GeForce RTX 4090",
-            48,
+            49140,
             False,
         ),  # not validated yet, or the flag off: the raw name
         (
             "NVIDIA GeForce RTX 4090 48GB",
-            24,
+            24564,
             True,
         ),  # a 24 GB card is not the 48 GB node
         ("NVIDIA GeForce RTX 4090 48GB", None, True),  # no VRAM reading: no relabel
     ],
 )
 def test_rtx_4090_48gb_host_is_compared_as_the_model_it_is_listed_as(
-    node_type, vram_gb, refused
+    node_type, vram_mib, refused
 ) -> None:
     portal = _Portal()
     portal.on("POST", "/executors", _Resp(400, {"detail": reg._ALREADY_EXISTS}))
@@ -909,7 +909,7 @@ def test_rtx_4090_48gb_host_is_compared_as_the_model_it_is_listed_as(
             ip_address="203.0.113.7",
             port=8080,
             price_per_gpu=0.11,
-            vram_gb=vram_gb,
+            vram_mib=vram_mib,
         )
 
     if refused:
@@ -968,6 +968,72 @@ def test_a_gpu_type_label_cannot_hide_another_machine(
             price_per_gpu=0.11,
             nvlink_pairs=0,
             detected_gpu_type=hw,
+        )
+
+    if refused:
+        with pytest.raises(reg.RegisterError, match="not registered"):
+            call()
+    else:
+        assert call() == reg.NodeRecord(node_id="node-1", already_registered=True)
+
+
+def test_a_48gb_rtx_4090_at_the_low_window_edge_is_listed_as_48gb() -> None:
+    inv = reg.parse_nvidia_smi("NVIDIA GeForce RTX 4090, 44237\n")
+    assert inv.vram_gb == 43  # rounded, below 43.2 GiB: the MiB reading decides
+    assert (
+        reg._listed_gpu_model(inv.gpu_type, 1, None, inv.vram_mib)
+        == "NVIDIA GeForce RTX 4090 48GB"
+    )
+    assert (
+        reg._listed_gpu_model(inv.gpu_type, 1, None, 44236) == "NVIDIA GeForce RTX 4090"
+    )
+
+
+def _measured_row(machine_name: str | None, count: int = 8) -> dict:
+    row = {
+        "id": "node-1",
+        "executor_ip_address": "203.0.113.7",
+        "executor_ip_port": "8080",
+        "gpu_type": "NVIDIA H100 80GB HBM3",  # the raw name the first host sent
+        "gpu_count": count,
+    }
+    if machine_name:
+        row["executor_info"] = {"machine_name": machine_name, "gpu_count": count}
+    return row
+
+
+@pytest.mark.parametrize(
+    ("measured", "nvlink_pairs", "refused"),
+    [
+        ("NVIDIA H100 80GB HBM3", 0, True),  # adapter host vs validated HGX node
+        ("NVIDIA H100 PCIe", 4, True),  # HGX host vs validated adapter node
+        ("NVIDIA H100 80GB HBM3", 4, False),  # validated HGX re-run
+        ("NVIDIA H100 PCIe", 0, False),  # validated adapter re-run
+        (None, 0, False),  # pending: raw-name fallback
+        (None, 4, False),
+    ],
+)
+def test_h100_adapter_and_hgx_hosts_are_told_apart_once_measured(
+    measured, nvlink_pairs, refused
+) -> None:
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(400, {"detail": reg._ALREADY_EXISTS}))
+    portal.on(
+        "GET",
+        "/executors",
+        _Resp(200, {"success": True, "data": [_measured_row(measured)]}),
+    )
+
+    def call():
+        return reg.register_node(
+            _http(portal),
+            miner_hotkey=HOTKEY,
+            gpu_type="NVIDIA H100 80GB HBM3",
+            gpu_count=8,
+            ip_address="203.0.113.7",
+            port=8080,
+            price_per_gpu=0.11,
+            nvlink_pairs=nvlink_pairs,
         )
 
     if refused:

@@ -143,6 +143,7 @@ class GpuInventory:
     gpu_type: str
     gpu_count: int
     vram_gb: int
+    vram_mib: int | None = None  # raw, for the validator's MiB model windows
 
 
 def parse_nvidia_smi(output: str) -> GpuInventory:
@@ -177,7 +178,12 @@ def parse_nvidia_smi(output: str) -> GpuInventory:
             "node: register one model at a time with `lium provider node add --gpu-type ... --gpu-count ...`."
         )
     vram_gb = round(max(mem for _, mem in rows) / 1024)
-    return GpuInventory(gpu_type=names[0], gpu_count=len(rows), vram_gb=vram_gb)
+    return GpuInventory(
+        gpu_type=names[0],
+        gpu_count=len(rows),
+        vram_gb=vram_gb,
+        vram_mib=max(mem for _, mem in rows),
+    )
 
 
 def executor_port(executor_dir: Path) -> int:
@@ -323,7 +329,7 @@ def register_node(
     port: int,
     price_per_gpu: float,
     nvlink_pairs: int | None = None,
-    vram_gb: int | None = None,
+    vram_mib: int | None = None,
     detected_gpu_type: str | None = None,
 ) -> NodeRecord:
     """``POST /executors`` with the register token, then find the node's id in the account's list.
@@ -371,13 +377,26 @@ def register_node(
                 f"A node at {ip_address}:{port} is already in the portal but not in this account's node list "
                 "(another account may hold it). Remove it there first, or contact support if that account is not yours."
             )
-        # compare the measured GPU, never a --gpu-type label (a label cannot hide another machine);
-        # before its first validation the node keeps the raw name this host sent, after it the listed one
+        # compare the measured GPU, never a --gpu-type label (a label cannot hide another machine)
         hw = detected_gpu_type or gpu_type
-        if all(
-            _is_another_host(row, gpu_type=name, gpu_count=gpu_count)
-            for name in (hw, _listed_gpu_model(hw, gpu_count, nvlink_pairs, vram_gb))
-        ):
+        listed = _listed_gpu_model(hw, gpu_count, nvlink_pairs, vram_mib)
+        info = (
+            row.get("executor_info")
+            if isinstance(row.get("executor_info"), dict)
+            else {}
+        )
+        if info.get(
+            "machine_name"
+        ):  # validated: the validator's measured name is the listed one
+            another = _is_another_host(
+                {"executor_info": info}, gpu_type=listed, gpu_count=gpu_count
+            )
+        else:  # before its first validation the node keeps the raw name this host sent
+            another = all(
+                _is_another_host(row, gpu_type=n, gpu_count=gpu_count)
+                for n in (hw, listed)
+            )
+        if another:
             node_type, node_count = _node_gpus(row)
             raise RegisterError(
                 f"{ip_address}:{port} is already your node {row.get('id')} ({node_count or '?'}x "
@@ -445,11 +464,14 @@ def read_nvlink_pairs(run: Callable[[str], tuple[str, str]]) -> int | None:
 
 # lium-io gpu_spec_table.classify_gpu_model: a plain RTX 4090 in the 48 GB VRAM window (0.90-1.05 x 49152 MiB)
 # is listed as the 48GB model while RTX_4090_48GB_MODEL_ENABLED is on
-_RTX_4090_48GB_WINDOW_GB = (49152 * 0.90 / 1024, 49152 * 1.05 / 1024)
+_RTX_4090_48GB_WINDOW_MIB = (
+    round(49152 * 0.90),
+    round(49152 * 1.05),
+)  # vram_window_for_size
 
 
 def _listed_gpu_model(
-    gpu_type: str, gpu_count: int, nvlink_pairs: int | None, vram_gb: int | None = None
+    gpu_type: str, gpu_count: int, nvlink_pairs: int | None, vram_mib: int | None = None
 ) -> str:
     """The name the validator lists this host under: an H100 SXM on PCIe adapter boards (several GPUs, no NVLink
     pair, lium-io gpu_spec_table.is_sxm_on_pcie_adapter) is listed as H100 PCIe; an HGX board keeps its name."""
@@ -463,8 +485,8 @@ def _listed_gpu_model(
     if (
         _GPU_ALIASES.get(gpu_type.strip(), gpu_type.strip())
         == "NVIDIA GeForce RTX 4090"
-        and vram_gb is not None
-        and _RTX_4090_48GB_WINDOW_GB[0] <= vram_gb <= _RTX_4090_48GB_WINDOW_GB[1]
+        and vram_mib is not None
+        and _RTX_4090_48GB_WINDOW_MIB[0] <= vram_mib <= _RTX_4090_48GB_WINDOW_MIB[1]
     ):
         return "NVIDIA GeForce RTX 4090 48GB"
     return gpu_type
