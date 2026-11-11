@@ -1182,6 +1182,10 @@ class Lium:
                 if isinstance(executor_dict.get("frequent_rent_failures"), bool) else None
             ),
             last_verified_at=executor_dict.get("last_verified_at"),
+            provider_notes=(
+                [n for n in executor_dict["provider_notes"] if isinstance(n, str)]
+                if isinstance(executor_dict.get("provider_notes"), list) else None
+            ),
             # the score lium.io shows: the node's own once the per-node gate sends it, none while it is new
             reliability_score=(
                 None
