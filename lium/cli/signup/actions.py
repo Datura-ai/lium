@@ -137,9 +137,10 @@ class SignupAction:
     """Register an account and return the API key minted for it.
 
     The account is created by ``POST /users``; the API key that call mints is
-    read back with ``POST /users/login`` + ``GET /keys``. Newer backends return
+    read back with ``POST /users/login`` + ``GET /keys``. Some backends return
     the key in the signup response itself — when they do, the two extra calls
-    are skipped.
+    are skipped. Current ones do not: ``POST /users`` answers a taken address the
+    same as a new one, so a refused login is how a taken address shows up here.
     """
 
     def __init__(self, email: str, password: str, display_name: str):
@@ -156,7 +157,18 @@ class SignupAction:
         if not creation_result.ok:
             return creation_result
 
+        self._login_refused = False
         api_key = creation_result.data.get("api_key") or self._read_minted_key()
+        if not api_key and self._login_refused:
+            # the server answers a signup on a taken address exactly as a new one, so a refused login is
+            # the first sign that this e-mail already had an account
+            return ActionResult(
+                ok=False,
+                data={},
+                error=f"Could not sign in as {self.email} with this password. If this e-mail already has a "
+                      "Lium account, run 'lium init' with its API key, or reset its password at "
+                      "https://lium.io/request-password.",
+            )
         if not api_key:
             return ActionResult(
                 ok=False,
@@ -214,6 +226,7 @@ class SignupAction:
                 json={"email": self.email, "password": self.password},
                 timeout=REQUEST_TIMEOUT,
             )
+            self._login_refused = login_response.status_code in (400, 401, 403)
             login_response.raise_for_status()
             token = login_response.json().get("token")
             if not token:
