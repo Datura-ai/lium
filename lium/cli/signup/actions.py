@@ -238,10 +238,12 @@ class SignupAction:
 
     @staticmethod
     def _describe_failure(response: requests.Response) -> str:
-        detail = _json_object(response).get("detail")
+        body = _json_object(response)
+        # the server's error body carries the reason in `message` (its old shape: `detail`)
+        detail = body.get("detail") or body.get("message") or (body.get("error") or {}).get("message")
 
         if isinstance(detail, dict):
-            detail = "; ".join(f"{k}: {v}" for k, v in detail.items())
+            detail = detail.get("message") or "; ".join(f"{k}: {v}" for k, v in detail.items())
         return str(detail) if detail else f"Signup failed with HTTP {response.status_code}."
 
 
