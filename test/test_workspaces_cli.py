@@ -887,7 +887,7 @@ def test_unknown_member_or_workspace_is_a_configuration_error(home, monkeypatch)
     assert workspace.exit_code == EXIT_API_ERROR and "No workspace named 'Nowhere'" in workspace.output
 
 
-MFA_CHALLENGE = {"user": {"id": "u-1"}, "mfa_required": True, "mfa_token": "mfa.fixture.token"}
+MFA_CHALLENGE = {"mfa_required": True, "mfa_token": "mfa.fixture.token"}  # no account data before the code
 
 
 @responses.activate

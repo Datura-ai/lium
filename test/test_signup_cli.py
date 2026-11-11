@@ -482,3 +482,17 @@ def test_signup_refuses_a_redirect_to_another_host_and_keeps_the_password_there(
     assert "evil.example" in result.error
     assert "pw-for-this-test" not in result.error  # the message names hosts, never the credential
     assert result.data.get("account_may_exist") is True
+
+
+def test_a_billing_key_login_that_asks_for_a_two_factor_code_says_so(monkeypatch, stored_config):
+    # DAH-5906: a two-factor account answers the password with a challenge, never a token
+    monkeypatch.setattr(
+        signup_actions.requests, "post",
+        lambda url, **kwargs: FakeResponse(200, {"mfa_required": True, "mfa_token": "mfa.fixture.token"}),
+    )
+
+    result = signup_actions.MintBillingKeyAction(email="ada@example.com", password="pw").execute({})
+
+    assert result.ok is False
+    assert "two-factor code" in result.error
+    assert "billing_api_key" not in stored_config

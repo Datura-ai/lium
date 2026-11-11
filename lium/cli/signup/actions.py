@@ -129,7 +129,11 @@ def session_token(login_path: str, credentials: dict) -> tuple[str | None, str |
         return None, f"login request failed: {e}"
     if response.status_code >= 400:
         return None, f"login failed with HTTP {response.status_code}"
-    token = _json_object(response).get("token")
+    body = _json_object(response)
+    if body.get("mfa_required"):
+        # DAH-5906: the account has two-factor sign-in on; this path has no code to give
+        return None, "the account asks for a two-factor code: sign in with 'lium workspaces login --code <code>'"
+    token = body.get("token")
     return (token, None) if token else (None, "login returned no session token")
 
 
