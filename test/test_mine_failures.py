@@ -748,6 +748,30 @@ def test_ctrl_c_during_a_timed_step_stops_the_command_too(monkeypatch, tmp_path)
         os.kill(pid, 0)
 
 
+def test_a_timed_step_whose_timeout_never_exits_is_killed_and_reported(monkeypatch):
+    # review on lium#440: a D-state nvidia-smi keeps `timeout` alive, so communicate() needs its own bound
+    import subprocess
+
+    killed = []
+    real_communicate = subprocess.Popen.communicate
+
+    def hang(self, *a, timeout=None, **k):
+        if not killed:
+            time.sleep(0.5)  # let timeout start its own process group
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        return real_communicate(self, *a, timeout=timeout, **k)
+
+    def killpg(pgid, sig):
+        killed.append(sig)
+        real_killpg(pgid, sig)
+
+    real_killpg = mine.os.killpg
+    monkeypatch.setattr(subprocess.Popen, "communicate", hang)
+    monkeypatch.setattr(mine.os, "killpg", killpg)
+    with pytest.raises(RuntimeError, match=r"`sleep 30` did not finish in 1s"):
+        mine._run("sleep 30", timeout=1)
+    assert killed == [mine.signal.SIGKILL]
+
 def test_a_held_dpkg_lock_stops_before_the_sysbox_installer_and_names_the_holder(monkeypatch, tmp_path):
     script, ran = _sysbox_install_host(monkeypatch, tmp_path, install_ok=True)
     plain = mine._run

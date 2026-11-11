@@ -1,6 +1,7 @@
 """Mine command for setting up a compute subnet executor/miner."""
 
 import json
+import os
 import re
 import shlex
 import shutil
@@ -99,7 +100,18 @@ def _run(cmd: list | str, check=True, capture=True, cwd: Optional[str] = None,
         proc = subprocess.Popen(["timeout", "-k", "10", str(timeout), "sh", "-c", cmd_str], cwd=cwd, text=True,
                                 stdout=pipe, stderr=pipe, env=_subprocess_env())
         try:
-            out, err = proc.communicate()
+            out, err = proc.communicate(timeout=timeout + 20)
+        except subprocess.TimeoutExpired:
+            # timeout itself never exits when the command sits in D state (nvidia-smi on a hung GPU)
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:  # timeout had not made its own group yet
+                proc.kill()
+            try:
+                out, err = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                out, err = "", ""
+            proc.returncode = 124
         except KeyboardInterrupt:
             # timeout runs the command in its own process group: Ctrl+C reaches only timeout, which
             # relays SIGINT to the group; subprocess.run would SIGKILL timeout and orphan the command
