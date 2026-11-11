@@ -22,7 +22,8 @@ def balance_command(output_format: str, json_output: bool):
     """Show the current Lium account balance.
 
     Running pods draw on it per second at their $/h price; the platform
-    debits the balance every 5 minutes.
+    debits the balance every 5 minutes, and every minute once less than
+    10 minutes of balance is left.
 
     \b
     Examples:
