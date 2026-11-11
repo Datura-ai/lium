@@ -723,6 +723,31 @@ def test_a_step_command_that_hangs_is_stopped_at_its_timeout_with_the_command_na
     assert time.monotonic() - start < 15
 
 
+def test_ctrl_c_during_a_timed_step_stops_the_command_too(monkeypatch, tmp_path):
+    # review on lium#440: timeout runs the command in its own process group, so killing only timeout orphans it
+    import os
+    import subprocess
+
+    pid_file = tmp_path / "pid"
+    real_communicate = subprocess.Popen.communicate
+
+    def interrupt(self, *a, **k):
+        for _ in range(100):
+            if pid_file.exists() and pid_file.read_text().strip():
+                break
+            time.sleep(0.05)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        mine._run(f"echo $$ > {pid_file}; sleep 30", timeout=60)
+    monkeypatch.setattr(subprocess.Popen, "communicate", real_communicate)
+
+    pid = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
 def test_a_held_dpkg_lock_stops_before_the_sysbox_installer_and_names_the_holder(monkeypatch, tmp_path):
     script, ran = _sysbox_install_host(monkeypatch, tmp_path, install_ok=True)
     plain = mine._run

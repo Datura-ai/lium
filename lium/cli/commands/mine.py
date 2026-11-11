@@ -4,6 +4,7 @@ import json
 import re
 import shlex
 import shutil
+import signal
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -93,15 +94,28 @@ def _run(cmd: list | str, check=True, capture=True, cwd: Optional[str] = None,
         cmd_str = cmd
     # coreutils timeout kills the whole process group: a Python-side timeout would kill only the shell
     # and then wait forever on the pipe a stuck grandchild (apt, nvidia-smi) still holds
-    run_str = f"timeout -k 10 {timeout} sh -c {shlex.quote(cmd_str)}" if timeout else cmd_str
-    result = subprocess.run(
-        run_str,
-        shell=True,
-        cwd=cwd,
-        text=True,
-        capture_output=capture,
-        env=_subprocess_env(),
-    )
+    if timeout:
+        pipe = subprocess.PIPE if capture else None
+        proc = subprocess.Popen(["timeout", "-k", "10", str(timeout), "sh", "-c", cmd_str], cwd=cwd, text=True,
+                                stdout=pipe, stderr=pipe, env=_subprocess_env())
+        try:
+            out, err = proc.communicate()
+        except KeyboardInterrupt:
+            # timeout runs the command in its own process group: Ctrl+C reaches only timeout, which
+            # relays SIGINT to the group; subprocess.run would SIGKILL timeout and orphan the command
+            proc.send_signal(signal.SIGINT)
+            proc.wait()
+            raise
+        result = subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+    else:
+        result = subprocess.run(
+            cmd_str,
+            shell=True,
+            cwd=cwd,
+            text=True,
+            capture_output=capture,
+            env=_subprocess_env(),
+        )
     if timeout and result.returncode in (124, 137):
         raise RuntimeError(
             f"`{cmd_str}` did not finish in {timeout}s and was stopped.\n"
