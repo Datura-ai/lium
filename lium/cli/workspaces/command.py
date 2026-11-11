@@ -15,7 +15,7 @@ from rich.markup import escape
 
 from lium.sdk import Config, Lium
 from lium.sdk.config import workspace_section
-from lium.sdk.exceptions import LiumSessionError
+from lium.sdk.exceptions import LiumSessionError, LiumTwoFactorRequired
 from lium.sdk.models import WorkspaceInfo
 from lium.sdk.workspaces import NEEDS_SESSION
 from lium.cli import ui
@@ -228,12 +228,14 @@ def workspaces_use_command(workspace: str):
 @click.option(
     "--password-stdin", is_flag=True, help="Read the password from stdin (for scripts) instead of prompting"
 )
+@click.option("--code", help="Two-factor code from your authenticator app, or a recovery code (asked for when needed)")
 @handle_errors
-def workspaces_login_command(email: Optional[str], password_stdin: bool):
+def workspaces_login_command(email: Optional[str], password_stdin: bool, code: Optional[str]):
     """Sign in with e-mail and password; the session token is kept for the session-only subcommands.
 
     Accounts created with GitHub or Google sign-in set a password with "Forgot password" on lium.io first.
-    Without a terminal (or with LIUM_NONINTERACTIVE=1) nothing is asked: pass --email and --password-stdin.
+    With two-factor sign-in on, the code is asked for after the password (or pass --code).
+    Without a terminal (or with LIUM_NONINTERACTIVE=1) nothing is asked: pass --email, --password-stdin and --code.
     """
     lium = workspace_client(login=True)  # no workspace check: `lium keys` needs the session on a server without workspaces too
     email = email or ui.prompt("E-mail", hint="pass --email")
@@ -247,7 +249,17 @@ def workspaces_login_command(email: Optional[str], password_stdin: bool):
         )
     else:
         password = click.prompt("Password", hide_input=True)
-    token = lium.workspaces.login(email, password)
+    try:
+        token = lium.workspaces.login(email, password)
+    except LiumTwoFactorRequired as challenge:
+        if not code and not is_interactive():
+            raise CliFailure(
+                "input_required",
+                f"Input required: Two-factor code (no prompt shown because {noninteractive_reason()}; pass --code)",
+                EXIT_CONFIGURATION_ERROR,
+            ) from None
+        code = code or click.prompt("Two-factor code (authenticator app or recovery code)")
+        token = lium.workspaces.login_two_factor(challenge.mfa_token, code)
     settings.set("session.token", token)
     ui.success("Signed in; `lium keys` and the `lium workspaces` subcommands can now use this session")
 
