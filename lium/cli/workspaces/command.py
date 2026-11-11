@@ -258,7 +258,7 @@ def workspaces_login_command(email: Optional[str], password_stdin: bool, code: O
                 f"Input required: Two-factor code (no prompt shown because {noninteractive_reason()}; pass --totp-code)",
                 EXIT_CONFIGURATION_ERROR,
             ) from None
-        code = code or click.prompt("Two-factor code (authenticator app or recovery code)")
+        code = code or click.prompt("Two-factor code (authenticator app or recovery code)", hide_input=True)
         token = lium.workspaces.login_two_factor(challenge.mfa_token, code)
     settings.set("session.token", token)
     ui.success("Signed in; `lium keys` and the `lium workspaces` subcommands can now use this session")
