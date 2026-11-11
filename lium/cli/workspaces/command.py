@@ -228,14 +228,14 @@ def workspaces_use_command(workspace: str):
 @click.option(
     "--password-stdin", is_flag=True, help="Read the password from stdin (for scripts) instead of prompting"
 )
-@click.option("--code", help="Two-factor code from your authenticator app, or a recovery code (asked for when needed)")
+@click.option("--totp-code", "--code", "code", help="Two-factor code from your authenticator app, or a recovery code (asked for when needed)")
 @handle_errors
 def workspaces_login_command(email: Optional[str], password_stdin: bool, code: Optional[str]):
     """Sign in with e-mail and password; the session token is kept for the session-only subcommands.
 
     Accounts created with GitHub or Google sign-in set a password with "Forgot password" on lium.io first.
-    With two-factor sign-in on, the code is asked for after the password (or pass --code).
-    Without a terminal (or with LIUM_NONINTERACTIVE=1) nothing is asked: pass --email, --password-stdin and --code.
+    With two-factor sign-in on, the code is asked for after the password (or pass --totp-code; --code is the same).
+    Without a terminal (or with LIUM_NONINTERACTIVE=1) nothing is asked: pass --email, --password-stdin and --totp-code.
     """
     lium = workspace_client(login=True)  # no workspace check: `lium keys` needs the session on a server without workspaces too
     email = email or ui.prompt("E-mail", hint="pass --email")
@@ -255,7 +255,7 @@ def workspaces_login_command(email: Optional[str], password_stdin: bool, code: O
         if not code and not is_interactive():
             raise CliFailure(
                 "input_required",
-                f"Input required: Two-factor code (no prompt shown because {noninteractive_reason()}; pass --code)",
+                f"Input required: Two-factor code (no prompt shown because {noninteractive_reason()}; pass --totp-code)",
                 EXIT_CONFIGURATION_ERROR,
             ) from None
         code = code or click.prompt("Two-factor code (authenticator app or recovery code)")

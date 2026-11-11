@@ -215,7 +215,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 
 ### Core Commands
 
-- `lium signup` - Create an account from the terminal and store its API key
+- `lium signup` - Create an account from the terminal and store its API key (`--totp-code` answers a two-factor sign-in)
 - `lium init` - Initialize configuration for an existing account (API key, SSH keys); `--api-key <key>` for machines without a browser; `--force` to log in again
 - `lium completion [bash|zsh|fish] [--install]` - Print or install shell tab completion
 - `lium balance` - Show the account balance (add `--format json` for machine-readable output)
@@ -288,7 +288,7 @@ Teams share a workspace whose billing owner pays. An API key is bound to one wor
 - `lium workspaces [list]` - The workspace this key acts in (the role shown is the account's the key runs as — the billing owner's for a team key); every workspace you belong to, with your own role, after `lium workspaces login`
 - `lium workspaces members [WORKSPACE]` - Members, roles and who pays
 - `lium workspaces use <WORKSPACE>` - Default workspace for every command (`~/.lium/config.ini`); run it as `LIUM_API_KEY=<a key bound to it> lium workspaces use <WORKSPACE>` to save that key for `--workspace`
-- `lium workspaces login [--code CODE]` - Sign in once (e-mail + password, plus the two-factor code when the account has it on) for the session-only subcommands below; needs no API key, and with none saved `lium keys` runs on the session alone
+- `lium workspaces login [--totp-code CODE]` - Sign in once (e-mail + password, plus the two-factor code when the account has it on) for the session-only subcommands below; needs no API key, and with none saved `lium keys` runs on the session alone
 - `lium workspaces create <NAME> [--use]` - Create a workspace; you are its owner and billing owner
 - `lium workspaces invite <EMAIL> [WORKSPACE] [--role member|admin|owner]` - E-mail an invitation (no account needed yet)
 - `lium workspaces remove <USER_ID_OR_EMAIL> [WORKSPACE] [--yes]` - Remove a member, asks first (owners and the billing owner cannot be; the server says so)

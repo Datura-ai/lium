@@ -895,7 +895,7 @@ def test_login_with_two_factor_on_sends_the_code_and_keeps_the_session(home):
     responses.add(responses.POST, f"{API}/users/login", json=MFA_CHALLENGE)
     responses.add(responses.POST, f"{API}/auth/login-totp", json=fixture("login"))
 
-    result = run("workspaces", "login", "--email", "ana@example.com", "--code", "123456", "--password-stdin",
+    result = run("workspaces", "login", "--email", "ana@example.com", "--totp-code", "123456", "--password-stdin",
                  input="pw\n")
 
     assert result.exit_code == 0, result.output
@@ -926,5 +926,5 @@ def test_two_factor_without_a_terminal_or_code_asks_nothing_and_names_the_flag(h
     result = run("workspaces", "login", "--email", "ana@example.com", "--password-stdin", input="pw\n")
 
     text = " ".join(result.output.split())
-    assert result.exit_code == 2 and "Input required: Two-factor code" in text and "--code" in text
+    assert result.exit_code == 2 and "Input required: Two-factor code" in text and "--totp-code" in text
     assert not any(c.request.url.endswith("/auth/login-totp") for c in responses.calls)

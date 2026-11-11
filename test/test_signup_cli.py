@@ -552,5 +552,66 @@ def test_a_billing_key_login_that_asks_for_a_two_factor_code_says_so(monkeypatch
     result = signup_actions.MintBillingKeyAction(email="ada@example.com", password="pw").execute({})
 
     assert result.ok is False
-    assert "two-factor code" in result.error
+    assert "two-factor code" in result.error and "--totp-code" in result.error
+    assert "billing_api_key" not in stored_config
+
+
+CHALLENGE = {"mfa_required": True, "mfa_token": "mfa.fixture.token"}
+
+
+def test_signup_with_totp_code_finishes_the_two_factor_login(monkeypatch, stored_config, ssh_setup_ok):
+    sent = []
+
+    def fake_post(url, **kwargs):
+        sent.append((url.rsplit("/api", 1)[-1], kwargs.get("json")))
+        if url.endswith("/users"):
+            return FakeResponse(200, {"msg": "success"})
+        if url.endswith("/auth/login-totp"):
+            return FakeResponse(200, {"token": "jwt-token"})
+        return FakeResponse(200, CHALLENGE)
+
+    monkeypatch.setattr(signup_actions.requests, "post", fake_post)
+    monkeypatch.setattr(signup_actions.requests, "get",
+                        lambda url, **kwargs: FakeResponse(200, [{"name": "Default", "key": "sk_minted"}]))
+
+    result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com", "--totp-code", "123456"])
+
+    assert result.exit_code == 0, result.output
+    assert stored_config["api.api_key"] == "sk_minted"
+    assert sent[-1] == ("/auth/login-totp", {"mfa_token": "mfa.fixture.token", "code": "123456"})
+
+
+def test_a_given_code_answers_once_then_a_terminal_is_asked(monkeypatch, stored_config):
+    codes = []
+
+    def fake_post(url, **kwargs):
+        if url.endswith("/auth/login-totp"):
+            codes.append(kwargs["json"]["code"])
+            return FakeResponse(200, {"token": "jwt-token"})
+        if url.endswith("/keys"):
+            return FakeResponse(200, {"id": 7, "key": "sk_billing", "scopes": ["billing"]})
+        return FakeResponse(200, CHALLENGE)
+
+    monkeypatch.setattr(signup_actions.requests, "post", fake_post)
+    monkeypatch.setattr(signup_actions, "is_interactive", lambda: True)
+    monkeypatch.setattr(signup_actions.click, "prompt", lambda *a, **k: "654321")
+    ask = signup_actions.totp_code_source("123456")
+
+    for _ in range(2):
+        assert signup_actions.MintBillingKeyAction(email="ada@example.com", password="pw", ask_code=ask).execute({}).ok
+
+    assert codes == ["123456", "654321"]
+
+
+def test_a_wrong_two_factor_code_is_named_and_no_key_is_kept(monkeypatch, stored_config):
+    monkeypatch.setattr(
+        signup_actions.requests, "post",
+        lambda url, **kwargs: FakeResponse(401 if url.endswith("/auth/login-totp") else 200, CHALLENGE),
+    )
+
+    result = signup_actions.MintBillingKeyAction(
+        email="ada@example.com", password="pw", ask_code=signup_actions.totp_code_source("000000")
+    ).execute({})
+
+    assert result.ok is False and "wrong or expired two-factor code" in result.error
     assert "billing_api_key" not in stored_config
