@@ -6107,8 +6107,8 @@ class Lium:
             ``{"sender_balance", "transfer_id", "idempotency_key"}``.
 
         Raises:
-            LiumError: ``code`` ``self_transfer`` (400), ``insufficient_balance`` (402), ``not_found`` (404, no
-                account with that e-mail or id) or ``recipient_unavailable`` (409, a deleted or blocked account).
+            LiumError: ``code`` ``self_transfer`` (400), ``insufficient_balance`` (402) or
+                ``recipient_unavailable`` (409: no account with that e-mail or id, or a deleted or blocked one).
                 ``code`` ``transfer_outcome_unknown`` (with ``idempotency_key`` and ``hint``): timeout, dropped
                 connection, 5xx after the POST, or, on a repeat, a 409 ``idempotency_outcome_unknown`` /
                 ``idempotency_in_progress`` or a 422 ``idempotency_key_reused`` (the key reused with a changed

@@ -154,6 +154,14 @@ def _check_prereqs(compute_dir: Path | None = None):
     # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
     # provider learns it from the preflight or a validator cycle later. The installer also installs the
     # NVIDIA Container Toolkit, so it runs before the toolkit check.
+    # the installer adds the user to the docker group, but this session keeps the groups it started with; without
+    # this check a socket permission error reads as "no sysbox runtime" and starts the sysbox installer
+    # only the socket error: a root-owned ~/.docker/config.json also says "permission denied", and Docker still works
+    if _exists("docker") and "permission denied while trying to connect" in _run("docker info", check=False)[1].lower():
+        raise Exception(
+            "Docker is installed, but this session may not use it yet (permission denied on the Docker socket).\n"
+            "Run `newgrp docker` (or log out and back in), then run `lium mine` again."
+        )
     failure = _install_sysbox(compute_dir) if compute_dir and not _has_sysbox() else ""
 
     if not _exists("nvidia-container-cli"):
@@ -1414,6 +1422,9 @@ def _register_and_wait(
                 ip_address=ip,
                 port=port,
                 price_per_gpu=price_per_gpu,
+                nvlink_pairs=reg.read_nvlink_pairs(_run),
+                vram_mib=inventory.vram_mib,
+                detected_gpu_type=inventory.gpu_type,
             )
     except Exception as e:   # RegisterError, a portal error, nvidia-smi exiting non-zero, an unreadable .env: same shape as steps 1–6
         console.error(f"❌ {escape(str(e))}")

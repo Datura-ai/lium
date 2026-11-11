@@ -192,6 +192,25 @@ def test_signup_reports_credentials_when_the_key_cannot_be_read_back(monkeypatch
     assert "copy your API key from the dashboard" in plain
 
 
+def test_signup_on_a_taken_address_says_so_when_the_login_is_refused(monkeypatch, stored_config, ssh_setup_ok):
+    """The server answers a taken address like a new signup; the refused login is what tells the user."""
+    def fake_post(url, **kwargs):
+        if url.endswith("/users"):
+            return FakeResponse(200, {"msg": "success", "is_new_user": True})
+        return FakeResponse(401, {"detail": "Invalid credentials"})
+
+    monkeypatch.setattr(signup_actions.requests, "post", fake_post)
+
+    result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com", "--password", "s3cret-pw"])
+
+    assert result.exit_code != 0
+    plain = " ".join(result.output.split())
+    assert "already has a Lium account" in plain
+    assert "lium init" in plain
+    assert "s3cret-pw" not in plain
+    assert "api.api_key" not in stored_config
+
+
 def test_signup_reports_credentials_when_the_request_times_out(monkeypatch, stored_config, ssh_setup_ok):
     """The backend mails the user inside the request, so a read timeout can still leave an account behind."""
     def timing_out_post(url, **kwargs):
@@ -379,6 +398,45 @@ def test_signup_surfaces_backend_rejection(monkeypatch, stored_config, ssh_setup
     assert result.exit_code != 0
     assert "already exists" in result.output
     assert "api.api_key" not in stored_config
+
+
+def test_signup_surfaces_the_message_of_the_current_error_body(monkeypatch, stored_config, ssh_setup_ok):
+    body = {"success": False, "status_code": 403,
+            "error": {"code": "FORBIDDEN", "message": "Many signups right now: complete the check to continue."},
+            "message": {"code": "CAPTCHA_REQUIRED", "message": "Many signups right now: complete the check to continue."}}
+    monkeypatch.setattr(signup_actions.requests, "post", lambda url, **kwargs: FakeResponse(403, body))
+
+    result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com"])
+
+    assert result.exit_code != 0
+    assert "complete the check" in result.output and "HTTP 403" not in result.output
+    assert "sign up at https://lium.io" in " ".join(result.output.split())
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"message": "Signups are paused."},
+        {"error": {"code": "FORBIDDEN", "message": "Signups are paused."}},
+        {"error": "Signups are paused.", "message": "Signups are paused."},
+    ],
+)
+def test_signup_reads_a_string_message_and_the_error_message_fallback(monkeypatch, stored_config, ssh_setup_ok, body):
+    monkeypatch.setattr(signup_actions.requests, "post", lambda url, **kwargs: FakeResponse(403, body))
+
+    result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com"])
+
+    assert result.exit_code != 0
+    assert "Signups are paused." in result.output and "lium.io" not in result.output
+
+
+def test_signup_survives_a_string_error_body(monkeypatch, stored_config, ssh_setup_ok):
+    monkeypatch.setattr(signup_actions.requests, "post", lambda url, **kwargs: FakeResponse(403, {"error": "some text"}))
+
+    result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com"])
+
+    assert result.exit_code != 0
+    assert "HTTP 403" in result.output
 
 
 def test_signup_surfaces_rate_limit(monkeypatch, stored_config, ssh_setup_ok):
