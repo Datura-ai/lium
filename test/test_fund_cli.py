@@ -1465,3 +1465,34 @@ def test_sdk_wallets_without_stripe_customer_is_empty(monkeypatch):
 
     assert lium.wallets() == []
     assert calls == ["/users/me"]
+
+
+def test_sdk_add_wallet_signs_the_readable_message_naming_the_account(monkeypatch):
+    lium = _sdk_lium()
+    signed, sent = [], {}
+
+    def fake_request(method, endpoint, **kwargs):
+        if endpoint == "/tao/pay/token/generate":
+            sent["params"] = kwargs.get("params")
+            return _Resp({"access_key": "ak", "message": "Link this wallet to the Lium account a@b.c.\n\nKey: ak"})
+        if endpoint == "/tao/create-transfer":
+            return _Resp({"url": "https://pay/redirect?app_id=APP&customer_id=CUS"})
+        if endpoint == "/tao/pay/token/verify":
+            assert kwargs["json"]["access_key"] == "ak"
+            return _Resp({"status": "ok"})
+        if endpoint == "/users/me":
+            return _Resp({"stripe_customer_id": "CUS"})
+        if endpoint.startswith("/tao/pay/wallet/available-wallets"):
+            return _Resp([{"wallet_hash": "coldkey"}])
+        raise AssertionError(f"unexpected endpoint {endpoint}")
+
+    monkeypatch.setattr(lium, "_request", fake_request)
+    bt_wallet = types.SimpleNamespace(
+        coldkey=types.SimpleNamespace(sign=lambda b: signed.append(b) or types.SimpleNamespace(hex=lambda: "sig")),
+        coldkeypub=types.SimpleNamespace(ss58_address="coldkey"),
+    )
+
+    lium.add_wallet(bt_wallet)
+
+    assert sent["params"] == {"readable": "true"}
+    assert signed == [b"Link this wallet to the Lium account a@b.c.\n\nKey: ak"]
