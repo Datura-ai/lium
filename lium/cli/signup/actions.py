@@ -139,7 +139,7 @@ class SignupAction:
     The account is created by ``POST /users``; the API key that call mints is
     read back with ``POST /users/login`` + ``GET /keys``. Some backends return
     the key in the signup response itself — when they do, the two extra calls
-    are skipped. Current ones do not: ``POST /users`` answers a taken address the
+    are skipped. Newer ones do not: ``POST /users`` answers a taken address the
     same as a new one, so a refused login is how a taken address shows up here.
     """
 
@@ -147,6 +147,7 @@ class SignupAction:
         self.email = email
         self.password = password
         self.display_name = display_name
+        self._login_refused: bool = False
 
     def execute(self, ctx: dict) -> ActionResult:
         refused = refuse_if_key_configured()
@@ -157,11 +158,8 @@ class SignupAction:
         if not creation_result.ok:
             return creation_result
 
-        self._login_refused = False
         api_key = creation_result.data.get("api_key") or self._read_minted_key()
         if not api_key and self._login_refused:
-            # the server answers a signup on a taken address exactly as a new one, so a refused login is
-            # the first sign that this e-mail already had an account
             return ActionResult(
                 ok=False,
                 data={},
