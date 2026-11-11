@@ -192,6 +192,25 @@ def test_signup_reports_credentials_when_the_key_cannot_be_read_back(monkeypatch
     assert "copy your API key from the dashboard" in plain
 
 
+def test_signup_on_a_taken_address_says_so_when_the_login_is_refused(monkeypatch, stored_config, ssh_setup_ok):
+    """The server answers a taken address like a new signup; the refused login is what tells the user."""
+    def fake_post(url, **kwargs):
+        if url.endswith("/users"):
+            return FakeResponse(200, {"msg": "success", "is_new_user": True})
+        return FakeResponse(401, {"detail": "Invalid credentials"})
+
+    monkeypatch.setattr(signup_actions.requests, "post", fake_post)
+
+    result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com", "--password", "s3cret-pw"])
+
+    assert result.exit_code != 0
+    plain = " ".join(result.output.split())
+    assert "already has a Lium account" in plain
+    assert "lium init" in plain
+    assert "s3cret-pw" not in plain
+    assert "api.api_key" not in stored_config
+
+
 def test_signup_reports_credentials_when_the_request_times_out(monkeypatch, stored_config, ssh_setup_ok):
     """The backend mails the user inside the request, so a read timeout can still leave an account behind."""
     def timing_out_post(url, **kwargs):
