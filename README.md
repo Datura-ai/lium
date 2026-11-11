@@ -385,6 +385,8 @@ lium mine --register <TOKEN> --wait 0          # add the node, do not wait for t
 lium mine --auto --hotkey <HOTKEY> --ip <VPS_IP> --external-port <FORWARDED_PORT> --internal-port 8080
 
 # Second node behind the same public IP: forward its own service, SSH and renting ports to it
+# (without these flags it registers at the first node's address; --register refuses that when the two
+# machines' GPUs differ, but cannot tell apart two machines with the same GPU model and count)
 lium mine --register <TOKEN> --external-port 8081 --ssh-port 2201 --renting-port-range 41000-41100
 
 # Provider-portal automation (same surface as the portal frontend)
