@@ -239,12 +239,18 @@ class SignupAction:
     @staticmethod
     def _describe_failure(response: requests.Response) -> str:
         body = _json_object(response)
+        error = body.get("error")
         # the server's error body carries the reason in `message` (its old shape: `detail`)
-        detail = body.get("detail") or body.get("message") or (body.get("error") or {}).get("message")
+        detail = body.get("detail") or body.get("message") or (error.get("message") if isinstance(error, dict) else None)
 
+        captcha = False
         if isinstance(detail, dict):
+            captcha = detail.get("code") == "CAPTCHA_REQUIRED"
             detail = detail.get("message") or "; ".join(f"{k}: {v}" for k, v in detail.items())
-        return str(detail) if detail else f"Signup failed with HTTP {response.status_code}."
+        if not detail:
+            return f"Signup failed with HTTP {response.status_code}."
+        # the CLI cannot show the check, so point at the site that can
+        return f"{detail} Or sign up at https://lium.io." if captcha else str(detail)
 
 
 class FingerprintSignupAction:
