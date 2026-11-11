@@ -400,6 +400,45 @@ def test_signup_surfaces_backend_rejection(monkeypatch, stored_config, ssh_setup
     assert "api.api_key" not in stored_config
 
 
+def test_signup_surfaces_the_message_of_the_current_error_body(monkeypatch, stored_config, ssh_setup_ok):
+    body = {"success": False, "status_code": 403,
+            "error": {"code": "FORBIDDEN", "message": "Many signups right now: complete the check to continue."},
+            "message": {"code": "CAPTCHA_REQUIRED", "message": "Many signups right now: complete the check to continue."}}
+    monkeypatch.setattr(signup_actions.requests, "post", lambda url, **kwargs: FakeResponse(403, body))
+
+    result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com"])
+
+    assert result.exit_code != 0
+    assert "complete the check" in result.output and "HTTP 403" not in result.output
+    assert "sign up at https://lium.io" in " ".join(result.output.split())
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"message": "Signups are paused."},
+        {"error": {"code": "FORBIDDEN", "message": "Signups are paused."}},
+        {"error": "Signups are paused.", "message": "Signups are paused."},
+    ],
+)
+def test_signup_reads_a_string_message_and_the_error_message_fallback(monkeypatch, stored_config, ssh_setup_ok, body):
+    monkeypatch.setattr(signup_actions.requests, "post", lambda url, **kwargs: FakeResponse(403, body))
+
+    result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com"])
+
+    assert result.exit_code != 0
+    assert "Signups are paused." in result.output and "lium.io" not in result.output
+
+
+def test_signup_survives_a_string_error_body(monkeypatch, stored_config, ssh_setup_ok):
+    monkeypatch.setattr(signup_actions.requests, "post", lambda url, **kwargs: FakeResponse(403, {"error": "some text"}))
+
+    result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com"])
+
+    assert result.exit_code != 0
+    assert "HTTP 403" in result.output
+
+
 def test_signup_surfaces_rate_limit(monkeypatch, stored_config, ssh_setup_ok):
     monkeypatch.setattr(
         signup_actions.requests, "post",
