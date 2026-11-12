@@ -5872,7 +5872,8 @@ class Lium:
         """Get current account balance.
 
         Pods are billed per second at their hourly price; the balance is
-        debited every 5 minutes.
+        debited every 5 minutes, and every minute once less than 10 minutes
+        of balance is left.
 
         Returns:
             Floating-point balance value reported by ``/users/me``.
