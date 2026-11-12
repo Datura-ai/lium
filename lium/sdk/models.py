@@ -86,6 +86,10 @@ class ExecutorInfo(_Serializable):
     # The platform's 0-100 reliability score for the node (uptime and rental history), the one lium.io shows: the
     # node's own score when the API sends one, else its provider's. None when not sent or the node is still new.
     reliability_score: Optional[float] = None
+    # last, so the earlier positional constructor slots keep their meaning
+    # Notes the provider shows renters on the node, each from a fixed list (e.g. "May reboot occasionally");
+    # None = the API did not send them.
+    provider_notes: Optional[List[str]] = None
 
     @property
     def link(self) -> Optional[str]:
