@@ -36,4 +36,6 @@ def test_the_listing_notice_becomes_a_warning_naming_kind_and_times():
     assert removal.notice_warning == (
         f"{removal.huid} is scheduled for removal from 2026-11-15 11:00 UTC: a pod on it is deleted at 2026-11-15 11:00 UTC."
     )
-    assert "maintenance" in maintenance.notice_warning and "rebooted" in maintenance.notice_warning
+    assert "maintenance" in maintenance.notice_warning and "may go offline" in maintenance.notice_warning
+    behind = _node(scheduled_notice={**REMOVAL, "permanent_removal": False}, removal_at="2026-11-20T09:30:00Z")
+    assert behind.notice_warning.endswith("deleted at 2026-11-20 09:30 UTC.")

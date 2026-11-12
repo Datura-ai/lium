@@ -793,6 +793,9 @@ def up_command(
             f"{ui.styled(rented.huid, 'id')} ({rented_gpus or rented.gpu_count}×{rented.gpu_type}) "
             f"at ${result.data['price_per_hour']:.2f}/h instead"
         )
+        # the notice warned about before the prompt was the confirmed node's, not this one's
+        if getattr(rented, "notice_warning", None):
+            ui.notice_warning(rented.notice_warning)
     executor = rented
     ui.dim(f"pod {pod_name} (id: {pod_id}) created; waiting for it to become ready")
     if backup_notice:

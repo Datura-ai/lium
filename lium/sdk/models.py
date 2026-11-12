@@ -94,6 +94,9 @@ class ExecutorInfo(_Serializable):
     # "permanent_removal"}. When it expires a pod on the node is rebooted (maintenance) or deleted (removal).
     # None = no notice, or the API did not send it.
     scheduled_notice: Optional[Dict] = None
+    # When an open permanent removal deletes a pod on the node (ISO 8601 UTC), also when an earlier maintenance
+    # window is the ``scheduled_notice``; None = no removal, or the API did not send it.
+    removal_at: Optional[str] = None
 
     @property
     def notice_warning(self) -> Optional[str]:
@@ -101,10 +104,18 @@ class ExecutorInfo(_Serializable):
         notice = self.scheduled_notice
         if not notice:
             return None
-        start, end = (str(notice.get(key) or "?")[:16].replace("T", " ") + " UTC" for key in ("starting_at", "expiring_at"))
+
+        def minute(value) -> str:
+            return str(value or "?")[:16].replace("T", " ") + " UTC"
+
+        start, end = minute(notice.get("starting_at")), minute(notice.get("expiring_at"))
         if notice.get("permanent_removal"):
             return f"{self.huid} is scheduled for removal from {start}: a pod on it is deleted at {end}."
-        return f"{self.huid} has scheduled maintenance from {start} to {end}: a pod on it is rebooted then."
+        # a maintenance window takes the node off the market; a running pod is not rebooted
+        warning = f"{self.huid} has scheduled maintenance from {start} to {end}: it may go offline during that window."
+        if self.removal_at:
+            warning += f" It is also scheduled for removal: a pod on it is deleted at {minute(self.removal_at)}."
+        return warning
 
     @property
     def link(self) -> Optional[str]:
