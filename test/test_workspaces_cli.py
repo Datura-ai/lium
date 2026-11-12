@@ -885,3 +885,46 @@ def test_unknown_member_or_workspace_is_a_configuration_error(home, monkeypatch)
 
     assert member.exit_code == EXIT_CONFIGURATION_ERROR and "No member 'nobody@example.com'" in member.output
     assert workspace.exit_code == EXIT_API_ERROR and "No workspace named 'Nowhere'" in workspace.output
+
+
+MFA_CHALLENGE = {"mfa_required": True, "mfa_token": "mfa.fixture.token"}  # no account data before the code
+
+
+@responses.activate
+def test_login_with_two_factor_on_sends_the_code_and_keeps_the_session(home):
+    responses.add(responses.POST, f"{API}/users/login", json=MFA_CHALLENGE)
+    responses.add(responses.POST, f"{API}/auth/login-totp", json=fixture("login"))
+
+    result = run("workspaces", "login", "--email", "ana@example.com", "--totp-code", "123456", "--password-stdin",
+                 input="pw\n")
+
+    assert result.exit_code == 0, result.output
+    assert "[session]\ntoken = eyJ.fixture.session" in config_text(home)
+    assert json.loads(responses.calls[1].request.body) == {"mfa_token": "mfa.fixture.token", "code": "123456"}
+
+
+@responses.activate
+def test_a_wrong_two_factor_code_is_refused_as_a_login(home):
+    me()
+    responses.add(responses.POST, f"{API}/users/login", json=MFA_CHALLENGE)
+    responses.add(responses.POST, f"{API}/auth/login-totp", status=401,
+                  json={"message": {"totp": "Invalid authentication code."}})
+
+    result = run("workspaces", "login", "--email", "ana@example.com", "--code", "000000", "--password-stdin",
+                 input="pw\n")
+
+    assert result.exit_code == EXIT_API_ERROR
+    assert "Login refused: wrong or expired two-factor code" in " ".join(result.output.split())
+    assert "Invalid API key" not in result.output and "[session]" not in config_text(home)
+
+
+@responses.activate
+def test_two_factor_without_a_terminal_or_code_asks_nothing_and_names_the_flag(home):
+    me()
+    responses.add(responses.POST, f"{API}/users/login", json=MFA_CHALLENGE)
+
+    result = run("workspaces", "login", "--email", "ana@example.com", "--password-stdin", input="pw\n")
+
+    text = " ".join(result.output.split())
+    assert result.exit_code == 2 and "Input required: Two-factor code" in text and "--totp-code" in text
+    assert not any(c.request.url.endswith("/auth/login-totp") for c in responses.calls)

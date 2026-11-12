@@ -8,7 +8,9 @@ from rich.markup import escape
 from lium.cli import ui
 from lium.cli.init.actions import SetupSshKeyAction
 from lium.cli.utils import CliFailure, handle_errors
-from .actions import FingerprintSignupAction, MintBillingKeyAction, SignupAction, generate_password
+from .actions import (
+    FingerprintSignupAction, MintBillingKeyAction, SignupAction, generate_password, totp_code_source,
+)
 
 
 def _credit_line(credit_granted: bool | None) -> str:
@@ -32,10 +34,13 @@ def _credit_line(credit_granted: bool | None) -> str:
               help="Account password (generated when omitted). Falls back to LIUM_SIGNUP_PASSWORD.")
 @click.option("--billing-key", "billing_key", is_flag=True,
               help="Also mint a key holding only the 'billing' scope (top-ups, no pods), kept as [api] billing_api_key.")
+@click.option("--totp-code", "totp_code", default=None,
+              help="Authenticator or recovery code, for an e-mail account with two-factor sign-in on "
+                   "(asked for on a terminal when needed).")
 @click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON")
 @handle_errors
 def signup_command(email: str | None, no_email: bool, display_name: str | None, password: str | None,
-                   billing_key: bool, json_output: bool):
+                   billing_key: bool, totp_code: str | None, json_output: bool):
     """Create a Lium account and store the API key it mints.
 
     Non-interactive: safe to run from an agent. The API key is written to
@@ -65,15 +70,19 @@ def signup_command(email: str | None, no_email: bool, display_name: str | None, 
     if bool(email) == no_email:
         raise click.UsageError("Pass --email <address>, or --no-email for an account without one (not both).")
     if no_email:
-        if password or display_name:
-            raise click.UsageError("--password and --name go with --email; a --no-email account has neither.")
+        if password or display_name or totp_code:
+            raise click.UsageError(
+                "--password, --name and --totp-code go with --email; a --no-email account has none of them."
+            )
         _signup_without_email(billing_key, json_output)
         return
 
     password = password or generate_password()
     display_name = display_name or email.split("@")[0]
 
-    signup_result = SignupAction(email=email, password=password, display_name=display_name).execute({})
+    ask_code = totp_code_source(totp_code)  # one source: a code is accepted once, so later asks prompt
+    signup_result = SignupAction(email=email, password=password, display_name=display_name,
+                                 ask_code=ask_code).execute({})
     if not signup_result.ok:
         # the account may already exist server-side; losing the generated password would make it unreachable
         if signup_result.data.get("account_may_exist"):
@@ -87,7 +96,7 @@ def signup_command(email: str | None, no_email: bool, display_name: str | None, 
 
     ssh_result = SetupSshKeyAction().execute({})
     credit_granted = signup_result.data.get("signup_credit_granted")
-    billing_result = MintBillingKeyAction(email=email, password=password).execute({}) if billing_key else None
+    billing_result = MintBillingKeyAction(email=email, password=password, ask_code=ask_code).execute({}) if billing_key else None
 
     if json_output:
         billing_fields = {}
