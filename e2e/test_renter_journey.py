@@ -212,6 +212,7 @@ def test_scp_round_trip_is_byte_exact(session: Session, rental: Rental, tmp_path
     assert dst.read_bytes() == payload, "downloaded bytes differ"
 
 
+@pytest.mark.timeout(900)  # up to 5 min to the tick + 5 min of queue lag
 def test_billing_moves_while_the_pod_runs(session: Session, rental: Rental):
     """Per-second billing settles on a 5-minute accrual tick (docs): once the tick has landed the account balance
     (the server's number) is below what it was before the rent; a pod running past the tick with the balance
@@ -222,16 +223,17 @@ def test_billing_moves_while_the_pod_runs(session: Session, rental: Rental):
     if rental.balance_before is None:
         pytest.skip("balance before the rent unknown")
     # the tick is the wall-clock */5 beat and charges only pods already RUNNING, so the first charge lands at the
-    # first boundary after RUNNING (up to 5 min + provisioning after `up`, not a fixed 330 s), plus the queue
+    # first boundary after RUNNING (up to 5 min + provisioning after `up`, not a fixed 330 s), plus the queue: the
+    # per-user charge tasks of one tick have landed up to ~4 min after the boundary, so allow one full tick of lag
     running_wall = time.time() - (time.monotonic() - rental.running_at)
     first_tick = (int(running_wall) // 300 + 1) * 300
-    deadline = first_tick + 120
+    deadline = first_tick + 300
     bal = _balance(session)
     while bal >= rental.balance_before and time.time() < deadline:
         time.sleep(15)
         bal = _balance(session)
     elapsed = time.monotonic() - rental.running_at
-    assert bal < rental.balance_before, f"balance {rental.balance_before}→{bal} unchanged {elapsed:.0f}s after RUNNING, 2 min past the first billing tick"
+    assert bal < rental.balance_before, f"balance {rental.balance_before}→{bal} unchanged {elapsed:.0f}s after RUNNING, 5 min past the first billing tick"
 
 
 def test_rm_removes_the_pod_and_the_final_charge_matches_the_clock(session: Session, rental: Rental):
