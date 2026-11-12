@@ -29,50 +29,14 @@ concurrency:
 jobs:
   test:
     # the unit suite under test/, the binary-target matrix test included. Same install the macOS build
-    # already does, minus pyinstaller. Also the packaging-inputs check and the sdist/wheel build: three jobs
-    # of about a minute each were three runner-minutes per PR push (DAH-5832).
+    # already does, minus pyinstaller.
     name: pytest
     if: github.event_name != 'schedule'   # the daily cron is for e2e-live only
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
       contents: read
-      pull-requests: read
-    # Did this change touch anything that changes how the binaries are packaged? The binary builds
-    # run only when a packaging input moved or on a manual dispatch with `binaries`; any other PR
-    # gets pytest and the wheel only (DAH-5200; the target-matrix test runs here, lium.spec collects every lium
-    # submodule). macOS Intel never builds on a PR: release.yml builds it.
-    outputs:
-      full-matrix: ${{ steps.check.outputs.full-matrix }}
-      linux-matrix: ${{ steps.check.outputs.linux-matrix }}
-      macos-matrix: ${{ steps.check.outputs.macos-matrix }}
     steps:
-    - name: Packaging inputs changed?
-      id: check
-      env:
-        GH_TOKEN: ${{ github.token }}
-        EVENT: ${{ github.event_name }}
-        PR: ${{ github.event.pull_request.number }}
-        BINARIES: ${{ inputs.binaries }}
-      run: |
-        amd64='{"runner":"ubuntu-latest","platform":"linux/amd64","asset_name":"lium-linux-amd64"}'
-        arm64='{"runner":"ubuntu-24.04-arm","platform":"linux/arm64","asset_name":"lium-linux-arm64"}'
-        mac_arm='{"runner":"macos-15","asset_name":"lium-darwin-arm64","expected_machine":"arm64"}'
-        mac_intel='{"runner":"macos-15-intel","asset_name":"lium-darwin-amd64","expected_machine":"x86_64"}'
-        out() { printf 'full-matrix=%s\nlinux-matrix=%s\nmacos-matrix=%s\n' "$1" "$2" "$3" >> "$GITHUB_OUTPUT"; }
-        # only a pull_request has a file list to inspect; a manual dispatch builds everything when asked to
-        if [[ "$EVENT" != "pull_request" ]]; then
-          if [[ "$BINARIES" == "true" ]]; then out true "[$amd64,$arm64]" "[$mac_arm,$mac_intel]"; else out false "[]" "[]"; fi
-          exit 0
-        fi
-        files="$(gh api --paginate "repos/${{ github.repository }}/pulls/$PR/files" -q '.[].filename')"
-        printf '%s\n' "$files"
-        if printf '%s\n' "$files" | grep -Eq '^(pyproject\.toml|uv\.lock|lium\.spec|lium_entry\.py|Dockerfile\.build|scripts/install\.sh|scripts/linux_bundle_report\.py|\.github/workflows/(ci|release)\.yml)$'; then
-          out true "[$amd64,$arm64]" "[$mac_arm]"
-        else
-          out false "[]" "[]"
-        fi
-
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0   # hatch-vcs: the version is git describe against the tags
@@ -91,13 +55,78 @@ jobs:
     - name: Run the test suite
       run: uv run pytest test/ -q -p no:cacheprovider --durations=10
 
-    # a release (release.yml calling this) builds the wheel itself under the same artifact name
+  packaging:
+    # Did this change touch anything that changes how the binaries are packaged? The binary builds
+    # run only when a packaging input moved or on a manual dispatch with `binaries`; any other PR gets pytest and
+    # the wheel only (DAH-5200; the target-matrix test runs in `pytest`, lium.spec collects every lium submodule).
+    # macOS Intel never builds on a PR: release.yml builds it.
+    name: Packaging inputs changed?
+    if: github.event_name != 'schedule'   # the daily cron is for e2e-live only
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      full-matrix: ${{ steps.check.outputs.full-matrix }}
+      linux-matrix: ${{ steps.check.outputs.linux-matrix }}
+      macos-matrix: ${{ steps.check.outputs.macos-matrix }}
+    steps:
+    - id: check
+      env:
+        GH_TOKEN: ${{ github.token }}
+        EVENT: ${{ github.event_name }}
+        PR: ${{ github.event.pull_request.number }}
+        BINARIES: ${{ inputs.binaries }}
+      run: |
+        amd64='{"runner":"ubuntu-latest","platform":"linux/amd64","asset_name":"lium-linux-amd64"}'
+        arm64='{"runner":"ubuntu-24.04-arm","platform":"linux/arm64","asset_name":"lium-linux-arm64"}'
+        mac_arm='{"runner":"macos-15","asset_name":"lium-darwin-arm64","expected_machine":"arm64"}'
+        mac_intel='{"runner":"macos-15-intel","asset_name":"lium-darwin-amd64","expected_machine":"x86_64"}'
+        out() { printf 'full-matrix=%s\nlinux-matrix=%s\nmacos-matrix=%s\n' "$1" "$2" "$3" >> "$GITHUB_OUTPUT"; }
+        # only a pull_request has a file list to inspect; a manual dispatch builds everything when asked to
+        # a release (release.yml calling this) builds every binary in release.yml itself
+        if [[ "$EVENT" == "release" ]]; then out false "[]" "[]"; exit 0; fi
+        if [[ "$EVENT" != "pull_request" ]]; then
+          if [[ "$BINARIES" == "true" ]]; then out true "[$amd64,$arm64]" "[$mac_arm,$mac_intel]"; else out false "[]" "[]"; fi
+          exit 0
+        fi
+        files="$(gh api --paginate "repos/${{ github.repository }}/pulls/$PR/files" -q '.[].filename')"
+        printf '%s\n' "$files"
+        if printf '%s\n' "$files" | grep -Eq '^(pyproject\.toml|uv\.lock|lium\.spec|lium_entry\.py|Dockerfile\.build|scripts/install\.sh|scripts/linux_bundle_report\.py|\.github/workflows/(ci|release)\.yml)$'; then
+          out true "[$amd64,$arm64]" "[$mac_arm]"
+        else
+          out false "[]" "[]"
+        fi
+
+  build-python:
+    name: Build Python distribution
+    needs: packaging
+    # the daily cron is for e2e-live only; a release builds the wheel in release.yml (same artifact name)
+    if: github.event_name != 'schedule' && github.event_name != 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0   # hatch-vcs: the version is git describe against the tags
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install setuptools wheel build toml
+
     - name: Build package
-      if: github.event_name != 'release'
-      run: uv build --sdist --wheel --out-dir dist/
+      run: python -m build --sdist --wheel --outdir dist/
 
     - name: Upload Python artifact
-      if: github.event_name != 'release'
       uses: actions/upload-artifact@v4
       with:
         name: python-dist
@@ -106,13 +135,13 @@ jobs:
 
   build-linux-binary:
     name: Build Linux binary (${{ matrix.asset_name }})
-    needs: test
-    # only when the packaging check in `test` says so (an empty matrix cannot run, hence the full-matrix test)
-    if: github.event_name != 'schedule' && needs.test.outputs.full-matrix == 'true'
+    needs: packaging
+    # only when `packaging` says so (an empty matrix cannot run, hence the full-matrix test)
+    if: github.event_name != 'schedule' && needs.packaging.outputs.full-matrix == 'true'
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.test.outputs.linux-matrix) }}
+        include: ${{ fromJSON(needs.packaging.outputs.linux-matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     permissions:
@@ -184,13 +213,13 @@ jobs:
 
   build-macos-binary:
     name: Build macOS binary (${{ matrix.asset_name }})
-    needs: test
+    needs: packaging
     # the two macOS jobs are the expensive ones (10x minutes): only when packaging inputs changed
-    if: github.event_name != 'schedule' && needs.test.outputs.full-matrix == 'true'
+    if: github.event_name != 'schedule' && needs.packaging.outputs.full-matrix == 'true'
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.test.outputs.macos-matrix) }}
+        include: ${{ fromJSON(needs.packaging.outputs.macos-matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     permissions:
@@ -321,16 +350,18 @@ jobs:
         retention-days: 14
 
   ci-ok:
-    # the one context to require in the ruleset. The binary
+    # the one context to require in the ruleset (lium requires none today). The binary
     # builds stay informational: a Debian mirror outage must not block every merge.
-    # It starts a runner only to go red: when `test` passed (or was skipped on the daily cron) this job is
-    # skipped, and a skipped required check passes, like `e2e-live` on a PR. A green ci-ok took a runner
-    # minute on every PR push (DAH-5832).
+    # `packaging` is in the list because a skipped job counts as passing: if the inputs
+    # check fails, the wheel is skipped and only `packaging`'s own
+    # failure makes this job red.
+    # It starts a runner only to go red: when every need passed (or was skipped) this job is skipped, and a skipped
+    # required check passes, like `e2e-live` on a PR. A green ci-ok took a runner minute on every PR push (DAH-5832).
     # e2e-live is not in the list on purpose: it is a live suite against a marketplace, and a red run caused
     # by a platform defect (B-119: a node billing 2 GPUs and exposing 1) or an empty listing must not block
     # every merge; its result stands on its own in the daily run.
     name: ci-ok
-    needs: [test]
+    needs: [packaging, test, build-python]
     if: always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
     runs-on: ubuntu-latest
     timeout-minutes: 5

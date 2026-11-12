@@ -724,8 +724,8 @@ builds (Linux amd64/arm64 in Docker, macOS arm64) run only when a packaging inpu
 runs the tests, the wheel and the live e2e (`./e2e/run.sh`, see `e2e/README.md`); `-f binaries=true` also builds
 all four binary targets. The live e2e otherwise runs once a day on a schedule and never on a PR. `release.yml` calls
 it on the release tag (pytest and the live e2e; the release builds the artifacts itself) and publishes only when it is
-green. `ci-ok` (red when the `pytest` job, which also runs the packaging check and the wheel build, fails; skipped,
-which passes, when it is green) and `e2e-live` are the two status checks the `main` ruleset requires.
+green. `ci-ok` (red when the test, packaging or wheel job fails; skipped, which passes, when they are all green) and
+`e2e-live` are the two status checks the `main` ruleset requires.
 
 
 ## License
