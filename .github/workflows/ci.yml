@@ -38,8 +38,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    # Did this change touch anything that changes how the binaries are packaged? The binary builds (macOS counts at
-    # GitHub's 10x rate) run only when a packaging input moved or on a manual dispatch with `binaries`; any other PR
+    # Did this change touch anything that changes how the binaries are packaged? The binary builds
+    # run only when a packaging input moved or on a manual dispatch with `binaries`; any other PR
     # gets pytest and the wheel only (DAH-5200; the target-matrix test runs here, lium.spec collects every lium
     # submodule). macOS Intel never builds on a PR: release.yml builds it.
     outputs:
