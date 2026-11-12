@@ -139,6 +139,9 @@ class ResolveExecutorAction:
             # DAH-3079). `up` ranks nothing on its own, so what the renter just saw in
             # `ls` is what it rents. Ties keep the API's listing order, as in `ls`.
             ordered, _ = sort_executors(executors, show_pareto=False)
+            # DAH-6272: a node under a maintenance or removal notice is taken only when nothing else matches, as the
+            # backend's rent-by-spec does for a run with no end; it stays in `ls` (stable sort, `ls` order otherwise)
+            ordered = sorted(ordered, key=lambda e: getattr(e, "scheduled_notice", None) is not None)
             executor = ordered[0]
             return ActionResult(
                 ok=True,

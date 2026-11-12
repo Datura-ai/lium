@@ -90,6 +90,21 @@ class ExecutorInfo(_Serializable):
     # Notes the provider shows renters on the node, each from a fixed list (e.g. "May reboot occasionally");
     # None = the API did not send them.
     provider_notes: Optional[List[str]] = None
+    # The provider's open maintenance or removal notice on the node: {"starting_at", "expiring_at" (ISO 8601 UTC),
+    # "permanent_removal"}. When it expires a pod on the node is rebooted (maintenance) or deleted (removal).
+    # None = no notice, or the API did not send it.
+    scheduled_notice: Optional[Dict] = None
+
+    @property
+    def notice_warning(self) -> Optional[str]:
+        """The sentence `lium up` prints before renting a node with a scheduled notice; None without one."""
+        notice = self.scheduled_notice
+        if not notice:
+            return None
+        start, end = (str(notice.get(key) or "?")[:16].replace("T", " ") + " UTC" for key in ("starting_at", "expiring_at"))
+        if notice.get("permanent_removal"):
+            return f"{self.huid} is scheduled for removal from {start}: a pod on it is deleted at {end}."
+        return f"{self.huid} has scheduled maintenance from {start} to {end}: a pod on it is rebooted then."
 
     @property
     def link(self) -> Optional[str]:

@@ -614,6 +614,8 @@ def up_command(
     # say both before renting, with or without --yes (on stderr, so --json stdout stays one document)
     if getattr(executor, "tier", None) == "spot":
         ui.notice_warning(f"{executor.huid} is a Spot node: the provider can reclaim it at any time, with no refund.")
+    if getattr(executor, "notice_warning", None):
+        ui.notice_warning(executor.notice_warning)
     if getattr(executor, "gpu_power_limited", None) and executor.gpu_power_limit_w:
         ui.notice_warning(
             f"{executor.huid} runs its GPUs at a reduced power limit "

@@ -1182,6 +1182,9 @@ class Lium:
                 if isinstance(executor_dict.get("frequent_rent_failures"), bool) else None
             ),
             last_verified_at=executor_dict.get("last_verified_at"),
+            scheduled_notice=(
+                executor_dict["scheduled_notice"] if isinstance(executor_dict.get("scheduled_notice"), dict) else None
+            ),
             provider_notes=(
                 [n for n in executor_dict["provider_notes"] if isinstance(n, str)]
                 if isinstance(executor_dict.get("provider_notes"), list) else None
