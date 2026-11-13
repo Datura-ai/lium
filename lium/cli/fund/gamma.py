@@ -27,9 +27,14 @@ FAILED_HINT = (
 )
 
 
-def _sim_gamma(substrate, rao: int) -> int:
+def _sim_gamma(subtensor, rao: int) -> int:
     """Gamma units ``rao`` TAO mints right now (``GammaRuntimeApi.sim_mint_gamma``)."""
-    raw = substrate.runtime_call("GammaRuntimeApi", "sim_mint_gamma", [NETUID, rao])
+    params = [NETUID, rao]
+    substrate = getattr(subtensor, "substrate", None)
+    if substrate is not None:
+        raw = substrate.runtime_call("GammaRuntimeApi", "sim_mint_gamma", params)
+    else:  # bittensor 11: no ``.substrate``; ``runtime`` returns the plain decoded value
+        raw = subtensor.runtime(("GammaRuntimeApi", "sim_mint_gamma"), params)
     value = getattr(raw, "value", raw)
     ok = value.get("Ok") if isinstance(value, dict) else None
     if not ok:
@@ -51,10 +56,10 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
     from .actions import UnlockColdkeyAction
 
     lium = Lium()  # before the unlock: a missing API key never costs a password prompt
-    substrate = validation.subtensor_class(bt)().substrate
-    gamma_per_tao = ui.load("Quoting gamma", lambda: _sim_gamma(substrate, _UNITS))
+    subtensor = validation.subtensor_class(bt)()
+    gamma_per_tao = ui.load("Quoting gamma", lambda: _sim_gamma(subtensor, _UNITS))
     tao_rao = tao_rao_for_usd(usd, gamma_per_tao)
-    expected = ui.load("Quoting gamma", lambda: _sim_gamma(substrate, tao_rao))
+    expected = ui.load("Quoting gamma", lambda: _sim_gamma(subtensor, tao_rao))
     min_out = min_gamma_out(expected)
     tao = tao_rao / _UNITS
 
@@ -80,27 +85,32 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
     if not spender:
         raise LiumError("Lium did not name a gamma spender; the server may not support gamma top-ups yet")
 
-    def mint():
-        call = substrate.compose_call(
-            call_module="SubtensorModule",
-            call_function="mint_gamma",
-            call_params={
-                "hotkey": coldkey_ss58,
-                "netuid": NETUID,
-                "amount": tao_rao,
-                "min_amount_out": min_out,
-                "spender": spender,
-                "daily_spend_cap": None,
-            },
-        )
+    params = {
+        "hotkey": coldkey_ss58,
+        "netuid": NETUID,
+        "amount": tao_rao,
+        "min_amount_out": min_out,
+        "spender": spender,
+        "daily_spend_cap": None,
+    }
+
+    def mint() -> tuple[bool, str | None]:
+        substrate = getattr(subtensor, "substrate", None)
+        if substrate is None:  # bittensor 11: raw calls go through submit_call, which signs with the coldkey
+            resp = subtensor.submit_call(
+                bt.calls.SubtensorModule.mint_gamma(**params), bt_wallet,
+                wait_for_inclusion=True, wait_for_finalization=True,
+            )
+            return resp.success, None if resp.success else resp.message
+        call = substrate.compose_call(call_module="SubtensorModule", call_function="mint_gamma", call_params=params)
         extrinsic = substrate.create_signed_extrinsic(call=call, keypair=coldkey)
-        return substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=True)
+        receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=True)
+        return receipt.is_success, None if receipt.is_success else receipt.error_message
 
     try:
-        receipt = ui.load("Minting gamma", mint)
-        ok, error = receipt.is_success, None if receipt.is_success else receipt.error_message
-    except Exception as e:  # noqa: BLE001 - a submit that raised may still have landed
-        ok, error = False, str(e)
+        ok, error = ui.load("Minting gamma", mint)
+    except (Exception, KeyboardInterrupt) as e:  # noqa: BLE001 - a submit that raised or was interrupted may still land
+        ok, error = False, str(e) or type(e).__name__
     if not ok:
         raise CliFailure("transfer_failed", f"Gamma mint failed: {error}", EXIT_GENERAL_ERROR, hint=FAILED_HINT)
 

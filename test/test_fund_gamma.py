@@ -4,6 +4,7 @@ import json
 import sys
 import types
 
+import pytest
 from click.testing import CliRunner
 
 from lium.cli.actions import ActionResult
@@ -23,8 +24,10 @@ def test_usd_is_sized_to_tao_rounded_up_and_floored_two_percent():
 
 
 class FakeSubstrate:
-    def __init__(self, success=True):
-        self.success, self.calls, self.submitted = success, [], None
+    """bittensor <= 10: ``Subtensor().substrate`` composes, signs and submits."""
+
+    def __init__(self, success=True, submit=None):
+        self.success, self.calls, self.submitted, self.submit = success, [], None, submit
 
     def runtime_call(self, api, method, params):
         assert (api, method, params[0]) == ("GammaRuntimeApi", "sim_mint_gamma", 51)
@@ -38,15 +41,46 @@ class FakeSubstrate:
         return (call, keypair)
 
     def submit_extrinsic(self, extrinsic, wait_for_inclusion, wait_for_finalization):
+        assert wait_for_inclusion and wait_for_finalization
+        if self.submit:
+            return self.submit(extrinsic)
         self.submitted = extrinsic
         return types.SimpleNamespace(is_success=self.success, error_message=None if self.success else "Slippage")
+
+    def subtensor(self):
+        return types.SimpleNamespace(substrate=self)
+
+
+class FakeV11Subtensor:
+    """bittensor 11: no ``.substrate``; ``runtime`` reads and ``submit_call`` sends a ``bt.calls`` builder."""
+
+    def __init__(self, success=True):
+        self.success, self.submitted = success, None
+
+    def runtime(self, method, params):
+        assert method == ("GammaRuntimeApi", "sim_mint_gamma") and params[0] == 51
+        return {"Ok": (1, 1, params[1] * GAMMA_PER_TAO // 10**9)}
+
+    def submit_call(self, call, wallet, wait_for_inclusion, wait_for_finalization):
+        assert wait_for_inclusion and wait_for_finalization
+        (module, function, params), signer = call, wallet.coldkey
+        self.submitted = ((module, function, params), signer)
+        return types.SimpleNamespace(success=self.success, message="" if self.success else "Slippage")
+
+    def subtensor(self):
+        return self
+
+
+def _calls():
+    mint = lambda **params: ("SubtensorModule", "mint_gamma", params)  # noqa: E731
+    return types.SimpleNamespace(SubtensorModule=types.SimpleNamespace(mint_gamma=mint))
 
 
 def _run(monkeypatch, args, substrate):
     events = []
     coldkey = types.SimpleNamespace(sign=lambda m: (events.append(("sign", m)), b"\x01\x02")[1])
     wallet = types.SimpleNamespace(coldkey=coldkey, unlock_coldkey=lambda: events.append("unlock"))
-    monkeypatch.setitem(sys.modules, "bittensor", types.SimpleNamespace(Subtensor=lambda: types.SimpleNamespace(substrate=substrate)))
+    monkeypatch.setitem(sys.modules, "bittensor", types.SimpleNamespace(Subtensor=substrate.subtensor, calls=_calls()))
 
     class FakeLoadWalletAction:
         def execute(self, ctx):
@@ -64,8 +98,9 @@ def _run(monkeypatch, args, substrate):
     return CliRunner().invoke(cli, args), events, coldkey
 
 
-def test_gamma_links_the_coldkey_and_mints_naming_the_spender(monkeypatch):
-    substrate = FakeSubstrate()
+@pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
+def test_gamma_links_the_coldkey_and_mints_naming_the_spender(monkeypatch, chain):
+    substrate = chain()
 
     result, events, coldkey = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
 
@@ -80,11 +115,30 @@ def test_gamma_links_the_coldkey_and_mints_naming_the_spender(monkeypatch):
     assert json.loads(result.output.strip().splitlines()[-1])["tx"]["spender"] == "5Spender"
 
 
-def test_a_failed_mint_exits_non_zero_and_warns_against_resending(monkeypatch):
-    result, _, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y"], FakeSubstrate(success=False))
+def _lost_reply(extrinsic):
+    raise ConnectionError("websocket closed")
 
-    assert result.exit_code != 0
-    assert "Slippage" in result.output and "Do not re-send yet" in result.output
+
+def _interrupted(extrinsic):
+    raise KeyboardInterrupt  # Ctrl-C while waiting for finalization, after the broadcast
+
+
+@pytest.mark.parametrize(
+    "chain, reason",
+    [
+        (FakeSubstrate(success=False), "Slippage"),
+        (FakeV11Subtensor(success=False), "Slippage"),
+        (FakeSubstrate(submit=_lost_reply), "websocket closed"),
+        (FakeSubstrate(submit=_interrupted), "KeyboardInterrupt"),
+    ],
+    ids=["dispatch-rejected", "dispatch-rejected-v11", "lost-reply", "interrupted"],
+)
+def test_a_failed_mint_exits_non_zero_and_warns_against_resending(monkeypatch, chain, reason):
+    result, _, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], chain)
+
+    assert result.exit_code != 0, result.output
+    envelope = json.loads(result.output.strip().splitlines()[-1])
+    assert envelope["ok"] is False and reason in json.dumps(envelope) and "Do not re-send yet" in json.dumps(envelope)
 
 
 def test_gamma_refuses_alpha_options(monkeypatch):
