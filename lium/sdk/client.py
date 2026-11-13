@@ -1182,6 +1182,14 @@ class Lium:
                 if isinstance(executor_dict.get("frequent_rent_failures"), bool) else None
             ),
             last_verified_at=executor_dict.get("last_verified_at"),
+            scheduled_notice=(
+                executor_dict["scheduled_notice"] if isinstance(executor_dict.get("scheduled_notice"), dict) else None
+            ),
+            removal_at=executor_dict["removal_at"] if isinstance(executor_dict.get("removal_at"), str) else None,
+            provider_notes=(
+                [n for n in executor_dict["provider_notes"] if isinstance(n, str)]
+                if isinstance(executor_dict.get("provider_notes"), list) else None
+            ),
             # the score lium.io shows: the node's own once the per-node gate sends it, none while it is new
             reliability_score=(
                 None
@@ -5868,7 +5876,8 @@ class Lium:
         """Get current account balance.
 
         Pods are billed per second at their hourly price; the balance is
-        debited every 5 minutes.
+        debited every 5 minutes, and every minute once less than 10 minutes
+        of balance is left.
 
         Returns:
             Floating-point balance value reported by ``/users/me``.

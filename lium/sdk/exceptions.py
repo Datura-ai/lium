@@ -34,6 +34,14 @@ class LiumSessionError(LiumAuthError):
     """
 
 
+class LiumTwoFactorRequired(LiumSessionError):
+    """The account has two-factor sign-in on: finish with ``workspaces.login_two_factor(mfa_token, code)``."""
+
+    def __init__(self, mfa_token: str) -> None:
+        super().__init__("Two-factor authentication is on: a code from the authenticator app is needed")
+        self.mfa_token = mfa_token
+
+
 class LiumRateLimitError(LiumError):
     """Rate limit exceeded. ``retry_after`` is the response's ``Retry-After`` in seconds, ``None`` when absent."""
 

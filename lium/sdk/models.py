@@ -86,6 +86,36 @@ class ExecutorInfo(_Serializable):
     # The platform's 0-100 reliability score for the node (uptime and rental history), the one lium.io shows: the
     # node's own score when the API sends one, else its provider's. None when not sent or the node is still new.
     reliability_score: Optional[float] = None
+    # last, so the earlier positional constructor slots keep their meaning
+    # Notes the provider shows renters on the node, each from a fixed list (e.g. "May reboot occasionally");
+    # None = the API did not send them.
+    provider_notes: Optional[List[str]] = None
+    # The provider's open maintenance or removal notice on the node: {"starting_at", "expiring_at" (ISO 8601 UTC),
+    # "permanent_removal"}. When it expires a pod on the node is rebooted (maintenance) or deleted (removal).
+    # None = no notice, or the API did not send it.
+    scheduled_notice: Optional[Dict] = None
+    # When an open permanent removal deletes a pod on the node (ISO 8601 UTC), also when an earlier maintenance
+    # window is the ``scheduled_notice``; None = no removal, or the API did not send it.
+    removal_at: Optional[str] = None
+
+    @property
+    def notice_warning(self) -> Optional[str]:
+        """The sentence `lium up` prints before renting a node with a scheduled notice; None without one."""
+        notice = self.scheduled_notice
+        if not notice:
+            return None
+
+        def minute(value) -> str:
+            return str(value or "?")[:16].replace("T", " ") + " UTC"
+
+        start, end = minute(notice.get("starting_at")), minute(notice.get("expiring_at"))
+        if notice.get("permanent_removal"):
+            return f"{self.huid} is scheduled for removal from {start}: a pod on it is deleted at {end}."
+        # a maintenance window takes the node off the market; a running pod is not rebooted
+        warning = f"{self.huid} has scheduled maintenance from {start} to {end}: it may go offline during that window."
+        if self.removal_at:
+            warning += f" It is also scheduled for removal: a pod on it is deleted at {minute(self.removal_at)}."
+        return warning
 
     @property
     def link(self) -> Optional[str]:

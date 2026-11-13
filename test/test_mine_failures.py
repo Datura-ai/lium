@@ -9,6 +9,7 @@
 """
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -738,3 +739,88 @@ def test_a_rerun_without_a_token_keeps_the_dev_stack_and_a_prod_token_clears_it(
                               dev_stack=False)
     text = (tmp_path / ".env").read_text()
     assert "LIUM_DEV_STACK" not in text and "DEFAULT_MINER_HOTKEY" not in text
+
+
+def test_a_step_command_that_hangs_is_stopped_at_its_timeout_with_the_command_named():
+    # 11 Nov 2026: `lium mine` sat at "[3/8] Checking prerequisites" for 20 min at 0% CPU; the pipe is held
+    # by a grandchild here, which a Python-side timeout alone would wait on forever
+    start = time.monotonic()
+    with pytest.raises(RuntimeError, match=r"`sleep 30 \| cat` did not finish in 1s"):
+        mine._run("sleep 30 | cat", timeout=1)
+    assert time.monotonic() - start < 15
+
+
+def test_ctrl_c_during_a_timed_step_stops_the_command_too(monkeypatch, tmp_path):
+    # review on lium#440: timeout runs the command in its own process group, so killing only timeout orphans it
+    import os
+    import subprocess
+
+    pid_file = tmp_path / "pid"
+    real_communicate = subprocess.Popen.communicate
+
+    def interrupt(self, *a, **k):
+        for _ in range(100):
+            if pid_file.exists() and pid_file.read_text().strip():
+                break
+            time.sleep(0.05)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        mine._run(f"echo $$ > {pid_file}; sleep 30", timeout=60)
+    monkeypatch.setattr(subprocess.Popen, "communicate", real_communicate)
+
+    pid = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_a_timed_step_whose_timeout_never_exits_is_killed_and_reported(monkeypatch):
+    # review on lium#440: a D-state nvidia-smi keeps `timeout` alive, so communicate() needs its own bound
+    import subprocess
+
+    killed = []
+    real_communicate = subprocess.Popen.communicate
+
+    def hang(self, *a, timeout=None, **k):
+        if not killed:
+            time.sleep(0.5)  # let timeout start its own process group
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        return real_communicate(self, *a, timeout=timeout, **k)
+
+    def killpg(pgid, sig):
+        killed.append(sig)
+        real_killpg(pgid, sig)
+
+    real_killpg = mine.os.killpg
+    monkeypatch.setattr(subprocess.Popen, "communicate", hang)
+    monkeypatch.setattr(mine.os, "killpg", killpg)
+    with pytest.raises(RuntimeError, match=r"`sleep 30` did not finish in 1s"):
+        mine._run("sleep 30", timeout=1)
+    assert killed == [mine.signal.SIGKILL]
+
+def test_a_held_dpkg_lock_stops_before_the_sysbox_installer_and_names_the_holder(monkeypatch, tmp_path):
+    script, ran = _sysbox_install_host(monkeypatch, tmp_path, install_ok=True)
+    plain = mine._run
+
+    def run(cmd, **kw):
+        if cmd.startswith(("fuser", "sudo -n fuser")):
+            return " 4242", ""
+        if cmd.startswith("ps "):
+            return "4242 19:58 /usr/bin/python3 /usr/bin/unattended-upgrade", ""
+        return plain(cmd, **kw)
+
+    monkeypatch.setattr(mine, "_run", run)
+    with pytest.raises(Exception, match="unattended-upgrade") as err:
+        mine._check_prereqs(tmp_path)
+    assert "apt/dpkg is busy" in str(err.value)
+    assert not any("sysbox_setup" in cmd for cmd in ran)
+
+
+def test_prereqs_name_each_sub_check_while_it_runs(monkeypatch, tmp_path):
+    _sysbox_install_host(monkeypatch, tmp_path, install_ok=True)
+    shown = []
+
+    mine._check_prereqs(tmp_path, shown.append)
+
+    assert shown[0] == "nvidia-smi" and "docker info" in shown and any("Sysbox" in s for s in shown)
