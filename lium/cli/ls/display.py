@@ -171,11 +171,12 @@ def _first_gpu_detail(specs: Optional[Dict]) -> Dict:
 def _pod_disk(executor: ExecutorInfo) -> str:
     """The disk (GiB) a pod renting the node's free GPUs gets: the API's pod_disk for that count (/root volume +
     pod disk), the rent's own numbers. A node that sets no per-pod limit lets the pod use all its free disk."""
-    if executor.pod_disk is None:
+    pod_disk = getattr(executor, "pod_disk", None)  # duck-typed executors (and older APIs) may not carry it
+    if pod_disk is None:
         free_kib = _intish(((executor.specs or {}).get("hard_disk") or {}).get("free"))
         # the API serves KiB: convert it directly, so a nearly full node's few MiB never read as GiB
         return "—" if free_kib is None else str(round(free_kib / (1024 * 1024)))
-    share = executor.pod_disk.get(str(_rentable(executor))) or {}
+    share = pod_disk.get(str(_rentable(executor))) or {}
     return str((_intish(share.get("volume_gb")) or 0) + (_intish(share.get("storage_gb")) or 0))
 
 
