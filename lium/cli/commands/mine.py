@@ -1,9 +1,11 @@
 """Mine command for setting up a compute subnet executor/miner."""
 
 import json
+import os
 import re
 import shlex
 import shutil
+import signal
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -84,20 +86,53 @@ def _subprocess_env() -> dict:
     return env
 
 
-def _run(cmd: list | str, check=True, capture=True, cwd: Optional[str] = None) -> Tuple[str, str]:
+def _run(cmd: list | str, check=True, capture=True, cwd: Optional[str] = None,
+         timeout: Optional[int] = None) -> Tuple[str, str]:
     import subprocess
     if isinstance(cmd, list):
         cmd_str = " ".join(cmd)
     else:
         cmd_str = cmd
-    result = subprocess.run(
-        cmd_str,
-        shell=True,
-        cwd=cwd,
-        text=True,
-        capture_output=capture,
-        env=_subprocess_env(),
-    )
+    # coreutils timeout kills the whole process group: a Python-side timeout would kill only the shell
+    # and then wait forever on the pipe a stuck grandchild (apt, nvidia-smi) still holds
+    if timeout:
+        pipe = subprocess.PIPE if capture else None
+        proc = subprocess.Popen(["timeout", "-k", "10", str(timeout), "sh", "-c", cmd_str], cwd=cwd, text=True,
+                                stdout=pipe, stderr=pipe, env=_subprocess_env())
+        try:
+            out, err = proc.communicate(timeout=timeout + 20)
+        except subprocess.TimeoutExpired:
+            # timeout itself never exits when the command sits in D state (nvidia-smi on a hung GPU)
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:  # timeout had not made its own group yet
+                proc.kill()
+            try:
+                out, err = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                out, err = "", ""
+            proc.returncode = 124
+        except KeyboardInterrupt:
+            # timeout runs the command in its own process group: Ctrl+C reaches only timeout, which
+            # relays SIGINT to the group; subprocess.run would SIGKILL timeout and orphan the command
+            proc.send_signal(signal.SIGINT)
+            proc.wait()
+            raise
+        result = subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+    else:
+        result = subprocess.run(
+            cmd_str,
+            shell=True,
+            cwd=cwd,
+            text=True,
+            capture_output=capture,
+            env=_subprocess_env(),
+        )
+    if timeout and result.returncode in (124, 137):
+        raise RuntimeError(
+            f"`{cmd_str}` did not finish in {timeout}s and was stopped.\n"
+            "Run it yourself to see what it waits for, fix that, then run `lium mine` again."
+        )
     if check and result.returncode != 0:
         # the cause of a failed step is the LAST thing a tool prints; the first 4000 chars of a
         # `docker compose up` are image-pull progress and the error is cut off
@@ -145,11 +180,13 @@ def _clone_or_update_repo(target_dir: Path, branch: str):
         _run(f"git clone --branch {branch} https://github.com/Datura-ai/lium-io.git {target_dir}")
 
 
-def _check_prereqs(compute_dir: Path | None = None):
+def _check_prereqs(compute_dir: Path | None = None, show=lambda text: None):
+    """`show` names the sub-check on the step's spinner, so a slow one is visible instead of a silent step."""
     if not _exists("nvidia-smi"):
         raise Exception("NVIDIA GPU driver not found (nvidia-smi missing)")
 
-    _run("nvidia-smi --query-gpu=name --format=csv,noheader")
+    show("nvidia-smi")
+    _run("nvidia-smi --query-gpu=name --format=csv,noheader", timeout=_QUICK_CHECK_SECS)
 
     # Validators reject a node whose Docker has no sysbox-runc runtime; without this check the
     # provider learns it from the preflight or a validator cycle later. The installer also installs the
@@ -157,12 +194,17 @@ def _check_prereqs(compute_dir: Path | None = None):
     # the installer adds the user to the docker group, but this session keeps the groups it started with; without
     # this check a socket permission error reads as "no sysbox runtime" and starts the sysbox installer
     # only the socket error: a root-owned ~/.docker/config.json also says "permission denied", and Docker still works
-    if _exists("docker") and "permission denied while trying to connect" in _run("docker info", check=False)[1].lower():
+    show("docker info")
+    if _exists("docker") and "permission denied while trying to connect" in _run(
+            "docker info", check=False, timeout=_QUICK_CHECK_SECS)[1].lower():
         raise Exception(
             "Docker is installed, but this session may not use it yet (permission denied on the Docker socket).\n"
             "Run `newgrp docker` (or log out and back in), then run `lium mine` again."
         )
-    failure = _install_sysbox(compute_dir) if compute_dir and not _has_sysbox() else ""
+    failure = ""
+    if compute_dir and not _has_sysbox():
+        show("installing Sysbox, can take several minutes")
+        failure = _install_sysbox(compute_dir)
 
     if not _exists("nvidia-container-cli"):
         raise Exception("NVIDIA Container Toolkit not found (required for Docker GPU access)")
@@ -170,7 +212,8 @@ def _check_prereqs(compute_dir: Path | None = None):
     if not _exists("docker"):
         raise Exception("Docker not found")
 
-    _run("docker info")
+    show("docker info")
+    _run("docker info", timeout=_QUICK_CHECK_SECS)
 
     if not _has_sysbox():
         raise Exception(
@@ -183,6 +226,19 @@ def _check_prereqs(compute_dir: Path | None = None):
         console.warning(f"The Sysbox installer reported a failure after installing the runtime:\n{failure}")
 
 
+_QUICK_CHECK_SECS = 60        # nvidia-smi and docker info answer in seconds; a hung GPU or daemon never does
+_SYSBOX_INSTALL_SECS = 1200   # downloads and installs packages
+_DPKG_LOCKS = "/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock"
+
+
+def _dpkg_lock_holder(sudo: str) -> str:
+    """`ps` lines of the processes holding an apt/dpkg lock; empty when none, or when fuser is not installed."""
+    if not _exists("fuser"):
+        return ""
+    pids = ",".join(_run(f"{sudo}fuser {_DPKG_LOCKS}", check=False, timeout=15)[0].split())
+    return _run(f"ps -o pid=,etime=,args= -p {pids}", check=False, timeout=15)[0].strip() if pids else ""
+
+
 def _install_sysbox(compute_dir: Path) -> str:
     """Run the checkout's Sysbox installer once (DAH-4778: one manual step fewer). Same privilege rule as step 2's
     install script: root, or passwordless sudo. No terminal input, so its one confirmation is skipped.
@@ -193,8 +249,16 @@ def _install_sysbox(compute_dir: Path) -> str:
     if not script.exists():
         return ""
     sudo = "" if os.geteuid() == 0 else "sudo -n "
+    holder = _dpkg_lock_holder(sudo)
+    if holder:
+        raise Exception(
+            "apt/dpkg is busy, so the Sysbox installer would wait for it. Holding the lock:\n"
+            f"{holder}\n"
+            "Let it finish (right after a boot this is often unattended-upgrades) or stop it, "
+            "then run `lium mine` again."
+        )
     try:
-        _run(f"{sudo}bash {shlex.quote(str(script))} < /dev/null")
+        _run(f"{sudo}bash {shlex.quote(str(script))} < /dev/null", timeout=_SYSBOX_INSTALL_SECS)
     except RuntimeError as exc:
         return str(exc)[-2000:]
     return ""
@@ -330,7 +394,7 @@ _SYSBOX_SETUP_COMMAND = (
 
 def _has_sysbox() -> bool:
     # validators run --runtime=sysbox-runc, so the runtime key must match exactly, not as a substring
-    runtimes, _ = _run("docker info --format '{{json .Runtimes}}'", check=False)
+    runtimes, _ = _run("docker info --format '{{json .Runtimes}}'", check=False, timeout=_QUICK_CHECK_SECS)
     try:
         parsed = json.loads(runtimes)
     except ValueError:
@@ -1246,8 +1310,9 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
         with timed_step_status(2, TOTAL_STEPS, "Installing node tools"):
             _install_executor_tools(target_dir)
 
-        with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites"):
-            _check_prereqs(target_dir)
+        with timed_step_status(3, TOTAL_STEPS, "Checking prerequisites") as show:
+            _check_prereqs(target_dir, show)
+            show("Docker storage")
             storage_ok = _docker_storage_limited()
         if not storage_ok:
             _setup_docker_storage(auto, target_dir)   # outside the spinner: it prints the plan and may ask to confirm

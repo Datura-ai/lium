@@ -228,7 +228,7 @@ def loading_status(message: str, success_message: str = ""):
         status.stop()
 
 
-def _update_spinner_display(step_prefix: str, message: str, start_time: float, running_flag):
+def _update_spinner_display(step_prefix: str, message: str, start_time: float, running_flag, detail=("",)):
     """Internal function to update spinner display with time."""
     import time
     import sys
@@ -251,8 +251,9 @@ def _update_spinner_display(step_prefix: str, message: str, start_time: float, r
         spinner_char = spinner_chars[spinner_index % len(spinner_chars)]
         
         # Use carriage return to overwrite the line smoothly with green spinner
-        line = f"{step_prefix}{message}... {green_code}{spinner_char}{reset_code} ({elapsed:.1f}s)"
-        sys.stdout.write(f"\r{line}")
+        shown = f"{message} ({detail[0]})" if detail[0] else message
+        line = f"{step_prefix}{shown}... {green_code}{spinner_char}{reset_code} ({elapsed:.1f}s)"
+        sys.stdout.write(f"\r{line}\033[K")
         sys.stdout.flush()
         spinner_index += 1
         time.sleep(0.1)
@@ -286,17 +287,18 @@ def timed_step_status(step: int = 0, total_steps: int = 0, message: str = ""):
     # Only show step prefix if steps > 0 (with bullet for visual separation)
     step_prefix = f"● [{step}/{total_steps}] " if step > 0 and total_steps > 0 else ""
     running = [True]  # Use list for mutable reference
+    detail = [""]  # what the step is doing now, set through the yielded callable
     
     # Hide cursor during animation
     sys.stdout.write('\033[?25l')  # Hide cursor
     sys.stdout.flush()
     
     # Start the update thread
-    update_thread = threading.Thread(target=_update_spinner_display, args=(step_prefix, message, start_time, running), daemon=True)
+    update_thread = threading.Thread(target=_update_spinner_display, args=(step_prefix, message, start_time, running, detail), daemon=True)
     update_thread.start()
     
     try:
-        yield
+        yield lambda text: detail.__setitem__(0, text)
         # Stop the update and show success
         running[0] = False
         update_thread.join(timeout=0.1)
