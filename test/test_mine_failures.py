@@ -714,6 +714,33 @@ def test_one_host_port_for_service_and_ssh_is_a_usage_error(monkeypatch, tmp_pat
         assert "both 8081" in result.output
 
 
+def test_a_dev_stack_central_miner_lands_in_env(tmp_path: Path):
+    """DAH-6051: the executor trusts DEFAULT_MINER_HOTKEY; on a dev stack it must be that stack's central miner."""
+    env = tmp_path / ".env"
+    env.write_text("INTERNAL_PORT=8080\n")
+    central = "5E9mXBKNan8FbRGs71LnXaP8dAVkCVViDvkhbuNsfLwBzLsi"  # gitleaks:allow (public ss58 address)
+    mine._apply_env_overrides(tmp_path, internal="8080", external="8080", ssh="2200", ssh_pub="", rng="",
+                              central_miner_hotkey=central)
+    assert f"DEFAULT_MINER_HOTKEY={central}" in env.read_text().splitlines()
+    assert "DEFAULT_MINER_HOTKEY" in mine._RESTART_KEYS   # a changed one recreates a running executor
+
+
+def test_a_rerun_without_a_token_keeps_the_dev_stack_and_a_prod_token_clears_it(tmp_path: Path):
+    """DAH-6051 review: a plain rerun rebuilds .env from the template; the dev-stack choice must survive it."""
+    central = "5E9mXBKNan8FbRGs71LnXaP8dAVkCVViDvkhbuNsfLwBzLsi"  # gitleaks:allow (public ss58 address)
+    (tmp_path / ".env.template").write_text("MINER_HOTKEY_SS58_ADDRESS=\nINTERNAL_PORT=8080\n")
+    (tmp_path / ".env").write_text(f"LIUM_DEV_STACK=1\nDEFAULT_MINER_HOTKEY={central}\n")
+    mine._setup_executor_env(tmp_path, hotkey=central)
+    mine._apply_env_overrides(tmp_path, internal="8080", external="8080", ssh="2200", ssh_pub="", rng="")
+    lines = (tmp_path / ".env").read_text().splitlines()
+    assert "LIUM_DEV_STACK=1" in lines and f"DEFAULT_MINER_HOTKEY={central}" in lines
+
+    mine._apply_env_overrides(tmp_path, internal="8080", external="8080", ssh="2200", ssh_pub="", rng="",
+                              dev_stack=False)
+    text = (tmp_path / ".env").read_text()
+    assert "LIUM_DEV_STACK" not in text and "DEFAULT_MINER_HOTKEY" not in text
+
+
 def test_a_step_command_that_hangs_is_stopped_at_its_timeout_with_the_command_named():
     # 11 Nov 2026: `lium mine` sat at "[3/8] Checking prerequisites" for 20 min at 0% CPU; the pipe is held
     # by a grandchild here, which a Python-side timeout alone would wait on forever
