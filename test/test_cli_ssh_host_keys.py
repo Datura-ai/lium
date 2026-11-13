@@ -4,6 +4,7 @@ Properties: the argv names only the pod's user, address and port (any other `ssh
 `subprocess.run` gets a list and no shell; the host-key options are the pinned ones unless LIUM_SSH_INSECURE=1.
 """
 
+import shlex
 import stat
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from lium.cli.ssh import actions as ssh_actions
 from lium.cli.ssh import command as ssh_command
 from lium.cli.utils import CliFailure, EXIT_SSH_ERROR
 from lium.sdk import Config, Lium, PodInfo
+from lium.sdk import client as sdk_client
 from lium.sdk.client import ssh_target
 
 
@@ -51,6 +53,7 @@ def _client(tmp_path, monkeypatch, key_name="id_ed25519"):
         ("ssh root@203.0.113.7", ("root", "203.0.113.7", 22)),
         ("ssh ubuntu@node-3.example.net -p 22", ("ubuntu", "node-3.example.net", 22)),
         ("ssh root@2001:db8::7 -p 2200", ("root", "2001:db8::7", 2200)),
+        ("ssh -J jump@gw.example.net root@pod-123.pods.example.net", ("root", "pod-123.pods.example.net", 22)),
     ],
 )
 def test_ssh_target_reads_the_shape_the_api_sends(ssh_cmd, expected):
@@ -81,6 +84,14 @@ def test_ssh_target_reads_the_shape_the_api_sends(ssh_cmd, expected):
         "ssh root@fe80::1%eth0 -p 22",
         "ssh root@203.0.113.7 -p \u0661\u0662",
         "ssh 'root@203.0.113.7\n' -p 22",
+        "ssh -J root@pod.example.net",
+        "ssh -J",
+        "ssh -J -oProxyCommand=id root@pod.example.net",
+        "ssh -J jump@gw.example.net:2222 root@pod.example.net",
+        "ssh -J jump@gw.example.net,jump@gw2.example.net root@pod.example.net",
+        "ssh -J jump@gw.example.net -J jump@gw2.example.net root@pod.example.net",
+        "ssh root@pod.example.net -J jump@gw.example.net",
+        "ssh -J 'jump@gw.example.net;id' root@pod.example.net",
     ],
 )
 def test_ssh_target_refuses_everything_but_user_host_port(ssh_cmd):
@@ -274,3 +285,46 @@ def test_cli_hides_first_connection_pin_notices_but_not_the_insecure_one(monkeyp
     assert any("Permanently added" in m for m in shown) is ssh_line_shown
     assert not any(m.startswith("Pinning") for m in shown)
     assert any(m.startswith("Accepting unverified") for m in shown)
+
+
+GATEWAY_CMD = "ssh -J jump@gw.example.net root@pod-123.pods.example.net"
+
+
+def test_ssh_jump_is_none_for_a_direct_pod_and_the_gateway_for_a_gateway_pod():
+    assert sdk_client.ssh_jump("ssh root@203.0.113.7 -p 20299") is None
+    assert sdk_client.ssh_jump(GATEWAY_CMD) == ("jump", "gw.example.net")
+
+
+def test_ssh_argv_reaches_a_gateway_pod_through_a_pinned_proxycommand(tmp_path, monkeypatch):
+    # DAH-3799: not -J, whose hop ignores command-line options; the hop gets the key and its own pin
+    client, key_path = _client(tmp_path, monkeypatch)
+    pins = tmp_path / ".lium" / "known_hosts"
+
+    argv = client.ssh_argv(_pod(GATEWAY_CMD))
+
+    proxy = argv[argv.index("-p") + 3]
+    assert argv[argv.index("-p") + 2] == "-o" and proxy.startswith("ProxyCommand=")
+    assert shlex.split(proxy[len("ProxyCommand="):]) == [
+        "ssh", "-F", "/dev/null", "-i", str(key_path), "-o", "IdentitiesOnly=yes",
+        "-o", "StrictHostKeyChecking=accept-new", "-o", f'UserKnownHostsFile="{pins / "gateway-gw.example.net"}"',
+        "-W", "%h:%p", "jump@gw.example.net",
+    ]
+    assert argv[-1] == "root@pod-123.pods.example.net"
+    assert f'UserKnownHostsFile="{pins / "pod-123"}"' in argv
+    assert (pins / "gateway-gw.example.net").exists()
+
+
+def test_gateway_proxycommand_escapes_a_percent_in_a_path(tmp_path, monkeypatch):
+    home = tmp_path / "100%home"
+    home.mkdir()
+    client, _ = _client(home, monkeypatch)
+
+    proxy = next(a for a in client.ssh_argv(_pod(GATEWAY_CMD)) if a.startswith("ProxyCommand="))
+
+    assert "100%%home" in proxy and "100%home" not in proxy.replace("%%", "")
+    assert " -W %h:%p jump@gw.example.net" in proxy
+
+
+def test_direct_pod_argv_has_no_proxycommand(tmp_path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+    assert not any(a.startswith("ProxyCommand=") for a in client.ssh_argv(_pod()))

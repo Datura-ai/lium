@@ -604,3 +604,17 @@ def test_cp_command_names_the_pin_step_when_the_destination_key_is_unknown(monke
     envelope = json.loads(result.output)
     assert envelope["error"]["code"] == "ssh_host_key_unknown"
     assert "lium ssh brave-lion-11" in envelope["error"]["hint"]
+
+
+def test_cp_to_a_gateway_pod_refuses_before_any_key_is_placed():
+    # DAH-3799: the one-off transfer key cannot pass the gateway yet; nothing runs on either pod
+    from dataclasses import replace
+
+    from lium.sdk import LiumError
+
+    client = _cp_client()
+    gateway_dst = replace(DST, ssh_cmd="ssh -J jump@gw.example.net root@pod-9.pods.example.net")
+
+    with pytest.raises(LiumError, match="Lium gateway"):
+        client.cp(SRC, "/a", gateway_dst, "/b")
+    assert client.sent == []
