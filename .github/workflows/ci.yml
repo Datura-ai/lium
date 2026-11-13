@@ -29,6 +29,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      pull-requests: read   # the changelog step reads the PR's files and labels
     steps:
     - uses: actions/checkout@v4
       with:
@@ -47,6 +48,21 @@ jobs:
     # needs either fails here instead of passing on the author's machine only
     - name: Run the test suite
       run: uv run pytest test/ -q -p no:cacheprovider --durations=10
+
+    # next_version.py --check refuses a release whose shipped code has no changelog entry; catch it on the PR instead
+    # of at release time (v0.41.9 failed after #425 merged without one). After the suite, and even when it fails, so
+    # both results show. The label is read live, so a re-run after labelling sees it.
+    - name: Changelog entry for shipped code
+      if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+      shell: bash   # -eo pipefail: a failed gh api call fails the step instead of feeding an empty list
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR: ${{ github.event.pull_request.number }}
+      run: |
+        labels="$(gh api "repos/${{ github.repository }}/pulls/$PR" -q '.labels[].name')"
+        if grep -qx 'no-changelog' <<<"$labels"; then echo "labelled no-changelog: skipped"; exit 0; fi
+        files="$(gh api --paginate "repos/${{ github.repository }}/pulls/$PR/files" -q '.[] | "\(.status)\t\(.filename)"')"
+        printf '%s\n' "$files" | python3 scripts/pr_changelog_check.py
 
   packaging:
     # Did this change touch anything that changes how the binaries are packaged? The binary builds (macOS bills at
