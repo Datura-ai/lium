@@ -523,7 +523,7 @@ def _ssh_with(monkeypatch, lium, client):
 
 
 def test_download_from_a_stalling_host_is_cut_at_the_timeout_and_its_connection_closed(lium, monkeypatch, tmp_path):
-    del lium.download  # the real SDK transfer, not the fixture's stand-in
+    monkeypatch.delattr(lium, "download")  # the real SDK transfer, not the fixture's stand-in
     threads = threading.active_count()
     for _ in range(3):  # repeated stalls leave no transfer behind
         client = _StallingClient()
@@ -536,7 +536,7 @@ def test_download_from_a_stalling_host_is_cut_at_the_timeout_and_its_connection_
 
 
 def test_download_past_the_byte_limit_stops_reading(lium, monkeypatch, tmp_path):
-    del lium.download
+    monkeypatch.delattr(lium, "download")
     client = _StallingClient(endless=True)
     _ssh_with(monkeypatch, lium, client)
 
@@ -547,7 +547,7 @@ def test_download_past_the_byte_limit_stops_reading(lium, monkeypatch, tmp_path)
 
 
 def test_transfer_deadline_covers_the_ssh_handshake(lium, monkeypatch, tmp_path):
-    del lium.download
+    monkeypatch.delattr(lium, "download")
     asked = []
 
     def ssh_connection(pod, timeout=30, deadline=None):
@@ -562,7 +562,7 @@ def test_transfer_deadline_covers_the_ssh_handshake(lium, monkeypatch, tmp_path)
 
 
 def test_download_with_only_a_timeout_copies_the_file(lium, monkeypatch, tmp_path):
-    del lium.download
+    monkeypatch.delattr(lium, "download")
     data = [b"a" * 40000, b"b" * 10]
 
     class File:
@@ -685,7 +685,7 @@ def _exec_over(monkeypatch, lium, channel):
 
 
 def test_exec_with_an_output_limit_keeps_the_tail(lium, monkeypatch):
-    del lium.exec
+    monkeypatch.delattr(lium, "exec")
     _exec_over(monkeypatch, lium, _Channel([b"a" * 70_000, b"b" * 70_000, b"END\n"]))
 
     out = lium.exec(_pod("p"), command="noisy", timeout=30, output_tail_bytes=1000)
@@ -694,7 +694,7 @@ def test_exec_with_an_output_limit_keeps_the_tail(lium, monkeypatch):
 
 
 def test_exec_with_a_zero_tail_keeps_no_output(lium, monkeypatch):
-    del lium.exec
+    monkeypatch.delattr(lium, "exec")
     _exec_over(monkeypatch, lium, _Channel([b"a" * 70_000, b"END\n"]))
 
     out = lium.exec(_pod("p"), command="noisy", timeout=30, output_tail_bytes=0)
@@ -703,7 +703,7 @@ def test_exec_with_a_zero_tail_keeps_no_output(lium, monkeypatch):
 
 
 def test_exec_refuses_a_negative_tail_before_connecting(lium, monkeypatch):
-    del lium.exec
+    monkeypatch.delattr(lium, "exec")
     monkeypatch.setattr(lium, "ssh_connection", Mock(side_effect=AssertionError("connected")))
     with pytest.raises(ValueError, match="output_tail_bytes"):
         lium.exec(_pod("p"), command="true", output_tail_bytes=-1)
@@ -732,7 +732,7 @@ def test_run_job_timeout_is_classified_whatever_the_output_tail(lium, monkeypatc
 
 
 def test_exec_with_an_output_limit_cuts_a_host_that_never_stops_sending(lium, monkeypatch):
-    del lium.exec
+    monkeypatch.delattr(lium, "exec")
     channel = _Channel([], endless=True)
     _exec_over(monkeypatch, lium, channel)
 

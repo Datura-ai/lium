@@ -344,8 +344,15 @@ class _LazyModule:
     the module, so `monkeypatch.setattr(client.paramiko, "SSHClient", Fake)` patches paramiko itself.
     """
 
+    __slots__ = ("_name",)
+
     def __init__(self, name: str) -> None:
         object.__setattr__(self, "_name", name)
+
+    @property
+    def __dict__(self) -> dict[str, Any]:  # type: ignore[override]
+        # pytest>=9.2 monkeypatch saves the old value from the target's __dict__; without the module's, undo deletes the real attribute
+        return vars(import_module(self._name))
 
     def __getattr__(self, attr: str) -> Any:
         return getattr(import_module(self._name), attr)
