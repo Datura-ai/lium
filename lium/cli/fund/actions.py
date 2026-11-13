@@ -121,6 +121,19 @@ class LoadWalletAction:
             return ActionResult(ok=False, data={}, error=str(e))
 
 
+def unlocked_signer(bt_wallet):
+    """The wallet's unlocked coldkey, to sign with on bittensor 11.
+
+    Given the wallet itself, bittensor 11 unlocks it again at signing and that second password prompt sits
+    unseen under the spinner. Signing with the keypair skips bittensor's check that the key file belongs to
+    the wallet's public address, the one the confirmation showed, so it is made here.
+    """
+    keypair = bt_wallet.coldkey
+    if keypair.ss58_address != bt_wallet.coldkeypub.ss58_address:
+        raise ValueError("the coldkey file does not match the wallet's coldkeypub.txt")
+    return keypair
+
+
 class UnlockColdkeyAction:
     """Decrypt the coldkey up front, so its password prompt lands on a clean line.
 
@@ -215,7 +228,7 @@ class ExecuteTransferAction:
                 # bittensor 11: extrinsics are intents run by ``execute`` (keep_alive, as transfer did by default)
                 resp = subtensor.execute(
                     bt.intents.Transfer(dest_ss58=self.LIUM_FUNDING_ADDRESS, amount_tao=amount),
-                    bt_wallet,
+                    unlocked_signer(bt_wallet),
                 )
 
             # bittensor >=8 returns an ExtrinsicResponse (.success/.message); older
@@ -365,6 +378,7 @@ class ExecuteAlphaTransferAction:
 
             legacy = hasattr(subtensor, "transfer_stake")
             if not legacy:
+                signer = unlocked_signer(bt_wallet)  # before transfer_attempted: a refusal here sent nothing
                 # bittensor 11: the same extrinsic as an intent; the stake stays on ``hotkey`` and subnet
                 intent = bt.intents.TransferStake(
                     dest_coldkey_ss58=dest_coldkey,
@@ -386,7 +400,7 @@ class ExecuteAlphaTransferAction:
                     amount=amount,
                 )
             else:
-                resp = subtensor.execute(intent, bt_wallet)
+                resp = subtensor.execute(intent, signer)
             # bittensor >=8 returns an ExtrinsicResponse (.success/.message); older
             # versions returned a bare bool. Accept either.
             ok = getattr(resp, "success", resp)
