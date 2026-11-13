@@ -85,6 +85,11 @@ class _Intent:
         self.op, self.fields = op, fields
 
 
+# execute() must get the unlocked keypair: given the wallet, bittensor 11 unlocks it again at signing and the
+# second password prompt sits unseen under the spinner
+WALLET = types.SimpleNamespace(coldkey="unlocked-coldkey")
+
+
 class _Subtensor11:
     """No legacy methods: reads through ``read``, extrinsics through ``execute`` (records them).
 
@@ -136,7 +141,7 @@ def _position(hotkey=BOB, netuid=51, stake_rao=5 * 10**9):
 
 def _alpha_ctx(bt, amount_rao):
     return {
-        "bt": bt, "bt_wallet": "wallet", "coldkey_ss58": ALICE, "hotkey_ss58": BOB,
+        "bt": bt, "bt_wallet": WALLET, "coldkey_ss58": ALICE, "hotkey_ss58": BOB,
         "amount_bal": _Balance(amount_rao, 51), "netuid": 51, "dest_coldkey": "5Dest",
     }
 
@@ -147,8 +152,8 @@ def test_alpha_transfer_runs_a_transfer_stake_intent_on_bittensor_11():
     result = ExecuteAlphaTransferAction().execute(_alpha_ctx(_bt11(subtensor), 2 * 10**9))
 
     assert result.ok, result.error
-    [(intent, wallet)] = subtensor.executed
-    assert (intent.op, wallet) == ("transfer_stake", "wallet")
+    [(intent, signer)] = subtensor.executed
+    assert (intent.op, signer) == ("transfer_stake", WALLET.coldkey)
     assert intent.fields == {
         "dest_coldkey_ss58": "5Dest", "hotkey_ss58": BOB, "origin_netuid": 51, "dest_netuid": 51,
         "amount_alpha": _Balance(2 * 10**9, 51),
@@ -225,18 +230,18 @@ def test_tao_transfer_runs_a_transfer_intent_on_bittensor_11(monkeypatch):
     subtensor = _Subtensor11()
     monkeypatch.setitem(sys.modules, "bittensor", _bt11(subtensor))
 
-    result = ExecuteTransferAction().execute({"bt_wallet": "wallet", "tao_amount": 0.5})
+    result = ExecuteTransferAction().execute({"bt_wallet": WALLET, "tao_amount": 0.5})
 
     assert result.ok, result.error
-    [(intent, wallet)] = subtensor.executed
-    assert (intent.op, wallet) == ("transfer", "wallet")
+    [(intent, signer)] = subtensor.executed
+    assert (intent.op, signer) == ("transfer", WALLET.coldkey)
     assert intent.fields == {"dest_ss58": LIUM_FUNDING_ADDRESS, "amount_tao": _Balance(5 * 10**8)}
 
 
 def test_a_refused_tao_transfer_on_bittensor_11_reports_the_chain_message(monkeypatch):
     monkeypatch.setitem(sys.modules, "bittensor", _bt11(_Subtensor11(success=False)))
 
-    result = ExecuteTransferAction().execute({"bt_wallet": "wallet", "tao_amount": 0.5})
+    result = ExecuteTransferAction().execute({"bt_wallet": WALLET, "tao_amount": 0.5})
 
     assert not result.ok and result.error == "Insufficient balance"
 

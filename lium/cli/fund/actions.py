@@ -212,10 +212,12 @@ class ExecuteTransferAction:
                     amount=amount,
                 )
             else:
-                # bittensor 11: extrinsics are intents run by ``execute`` (keep_alive, as transfer did by default)
+                # bittensor 11: extrinsics are intents run by ``execute`` (keep_alive, as transfer did by default).
+                # Signed with the unlocked keypair: given the wallet, bittensor 11 unlocks it again at
+                # signing, and that second password prompt sits unseen under the spinner.
                 resp = subtensor.execute(
                     bt.intents.Transfer(dest_ss58=self.LIUM_FUNDING_ADDRESS, amount_tao=amount),
-                    bt_wallet,
+                    bt_wallet.coldkey,
                 )
 
             # bittensor >=8 returns an ExtrinsicResponse (.success/.message); older
@@ -386,7 +388,7 @@ class ExecuteAlphaTransferAction:
                     amount=amount,
                 )
             else:
-                resp = subtensor.execute(intent, bt_wallet)
+                resp = subtensor.execute(intent, bt_wallet.coldkey)  # the unlocked keypair, as in the TAO transfer
             # bittensor >=8 returns an ExtrinsicResponse (.success/.message); older
             # versions returned a bare bool. Accept either.
             ok = getattr(resp, "success", resp)

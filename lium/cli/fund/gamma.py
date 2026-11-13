@@ -96,9 +96,11 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
 
     def mint() -> tuple[bool, str | None]:
         substrate = getattr(subtensor, "substrate", None)
-        if substrate is None:  # bittensor 11: raw calls go through submit_call, which signs with the coldkey
+        if substrate is None:  # bittensor 11: raw calls go through submit_call
+            # the unlocked keypair, not the wallet: bittensor 11 unlocks a wallet again at signing,
+            # and that second password prompt sits unseen under the spinner
             resp = subtensor.submit_call(
-                bt.calls.SubtensorModule.mint_gamma(**params), bt_wallet,
+                bt.calls.SubtensorModule.mint_gamma(**params), coldkey,
                 wait_for_inclusion=True, wait_for_finalization=True,
             )
             return resp.success, None if resp.success else resp.message

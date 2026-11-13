@@ -61,9 +61,10 @@ class FakeV11Subtensor:
         assert method == ("GammaRuntimeApi", "sim_mint_gamma") and params[0] == 51
         return {"Ok": (1, 1, params[1] * GAMMA_PER_TAO // 10**9)}
 
-    def submit_call(self, call, wallet, wait_for_inclusion, wait_for_finalization):
-        assert wait_for_inclusion and wait_for_finalization
-        (module, function, params), signer = call, wallet.coldkey
+    def submit_call(self, call, signer, wait_for_inclusion, wait_for_finalization):
+        # the unlocked keypair itself: given a wallet, bittensor 11 unlocks it again and prompts under the spinner
+        assert wait_for_inclusion and wait_for_finalization and not hasattr(signer, "unlock_coldkey")
+        module, function, params = call
         self.submitted = ((module, function, params), signer)
         return types.SimpleNamespace(success=self.success, message="" if self.success else "Slippage")
 
