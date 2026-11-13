@@ -121,7 +121,7 @@ class ControlMaster:
     """The control master of one pod: check it, start it, run a command over it, stop it."""
 
     def __init__(self, lium: Any, pod: PodInfo):
-        from .client import openssh_host_key_options, ssh_target
+        from .client import openssh_host_key_options, openssh_jump_options, ssh_target
 
         user, host, port = ssh_target(pod.ssh_cmd)
         self.pod = pod
@@ -133,6 +133,7 @@ class ControlMaster:
         key_path = _key_path(lium)
         if key_path:
             self.base += ["-i", key_path, "-o", "IdentitiesOnly=yes"]
+        self.base += openssh_jump_options(pod, key_path, create_pin_file=False)   # the Lium gateway hop, if any
         self.base += openssh_host_key_options(pod, create_pin_file=False)   # ssh writes the pin on first connect
 
     def _argv(self, *options: str, command: Optional[str] = None) -> List[str]:

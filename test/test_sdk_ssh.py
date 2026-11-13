@@ -490,3 +490,56 @@ def test_ssh_connection_connects_to_the_validated_user_host_and_default_port(mon
     with client.ssh_connection(pod):
         pass
     assert connects == [("ubuntu", "pod-7.example.net", 22)]
+
+
+def test_ssh_connection_tunnels_a_gateway_pod_through_the_pinned_gateway(monkeypatch, tmp_path):
+    # DAH-3799: the gateway is connected (own pin file) with the same key, then the pod over a direct-tcpip channel
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("LIUM_SSH_INSECURE", raising=False)
+    key_path = tmp_path / "id_ed25519"
+    key_path.write_text("key")
+    key = object()
+    monkeypatch.setattr(sdk_client.paramiko.Ed25519Key, "from_private_key_file", lambda p: key)
+    clients = []
+    channel = object()
+
+    class FakeTransport:
+        def open_channel(self, kind, dest, src, timeout=None):
+            clients[1].opened = (kind, dest)   # [0] is the pod client, [1] the gateway
+            return channel
+
+    class FakeSSHClient:
+        def __init__(self):
+            self.hosts, self.closed = [], False
+            clients.append(self)
+
+        def set_missing_host_key_policy(self, policy):
+            pass
+
+        def load_host_keys(self, path):
+            self.hosts.append(path)
+
+        def connect(self, **kwargs):
+            self.kwargs = kwargs
+
+        def get_transport(self):
+            return FakeTransport()
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(sdk_client.paramiko, "SSHClient", FakeSSHClient)
+    client = Lium(Config(api_key="test", ssh_key_path=key_path))
+    pod = _pod()
+    pod.ssh_cmd = "ssh -J jump@gw.example.net root@pod-123.pods.example.net"
+
+    with client.ssh_connection(pod):
+        pod_client, gateway = clients
+        assert gateway.kwargs["hostname"] == "gw.example.net" and gateway.kwargs["username"] == "jump"
+        assert gateway.kwargs["port"] == 22 and gateway.kwargs["pkey"] is key
+        assert gateway.hosts == [str(tmp_path / ".lium" / "known_hosts" / "gateway-gw.example.net")]
+        assert gateway.opened == ("direct-tcpip", ("pod-123.pods.example.net", 22))
+        assert pod_client.kwargs["sock"] is channel and pod_client.kwargs["hostname"] == "pod-123.pods.example.net"
+        assert pod_client.hosts == [str(tmp_path / ".lium" / "known_hosts" / "pod-123")]
+        assert not gateway.closed
+    assert pod_client.closed and gateway.closed

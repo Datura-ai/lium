@@ -201,7 +201,7 @@ def _ensure_known_hosts_file(path: Path) -> None:
         path.touch(mode=0o600)
 
 
-def openssh_host_key_options(pod: PodInfo, *, create_pin_file: bool = True) -> List[str]:
+def openssh_host_key_options(pod: Union[PodInfo, str], *, create_pin_file: bool = True) -> List[str]:
     """The ``-o`` arguments that make the OpenSSH client check a pod's host key.
 
     Pinned per pod under ``~/.lium/known_hosts/<pod id>`` (created here), accepted
@@ -230,38 +230,91 @@ _SSH_USER_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")   # no leading "-": ss
 _SSH_HOSTNAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?")
 
 
-def ssh_target(ssh_cmd: Optional[str]) -> tuple[str, str, int]:
-    """``(user, host, port)`` from the API's ``ssh_connect_cmd``, or ``ValueError``.
+def _ssh_user_host(token: str) -> Optional[tuple[str, str]]:
+    """``(user, host)`` from ``user@host``, or None when either part is not a plain name or address."""
+    user, sep, host = token.partition("@")
+    if not sep or len(user) > 32 or len(host) > 253 or not _SSH_USER_RE.fullmatch(user):
+        return None
+    if not _SSH_HOSTNAME_RE.fullmatch(host):
+        try:
+            if "%" in host:  # an IPv6 scope id is not an address the API sends
+                return None
+            ipaddress.ip_address(host)
+        except ValueError:
+            return None
+    return user, host
 
-    The API sends ``ssh <user>@<host> -p <port>`` and nothing else. Only that shape
-    (``-p <port>`` optional, default 22) is accepted — every token is checked, so a
-    value that carries anything besides a user, an address and a port (an extra ssh
-    option, a shell character) is refused instead of being handed to ssh or to a shell.
-    """
+
+def _ssh_parts(ssh_cmd: Optional[str]) -> tuple[Optional[tuple[str, str]], str, str, int]:
+    """``(jump, user, host, port)`` of :func:`ssh_target`; ``jump`` is ``(user, host)`` of ``-J`` or None."""
     if not ssh_cmd:
         raise ValueError("No SSH command for this pod")
+    bad = ValueError(f"Unexpected ssh command from the API: {ssh_cmd!r}")
     try:
         tokens = shlex.split(ssh_cmd)
     except ValueError as e:
         raise ValueError(f"Unexpected ssh command from the API: {ssh_cmd!r} ({e})") from e
-    if len(tokens) not in (2, 4) or tokens[0] != "ssh":
-        raise ValueError(f"Unexpected ssh command from the API: {ssh_cmd!r}")
-    user, sep, host = tokens[1].partition("@")
-    if not sep or len(user) > 32 or len(host) > 253 or not _SSH_USER_RE.fullmatch(user):
-        raise ValueError(f"Unexpected ssh command from the API: {ssh_cmd!r}")
-    if not _SSH_HOSTNAME_RE.fullmatch(host):
-        try:
-            if "%" in host:  # an IPv6 scope id is not an address the API sends
-                raise ValueError(host)
-            ipaddress.ip_address(host)
-        except ValueError:
-            raise ValueError(f"Unexpected ssh command from the API: {ssh_cmd!r}") from None
+    if not tokens or tokens[0] != "ssh":
+        raise bad
+    tokens = tokens[1:]
+    jump = None
+    if tokens[:1] == ["-J"]:
+        # shortcut: a jump of exactly user@host (port 22), the gateway form the API sends; widen if it ever adds a port
+        jump = _ssh_user_host(tokens[1]) if len(tokens) > 1 else None
+        if jump is None:
+            raise bad
+        tokens = tokens[2:]
+    if len(tokens) not in (1, 3):
+        raise bad
+    target = _ssh_user_host(tokens[0])
+    if target is None:
+        raise bad
     port = 22
-    if len(tokens) == 4:
-        if tokens[2] != "-p" or not re.fullmatch(r"[0-9]{1,5}", tokens[3]) or not 1 <= int(tokens[3]) <= 65535:
-            raise ValueError(f"Unexpected ssh command from the API: {ssh_cmd!r}")
-        port = int(tokens[3])
+    if len(tokens) == 3:
+        if tokens[1] != "-p" or not re.fullmatch(r"[0-9]{1,5}", tokens[2]) or not 1 <= int(tokens[2]) <= 65535:
+            raise bad
+        port = int(tokens[2])
+    return jump, *target, port
+
+
+def ssh_target(ssh_cmd: Optional[str]) -> tuple[str, str, int]:
+    """``(user, host, port)`` from the API's ``ssh_connect_cmd``, or ``ValueError``.
+
+    The API sends ``ssh <user>@<host> -p <port>``, or through the Lium gateway
+    ``ssh -J <user>@<gateway> <user>@<host>`` (:func:`ssh_jump`), and nothing else.
+    Only those shapes (``-p <port>`` optional, default 22) are accepted — every token
+    is checked, so a value that carries anything besides a jump, a user, an address and
+    a port (an extra ssh option, a shell character) is refused instead of being handed
+    to ssh or to a shell.
+    """
+    _jump, user, host, port = _ssh_parts(ssh_cmd)
     return user, host, port
+
+
+def ssh_jump(ssh_cmd: Optional[str]) -> Optional[tuple[str, str]]:
+    """``(user, host)`` of the gateway the pod is reached through (``-J``), or None for a direct pod."""
+    return _ssh_parts(ssh_cmd)[0]
+
+
+def openssh_jump_options(pod: PodInfo, key_path: Optional[str] = None, *, create_pin_file: bool = True) -> List[str]:
+    """``-o ProxyCommand=...`` reaching the pod through its gateway, or ``[]`` for a direct pod.
+
+    Not ``-J``: options given on ssh's command line do not reach a ProxyJump hop, so the
+    gateway's key would be checked against ``~/.ssh/known_hosts`` with whatever the user's
+    config says. The ProxyCommand's ssh gets the same key and pinning as the pod itself;
+    the gateway's key is pinned under ``~/.lium/known_hosts/gateway-<host>``.
+    """
+    jump = ssh_jump(pod.ssh_cmd)
+    if jump is None:
+        return []
+    user, host = jump
+    hop = ["ssh", "-F", "/dev/null"]
+    if key_path:
+        hop += ["-i", str(Path(key_path).expanduser()), "-o", "IdentitiesOnly=yes"]
+    hop += [*openssh_host_key_options(f"gateway-{host}", create_pin_file=create_pin_file), f"{user}@{host}"]
+    # ssh expands %-tokens in a ProxyCommand: a literal "%" in a path must not be read as one
+    hop = [arg.replace("%", "%%") for arg in hop]
+    return ["-o", "ProxyCommand=" + shlex.join([*hop[:-1], "-W", "%h:%p", hop[-1]])]
 
 
 def pod_ssh_command(pod: PodInfo) -> Optional[str]:
@@ -280,7 +333,7 @@ def pod_ssh_command(pod: PodInfo) -> Optional[str]:
         user, host, port = ssh_target(pod.ssh_cmd)
     except ValueError:
         return None
-    options = openssh_host_key_options(pod, create_pin_file=False)
+    options = [*openssh_jump_options(pod, create_pin_file=False), *openssh_host_key_options(pod, create_pin_file=False)]
     return shlex.join(["ssh", "-p", str(port), *options, f"{user}@{host}"])
 
 
@@ -3638,6 +3691,7 @@ class Lium:
         # The same shape check the OpenSSH path (ssh_argv, pod_ssh_command) applies: only
         # `ssh <user>@<host> [-p <port>]` reaches connect(); anything else is a ValueError here.
         user, host, port = ssh_target(pod.ssh_cmd)
+        jump = ssh_jump(pod.ssh_cmd)
         if deadline is not None:
             left = deadline - time.monotonic()
             if left <= 0:
@@ -3655,14 +3709,18 @@ class Lium:
 
         # Connect. Host keys are pinned per pod under ~/.lium/known_hosts/ (trust
         # on first use, reject on change) unless LIUM_SSH_INSECURE=1.
-        client = paramiko.SSHClient()
-        if ssh_insecure():
-            client.set_missing_host_key_policy(_InsecureAcceptPolicy())
-        else:
-            hosts_file = known_hosts_path(pod)
-            _ensure_known_hosts_file(hosts_file)
-            client.load_host_keys(str(hosts_file))
-            client.set_missing_host_key_policy(_PinOnFirstUsePolicy())
+        def pinned_client(pin: Union[PodInfo, str]) -> Any:
+            client = paramiko.SSHClient()
+            if ssh_insecure():
+                client.set_missing_host_key_policy(_InsecureAcceptPolicy())
+            else:
+                hosts_file = known_hosts_path(pin)
+                _ensure_known_hosts_file(hosts_file)
+                client.load_host_keys(str(hosts_file))
+                client.set_missing_host_key_policy(_PinOnFirstUsePolicy())
+            return client
+
+        client = pinned_client(pod)
         connect_kwargs = {
             "hostname": host,
             "port": port,
@@ -3681,12 +3739,32 @@ class Lium:
             # Paramiko cannot parse the private key file directly.
             connect_kwargs["key_filename"] = str(self.config.ssh_key_path)
             connect_kwargs["allow_agent"] = True
+        gateway = None
         try:
+            if jump is not None:
+                # the Lium gateway (DAH-3799): same key, its own pin (gateway-<host>), then a tunnel to the pod
+                gateway = pinned_client(f"gateway-{jump[1]}")
+                hop_kwargs = {**connect_kwargs, "hostname": jump[1], "port": 22, "username": jump[0]}
+                if deadline is None:
+                    gateway.connect(**hop_kwargs)
+                else:
+                    _connect_by(gateway, hop_kwargs, deadline, f"SSH connection to the gateway of pod {pod.name}")
+                connect_kwargs["sock"] = gateway.get_transport().open_channel(
+                    "direct-tcpip", (host, port), ("127.0.0.1", 0), timeout=timeout
+                )
             if deadline is None:
                 client.connect(**connect_kwargs)
             else:
                 _connect_by(client, connect_kwargs, deadline, f"SSH connection to pod {pod.name}")
         except paramiko.BadHostKeyException as e:
+            if gateway is not None:
+                gateway.close()
+            if jump is not None and "sock" not in connect_kwargs:
+                raise LiumHostKeyError(
+                    f"Host key for the Lium gateway {jump[1]} changed: got {host_key_fingerprint(e.key)}, pinned "
+                    f"{host_key_fingerprint(e.expected_key)}; the connection may be intercepted. If you trust the "
+                    f"new key, delete {known_hosts_path(f'gateway-{jump[1]}')} and reconnect."
+                ) from e
             hosts_file = known_hosts_path(pod)
             raise LiumHostKeyError(
                 f"Host key for pod {pod.name} ({host}:{port}) changed: got "
@@ -3697,6 +3775,10 @@ class Lium:
                 f"connection is being intercepted. If you trust the new key, delete {hosts_file} "
                 f"and reconnect; {_SSH_INSECURE_ENV}=1 disables pinning."
             ) from e
+        except BaseException:
+            if gateway is not None:
+                gateway.close()
+            raise
 
         # A kept connection suspends here for as long as it is kept, and the pool holds this generator:
         # a frame that still named the client would keep it from ever being collected (and so from
@@ -3706,6 +3788,8 @@ class Lium:
             yield client
         finally:
             client.close()
+            if gateway is not None:
+                gateway.close()
 
     @staticmethod
     def _env_exports(env: Dict[str, str]) -> str:
@@ -4852,7 +4936,7 @@ class Lium:
         argv = ["ssh"]
         if self.config.ssh_key_path:
             argv += ["-i", str(Path(self.config.ssh_key_path).expanduser())]
-        argv += ["-p", str(port), *openssh_host_key_options(pod), f"{user}@{host}"]
+        argv += ["-p", str(port), *openssh_jump_options(pod, self.config.ssh_key_path), *openssh_host_key_options(pod), f"{user}@{host}"]
         return argv
 
     def refresh_pod(self, pod: Union[str, PodInfo]) -> PodInfo:
@@ -4974,7 +5058,8 @@ class Lium:
 
         user, host, port = ssh_target(pod.ssh_cmd)
         ssh_cmd = shlex.join(
-            ["ssh", "-i", str(self.config.ssh_key_path), "-p", str(port), *openssh_host_key_options(pod)]
+            ["ssh", "-i", str(self.config.ssh_key_path), "-p", str(port),
+             *openssh_jump_options(pod, self.config.ssh_key_path), *openssh_host_key_options(pod)]
         )
         remote_spec = f"{user}@{host}:{remote}"
         endpoints = [remote_spec, local] if download else [local, remote_spec]
@@ -5044,6 +5129,12 @@ class Lium:
             raise ValueError(f"No SSH for destination pod {dst_pod.name or dst_pod.huid}")
         # the hop from the source pod is told the same user, host and port this client validated
         dst_user, dst_host, dst_port = ssh_target(dst_pod.ssh_cmd)
+        if ssh_jump(dst_pod.ssh_cmd) is not None:
+            # shortcut: the hop would need the gateway to accept the one-off transfer key; add once the gateway's auth is settled
+            raise LiumError(
+                f"Pod {dst_pod.name or dst_pod.huid} is reached through the Lium gateway; a direct pod-to-pod copy "
+                f"to it is not supported yet. Copy through this machine instead (download, then upload)."
+            )
 
         # The key pair is made here, not on the source pod: whatever the source prints is never
         # what the destination authorises (bounty report 6, DAH-3511).
