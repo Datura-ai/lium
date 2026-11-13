@@ -5681,6 +5681,22 @@ class Lium:
         ).json()
         return resp["wallet_hash"]
 
+    def link_gamma_hotkey(self, hotkey: str, sign) -> dict:
+        """Link ``hotkey`` so SN51 gamma minted into it becomes this account's USD credit.
+
+        ``sign(message) -> str`` signs the server's challenge with the hotkey's key
+        (0x-hex sr25519). Linking an already-linked hotkey is a no-op. Returns
+        ``{"hotkey", "netuid", "spender"}``; a ``mint_gamma`` must name ``spender``.
+        """
+        message = self._request(
+            "GET", "/gamma/hotkeys/challenge", params={"hotkey": hotkey}
+        ).json()["message"]
+        return self._request(
+            "POST",
+            "/gamma/hotkeys",
+            json={"hotkey": hotkey, "message": message, "signature": sign(message)},
+        ).json()
+
     def backup_create(
         self,
         pod: PodInfo,

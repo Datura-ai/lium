@@ -18,6 +18,7 @@ from lium.cli.utils import (
 from lium.cli.settings import config
 from lium.provider.chain_stack import missing_chain_stack_message
 from . import validation
+from .gamma import gamma_fund
 from .actions import (
     LoadWalletAction,
     UnlockColdkeyAction,
@@ -406,11 +407,45 @@ def _alpha_fund(
     ui.info("Done.")
 
 
+def _gamma_fund(wallet: Optional[str], amount: Optional[str], yes: bool, json_output: bool) -> None:
+    """Pay ``amount`` USD with SN51 gamma minted from the wallet's TAO (see ``gamma.py``)."""
+    try:
+        import bittensor as bt
+    except ImportError as e:
+        raise CliFailure(
+            "provider_extra_missing",
+            f"Gamma funding needs the chain stack. Reason: {missing_chain_stack_message()}",
+            EXIT_CONFIGURATION_ERROR,
+        ) from e
+    if json_output and not wallet:
+        raise LiumError("wallet is required: pass --wallet")
+    if json_output and not amount:
+        raise LiumError("amount is required: pass --amount")
+    if not wallet:
+        default_wallet = config.get("funding.default_wallet", "default")
+        wallet = ui.prompt("Wallet name", default=default_wallet, hint="pass --wallet").strip()
+    if not amount:
+        amount = ui.prompt("Enter USD amount to fund", hint="pass --amount").strip()
+    usd_amount, error = validation.validate_amount(amount)
+    if error:
+        raise LiumError(error)
+    result = LoadWalletAction().execute({"bt": bt, "wallet_name": wallet})
+    if not result.ok:
+        raise LiumError(f"Failed to load wallet '{wallet}': {result.error}")
+    gamma_fund(bt, result.data["wallet"], result.data["address"], wallet, usd_amount, yes, json_output)
+
+
 @click.command("fund")
 @click.option("--wallet", "-w", help="Name of the local wallet to fund from")
-@click.option("--amount", "-a", help="Amount to fund with (TAO; USD when --alpha)")
+@click.option("--amount", "-a", help="Amount to fund with (TAO; USD when --alpha or --gamma)")
 @click.option(
     "--alpha", is_flag=True, default=False, help="Fund with free alpha stake"
+)
+@click.option(
+    "--gamma",
+    is_flag=True,
+    default=False,
+    help="Pay USD with SN51 gamma minted from the wallet's TAO (1 gamma = 1 USD)",
 )
 @click.option(
     "--hotkey",
@@ -435,12 +470,13 @@ def fund_command(
     wallet: Optional[str],
     amount: Optional[str],
     alpha: bool,
+    gamma: bool,
     hotkey: Optional[str],
     netuid: Optional[int],
     json_output: bool,
     yes: bool,
 ):
-    """Fund your Lium account with TAO or free alpha from your wallet.
+    """Fund your Lium account with TAO, free alpha or SN51 gamma from your wallet.
 
     \b
     Examples:
@@ -451,7 +487,17 @@ def fund_command(
       lium fund --alpha -w default -k myhotkey -a 25  # -k may be a wallet hotkey name
       lium fund --alpha -k <hotkey-ss58> -a 25 -y --json
       lium fund --alpha -k <hotkey-ss58> -a 25 --netuid 64  # alpha from subnet 64
+      lium fund --gamma -w default -a 25              # -a is USD; mints SN51 gamma
     """
+    if gamma:
+        if alpha or hotkey or netuid is not None:
+            raise CliFailure(
+                "gamma_options",
+                "--gamma pays from the wallet's TAO; drop --alpha, --hotkey and --netuid",
+                EXIT_CONFIGURATION_ERROR,
+            )
+        _gamma_fund(wallet, amount, yes, json_output)
+        return
     if netuid is not None and not alpha:
         raise CliFailure(
             "netuid_needs_alpha",
