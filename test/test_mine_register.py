@@ -993,6 +993,27 @@ def test_a_48gb_rtx_4090_at_the_low_window_edge_is_listed_as_48gb() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("raw", "vram_mib", "listed"),
+    [
+        ("NVIDIA GeForce RTX 4080", 32607, "NVIDIA GeForce RTX 4080 32GB"),
+        ("NVIDIA GeForce RTX 4080 SUPER", 32607, "NVIDIA GeForce RTX 4080 SUPER 32GB"),
+        (
+            "NVIDIA GeForce RTX 4080",
+            16376,
+            "NVIDIA GeForce RTX 4080",
+        ),  # factory 16 GB card
+        (
+            "NVIDIA GeForce RTX 4080 SUPER",
+            None,
+            "NVIDIA GeForce RTX 4080 SUPER",
+        ),  # no reading: no relabel
+    ],
+)
+def test_a_32gb_rtx_4080_is_listed_as_its_modded_model(raw, vram_mib, listed) -> None:
+    assert reg._listed_gpu_model(raw, 1, None, vram_mib) == listed
+
+
 def _measured_row(machine_name: str | None, count: int = 8) -> dict:
     row = {
         "id": "node-1",
@@ -1137,6 +1158,57 @@ def test_a_validated_rtx_4090_rerun_matches_either_listed_name(
             _http(portal),
             miner_hotkey=HOTKEY,
             gpu_type="NVIDIA GeForce RTX 4090",
+            gpu_count=1,
+            ip_address="203.0.113.7",
+            port=8080,
+            price_per_gpu=0.11,
+            vram_mib=mib,
+        )
+
+    if ok:
+        assert call() == reg.NodeRecord(node_id="node-1", already_registered=True)
+    else:
+        with pytest.raises(reg.RegisterError, match="not registered"):
+            call()
+
+
+@pytest.mark.parametrize(
+    "raw", ["NVIDIA GeForce RTX 4080", "NVIDIA GeForce RTX 4080 SUPER"]
+)
+@pytest.mark.parametrize(
+    ("machine_name", "mib", "ok"),
+    [
+        (None, 32760, True),  # not validated yet: the raw name this host sent
+        ("{raw} 32GB", 32760, True),  # validated 32 GB host re-run
+        ("{raw}", 32760, True),  # validated before the modded name shipped
+        ("{raw}", 16376, True),  # factory 16 GB card, factory name
+        ("{raw} 32GB", 16376, False),  # a 16 GB card is not the 32 GB node
+    ],
+)
+def test_a_32gb_rtx_4080_rerun_is_compared_as_the_model_it_is_listed_as(
+    raw, machine_name, mib, ok
+) -> None:
+    row = {
+        "id": "node-1",
+        "executor_ip_address": "203.0.113.7",
+        "executor_ip_port": "8080",
+        "gpu_type": raw,
+        "gpu_count": 1,
+    }
+    if machine_name is not None:
+        row["executor_info"] = {
+            "machine_name": machine_name.format(raw=raw),
+            "gpu_count": 1,
+        }
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(400, {"detail": reg._ALREADY_EXISTS}))
+    portal.on("GET", "/executors", _Resp(200, {"success": True, "data": [row]}))
+
+    def call():
+        return reg.register_node(
+            _http(portal),
+            miner_hotkey=HOTKEY,
+            gpu_type=raw,
             gpu_count=1,
             ip_address="203.0.113.7",
             port=8080,
