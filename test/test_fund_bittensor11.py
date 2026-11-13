@@ -87,7 +87,9 @@ class _Intent:
 
 # execute() must get the unlocked keypair: given the wallet, bittensor 11 unlocks it again at signing and the
 # second password prompt sits unseen under the spinner
-WALLET = types.SimpleNamespace(coldkey="unlocked-coldkey")
+WALLET = types.SimpleNamespace(
+    coldkey=types.SimpleNamespace(ss58_address=ALICE), coldkeypub=types.SimpleNamespace(ss58_address=ALICE)
+)
 
 
 class _Subtensor11:
@@ -236,6 +238,19 @@ def test_tao_transfer_runs_a_transfer_intent_on_bittensor_11(monkeypatch):
     [(intent, signer)] = subtensor.executed
     assert (intent.op, signer) == ("transfer", WALLET.coldkey)
     assert intent.fields == {"dest_ss58": LIUM_FUNDING_ADDRESS, "amount_tao": _Balance(5 * 10**8)}
+
+
+def test_a_coldkey_file_of_another_account_sends_nothing_on_bittensor_11(monkeypatch):
+    subtensor = _Subtensor11()
+    monkeypatch.setitem(sys.modules, "bittensor", _bt11(subtensor))
+    swapped = types.SimpleNamespace(
+        coldkey=types.SimpleNamespace(ss58_address=BOB), coldkeypub=types.SimpleNamespace(ss58_address=ALICE)
+    )
+
+    result = ExecuteTransferAction().execute({"bt_wallet": swapped, "tao_amount": 0.5})
+
+    assert not result.ok and "coldkeypub.txt" in result.error
+    assert subtensor.executed == []
 
 
 def test_a_refused_tao_transfer_on_bittensor_11_reports_the_chain_message(monkeypatch):

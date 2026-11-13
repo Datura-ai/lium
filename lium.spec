@@ -39,7 +39,7 @@ datas += collect_data_files("bittensor", include_py_files=False)
 datas += collect_data_files("bittensor_cli", include_py_files=False)
 # scalecodec's type registry (JSON): without it runtime_call / compose_call fail with
 # 'Decoder class for "MetadataVersioned" not found'
-datas += collect_data_files("scalecodec", include_py_files=False)
+datas += collect_data_files("scalecodec", includes=["**/*.json"])
 datas += collect_data_files("plotly", include_py_files=False)
 datas += collect_data_files("certifi", include_py_files=False)
 
