@@ -168,18 +168,15 @@ def _first_gpu_detail(specs: Optional[Dict]) -> Dict:
     return details[0] if details else {}
 
 
-_DISK_SYSTEM_RESERVE_KIB = 20 * 1024 * 1024  # what the rent keeps off the free disk before it splits it
-
-
-def _pod_disk_kib(executor: ExecutorInfo, free_kib: Any) -> Optional[float]:
-    """The disk a pod renting the node's free GPUs gets: (free − 20 GB) × its GPU share, as the web node card shows."""
-    free = _intish(free_kib)
-    # a node without storage_limit_supported sets no per-pod limit: the pod can use all its free disk
-    if free is None or not executor.gpu_count or not (executor.specs or {}).get("storage_limit_supported"):
-        return free
-    if free < 8192:  # already GiB, as _maybe_gi_from_big_number reads it
-        free *= 1024 * 1024
-    return max(free - _DISK_SYSTEM_RESERVE_KIB, 0) * _rentable(executor) / executor.gpu_count
+def _pod_disk(executor: ExecutorInfo) -> str:
+    """The disk (GiB) a pod renting the node's free GPUs gets: the API's pod_disk for that count (/root volume +
+    pod disk), the rent's own numbers. A node that sets no per-pod limit lets the pod use all its free disk."""
+    if executor.pod_disk is None:
+        free_kib = _intish(((executor.specs or {}).get("hard_disk") or {}).get("free"))
+        # the API serves KiB: convert it directly, so a nearly full node's few MiB never read as GiB
+        return "—" if free_kib is None else str(round(free_kib / (1024 * 1024)))
+    share = executor.pod_disk.get(str(_rentable(executor))) or {}
+    return str((_intish(share.get("volume_gb")) or 0) + (_intish(share.get("storage_gb")) or 0))
 
 
 def _specs_row(executor: ExecutorInfo) -> Dict[str, str]:
@@ -200,10 +197,9 @@ def _specs_row(executor: ExecutorInfo) -> Dict[str, str]:
         "VRAM": _maybe_gi_from_capacity(d.get("capacity")),
         "RAM": _maybe_gi_from_big_number(ram.get("total")),
         "CPUs": _maybe_int((specs.get("cpu") or {}).get("count")),
-        # free, not total: a pod gets a share of the host's FREE disk (≈ (free − 20 GB) × its GPU share,
-        # 2/3 as the /root volume + 1/3 as /workspace), so the total is the one number a renter never sees
+        # free, not total: a pod's disk comes out of the host's FREE disk (PodDisk is the share the API serves)
         "Disk": _maybe_gi_from_big_number(disk.get("free")),
-        "PodDisk": _maybe_gi_from_big_number(_pod_disk_kib(executor, disk.get("free"))),
+        "PodDisk": _pod_disk(executor),
         "DiskTotal": _maybe_gi_from_big_number(disk.get("total")),
         "Country": _country_name(specs.get("location")),
         "Upload": _speed_cell(upload, upload_source),

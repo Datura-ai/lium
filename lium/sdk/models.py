@@ -97,6 +97,10 @@ class ExecutorInfo(_Serializable):
     # When an open permanent removal deletes a pod on the node (ISO 8601 UTC), also when an earlier maintenance
     # window is the ``scheduled_notice``; None = no removal, or the API did not send it.
     removal_at: Optional[str] = None
+    # The disk a pod of each GPU count (a string key) gets, as the API serves it from the rent's own split:
+    # ``{"2": {"volume_gb": 400, "storage_gb": 200}}`` (the /root volume and the pod disk). None: the node sets no
+    # per-pod limit, so a pod can use all its free disk, or the API did not send it.
+    pod_disk: Optional[Dict] = None
 
     @property
     def notice_warning(self) -> Optional[str]:
