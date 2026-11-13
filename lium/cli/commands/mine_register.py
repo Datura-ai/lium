@@ -387,7 +387,7 @@ def register_node(
         )
         if info.get("machine_name"):  # validated: compare the validator's measured name
             # the H100 adapter relabel is hardware (NVLink), so its raw name must not match an HGX node; the
-            # RTX 4090 48GB relabel depends on the validator's flag and VRAM reading, so either name may be listed
+            # memory-modded relabel depends on the validator's VRAM reading, so either name may be listed
             adapter = listed == "NVIDIA H100 PCIe" and not _same_gpu_model(hw, listed)
             measured = {**row, "gpu_type": info["machine_name"]}
             another = all(
@@ -465,9 +465,17 @@ def read_nvlink_pairs(run: Callable[[str], tuple[str, str]]) -> int | None:
     return sum(len(re.findall(r"\bNV\d+\b", ln)) for ln in rows) // 2 if rows else None
 
 
-# lium-io classify_gpu_model names a plain RTX 4090 with 48 GB VRAM "...48GB" while RTX_4090_48GB_MODEL_ENABLED is on;
-# any reading above the 24 GB card's window counts, since the validator's own reading can sit outside the window this host computes
-_RTX_4090_24GB_MAX_MIB = round(24576 * 1.05)
+# lium-io gpu_spec_table.MODDED_VRAM_MODELS: a memory-modded card reports its base card's name, and the validator lists
+# it as its own model from the VRAM reading. Base name -> (modded name, base card's top MiB); any reading above the
+# base card's window counts, since the validator's own reading can sit outside the window this host computes
+_MODDED_GPU_MODELS = {
+    "NVIDIA GeForce RTX 4090": ("NVIDIA GeForce RTX 4090 48GB", round(24576 * 1.05)),
+    "NVIDIA GeForce RTX 4080": ("NVIDIA GeForce RTX 4080 32GB", round(16384 * 1.05)),
+    "NVIDIA GeForce RTX 4080 SUPER": (
+        "NVIDIA GeForce RTX 4080 SUPER 32GB",
+        round(16384 * 1.05),
+    ),
+}
 
 
 def _listed_gpu_model(
@@ -482,13 +490,11 @@ def _listed_gpu_model(
         == "NVIDIA H100 80GB HBM3"
     ):
         return "NVIDIA H100 PCIe"
-    if (
+    modded = _MODDED_GPU_MODELS.get(
         _GPU_ALIASES.get(gpu_type.strip(), gpu_type.strip())
-        == "NVIDIA GeForce RTX 4090"
-        and vram_mib is not None
-        and vram_mib > _RTX_4090_24GB_MAX_MIB
-    ):
-        return "NVIDIA GeForce RTX 4090 48GB"
+    )
+    if modded and vram_mib is not None and vram_mib > modded[1]:
+        return modded[0]
     return gpu_type
 
 

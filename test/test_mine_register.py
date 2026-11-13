@@ -993,6 +993,27 @@ def test_a_48gb_rtx_4090_at_the_low_window_edge_is_listed_as_48gb() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("raw", "vram_mib", "listed"),
+    [
+        ("NVIDIA GeForce RTX 4080", 32607, "NVIDIA GeForce RTX 4080 32GB"),
+        ("NVIDIA GeForce RTX 4080 SUPER", 32607, "NVIDIA GeForce RTX 4080 SUPER 32GB"),
+        (
+            "NVIDIA GeForce RTX 4080",
+            16376,
+            "NVIDIA GeForce RTX 4080",
+        ),  # factory 16 GB card
+        (
+            "NVIDIA GeForce RTX 4080 SUPER",
+            None,
+            "NVIDIA GeForce RTX 4080 SUPER",
+        ),  # no reading: no relabel
+    ],
+)
+def test_a_32gb_rtx_4080_is_listed_as_its_modded_model(raw, vram_mib, listed) -> None:
+    assert reg._listed_gpu_model(raw, 1, None, vram_mib) == listed
+
+
 def _measured_row(machine_name: str | None, count: int = 8) -> dict:
     row = {
         "id": "node-1",
