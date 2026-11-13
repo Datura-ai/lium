@@ -7,13 +7,14 @@ as in the web Billing page, so one key signs both the link and the mint.
 """
 
 import json
-from decimal import Decimal, ROUND_CEILING
+from decimal import ROUND_CEILING, Decimal
 
 import click
 
-from lium.sdk import Lium, LiumError
 from lium.cli import ui
-from lium.cli.utils import CliFailure, EXIT_GENERAL_ERROR
+from lium.cli.utils import EXIT_GENERAL_ERROR, CliFailure
+from lium.sdk import Lium, LiumError
+
 from . import validation
 
 NETUID = 51
@@ -98,7 +99,7 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
     try:
         receipt = ui.load("Minting gamma", mint)
         ok, error = receipt.is_success, None if receipt.is_success else receipt.error_message
-    except Exception as e:  # a submit that raised may still have landed
+    except Exception as e:  # noqa: BLE001 - a submit that raised may still have landed
         ok, error = False, str(e)
     if not ok:
         raise CliFailure("transfer_failed", f"Gamma mint failed: {error}", EXIT_GENERAL_ERROR, hint=FAILED_HINT)
