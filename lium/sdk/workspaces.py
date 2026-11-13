@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import requests
 
-from .exceptions import LiumAuthError, LiumError, LiumSessionError
+from .exceptions import LiumAuthError, LiumError, LiumSessionError, LiumTwoFactorRequired
 from .models import WorkspaceInfo, WorkspaceMember
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -97,7 +97,24 @@ class WorkspacesClient:
             # the rename (DAH-3057) so the refusal can be quoted to support; its code and hint describe an API key
             # and stay behind — the CLI's `session_required` code and login hint are the right ones here
             raise LiumSessionError("Login refused: check the e-mail and password", request_id=e.request_id) from e
-        token = response.json().get("token")
+        body = response.json()
+        if body.get("mfa_required"):
+            raise LiumTwoFactorRequired(body.get("mfa_token") or "")
+        return self._keep_token(body.get("token"))
+
+    def login_two_factor(self, mfa_token: str, code: str) -> str:
+        """Finish a sign-in that raised ``LiumTwoFactorRequired`` with an authenticator or recovery code."""
+        try:
+            response = self._lium._request(
+                "POST", "/auth/login-totp", headers=self._plain_headers(), json={"mfa_token": mfa_token, "code": code}
+            )
+        except LiumAuthError as e:
+            raise LiumSessionError(
+                "Login refused: wrong or expired two-factor code; sign in again", request_id=e.request_id
+            ) from e
+        return self._keep_token(response.json().get("token"))
+
+    def _keep_token(self, token: Optional[str]) -> str:
         if not token:
             raise LiumSessionError("Login did not return a session token")
         self._lium.config.session_token = token

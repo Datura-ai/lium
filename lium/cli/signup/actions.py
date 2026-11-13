@@ -7,9 +7,11 @@ import string
 from datetime import datetime, timezone
 from urllib.parse import quote
 
+import click
 import requests
 
 from lium.cli.actions import ActionResult
+from lium.cli.interactive import is_interactive
 from lium.cli.settings import config
 from lium.sdk.exceptions import LiumError
 from lium.sdk.utils import request_same_origin
@@ -119,7 +121,45 @@ def refuse_if_key_configured() -> ActionResult | None:
     )
 
 
-def session_token(login_path: str, credentials: dict) -> tuple[str | None, str | None]:
+def totp_code_source(totp_code: str | None = None):
+    """Codes for a sign-in that asks for one (lium#370's rule): ``--totp-code`` answers the first ask,
+    a terminal is asked after that, and without one nothing is asked (``None``)."""
+    given = [totp_code] if totp_code else []
+
+    def ask() -> str | None:
+        if given:
+            return given.pop()
+        if not is_interactive():
+            return None
+        return click.prompt("Authenticator code (or a recovery code)", err=True, hide_input=True)
+
+    return ask
+
+
+def _signed_in(body: dict, ask_code) -> tuple[str | None, str | None]:
+    """The session token of a login answer, finishing a two-factor challenge (DAH-5906) with a code."""
+    if not body.get("mfa_required"):
+        token = body.get("token")
+        return (token, None) if token else (None, "login returned no session token")
+    code = ask_code() if ask_code else None
+    if not code:
+        return None, "the account asks for a two-factor code: pass --totp-code <code>, or run it in a terminal"
+    try:
+        response = request_same_origin(
+            _send, "POST", f"{base_url()}/auth/login-totp",
+            json={"mfa_token": body.get("mfa_token"), "code": code}, timeout=REQUEST_TIMEOUT,
+        )
+    except (requests.RequestException, LiumError) as e:
+        return None, f"two-factor request failed: {e}"
+    if response.status_code == 401:
+        return None, "login refused: wrong or expired two-factor code"
+    if response.status_code >= 400:
+        return None, f"two-factor login failed with HTTP {response.status_code}"
+    token = _json_object(response).get("token")
+    return (token, None) if token else (None, "login returned no session token")
+
+
+def session_token(login_path: str, credentials: dict, ask_code=None) -> tuple[str | None, str | None]:
     """A session token from `POST <login_path>`: ``(token, None)``, or ``(None, why)``."""
     try:
         response = request_same_origin(
@@ -129,23 +169,26 @@ def session_token(login_path: str, credentials: dict) -> tuple[str | None, str |
         return None, f"login request failed: {e}"
     if response.status_code >= 400:
         return None, f"login failed with HTTP {response.status_code}"
-    token = _json_object(response).get("token")
-    return (token, None) if token else (None, "login returned no session token")
+    return _signed_in(_json_object(response), ask_code)
 
 
 class SignupAction:
     """Register an account and return the API key minted for it.
 
     The account is created by ``POST /users``; the API key that call mints is
-    read back with ``POST /users/login`` + ``GET /keys``. Newer backends return
+    read back with ``POST /users/login`` + ``GET /keys``. Some backends return
     the key in the signup response itself — when they do, the two extra calls
-    are skipped.
+    are skipped. Newer ones do not: ``POST /users`` answers a taken address the
+    same as a new one, so a refused login is how a taken address shows up here.
     """
 
-    def __init__(self, email: str, password: str, display_name: str):
+    def __init__(self, email: str, password: str, display_name: str, ask_code=None):
         self.email = email
         self.password = password
         self.display_name = display_name
+        self.ask_code = ask_code
+        self._login_refused: bool = False
+        self._login_why: str | None = None
 
     def execute(self, ctx: dict) -> ActionResult:
         refused = refuse_if_key_configured()
@@ -157,11 +200,20 @@ class SignupAction:
             return creation_result
 
         api_key = creation_result.data.get("api_key") or self._read_minted_key()
+        if not api_key and self._login_refused:
+            return ActionResult(
+                ok=False,
+                data={},
+                error=f"Could not sign in as {self.email} with this password. If this e-mail already has a "
+                      "Lium account, run 'lium init' with its API key, or reset its password at "
+                      "https://lium.io/request-password.",
+            )
         if not api_key:
             return ActionResult(
                 ok=False,
                 data={"account_may_exist": True},
-                error="Account created, but the API key could not be read back.",
+                error="Account created, but the API key could not be read back"
+                      + (f" ({self._login_why})." if self._login_why else "."),
             )
 
         config.set("api.api_key", api_key)
@@ -214,8 +266,9 @@ class SignupAction:
                 json={"email": self.email, "password": self.password},
                 timeout=REQUEST_TIMEOUT,
             )
+            self._login_refused = login_response.status_code in (400, 401, 403)
             login_response.raise_for_status()
-            token = login_response.json().get("token")
+            token, self._login_why = _signed_in(login_response.json(), self.ask_code)
             if not token:
                 return None
 
@@ -238,11 +291,19 @@ class SignupAction:
 
     @staticmethod
     def _describe_failure(response: requests.Response) -> str:
-        detail = _json_object(response).get("detail")
+        body = _json_object(response)
+        error = body.get("error")
+        # the server's error body carries the reason in `message` (its old shape: `detail`)
+        detail = body.get("detail") or body.get("message") or (error.get("message") if isinstance(error, dict) else None)
 
+        captcha = False
         if isinstance(detail, dict):
-            detail = "; ".join(f"{k}: {v}" for k, v in detail.items())
-        return str(detail) if detail else f"Signup failed with HTTP {response.status_code}."
+            captcha = detail.get("code") == "CAPTCHA_REQUIRED"
+            detail = detail.get("message") or "; ".join(f"{k}: {v}" for k, v in detail.items())
+        if not detail:
+            return f"Signup failed with HTTP {response.status_code}."
+        # the CLI cannot show the check, so point at the site that can
+        return f"{detail} Or sign up at https://lium.io." if captcha else str(detail)
 
 
 class FingerprintSignupAction:
@@ -325,14 +386,16 @@ class MintBillingKeyAction:
     the balance; it reaches no pods.
     """
 
-    def __init__(self, email: str | None = None, password: str | None = None, fingerprint: str | None = None):
+    def __init__(self, email: str | None = None, password: str | None = None, fingerprint: str | None = None,
+                 ask_code=None):
+        self.ask_code = ask_code
         if fingerprint:
             self.login = ("/auth/login", {"fingerprint": fingerprint})
         else:
             self.login = ("/users/login", {"email": email, "password": password})
 
     def execute(self, ctx: dict) -> ActionResult:
-        token, why = session_token(*self.login)
+        token, why = session_token(*self.login, self.ask_code)
         if not token:
             return ActionResult(ok=False, data={}, error=why)
         try:

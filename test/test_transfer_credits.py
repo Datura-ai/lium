@@ -265,8 +265,8 @@ def test_ctrl_c_while_waiting_is_outcome_unknown_with_the_key_and_one_post(clien
 @pytest.mark.parametrize("recipient", ["missing@example.com", "3f1c0000-0000-0000-0000-00000000dead"])
 @pytest.mark.parametrize(
     "status, code",
-    [(404, "not_found"), (409, "recipient_unavailable")],
-    ids=["missing", "deleted-or-blocked"],
+    [(409, "recipient_unavailable")],
+    ids=["missing-deleted-or-blocked"],
 )
 @responses.activate
 def test_cli_recipient_refusals_pass_the_api_code_through(client, recipient, status, code):
@@ -279,7 +279,7 @@ def test_cli_recipient_refusals_pass_the_api_code_through(client, recipient, sta
     assert len(responses.calls) == 1
 
 
-@pytest.mark.parametrize("status, code", [(400, "self_transfer"), (404, "not_found"), (409, "recipient_unavailable")])
+@pytest.mark.parametrize("status, code", [(400, "self_transfer"), (409, "recipient_unavailable")])
 @responses.activate
 def test_cli_refusals_without_a_server_hint_get_a_transfer_hint(client, status, code):
     # live 0.39.0 run: self_transfer said "Retry", not_found pointed at nodes and pods
@@ -294,7 +294,7 @@ def test_cli_refusals_without_a_server_hint_get_a_transfer_hint(client, status, 
 
 @responses.activate
 def test_cli_a_server_hint_on_a_refusal_wins(client):
-    responses.post(URL, status=404, json=_error("not_found", "refused", hint="Ask the recipient to sign up first."))
+    responses.post(URL, status=409, json=_error("recipient_unavailable", "refused", hint="Ask the recipient to sign up first."))
 
     result = _run("friend@example.com", "25", "--yes", "--json")
 

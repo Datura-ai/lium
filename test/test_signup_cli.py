@@ -192,6 +192,25 @@ def test_signup_reports_credentials_when_the_key_cannot_be_read_back(monkeypatch
     assert "copy your API key from the dashboard" in plain
 
 
+def test_signup_on_a_taken_address_says_so_when_the_login_is_refused(monkeypatch, stored_config, ssh_setup_ok):
+    """The server answers a taken address like a new signup; the refused login is what tells the user."""
+    def fake_post(url, **kwargs):
+        if url.endswith("/users"):
+            return FakeResponse(200, {"msg": "success", "is_new_user": True})
+        return FakeResponse(401, {"detail": "Invalid credentials"})
+
+    monkeypatch.setattr(signup_actions.requests, "post", fake_post)
+
+    result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com", "--password", "s3cret-pw"])
+
+    assert result.exit_code != 0
+    plain = " ".join(result.output.split())
+    assert "already has a Lium account" in plain
+    assert "lium init" in plain
+    assert "s3cret-pw" not in plain
+    assert "api.api_key" not in stored_config
+
+
 def test_signup_reports_credentials_when_the_request_times_out(monkeypatch, stored_config, ssh_setup_ok):
     """The backend mails the user inside the request, so a read timeout can still leave an account behind."""
     def timing_out_post(url, **kwargs):
@@ -381,6 +400,45 @@ def test_signup_surfaces_backend_rejection(monkeypatch, stored_config, ssh_setup
     assert "api.api_key" not in stored_config
 
 
+def test_signup_surfaces_the_message_of_the_current_error_body(monkeypatch, stored_config, ssh_setup_ok):
+    body = {"success": False, "status_code": 403,
+            "error": {"code": "FORBIDDEN", "message": "Many signups right now: complete the check to continue."},
+            "message": {"code": "CAPTCHA_REQUIRED", "message": "Many signups right now: complete the check to continue."}}
+    monkeypatch.setattr(signup_actions.requests, "post", lambda url, **kwargs: FakeResponse(403, body))
+
+    result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com"])
+
+    assert result.exit_code != 0
+    assert "complete the check" in result.output and "HTTP 403" not in result.output
+    assert "sign up at https://lium.io" in " ".join(result.output.split())
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"message": "Signups are paused."},
+        {"error": {"code": "FORBIDDEN", "message": "Signups are paused."}},
+        {"error": "Signups are paused.", "message": "Signups are paused."},
+    ],
+)
+def test_signup_reads_a_string_message_and_the_error_message_fallback(monkeypatch, stored_config, ssh_setup_ok, body):
+    monkeypatch.setattr(signup_actions.requests, "post", lambda url, **kwargs: FakeResponse(403, body))
+
+    result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com"])
+
+    assert result.exit_code != 0
+    assert "Signups are paused." in result.output and "lium.io" not in result.output
+
+
+def test_signup_survives_a_string_error_body(monkeypatch, stored_config, ssh_setup_ok):
+    monkeypatch.setattr(signup_actions.requests, "post", lambda url, **kwargs: FakeResponse(403, {"error": "some text"}))
+
+    result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com"])
+
+    assert result.exit_code != 0
+    assert "HTTP 403" in result.output
+
+
 def test_signup_surfaces_rate_limit(monkeypatch, stored_config, ssh_setup_ok):
     monkeypatch.setattr(
         signup_actions.requests, "post",
@@ -482,3 +540,78 @@ def test_signup_refuses_a_redirect_to_another_host_and_keeps_the_password_there(
     assert "evil.example" in result.error
     assert "pw-for-this-test" not in result.error  # the message names hosts, never the credential
     assert result.data.get("account_may_exist") is True
+
+
+def test_a_billing_key_login_that_asks_for_a_two_factor_code_says_so(monkeypatch, stored_config):
+    # DAH-5906: a two-factor account answers the password with a challenge, never a token
+    monkeypatch.setattr(
+        signup_actions.requests, "post",
+        lambda url, **kwargs: FakeResponse(200, {"mfa_required": True, "mfa_token": "mfa.fixture.token"}),
+    )
+
+    result = signup_actions.MintBillingKeyAction(email="ada@example.com", password="pw").execute({})
+
+    assert result.ok is False
+    assert "two-factor code" in result.error and "--totp-code" in result.error
+    assert "billing_api_key" not in stored_config
+
+
+CHALLENGE = {"mfa_required": True, "mfa_token": "mfa.fixture.token"}
+
+
+def test_signup_with_totp_code_finishes_the_two_factor_login(monkeypatch, stored_config, ssh_setup_ok):
+    sent = []
+
+    def fake_post(url, **kwargs):
+        sent.append((url.rsplit("/api", 1)[-1], kwargs.get("json")))
+        if url.endswith("/users"):
+            return FakeResponse(200, {"msg": "success"})
+        if url.endswith("/auth/login-totp"):
+            return FakeResponse(200, {"token": "jwt-token"})
+        return FakeResponse(200, CHALLENGE)
+
+    monkeypatch.setattr(signup_actions.requests, "post", fake_post)
+    monkeypatch.setattr(signup_actions.requests, "get",
+                        lambda url, **kwargs: FakeResponse(200, [{"name": "Default", "key": "sk_minted"}]))
+
+    result = CliRunner().invoke(cli, ["signup", "--email", "ada@example.com", "--totp-code", "123456"])
+
+    assert result.exit_code == 0, result.output
+    assert stored_config["api.api_key"] == "sk_minted"
+    assert sent[-1] == ("/auth/login-totp", {"mfa_token": "mfa.fixture.token", "code": "123456"})
+
+
+def test_a_given_code_answers_once_then_a_terminal_is_asked(monkeypatch, stored_config):
+    codes = []
+
+    def fake_post(url, **kwargs):
+        if url.endswith("/auth/login-totp"):
+            codes.append(kwargs["json"]["code"])
+            return FakeResponse(200, {"token": "jwt-token"})
+        if url.endswith("/keys"):
+            return FakeResponse(200, {"id": 7, "key": "sk_billing", "scopes": ["billing"]})
+        return FakeResponse(200, CHALLENGE)
+
+    monkeypatch.setattr(signup_actions.requests, "post", fake_post)
+    monkeypatch.setattr(signup_actions, "is_interactive", lambda: True)
+    monkeypatch.setattr(signup_actions.click, "prompt", lambda *a, **k: "654321")
+    ask = signup_actions.totp_code_source("123456")
+
+    for _ in range(2):
+        assert signup_actions.MintBillingKeyAction(email="ada@example.com", password="pw", ask_code=ask).execute({}).ok
+
+    assert codes == ["123456", "654321"]
+
+
+def test_a_wrong_two_factor_code_is_named_and_no_key_is_kept(monkeypatch, stored_config):
+    monkeypatch.setattr(
+        signup_actions.requests, "post",
+        lambda url, **kwargs: FakeResponse(401 if url.endswith("/auth/login-totp") else 200, CHALLENGE),
+    )
+
+    result = signup_actions.MintBillingKeyAction(
+        email="ada@example.com", password="pw", ask_code=signup_actions.totp_code_source("000000")
+    ).execute({})
+
+    assert result.ok is False and "wrong or expired two-factor code" in result.error
+    assert "billing_api_key" not in stored_config

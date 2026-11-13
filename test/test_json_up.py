@@ -46,7 +46,7 @@ def _one_document(stdout: str) -> dict:
 # --- lium up --json ---------------------------------------------------------------------------
 
 def _run_up(monkeypatch, args=(), *, wait="ready", rent_error=None, gpus="match", jupyter="ok", rm_error=None,
-            volume_takes=0, schedule_error=None, yes=True, input=None, backup_notice=None):
+            volume_takes=0, schedule_error=None, yes=True, input=None, backup_notice=None, notice=None, rented=None):
     """`lium up brave-fox-3a --yes --json <args>` against fakes; returns (result, calls).
 
     ``wait``: ``"ready"`` | ``"timeout"`` (still starting) | ``"failed"`` (dead pod) | ``"api_error"`` (503 while
@@ -63,7 +63,7 @@ def _run_up(monkeypatch, args=(), *, wait="ready", rent_error=None, gpus="match"
     monkeypatch.setattr(up_module.time, "monotonic", lambda: clock["now"])
     executor = SimpleNamespace(
         id="exec-1", huid="brave-fox-3a", gpu_count=1, gpu_type="A6000",
-        price_per_hour=0.24, available_port_count=10, download_speed=1000,
+        price_per_hour=0.24, available_port_count=10, download_speed=1000, notice_warning=notice,
     )
 
     class _Lium:
@@ -104,6 +104,7 @@ def _run_up(monkeypatch, args=(), *, wait="ready", rent_error=None, gpus="match"
                 raise rent_error
             return ActionResult(ok=True, data={
                 "pod_info": {"id": "pod-1"}, "pod_id": "pod-1", "pod_name": "train", "backup_notice": backup_notice,
+                **({"executor": rented, "price_per_hour": 0.3} if rented is not None else {}),
             })
 
     class _Wait:
@@ -486,3 +487,16 @@ def test_json_narration_redirect_is_undone_after_the_command(monkeypatch):
     assert ui.console.stderr is False
     _run_up(monkeypatch, wait="timeout")  # the failure path leaves through `finally` too
     assert ui.console.stderr is False
+
+
+def test_up_warns_about_the_nodes_notice_before_renting_and_about_a_re_picked_nodes_after(monkeypatch):
+    # DAH-6272: an agent rented a node due for removal with no word from the CLI (owner, 12 Nov 2026)
+    before = "brave-fox-3a is scheduled for removal from 2026-11-15 11:00 UTC"
+    after = "quiet-owl-7c has scheduled maintenance from 2026-11-13 08:00 UTC"
+    rented = SimpleNamespace(id="exec-2", huid="quiet-owl-7c", gpu_count=1, gpu_type="A6000", notice_warning=after)
+
+    warned, _ = _run_up(monkeypatch, notice=before)
+    re_picked, _ = _run_up(monkeypatch, rented=rented)
+
+    assert warned.exit_code == 0 and before in warned.stderr
+    assert re_picked.exit_code == 0 and after in re_picked.stderr

@@ -372,6 +372,8 @@ def compact_executor(exe: ExecutorInfo, is_pareto: bool, index: int) -> Dict[str
         "gpu_power_limited": getattr(exe, "gpu_power_limited", None),
         "gpu_power_limit_w": getattr(exe, "gpu_power_limit_w", None),
         "gpu_power_limit_default_w": getattr(exe, "gpu_power_limit_default_w", None),
+        # DAH-5995: the provider's notes from a fixed list, e.g. "May reboot occasionally"; null = the API sent none
+        "provider_notes": getattr(exe, "provider_notes", None),
     }
 
 

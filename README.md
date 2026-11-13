@@ -215,7 +215,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 
 ### Core Commands
 
-- `lium signup` - Create an account from the terminal and store its API key
+- `lium signup` - Create an account from the terminal and store its API key (`--totp-code` answers a two-factor sign-in)
 - `lium init` - Initialize configuration for an existing account (API key, SSH keys); `--api-key <key>` for machines without a browser; `--force` to log in again
 - `lium completion [bash|zsh|fish] [--install]` - Print or install shell tab completion
 - `lium balance` - Show the account balance (add `--format json` for machine-readable output)
@@ -245,7 +245,7 @@ The `lium` CLI exposes the full pod lifecycle. Run `lium --help` to see everythi
 - `lium fund` - Fund account with TAO from your wallet (`--alpha -k <hotkey> -a <USD>` pays with alpha stake instead; add `--netuid <N>` to pay from any subnet Lium accepts, the primary subnet otherwise)
 - `lium topup create -a <USD> -c <COIN> -n <NETWORK>` - Top up with a stablecoin (`lium topup currencies` lists them)
 - `lium topup card -a <USD> [--card <pm_id>] [--yes]` - Charge a card saved on the account, with no browser; the API key needs the `billing` scope (not released: the platform switch is off). Asks first; `--yes` skips the question and `--json` needs it. Sent once with an idempotency key; a lost answer or a 202 without a payment_intent_id exits 6 ("the charge may have gone through" / "still being confirmed") with the key and the same amount to re-run with, never a bare retry. A 202 with a payment_intent_id is success (exit 0). The same key with a different amount is a new charge. A 3-D Secure step-up (`CARD_AUTHENTICATION_REQUIRED` with a URL) exits 6 with the URL to confirm at, the transaction id and the exact re-run with the same `--idempotency-key`; a new key would open a second payment
-- `lium transfer <EMAIL|USER_ID> <USD> [--note TEXT] [--yes] [--json]` - Send part of your balance to another account; the API key needs the `billing` scope. Asks first; `--yes` skips the question and `--json` needs it. Fails non-zero with the API's code: `self_transfer`, `insufficient_balance`, `not_found` (no account with that e-mail or id), `recipient_unavailable` (a deleted or blocked account), or `missing_scope` (exit 6, with how to make a billing key). AMOUNT is rounded to the cent (half up, as the API does) before the question. A lost or unrecorded answer (also Ctrl-C while waiting, or the same key still in progress) exits 6 with `transfer_outcome_unknown` and the key: check transfer history on the Billing page of the account that owns the billing key, and if it is not there contact support with the key; do not run it again, with that key or a new one
+- `lium transfer <EMAIL|USER_ID> <USD> [--note TEXT] [--yes] [--json]` - Send part of your balance to another account; the API key needs the `billing` scope. Asks first; `--yes` skips the question and `--json` needs it. Fails non-zero with the API's code: `self_transfer`, `insufficient_balance`, `recipient_unavailable` (no account with that e-mail or id, or a deleted or blocked one), or `missing_scope` (exit 6, with how to make a billing key). AMOUNT is rounded to the cent (half up, as the API does) before the question. A lost or unrecorded answer (also Ctrl-C while waiting, or the same key still in progress) exits 6 with `transfer_outcome_unknown` and the key: check transfer history on the Billing page of the account that owns the billing key, and if it is not there contact support with the key; do not run it again, with that key or a new one
 - `lium ssh-keys list|sync` - SSH public keys registered on the account
 
 `ls`, `ps`, `spend`, `templates`, `balance` and `describe` all accept `--format json` (and `--json`); `rm` accepts `--format json`; `up` accepts `--json`. All of them print a JSON error envelope on stderr when the command fails, so the same flag works across commands in scripts.
@@ -288,7 +288,7 @@ Teams share a workspace whose billing owner pays. An API key is bound to one wor
 - `lium workspaces [list]` - The workspace this key acts in (the role shown is the account's the key runs as — the billing owner's for a team key); every workspace you belong to, with your own role, after `lium workspaces login`
 - `lium workspaces members [WORKSPACE]` - Members, roles and who pays
 - `lium workspaces use <WORKSPACE>` - Default workspace for every command (`~/.lium/config.ini`); run it as `LIUM_API_KEY=<a key bound to it> lium workspaces use <WORKSPACE>` to save that key for `--workspace`
-- `lium workspaces login` - Sign in once (e-mail + password) for the session-only subcommands below; needs no API key, and with none saved `lium keys` runs on the session alone
+- `lium workspaces login [--totp-code CODE]` - Sign in once (e-mail + password, plus the two-factor code when the account has it on) for the session-only subcommands below; needs no API key, and with none saved `lium keys` runs on the session alone
 - `lium workspaces create <NAME> [--use]` - Create a workspace; you are its owner and billing owner
 - `lium workspaces invite <EMAIL> [WORKSPACE] [--role member|admin|owner]` - E-mail an invitation (no account needed yet)
 - `lium workspaces remove <USER_ID_OR_EMAIL> [WORKSPACE] [--yes]` - Remove a member, asks first (owners and the billing owner cannot be; the server says so)
@@ -385,6 +385,8 @@ lium mine --register <TOKEN> --wait 0          # add the node, do not wait for t
 lium mine --auto --hotkey <HOTKEY> --ip <VPS_IP> --external-port <FORWARDED_PORT> --internal-port 8080
 
 # Second node behind the same public IP: forward its own service, SSH and renting ports to it
+# (without these flags it registers at the first node's address; --register refuses that when the two
+# machines' GPUs differ, but cannot tell apart two machines with the same GPU model and count)
 lium mine --register <TOKEN> --external-port 8081 --ssh-port 2201 --renting-port-range 41000-41100
 
 # Provider-portal automation (same surface as the portal frontend)
@@ -447,7 +449,7 @@ lium scp my-pod /root/output.log ./downloads -d  # Download into ./downloads dir
 lium reboot my-pod                           # Reboot a single pod
 lium reboot 1,2                              # Reboot pods 1 and 2 (no confirmation prompt)
 lium reboot all                              # Reboot all active pods
-lium reboot my-pod --volume-id <VOLUME_ID>   # Reboot with a specific volume ID
+lium reboot my-pod --volume-id <VOLUME_HUID>  # Reboot with a volume attached (HUID from `lium volumes`, or its ID)
 
 # Sync directories to pods
 lium rsync my-pod ./project                    # Sync to /root/project
@@ -721,7 +723,8 @@ builds (Linux amd64/arm64 in Docker, macOS arm64) run only when a packaging inpu
 `uv.lock`, `lium.spec`, `lium_entry.py`, `Dockerfile.build`, `scripts/install.sh`, `scripts/linux_bundle_report.py`,
 `ci.yml`, `release.yml`); macOS Intel never builds on a PR. A manual dispatch (`gh workflow run ci.yml --ref <branch>`)
 builds all five targets and runs the live e2e (`./e2e/run.sh`, see `e2e/README.md`), which otherwise runs once a day
-on a schedule and never on a PR. `ci-ok` (the aggregate of the test, packaging,
+on a schedule and never on a PR. `release.yml` calls it on the release tag (pytest and the live e2e; the release
+builds the artifacts itself) and publishes only when it is green. `ci-ok` (the aggregate of the test, packaging,
 wheel and target-matrix jobs) and `e2e-live` are the two status checks the `main` ruleset requires.
 
 

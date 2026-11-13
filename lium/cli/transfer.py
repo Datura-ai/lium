@@ -21,10 +21,9 @@ BILLING_KEY_HINT = ("Transfers need an API key with the billing scope: 'lium wor
 # The generic hints for these codes say "retry" or point at nodes and pods; nothing was transferred
 REFUSAL_HINTS = {
     "self_transfer": "The sender is the account that owns the billing key; send to another account's e-mail or id.",
-    "not_found": "No account has that e-mail or id. Check it with the recipient: the e-mail they sign in with, or "
-                 "their account id.",
-    "recipient_unavailable": "That account is deleted or blocked and cannot receive credit; ask the recipient for "
-                             "another account.",
+    "recipient_unavailable": "That account cannot receive credit: no account has that e-mail or id, or it is "
+                             "deleted or blocked. Check it with the recipient: the e-mail they sign in with, or "
+                             "their account id.",
 }
 
 
@@ -46,8 +45,8 @@ def transfer_command(to: str, amount: float, note: Optional[str], idempotency_ke
 
     Asks first; `--yes` skips the question and `--json` needs it. The API key must hold the
     `billing` scope. Errors exit non-zero with the API's code: self_transfer (sending to
-    yourself), insufficient_balance, not_found (no account with that e-mail or id), recipient_unavailable
-    (a deleted or blocked account). If the answer is lost (timeout, dropped connection, 5xx, Ctrl-C,
+    yourself), insufficient_balance, recipient_unavailable (no account with that e-mail or id, or a
+    deleted or blocked one). If the answer is lost (timeout, dropped connection, 5xx, Ctrl-C,
     or the same key still in progress) the transfer may have happened: exit 6 with
     transfer_outcome_unknown and the idempotency key; check transfer history on the Billing page of
     the account that owns the billing key and, if it is not there, contact support with the key.
