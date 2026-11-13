@@ -532,6 +532,7 @@ One object per node, sorted as the table is; the names are stable:
 | `country`, `country_code`, `city` | country name, ISO code, city |
 | `vram_gb`, `ram_gb`, `cpu_count` | per-GPU VRAM (GiB), host RAM (GiB), CPU threads |
 | `disk_gb`, `disk_total_gb` | free and total host disk (GiB) |
+| `pod_disk_gb` | the disk a pod renting the free GPUs gets (GiB): the API's `pod_disk` for that GPU count (/root volume + pod disk), or all the free disk on a node that sets no per-pod limit; the table's **Your disk** column |
 | `upload_mbps`, `download_mbps` | the backend's effective speeds: a VerifyX download or an average over the validator's cycles when it has one, else the node's latest speed-test sample |
 | `upload_source`, `download_source` | `measured` (checked or averaged) or `reported` (a single speed-test sample — the table's `~`); `null` with no figure |
 | `available_ports` | ports free for `--ports` |
