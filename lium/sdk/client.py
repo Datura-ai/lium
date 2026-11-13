@@ -5595,8 +5595,10 @@ class Lium:
         Raises:
             LiumError: If verification or wallet polling fails.
         """
-        access_key = self._request("GET", "/tao/pay/token/generate").json()["access_key"]
-        sig = bt_wallet.coldkey.sign(access_key.encode()).hex()
+        # readable: the coldkey signs text naming the Lium account it joins, not only the opaque key
+        token = self._request("GET", "/tao/pay/token/generate", params={"readable": "true"}).json()
+        access_key = token["access_key"]
+        sig = bt_wallet.coldkey.sign((token.get("message") or access_key).encode()).hex()
         app_id, stripe_customer_id = self._create_transfer_app_credentials()
 
         verify_response = self._request(
