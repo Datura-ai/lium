@@ -768,6 +768,12 @@ def test_a_rerun_on_the_same_host_is_still_already_registered() -> None:
             1,
             False,
         ),  # nothing known: a re-run
+        (
+            {"gpu_type": "NVIDIA H100 PCIe", "gpu_count": 8},
+            "NVIDIA H100",
+            8,
+            False,
+        ),  # the bare NVML H100 name the validator lists as H100 PCIe (DAH-6459)
     ],
 )
 def test_another_host_compares_gpu_names_through_the_validator_aliases(
