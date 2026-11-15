@@ -170,12 +170,20 @@ def _show_setup_summary(register: bool = False):
 # Actions
 # --------------------------
 def _clone_or_update_repo(target_dir: Path, branch: str):
-    if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or branch.startswith("-"):
+    # git's branch-name rules (check-ref-format) for this character set: `.`, `..` or `x.lock` would not name a branch
+    if (
+        not re.fullmatch(r"[A-Za-z0-9._/-]+", branch)
+        or branch.startswith("-")
+        or ".." in branch
+        or branch.endswith(".")
+        or any(not part or part.startswith(".") or part.endswith(".lock") for part in branch.split("/"))
+    ):
         raise click.BadParameter(f"not a branch name: {branch!r}", param_hint="--branch")
     if target_dir.exists():
         if (target_dir / ".git").exists():
             _run("git fetch --all", cwd=str(target_dir))
-            _run(["git", "checkout", branch], cwd=str(target_dir))
+            # switch, not checkout: checkout would read a name that is also a path as files to discard
+            _run(["git", "switch", branch], cwd=str(target_dir))
             _run(["git", "pull", "origin", branch], cwd=str(target_dir))
 
     else:

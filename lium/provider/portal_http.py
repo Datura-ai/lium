@@ -119,10 +119,12 @@ class PortalHTTP:
         # __init__, so the commands' ProviderError handlers report it (JSON envelope included)
         try:
             parsed = urlsplit(self.base_url)
-            loopback = parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1")
+            parsed.port  # a port that is not a number raises here, not later inside requests
+            scheme, host = parsed.scheme, parsed.hostname
         except ValueError:
-            parsed, loopback = None, False
-        if not loopback and (parsed is None or parsed.scheme != "https"):
+            scheme, host = None, None
+        loopback = scheme == "http" and host in ("localhost", "127.0.0.1", "::1")
+        if not host or not (loopback or scheme == "https"):
             # the URL is not echoed: it may carry user:password
             raise ProviderError("portal URL must be a valid https URL", code=ARG_INVALID)
         url = self.base_url + (path if path.startswith("/") else "/" + path)
@@ -145,8 +147,8 @@ class PortalHTTP:
                 params=params,
                 json=json_body,
                 timeout=self._timeout,
-                # plain http to this machine must not go through HTTP_PROXY or ALL_PROXY in plaintext
-                proxies={"http": None, "https": None, "all": None} if loopback else None,
+                # plain http to this machine must not reach any proxy (environment or session, scheme or host key)
+                proxies=dict.fromkeys(("http", "https", "all", f"http://{host}", f"all://{host}")) if loopback else None,
             )
         except LiumError as e:
             raise ProviderError(

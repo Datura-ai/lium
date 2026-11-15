@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 import requests
+from requests.sessions import merge_setting
+from requests.utils import select_proxy
 
 from lium.provider.errors import (
     ARG_INVALID,
@@ -274,7 +276,15 @@ def test_a_same_origin_redirect_is_followed() -> None:
 
 
 @pytest.mark.parametrize(
-    "url", ["http://portal.example.com", "ftp://portal.example.com", "https://[", "http://user:s3cret@portal.example.com"]
+    "url",
+    [
+        "http://portal.example.com",
+        "ftp://portal.example.com",
+        "https://[",
+        "http://user:s3cret@portal.example.com",
+        "https://user:s3cret@",
+        "https://portal.example.com:s3cret",
+    ],
 )
 def test_a_portal_url_without_https_is_refused_at_the_first_request(url: str) -> None:
     session = _RecordingSession(_FakeResponse(200, {}))
@@ -307,3 +317,13 @@ def test_plain_http_to_this_machine_bypasses_an_environment_proxy(
         "http://127.0.0.1:8001/x", session.last_call["proxies"], None, None, None
     )
     assert settings["proxies"] == {}
+
+
+def test_plain_http_to_this_machine_bypasses_a_host_proxy_set_on_the_session() -> None:
+    real = requests.Session()
+    real.proxies = {"http://127.0.0.1": "http://proxy.example.com:3128", "all://127.0.0.1": "http://proxy.example.com:3128"}
+    session = _RecordingSession(_FakeResponse(200, {}))
+    PortalHTTP(base_url="http://127.0.0.1:8001", token_provider=lambda: None, session=session).get("/x", auth=False)
+
+    proxies = merge_setting(session.last_call["proxies"], real.proxies)
+    assert select_proxy("http://127.0.0.1:8001/x", proxies) is None
