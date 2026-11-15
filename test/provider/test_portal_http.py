@@ -270,3 +270,13 @@ def test_a_same_origin_redirect_is_followed() -> None:
         "https://portal.example.com/v2/auth/me",
     ]
     assert session.calls[1]["headers"]["Authorization"] == "Bearer jwt-token"
+
+
+@pytest.mark.parametrize("url", ["http://portal.example.com", "ftp://portal.example.com"])
+def test_a_portal_url_without_https_is_refused(url: str) -> None:
+    with pytest.raises(ProviderError):
+        PortalHTTP(base_url=url, token_provider=lambda: None)
+
+
+def test_plain_http_to_this_machine_is_allowed() -> None:
+    assert PortalHTTP(base_url="http://127.0.0.1:8001", token_provider=lambda: None).base_url == "http://127.0.0.1:8001"

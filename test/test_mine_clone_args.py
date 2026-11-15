@@ -1,0 +1,32 @@
+"""The miner repo clone passes --branch and the target dir as single arguments, and refuses a non-ref branch."""
+
+from pathlib import Path
+
+import click
+import pytest
+
+from lium.cli.commands import mine
+
+
+def test_the_clone_sends_branch_and_dir_as_single_quoted_arguments(monkeypatch, tmp_path: Path) -> None:
+    ran = []
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or ("", ""))
+    target = tmp_path / "dir with space"
+
+    mine._clone_or_update_repo(target, "release/v1.2")
+
+    assert ran == [["git", "clone", "--branch", "release/v1.2", "https://github.com/Datura-ai/lium-io.git", str(target)]]
+
+
+@pytest.mark.parametrize("branch", ["main;id", "-x", "a b", "$(x)"])
+def test_a_branch_that_is_not_a_ref_name_is_refused(monkeypatch, tmp_path: Path, branch: str) -> None:
+    monkeypatch.setattr(mine, "_run", lambda *a, **kw: pytest.fail("ran a command"))
+
+    with pytest.raises(click.BadParameter):
+        mine._clone_or_update_repo(tmp_path / "x", branch)
+
+
+def test_run_quotes_each_list_item_for_the_shell() -> None:
+    out, _ = mine._run(["printf", "%s|", "a b", "c;d"])
+
+    assert out == "a b|c;d|"

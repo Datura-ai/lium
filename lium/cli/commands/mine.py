@@ -90,7 +90,7 @@ def _run(cmd: list | str, check=True, capture=True, cwd: Optional[str] = None,
          timeout: Optional[int] = None) -> Tuple[str, str]:
     import subprocess
     if isinstance(cmd, list):
-        cmd_str = " ".join(cmd)
+        cmd_str = shlex.join(cmd)
     else:
         cmd_str = cmd
     # coreutils timeout kills the whole process group: a Python-side timeout would kill only the shell
@@ -170,14 +170,16 @@ def _show_setup_summary(register: bool = False):
 # Actions
 # --------------------------
 def _clone_or_update_repo(target_dir: Path, branch: str):
+    if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or branch.startswith("-"):
+        raise click.BadParameter(f"not a branch name: {branch!r}", param_hint="--branch")
     if target_dir.exists():
         if (target_dir / ".git").exists():
             _run("git fetch --all", cwd=str(target_dir))
-            _run(f"git checkout {branch}", cwd=str(target_dir))
-            _run(f"git pull origin {branch}", cwd=str(target_dir))
+            _run(["git", "checkout", branch], cwd=str(target_dir))
+            _run(["git", "pull", "origin", branch], cwd=str(target_dir))
 
     else:
-        _run(f"git clone --branch {branch} https://github.com/Datura-ai/lium-io.git {target_dir}")
+        _run(["git", "clone", "--branch", branch, "https://github.com/Datura-ai/lium-io.git", str(target_dir)])
 
 
 def _check_prereqs(compute_dir: Path | None = None, show=lambda text: None):

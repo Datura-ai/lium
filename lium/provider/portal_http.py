@@ -13,10 +13,12 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 import requests
 
 from lium.provider.errors import (
+    ARG_INVALID,
     PORTAL_AUTH_EXPIRED,
     PORTAL_AUTH_INVALID,
     PORTAL_FORBIDDEN,
@@ -67,6 +69,14 @@ class PortalHTTP:
         timeout: float = 30.0,
     ) -> None:
         self.base_url = (base_url or DEFAULT_PORTAL_URL).rstrip("/")
+        # the provider token goes with every call: plain http only to this machine
+        parsed = urlsplit(self.base_url)
+        if parsed.scheme != "https" and not (
+            parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1")
+        ):
+            raise ProviderError(
+                f"portal URL must use https: {self.base_url}", code=ARG_INVALID
+            )
         self._token_provider = token_provider or (lambda: None)
         self._session = session or requests.Session()
         self._timeout = timeout
