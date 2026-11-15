@@ -30,3 +30,15 @@ def test_run_quotes_each_list_item_for_the_shell() -> None:
     out, _ = mine._run(["printf", "%s|", "a b", "c;d"])
 
     assert out == "a b|c;d|"
+
+
+def test_the_executor_install_script_path_with_a_space_is_one_argument(monkeypatch, tmp_path: Path) -> None:
+    ran = []
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or ("", ""))
+    compute_dir = tmp_path / "node dir"
+    (compute_dir / "scripts").mkdir(parents=True)
+    (compute_dir / "scripts" / "install_executor_on_ubuntu.sh").touch()
+
+    mine._install_executor_tools(compute_dir)
+
+    assert ran == [["bash", str(compute_dir / "scripts" / "install_executor_on_ubuntu.sh")]]

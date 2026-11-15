@@ -69,14 +69,6 @@ class PortalHTTP:
         timeout: float = 30.0,
     ) -> None:
         self.base_url = (base_url or DEFAULT_PORTAL_URL).rstrip("/")
-        # the provider token goes with every call: plain http only to this machine
-        parsed = urlsplit(self.base_url)
-        if parsed.scheme != "https" and not (
-            parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1")
-        ):
-            raise ProviderError(
-                f"portal URL must use https: {self.base_url}", code=ARG_INVALID
-            )
         self._token_provider = token_provider or (lambda: None)
         self._session = session or requests.Session()
         self._timeout = timeout
@@ -123,6 +115,15 @@ class PortalHTTP:
         json_body: dict[str, Any] | None = None,
         auth: bool = True,
     ) -> dict[str, Any]:
+        # the token and login go with these calls: plain http only to this machine. Checked here, not in
+        # __init__, so the commands' ProviderError handlers report it (JSON envelope included)
+        parsed = urlsplit(self.base_url)
+        if parsed.scheme != "https" and not (
+            parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1")
+        ):
+            raise ProviderError(
+                f"portal URL must use https: {self.base_url}", code=ARG_INVALID
+            )
         url = self.base_url + (path if path.startswith("/") else "/" + path)
         headers: dict[str, str] = {"Accept": "application/json"}
         if json_body is not None:

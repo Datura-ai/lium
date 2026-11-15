@@ -273,10 +273,18 @@ def test_a_same_origin_redirect_is_followed() -> None:
 
 
 @pytest.mark.parametrize("url", ["http://portal.example.com", "ftp://portal.example.com"])
-def test_a_portal_url_without_https_is_refused(url: str) -> None:
+def test_a_portal_url_without_https_is_refused_at_the_first_request(url: str) -> None:
+    session = _RecordingSession(_FakeResponse(200, {}))
+    http = PortalHTTP(base_url=url, token_provider=lambda: "jwt-token", session=session)
+
     with pytest.raises(ProviderError):
-        PortalHTTP(base_url=url, token_provider=lambda: None)
+        http.get("/auth/me")
+
+    assert session.last_call is None
 
 
 def test_plain_http_to_this_machine_is_allowed() -> None:
-    assert PortalHTTP(base_url="http://127.0.0.1:8001", token_provider=lambda: None).base_url == "http://127.0.0.1:8001"
+    session = _RecordingSession(_FakeResponse(200, {}))
+    PortalHTTP(base_url="http://127.0.0.1:8001", token_provider=lambda: None, session=session).get("/x", auth=False)
+
+    assert session.last_call["url"] == "http://127.0.0.1:8001/x"

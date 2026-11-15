@@ -445,7 +445,7 @@ def _install_executor_tools(compute_dir: Path):
     if not script.exists():
         raise Exception(f"Install script not found at {script}")
 
-    _run(f"bash {script}")
+    _run(["bash", str(script)])
 
 
 def _setup_executor_env(
