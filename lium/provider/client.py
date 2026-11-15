@@ -356,6 +356,8 @@ class ProviderClient:
             out.portal_session_active = False
             warnings.append(f"whoami: {e.code}")
         except ProviderError as e:
+            if e.code == ARG_INVALID:
+                raise  # a bad portal URL is the caller's input error, not a portal that is down
             out.portal_session_active = False
             warnings.append(f"whoami: {e.code}")
         out.provider_id = provider_id

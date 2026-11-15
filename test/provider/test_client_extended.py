@@ -17,6 +17,8 @@ from typing import Any
 import pytest
 
 from lium.provider.client import ProviderClient
+from lium.provider.errors import ARG_INVALID, ProviderError
+from lium.provider.portal_http import PortalHTTP
 
 
 class _Portal:
@@ -95,3 +97,18 @@ def test_billing_history_reads_the_signed_in_providers_daily_ledger(client) -> N
 # --- node listing scope ------------------------------------------------------
 
 
+
+
+def test_status_raises_a_plain_http_portal_url_instead_of_reporting_the_portal_down(
+    fake_signer, tmp_token_store
+) -> None:
+    client = ProviderClient(
+        signer=fake_signer,
+        token_store=tmp_token_store,
+        http=PortalHTTP(base_url="http://portal.example.com", token_provider=lambda: "jwt"),
+    )
+
+    with pytest.raises(ProviderError) as exc:
+        client.status(metagraph_factory=lambda: None)
+
+    assert exc.value.code == ARG_INVALID
