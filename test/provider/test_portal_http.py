@@ -6,6 +6,7 @@ import pytest
 import requests
 
 from lium.provider.errors import (
+    ARG_INVALID,
     PORTAL_AUTH_INVALID,
     PORTAL_FORBIDDEN,
     PORTAL_CONTRACT_DRIFT,
@@ -272,14 +273,18 @@ def test_a_same_origin_redirect_is_followed() -> None:
     assert session.calls[1]["headers"]["Authorization"] == "Bearer jwt-token"
 
 
-@pytest.mark.parametrize("url", ["http://portal.example.com", "ftp://portal.example.com"])
+@pytest.mark.parametrize(
+    "url", ["http://portal.example.com", "ftp://portal.example.com", "https://[", "http://user:s3cret@portal.example.com"]
+)
 def test_a_portal_url_without_https_is_refused_at_the_first_request(url: str) -> None:
     session = _RecordingSession(_FakeResponse(200, {}))
     http = PortalHTTP(base_url=url, token_provider=lambda: "jwt-token", session=session)
 
-    with pytest.raises(ProviderError):
+    with pytest.raises(ProviderError) as exc:
         http.get("/auth/me")
 
+    assert exc.value.code == ARG_INVALID
+    assert "s3cret" not in str(exc.value)
     assert session.last_call is None
 
 
@@ -288,3 +293,14 @@ def test_plain_http_to_this_machine_is_allowed() -> None:
     PortalHTTP(base_url="http://127.0.0.1:8001", token_provider=lambda: None, session=session).get("/x", auth=False)
 
     assert session.last_call["url"] == "http://127.0.0.1:8001/x"
+
+
+def test_plain_http_to_this_machine_bypasses_an_environment_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example.com:3128")
+    session = _RecordingSession(_FakeResponse(200, {}))
+    PortalHTTP(base_url="http://127.0.0.1:8001", token_provider=lambda: None, session=session).get("/x", auth=False)
+
+    settings = requests.Session().merge_environment_settings(
+        "http://127.0.0.1:8001/x", session.last_call["proxies"], None, None, None
+    )
+    assert settings["proxies"] == {}

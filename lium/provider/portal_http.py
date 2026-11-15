@@ -117,13 +117,14 @@ class PortalHTTP:
     ) -> dict[str, Any]:
         # the token and login go with these calls: plain http only to this machine. Checked here, not in
         # __init__, so the commands' ProviderError handlers report it (JSON envelope included)
-        parsed = urlsplit(self.base_url)
-        if parsed.scheme != "https" and not (
-            parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1")
-        ):
-            raise ProviderError(
-                f"portal URL must use https: {self.base_url}", code=ARG_INVALID
-            )
+        try:
+            parsed = urlsplit(self.base_url)
+            loopback = parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1")
+        except ValueError:
+            parsed, loopback = None, False
+        if not loopback and (parsed is None or parsed.scheme != "https"):
+            # the URL is not echoed: it may carry user:password
+            raise ProviderError("portal URL must be a valid https URL", code=ARG_INVALID)
         url = self.base_url + (path if path.startswith("/") else "/" + path)
         headers: dict[str, str] = {"Accept": "application/json"}
         if json_body is not None:
@@ -144,6 +145,8 @@ class PortalHTTP:
                 params=params,
                 json=json_body,
                 timeout=self._timeout,
+                # plain http to this machine must not go through an HTTP_PROXY in plaintext
+                proxies={"http": None, "https": None} if loopback else None,
             )
         except LiumError as e:
             raise ProviderError(

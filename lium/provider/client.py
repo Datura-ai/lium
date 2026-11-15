@@ -273,6 +273,8 @@ class ProviderClient:
                 self._cached_token = None
                 return True
         except ProviderError as e:
+            if e.code == ARG_INVALID:
+                raise
             logger.debug("cached session not checked: %s", e)
         return False
 
