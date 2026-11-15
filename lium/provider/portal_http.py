@@ -145,8 +145,8 @@ class PortalHTTP:
                 params=params,
                 json=json_body,
                 timeout=self._timeout,
-                # plain http to this machine must not go through an HTTP_PROXY in plaintext
-                proxies={"http": None, "https": None} if loopback else None,
+                # plain http to this machine must not go through HTTP_PROXY or ALL_PROXY in plaintext
+                proxies={"http": None, "https": None, "all": None} if loopback else None,
             )
         except LiumError as e:
             raise ProviderError(
