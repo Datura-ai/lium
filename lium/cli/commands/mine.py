@@ -182,12 +182,16 @@ def _clone_or_update_repo(target_dir: Path, branch: str):
     if target_dir.exists():
         if (target_dir / ".git").exists():
             cwd = str(target_dir)
-            _run("git fetch --all --tags", cwd=cwd)
+            # no --tags: a local tag that differs from the remote's would fail the whole fetch
+            _run("git fetch --all", cwd=cwd)
 
             def has(ref: str) -> bool:
                 return bool(_run(["git", "rev-parse", "--verify", "--quiet", ref], check=False, cwd=cwd)[0].strip())
 
             # clone --branch also takes a tag; switch takes only a branch, so a tag is checked out detached
+            if not has(f"refs/heads/{branch}") and not has(f"refs/remotes/origin/{branch}"):
+                # only the requested tag, forced: a rerun takes the tag as the repository publishes it now
+                _run(["git", "fetch", "origin", f"+refs/tags/{branch}:refs/tags/{branch}"], check=False, cwd=cwd)
             if not has(f"refs/heads/{branch}") and not has(f"refs/remotes/origin/{branch}") and has(f"refs/tags/{branch}"):
                 _run(["git", "switch", "--detach", f"refs/tags/{branch}"], cwd=cwd)
             else:

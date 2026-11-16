@@ -84,3 +84,24 @@ def test_a_rerun_on_a_checkout_of_a_tag_or_a_branch_updates_it(tmp_path: Path, n
     mine._clone_or_update_repo(target, name)
 
     assert _git("rev-parse", "HEAD", cwd=target) == _git("rev-parse", f"{name}^{{commit}}", cwd=origin)
+
+
+@pytest.mark.parametrize("name", ["v1.0", "release"])
+def test_a_rerun_is_not_blocked_by_an_unrelated_tag_moved_upstream(tmp_path: Path, name: str) -> None:
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git("init", "-q", "-b", "main", cwd=origin)
+    _git("commit", "-q", "--allow-empty", "-m", "one", cwd=origin)
+    _git("tag", "v1.0", cwd=origin)
+    _git("tag", "old", cwd=origin)
+    _git("branch", "release", cwd=origin)
+    target = tmp_path / "node"
+    _git("clone", "-q", "--branch", name, str(origin), str(target), cwd=tmp_path)
+    _git("commit", "-q", "--allow-empty", "-m", "two", cwd=origin)
+    _git("branch", "-f", "release", cwd=origin)
+    _git("tag", "-f", "old", cwd=origin)  # retagged upstream: the local `old` now differs
+    _git("tag", "-f", "v1.0", cwd=origin)
+
+    mine._clone_or_update_repo(target, name)
+
+    assert _git("rev-parse", "HEAD", cwd=target) == _git("rev-parse", f"{name}^{{commit}}", cwd=origin)
