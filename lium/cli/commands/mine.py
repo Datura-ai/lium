@@ -652,6 +652,37 @@ def _host_ports_from_answers(answers: dict) -> dict[str, int]:
     return ports
 
 
+def _ufw_rules(host_ports: dict[str, int], port_range: str) -> list[str]:
+    """`ufw allow` arguments for the node's ports: each published port, and the renting range as one rule
+    (``FIRST:LAST/tcp``) or one rule per listed port. An empty range means every port from 20000 up."""
+    rules = [f"{p}/tcp" for p in sorted(set(host_ports.values()))]
+    rng = (port_range or "").replace(" ", "")
+    if not rng:
+        rules.append("20000:65535/tcp")
+    elif "-" in rng:
+        first, last = rng.split("-", 1)
+        rules.append(f"{first}:{last}/tcp")
+    else:
+        rules += [f"{p}/tcp" for p in rng.split(",") if p]
+    return rules
+
+
+def _open_ufw(host_ports: dict[str, int], port_range: str) -> None:
+    """--open-firewall: allow the node's ports in ufw, only when ufw is installed and active (a provider asked for
+    it with the flag; nothing else on the host's or the network's firewall is touched)."""
+    if not _exists("ufw"):
+        console.warning("--open-firewall: ufw is not installed; nothing changed. Open the ports in your firewall.")
+        return
+    sudo = "" if os.geteuid() == 0 else "sudo -n "
+    status = _run(f"{sudo}ufw status", check=False, timeout=_QUICK_CHECK_SECS)[0]
+    if "Status: active" not in status:
+        console.warning("--open-firewall: ufw is not active, so it blocks nothing; nothing changed.")
+        return
+    for rule in _ufw_rules(host_ports, port_range):
+        _run(f"{sudo}ufw allow {shlex.quote(rule)}", timeout=_QUICK_CHECK_SECS)
+    console.warning(f"--open-firewall: ufw now allows {', '.join(_ufw_rules(host_ports, port_range))}.")
+
+
 def _compose_project_running(executor_dir: Path) -> bool:
     """Whether this executor's own ``executor`` service is in the ``running`` state.
 
@@ -1219,10 +1250,17 @@ def _renting_port_range(ctx, param, value: str | None) -> str | None:
     help="Ports rented pods are published on (RENTING_PORT_RANGE), e.g. 41000-41100 or 41000,41001,41002 "
     "(default: all ports). A second node behind the same public IP needs a range of its own.",
 )
+@click.option(
+    "--open-firewall",
+    is_flag=True,
+    default=False,
+    help="If ufw is active on this host, allow the node's service, SSH and renting ports in it (ufw allow ... /tcp). "
+    "Off by default; a router, cloud security group or other firewall is not changed.",
+)
 @click.pass_context
 @handle_errors
 def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token, portal_url, price, gpu_type,
-                 wait_minutes, ip, internal_port, external_port, ssh_port, renting_port_range):
+                 wait_minutes, ip, internal_port, external_port, ssh_port, renting_port_range, open_firewall):
     """Set up this host as a Lium provider node: clone, configure, start and validate the executor.
 
     Before `docker compose up`, the service and SSH ports are checked on this host: a port
@@ -1368,6 +1406,8 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             # "address already in use" and the health check below time out
             # with no explanation. Catch it here, before .env changes or the 3-minute wait.
             _check_ports_free(host_ports, executor_dir)
+            if open_firewall:
+                _open_ufw(host_ports, answers["port_range"])
 
             _setup_executor_env(
                 str(executor_dir),
@@ -1510,6 +1550,10 @@ def _register_and_wait(
     except Exception as e:   # RegisterError, a portal error, nvidia-smi exiting non-zero, an unreadable .env: same shape as steps 1–6
         console.error(f"❌ {escape(str(e))}")
         return 1
+
+    if record.port_check and record.port_check.get("reachable") is False:
+        # the portal dialled the node from outside and got no answer: say so now, not after the listing wait times out
+        console.warning(escape(record.port_check.get("message") or f"The portal could not reach {ip}:{port} from outside."))
 
     if record.node_id is None:
         # the add went through; the list did not show it within ~30 s — nothing to poll, nothing failed, but the node

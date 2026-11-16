@@ -898,3 +898,28 @@ def test_a_rerun_with_only_a_new_renting_range_keeps_the_saved_hotkey(monkeypatc
     assert mine._env_value(node / ".env", "MINER_HOTKEY_SS58_ADDRESS") == _HK
     assert mine._env_value(node / ".env", "RENTING_PORT_RANGE") == "40000-40100"
     assert mine._env_value(node / ".env", "MINER_ACCOUNT_CLAIM") == "claim"
+
+
+@pytest.mark.parametrize("port_range, extra", [
+    ("41000-41100", ["41000:41100/tcp"]),
+    ("41000,41002", ["41000/tcp", "41002/tcp"]),
+    ("", ["20000:65535/tcp"]),  # an empty range is every port from 20000 up
+])
+def test_open_firewall_allows_the_nodes_ports_in_an_active_ufw(monkeypatch, port_range, extra):
+    ran = []
+    monkeypatch.setattr(mine, "_exists", lambda cmd: True)
+    monkeypatch.setattr(mine.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or ("Status: active\n", ""))
+    monkeypatch.setattr(mine.console, "warning", lambda text: None)
+    mine._open_ufw({"service port": 8081, "SSH port": 2201}, port_range)
+    assert ran[1:] == [f"ufw allow {r}" for r in ["2201/tcp", "8081/tcp", *extra]]
+
+
+@pytest.mark.parametrize("installed, status", [(False, ""), (True, "Status: inactive\n")])
+def test_open_firewall_changes_nothing_without_an_active_ufw(monkeypatch, installed, status):
+    ran = []
+    monkeypatch.setattr(mine, "_exists", lambda cmd: installed)
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or (status, ""))
+    monkeypatch.setattr(mine.console, "warning", lambda text: None)
+    mine._open_ufw({"service port": 8080}, "")
+    assert not any("allow" in c for c in ran)
