@@ -211,6 +211,7 @@ def keys_create_command(
       lium keys create agent-1 --scope read --scope rent --daily-budget 20 --monthly-budget 300 --max-budget 2000
       lium keys create ops --scope read --scope rent --scope manage --pod-visibility account
       lium keys create payer --scope billing            # money routes only; warns first
+      lium keys create agent --scope read --scope rent --scope billing   # rents and pays; warns first
       lium keys create ci --workspace Research --save
     """
     chosen = list(dict.fromkeys(scopes)) or list(DEFAULT_SCOPES)

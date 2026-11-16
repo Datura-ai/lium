@@ -15,7 +15,7 @@ import responses
 
 from lium.cli.utils import EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, EXIT_PERMISSION_DENIED, _classify_sdk_error
 from lium.sdk import Config, Lium, LiumBudgetExceededError, LiumError, LiumPermissionError, LiumScopeError
-from lium.sdk.api_keys import BILLING_ALONE, DEFAULT_SCOPES
+from lium.sdk.api_keys import DEFAULT_SCOPES
 from lium.sdk.client import permission_error
 from lium.sdk.exceptions import LiumNotFoundError
 
@@ -336,24 +336,19 @@ def test_create_with_billing_scope_prints_the_servers_warning_before_the_post(ho
 
 
 @pytest.mark.parametrize("other", ["rent", "manage", "read"])
-def test_create_refuses_billing_with_any_other_scope_before_any_request(home, other):
-    """Conductor 12:11Z: `billing` is "and nothing else". The server answers 422 to billing + rent/manage
-    once it enforces the rule; the CLI says the same before the request, so no warning is printed
-    for a key that is never minted and the scopes route is not read."""
-    with responses.RequestsMock() as mocked:
-        result = run("keys", "create", "payer", "--scope", "billing", "--scope", other, "--json")
+@responses.activate
+def test_create_sends_billing_next_to_another_scope_as_one_key(home, monkeypatch, other):
+    """One key may rent and pay (16 Nov 2026): billing next to read/rent/manage goes to the server as asked, with
+    the billing warning first."""
+    session(monkeypatch)
+    responses.add(responses.GET, f"{API}/keys/scopes", json=fixture("scopes"))
+    responses.add(responses.POST, f"{API}/keys", json=created("agent", scopes=[other, "billing"]))
 
-        assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
-        error = json.loads(result.stderr)["error"]
-        assert error["code"] == "invalid_arguments"
-        assert error["message"] == BILLING_ALONE
-        assert "billing with read, rent or manage is refused" in error["message"]
-        assert "lium-platform" not in error["message"] and "DAH-" not in error["message"]
-        assert "Warning" not in result.stderr
-        assert len(mocked.calls) == 0
+    result = run("keys", "create", "agent", "--scope", other, "--scope", "billing")
 
-    plain = run("keys", "create", "payer", "--scope", other, "--scope", "billing")
-    assert plain.exit_code == EXIT_CONFIGURATION_ERROR and "stands alone" in " ".join(plain.output.split())
+    assert result.exit_code == 0, result.output
+    assert "Warning: this key holds the 'billing' scope" in " ".join(result.output.split())
+    assert json.loads(calls_to("/keys", "POST")[0].request.body)["scopes"] == [other, "billing"]
 
 
 @responses.activate
@@ -1289,8 +1284,6 @@ def test_sdk_api_keys_create_defaults_and_validation():
         lium.api_keys.create("bad", pod_visibility="everyone")
     with pytest.raises(ValueError, match="at least one scope"):
         lium.api_keys.create("bad", [])
-    with pytest.raises(ValueError, match="'billing' scope stands alone"):
-        lium.api_keys.create("bad", ["billing", "rent"])
     with pytest.raises(ValueError, match="monthly budget .* is below the daily budget"):
         lium.api_keys.create("bad", daily_budget_usd=50, monthly_budget_usd=20)
     assert len(calls_to("/keys", "POST")) == 2  # the refused calls never went out
