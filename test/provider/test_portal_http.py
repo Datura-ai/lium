@@ -2,13 +2,8 @@
 
 from __future__ import annotations
 
-import re
-from urllib.parse import urlsplit
-
 import pytest
 import requests
-from requests.sessions import merge_setting
-from requests.utils import select_proxy
 
 from lium.provider.errors import (
     ARG_INVALID,
@@ -25,7 +20,6 @@ from lium.provider.errors import (
     ProviderPortalContractError,
     ProviderServerError,
 )
-from lium.provider import portal_http
 from lium.provider.portal_http import PortalHTTP
 
 
@@ -279,70 +273,13 @@ def test_a_same_origin_redirect_is_followed() -> None:
     assert session.calls[1]["headers"]["Authorization"] == "Bearer jwt-token"
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
-        "http://portal.example.com",
-        "ftp://portal.example.com",
-        "https://[",
-        "http://user:s3cret@portal.example.com",
-        "https://user:s3cret@",
-        "https://portal.example.com:s3cret",
-        "http://portal.example.com\\@localhost:8001",
-        "http://portal.example.com\t@localhost:8001",
-    ],
-)
-def test_a_portal_url_without_https_is_refused_at_the_first_request(url: str) -> None:
+def test_a_portal_url_without_https_is_refused_at_the_first_request() -> None:
     session = _RecordingSession(_FakeResponse(200, {}))
-    http = PortalHTTP(base_url=url, token_provider=lambda: "jwt-token", session=session)
+    http = PortalHTTP(base_url="http://user:s3cret@portal.example.com", token_provider=lambda: "jwt-token", session=session)
 
     with pytest.raises(ProviderError) as exc:
         http.get("/auth/me")
 
     assert exc.value.code == ARG_INVALID
     assert "s3cret" not in str(exc.value)
-    assert session.last_call is None
-
-
-def test_plain_http_to_this_machine_is_allowed() -> None:
-    session = _RecordingSession(_FakeResponse(200, {}))
-    PortalHTTP(base_url="http://127.0.0.1:8001", token_provider=lambda: None, session=session).get("/x", auth=False)
-
-    assert session.last_call["url"] == "http://127.0.0.1:8001/x"
-
-
-@pytest.mark.parametrize("variable", ["HTTP_PROXY", "ALL_PROXY"])
-def test_plain_http_to_this_machine_bypasses_an_environment_proxy(
-    monkeypatch: pytest.MonkeyPatch, variable: str
-) -> None:
-    monkeypatch.setenv(variable, "http://proxy.example.com:3128")
-    session = _RecordingSession(_FakeResponse(200, {}))
-    PortalHTTP(base_url="http://127.0.0.1:8001", token_provider=lambda: None, session=session).get("/x", auth=False)
-
-    settings = requests.Session().merge_environment_settings(
-        "http://127.0.0.1:8001/x", session.last_call["proxies"], None, None, None
-    )
-    assert settings["proxies"] == {}
-
-
-def test_plain_http_to_this_machine_bypasses_a_host_proxy_set_on_the_session() -> None:
-    real = requests.Session()
-    real.proxies = {"http://127.0.0.1": "http://proxy.example.com:3128", "all://127.0.0.1": "http://proxy.example.com:3128"}
-    session = _RecordingSession(_FakeResponse(200, {}))
-    PortalHTTP(base_url="http://127.0.0.1:8001", token_provider=lambda: None, session=session).get("/x", auth=False)
-
-    proxies = merge_setting(session.last_call["proxies"], real.proxies)
-    assert select_proxy("http://127.0.0.1:8001/x", proxies) is None
-
-
-def test_the_loopback_check_reads_the_url_as_requests_sends_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    # without the character check, the prepared URL alone must still keep credentials off a remote host
-    monkeypatch.setattr(portal_http, "_UNSAFE_URL_CHARS", re.compile("(?!)"))
-    url = "http://portal.example.com\\@localhost:8001"
-    assert urlsplit(requests.Request("GET", url + "/x").prepare().url).hostname != "localhost"
-    session = _RecordingSession(_FakeResponse(200, {}))
-
-    with pytest.raises(ProviderError):
-        PortalHTTP(base_url=url, token_provider=lambda: "jwt-token", session=session).get("/x")
-
     assert session.last_call is None

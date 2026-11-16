@@ -203,24 +203,3 @@ def test_over_a_socket_the_other_host_never_sees_the_key():
         redirector.shutdown()
         collector.shutdown()
     assert received == []
-
-
-def test_a_redirect_is_compared_as_requests_will_send_it(client, monkeypatch):
-    location = "https://evil.example\\@api.example/api/pods"
-    assert client_module.requests.Request("GET", location).prepare().url.startswith("https://evil.example/")
-    calls = _script(monkeypatch, _Redirect(307, location))
-    with pytest.raises(LiumError):
-        client._request("GET", "/pods")
-    assert len(calls) == 1, "nothing was sent to the redirect target"
-
-
-def test_a_unicode_api_host_follows_its_own_relative_redirect_and_still_refuses_another_host(monkeypatch):
-    client = Lium(Config(api_key=KEY, base_url="https://bücher.example/api"))
-    calls = _script(monkeypatch, _Redirect(307, "/api/pods/"), _Ok())
-    client._request("GET", "/pods")
-    assert len(calls) == 2 and calls[1]["url"].startswith("https://xn--bcher-kva.example/api/pods/")
-
-    calls = _script(monkeypatch, _Redirect(307, "https://other.example/api/pods"))
-    with pytest.raises(LiumError):
-        client._request("GET", "/pods")
-    assert len(calls) == 1

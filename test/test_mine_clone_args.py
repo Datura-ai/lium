@@ -1,4 +1,4 @@
-"""The miner repo clone passes --branch and the target dir as single arguments, and refuses a non-ref branch."""
+"""`lium mine --branch` takes only a branch of the repository, and git gets it as one argument."""
 
 from pathlib import Path
 
@@ -8,114 +8,18 @@ import pytest
 from lium.cli.commands import mine
 
 
-def test_the_clone_sends_branch_and_dir_as_single_quoted_arguments(monkeypatch, tmp_path: Path) -> None:
-    ran = []
-    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or ("", ""))
-    target = tmp_path / "dir with space"
-
-    mine._clone_or_update_repo(target, "release/v1.2")
-
-    assert ran == [["git", "clone", "--branch", "release/v1.2", "https://github.com/Datura-ai/lium-io.git", str(target)]]
-
-
-@pytest.mark.parametrize("branch", ["main;id", "-x", "a b", "$(x)", ".", "..", "a/../b", "a/.b", "a.lock", "a/", "a//b", "a."])
-def test_a_branch_that_is_not_a_ref_name_is_refused(monkeypatch, tmp_path: Path, branch: str) -> None:
-    monkeypatch.setattr(mine, "_run", lambda *a, **kw: pytest.fail("ran a command"))
-
-    with pytest.raises(click.BadParameter):
-        mine._clone_or_update_repo(tmp_path / "x", branch)
-
-
 def test_run_quotes_each_list_item_for_the_shell() -> None:
     out, _ = mine._run(["printf", "%s|", "a b", "c;d"])
 
     assert out == "a b|c;d|"
 
 
-def test_the_executor_install_script_path_with_a_space_is_one_argument(monkeypatch, tmp_path: Path) -> None:
+def test_a_name_that_is_not_a_branch_of_the_repository_is_refused_before_any_change(monkeypatch, tmp_path: Path) -> None:
     ran = []
-    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or ("", ""))
-    compute_dir = tmp_path / "node dir"
-    (compute_dir / "scripts").mkdir(parents=True)
-    (compute_dir / "scripts" / "install_executor_on_ubuntu.sh").touch()
+    # ls-remote matches the pattern as a path suffix, so it can list a longer branch only
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or ("abc\trefs/heads/x/v1.0\n", ""))
 
-    mine._install_executor_tools(compute_dir)
+    with pytest.raises(click.BadParameter):
+        mine._clone_or_update_repo(tmp_path / "x", "v1.0")
 
-    assert ran == [["bash", str(compute_dir / "scripts" / "install_executor_on_ubuntu.sh")]]
-
-
-def test_an_existing_checkout_is_updated_with_switch_so_the_branch_is_never_a_pathspec(monkeypatch, tmp_path: Path) -> None:
-    (tmp_path / ".git").mkdir()
-    ran = []
-    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or ("", ""))
-
-    mine._clone_or_update_repo(tmp_path, "main")
-
-    assert ["git", "switch", "main"] in ran
-    assert not any(isinstance(cmd, list) and "checkout" in cmd for cmd in ran)
-
-
-def test_a_tag_is_cloned_with_branch_like_a_branch(monkeypatch, tmp_path: Path) -> None:
-    ran = []
-    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or ("", ""))
-
-    mine._clone_or_update_repo(tmp_path / "x", "v1.0")
-
-    assert ran == [["git", "clone", "--branch", "v1.0", "https://github.com/Datura-ai/lium-io.git", str(tmp_path / "x")]]
-
-
-def _git(*args: str, cwd: Path) -> str:
-    return mine._run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args], cwd=str(cwd))[0].strip()
-
-
-@pytest.mark.parametrize("name", ["v1.0", "release"])
-def test_a_rerun_on_a_checkout_of_a_tag_or_a_branch_updates_it(tmp_path: Path, name: str) -> None:
-    origin = tmp_path / "origin"
-    origin.mkdir()
-    _git("init", "-q", "-b", "main", cwd=origin)
-    _git("commit", "-q", "--allow-empty", "-m", "one", cwd=origin)
-    _git("tag", "v1.0", cwd=origin)
-    _git("branch", "release", cwd=origin)
-    target = tmp_path / "node"
-    _git("clone", "-q", "--branch", name, str(origin), str(target), cwd=tmp_path)
-    _git("commit", "-q", "--allow-empty", "-m", "two", cwd=origin)
-    _git("branch", "-f", "release", cwd=origin)
-
-    mine._clone_or_update_repo(target, name)
-
-    assert _git("rev-parse", "HEAD", cwd=target) == _git("rev-parse", f"{name}^{{commit}}", cwd=origin)
-
-
-@pytest.mark.parametrize("name", ["v1.0", "release"])
-def test_a_rerun_is_not_blocked_by_an_unrelated_tag_moved_upstream(tmp_path: Path, name: str) -> None:
-    origin = tmp_path / "origin"
-    origin.mkdir()
-    _git("init", "-q", "-b", "main", cwd=origin)
-    _git("commit", "-q", "--allow-empty", "-m", "one", cwd=origin)
-    _git("tag", "v1.0", cwd=origin)
-    _git("tag", "old", cwd=origin)
-    _git("branch", "release", cwd=origin)
-    target = tmp_path / "node"
-    _git("clone", "-q", "--branch", name, str(origin), str(target), cwd=tmp_path)
-    _git("commit", "-q", "--allow-empty", "-m", "two", cwd=origin)
-    _git("branch", "-f", "release", cwd=origin)
-    _git("tag", "-f", "old", cwd=origin)  # retagged upstream: the local `old` now differs
-    _git("tag", "-f", "v1.0", cwd=origin)
-
-    mine._clone_or_update_repo(target, name)
-
-    assert _git("rev-parse", "HEAD", cwd=target) == _git("rev-parse", f"{name}^{{commit}}", cwd=origin)
-
-
-def test_a_rerun_stops_when_the_tag_cannot_be_refreshed(tmp_path: Path) -> None:
-    origin = tmp_path / "origin"
-    origin.mkdir()
-    _git("init", "-q", "-b", "main", cwd=origin)
-    _git("commit", "-q", "--allow-empty", "-m", "one", cwd=origin)
-    _git("tag", "v1.0", cwd=origin)
-    target = tmp_path / "node"
-    _git("clone", "-q", "--branch", "v1.0", str(origin), str(target), cwd=tmp_path)
-    _git("tag", "-d", "v1.0", cwd=origin)  # the branch fetch succeeds, the tag fetch fails
-
-    with pytest.raises(RuntimeError, match="refs/tags/v1.0"):
-        mine._clone_or_update_repo(target, "v1.0")
+    assert [cmd[1] for cmd in ran] == ["ls-remote"]

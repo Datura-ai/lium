@@ -170,38 +170,21 @@ def _show_setup_summary(register: bool = False):
 # Actions
 # --------------------------
 def _clone_or_update_repo(target_dir: Path, branch: str):
-    # git's branch-name rules (check-ref-format) for this character set: `.`, `..` or `x.lock` would not name a branch
-    if (
-        not re.fullmatch(r"[A-Za-z0-9._/-]+", branch)
-        or branch.startswith("-")
-        or ".." in branch
-        or branch.endswith(".")
-        or any(not part or part.startswith(".") or part.endswith(".lock") for part in branch.split("/"))
-    ):
-        raise click.BadParameter(f"not a branch name: {branch!r}", param_hint="--branch")
+    repo = "https://github.com/Datura-ai/lium-io.git"
+    # only a branch the repository has; checked before anything on disk changes
+    heads = _run(["git", "ls-remote", "--heads", repo, f"refs/heads/{branch}"])[0].splitlines()
+    if not any(line.split("\t", 1)[-1] == f"refs/heads/{branch}" for line in heads):
+        raise click.BadParameter(f"not a branch of {repo}: {branch!r}", param_hint="--branch")
     if target_dir.exists():
         if (target_dir / ".git").exists():
             cwd = str(target_dir)
-            # no --tags: a local tag that differs from the remote's would fail the whole fetch
             _run("git fetch --all", cwd=cwd)
-
-            def has(ref: str) -> bool:
-                return bool(_run(["git", "rev-parse", "--verify", "--quiet", ref], check=False, cwd=cwd)[0].strip())
-
-            # clone --branch also takes a tag; switch takes only a branch, so a tag is checked out detached
-            if not has(f"refs/heads/{branch}") and not has(f"refs/remotes/origin/{branch}"):
-                # only the requested tag, forced: a rerun takes the tag as the repository publishes it now;
-                # a failed refresh stops setup instead of running the stale local tag
-                _run(["git", "fetch", "origin", f"+refs/tags/{branch}:refs/tags/{branch}"], cwd=cwd)
-            if not has(f"refs/heads/{branch}") and not has(f"refs/remotes/origin/{branch}") and has(f"refs/tags/{branch}"):
-                _run(["git", "switch", "--detach", f"refs/tags/{branch}"], cwd=cwd)
-            else:
-                # switch, not checkout: checkout would read a name that is also a path as files to discard
-                _run(["git", "switch", branch], cwd=cwd)
-                _run(["git", "pull", "origin", branch], cwd=cwd)
+            # switch, not checkout: checkout would read a name that is also a path as files to discard
+            _run(["git", "switch", branch], cwd=cwd)
+            _run(["git", "pull", "origin", branch], cwd=cwd)
 
     else:
-        _run(["git", "clone", "--branch", branch, "https://github.com/Datura-ai/lium-io.git", str(target_dir)])
+        _run(["git", "clone", "--branch", branch, repo, str(target_dir)])
 
 
 def _check_prereqs(compute_dir: Path | None = None, show=lambda text: None):
