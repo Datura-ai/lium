@@ -870,3 +870,31 @@ def test_the_sysbox_install_waits_for_apt_instead_of_stopping(monkeypatch, tmp_p
         with pytest.raises(Exception, match="still busy after 15 minutes"):
             mine._install_sysbox(tmp_path)
         assert ran == [] and clock["t"] >= mine._DPKG_WAIT_SECS
+
+
+def test_a_rerun_with_only_a_new_renting_range_keeps_the_saved_hotkey(monkeypatch, tmp_path: Path):
+    # the second-node docs: `lium mine --auto --renting-port-range ...` on the first node; after --register its hotkey
+    # is the portal's, which the provider never typed, so the rerun must not ask for or drop it
+    node = tmp_path / "repo" / "neurons" / "executor"
+    node.mkdir(parents=True)
+    (node / ".env").write_text(f"MINER_HOTKEY_SS58_ADDRESS={_HK}\nMINER_ACCOUNT_CLAIM=claim\nRENTING_PORT_RANGE=\n")
+    (node / ".env.template").write_text(
+        "MINER_HOTKEY_SS58_ADDRESS=\nINTERNAL_PORT=8080\nEXTERNAL_PORT=8080\nSSH_PORT=2200\nSSH_PUBLIC_PORT=2200\n"
+    )
+    for name in ("_clone_or_update_repo", "_install_executor_tools", "_check_prereqs", "_check_free_disk",
+                 "_check_ports_free"):
+        monkeypatch.setattr(mine, name, lambda *a, **k: None)
+    monkeypatch.setattr(mine, "_docker_storage_limited", lambda: True)
+    monkeypatch.setattr(mine, "_start_preflight_pull", lambda: SimpleNamespace(poll=lambda: 0))
+    stop = lambda *a, **k: (_ for _ in ()).throw(SystemExit(99))  # noqa: E731
+    monkeypatch.setattr(mine, "_finish_preflight_pull", stop)
+    monkeypatch.setattr(mine, "_start_executor", stop)
+
+    result = CliRunner().invoke(
+        mine.mine_command, ["--auto", "--renting-port-range", "40000-40100", "--dir", str(tmp_path / "repo")]
+    )
+
+    assert result.exit_code == 99, result.output
+    assert mine._env_value(node / ".env", "MINER_HOTKEY_SS58_ADDRESS") == _HK
+    assert mine._env_value(node / ".env", "RENTING_PORT_RANGE") == "40000-40100"
+    assert mine._env_value(node / ".env", "MINER_ACCOUNT_CLAIM") == "claim"

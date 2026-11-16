@@ -1317,6 +1317,8 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     ssh_port = ssh_port or (int(saved["SSH_PORT"]) if saved["SSH_PORT"].isdigit() else None)
     ssh_public = saved["SSH_PUBLIC_PORT"] if saved["SSH_PUBLIC_PORT"] != saved["SSH_PORT"] else ""  # equal: follows SSH_PORT
     renting_port_range = renting_port_range or saved["RENTING_PORT_RANGE"] or None
+    # a rerun on an installed node keeps its hotkey: after --register it is the portal's, which the provider never saw
+    hotkey = hotkey or parsed.get("MINER_HOTKEY_SS58_ADDRESS") or None
     answers = _gather_inputs(hotkey, auto, internal_port, external_port, ssh_port, renting_port_range, ssh_public)
     # the flag and the prompt answer get the same check: spaces dropped, format, size and overlap
     answers["port_range"] = answers["port_range"].replace(" ", "")
