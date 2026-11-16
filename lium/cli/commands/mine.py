@@ -181,10 +181,19 @@ def _clone_or_update_repo(target_dir: Path, branch: str):
         raise click.BadParameter(f"not a branch name: {branch!r}", param_hint="--branch")
     if target_dir.exists():
         if (target_dir / ".git").exists():
-            _run("git fetch --all", cwd=str(target_dir))
-            # switch, not checkout: checkout would read a name that is also a path as files to discard
-            _run(["git", "switch", branch], cwd=str(target_dir))
-            _run(["git", "pull", "origin", branch], cwd=str(target_dir))
+            cwd = str(target_dir)
+            _run("git fetch --all --tags", cwd=cwd)
+
+            def has(ref: str) -> bool:
+                return bool(_run(["git", "rev-parse", "--verify", "--quiet", ref], check=False, cwd=cwd)[0].strip())
+
+            # clone --branch also takes a tag; switch takes only a branch, so a tag is checked out detached
+            if not has(f"refs/heads/{branch}") and not has(f"refs/remotes/origin/{branch}") and has(f"refs/tags/{branch}"):
+                _run(["git", "switch", "--detach", f"refs/tags/{branch}"], cwd=cwd)
+            else:
+                # switch, not checkout: checkout would read a name that is also a path as files to discard
+                _run(["git", "switch", branch], cwd=cwd)
+                _run(["git", "pull", "origin", branch], cwd=cwd)
 
     else:
         _run(["git", "clone", "--branch", branch, "https://github.com/Datura-ai/lium-io.git", str(target_dir)])

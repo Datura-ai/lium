@@ -53,3 +53,34 @@ def test_an_existing_checkout_is_updated_with_switch_so_the_branch_is_never_a_pa
 
     assert ["git", "switch", "main"] in ran
     assert not any(isinstance(cmd, list) and "checkout" in cmd for cmd in ran)
+
+
+def test_a_tag_is_cloned_with_branch_like_a_branch(monkeypatch, tmp_path: Path) -> None:
+    ran = []
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or ("", ""))
+
+    mine._clone_or_update_repo(tmp_path / "x", "v1.0")
+
+    assert ran == [["git", "clone", "--branch", "v1.0", "https://github.com/Datura-ai/lium-io.git", str(tmp_path / "x")]]
+
+
+def _git(*args: str, cwd: Path) -> str:
+    return mine._run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args], cwd=str(cwd))[0].strip()
+
+
+@pytest.mark.parametrize("name", ["v1.0", "release"])
+def test_a_rerun_on_a_checkout_of_a_tag_or_a_branch_updates_it(tmp_path: Path, name: str) -> None:
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git("init", "-q", "-b", "main", cwd=origin)
+    _git("commit", "-q", "--allow-empty", "-m", "one", cwd=origin)
+    _git("tag", "v1.0", cwd=origin)
+    _git("branch", "release", cwd=origin)
+    target = tmp_path / "node"
+    _git("clone", "-q", "--branch", name, str(origin), str(target), cwd=tmp_path)
+    _git("commit", "-q", "--allow-empty", "-m", "two", cwd=origin)
+    _git("branch", "-f", "release", cwd=origin)
+
+    mine._clone_or_update_repo(target, name)
+
+    assert _git("rev-parse", "HEAD", cwd=target) == _git("rev-parse", f"{name}^{{commit}}", cwd=origin)
