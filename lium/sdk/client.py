@@ -1457,17 +1457,24 @@ class Lium:
                 code="gpu_verification_failed",
             )
 
-        for attempt in range(19):
+        deadline = time.monotonic() + 90
+        while True:
             try:
-                result = self.exec(pod, command="nvidia-smi -L")
+                result = self._gpu_verification_command(pod, deadline)
                 break
             except (OSError, EOFError, paramiko.SSHException) as exc:
-                if attempt == 18:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     raise LiumError(
                         f"could not verify GPUs over SSH: {exc}; {billing_note}",
                         code="gpu_verification_failed",
                     ) from exc
-                time.sleep(5)
+                time.sleep(min(5, remaining))
+                if time.monotonic() >= deadline:
+                    raise LiumError(
+                        f"could not verify GPUs over SSH: {exc}; {billing_note}",
+                        code="gpu_verification_failed",
+                    ) from exc
             except Exception as exc:
                 raise LiumError(
                     f"could not verify GPUs over SSH: {exc}; {billing_note}",
@@ -1493,6 +1500,21 @@ class Lium:
                 f"GPU count mismatch: billed for {reference}, nvidia-smi reports {visible}; {billing_note}",
                 code="gpu_count_mismatch",
             )
+
+    def _gpu_verification_command(self, pod: PodInfo, deadline: float) -> Dict[str, Any]:
+        # Bound connection setup and command execution by the same retry deadline.
+        connect_deadline = min(deadline, time.monotonic() + 30)
+        with self.ssh_connection(pod, deadline=connect_deadline) as client:
+            with _transfer_deadline(client, deadline - time.monotonic(), "GPU verification"):
+                stdin, stdout, _ = client.exec_command("nvidia-smi -L")
+                stdin.close()
+                result = self._drain_capped(
+                    stdout.channel, DEFAULT_MAX_OUTPUT_BYTES, deadline - time.monotonic(),
+                    pod, "nvidia-smi -L",
+                )
+                if result["truncated"]:
+                    raise ValueError("GPU verification output exceeded the limit")
+                return result
 
     def _rent(
         self,

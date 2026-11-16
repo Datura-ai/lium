@@ -7,6 +7,7 @@ A script that rents a pod has to write the same twenty lines every time: poll
 
 import inspect
 import time
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -82,8 +83,8 @@ def test_up_verify_gpus_checks_visible_5090(monkeypatch):
     pod.gpu_count = 1
     client = _Client(ps_sequence=[[pod]])
     seen = []
-    monkeypatch.setattr(client, "exec", lambda ready, *, command: (
-        seen.append((ready.id, command)) or {
+    monkeypatch.setattr(client, "_gpu_verification_command", lambda ready, deadline: (
+        seen.append((ready.id, "nvidia-smi -L")) or {
             "success": True, "exit_code": 0,
             "stdout": "GPU 0: NVIDIA GeForce RTX 5090 (UUID: GPU-abc)\n", "stderr": "",
         }
@@ -97,7 +98,7 @@ def test_up_verify_gpus_rejects_billed_count_before_ssh(monkeypatch):
     pod = _pod()
     pod.gpu_count = 1
     client = _Client(ps_sequence=[[pod]])
-    monkeypatch.setattr(client, "exec", lambda *args, **kwargs: pytest.fail("SSH should not run"))
+    monkeypatch.setattr(client, "_gpu_verification_command", lambda *args, **kwargs: pytest.fail("SSH should not run"))
 
     with pytest.raises(LiumError, match="requested 2.*billed for 1.*pod-1"):
         client.up(executor_id="exec-1", wait=True, gpu_count=2, verify_gpus=True)
@@ -107,7 +108,7 @@ def test_up_verify_gpus_reports_visible_mismatch_and_billing(monkeypatch):
     pod = _pod()
     pod.gpu_count = 2
     client = _Client(ps_sequence=[[pod]])
-    monkeypatch.setattr(client, "exec", lambda *args, **kwargs: {
+    monkeypatch.setattr(client, "_gpu_verification_command", lambda *args, **kwargs: {
         "success": True, "exit_code": 0,
         "stdout": "GPU 0: NVIDIA GeForce RTX 5090 (UUID: GPU-abc)\n", "stderr": "",
     })
@@ -121,7 +122,7 @@ def test_up_verify_gpus_uses_split_pod_count_not_host_count(monkeypatch):
     pod.gpu_count = 2
     pod.executor.gpu_count = 8
     client = _Client(ps_sequence=[[pod]])
-    monkeypatch.setattr(client, "exec", lambda *args, **kwargs: {
+    monkeypatch.setattr(client, "_gpu_verification_command", lambda *args, **kwargs: {
         "success": True, "exit_code": 0,
         "stdout": "GPU 0: RTX 5090\nGPU 1: RTX 5090\n",
     })
@@ -132,7 +133,7 @@ def test_up_verify_gpus_uses_split_pod_count_not_host_count(monkeypatch):
 def test_up_verify_gpus_reports_missing_billed_count(monkeypatch):
     pod = _pod()
     client = _Client(ps_sequence=[[pod]])
-    monkeypatch.setattr(client, "exec", lambda *args, **kwargs: pytest.fail("SSH should not run"))
+    monkeypatch.setattr(client, "_gpu_verification_command", lambda *args, **kwargs: pytest.fail("SSH should not run"))
 
     with pytest.raises(LiumError, match="did not report a billed GPU count.*pod-1"):
         client.up(executor_id="exec-1", wait=True, verify_gpus=True)
@@ -141,7 +142,7 @@ def test_up_verify_gpus_reports_missing_billed_count(monkeypatch):
 def test_up_verify_gpus_rejects_missing_billed_count_with_requested_count(monkeypatch):
     pod = _pod()
     client = _Client(ps_sequence=[[pod]])
-    monkeypatch.setattr(client, "exec", lambda *args, **kwargs: pytest.fail("SSH should not run"))
+    monkeypatch.setattr(client, "_gpu_verification_command", lambda *args, **kwargs: pytest.fail("SSH should not run"))
 
     with pytest.raises(LiumError, match="did not report a billed GPU count.*pod-1"):
         client.up(executor_id="exec-1", wait=True, gpu_count=1, verify_gpus=True)
@@ -151,7 +152,7 @@ def test_up_verify_gpus_reports_uncheckable_pod_without_claiming_mismatch(monkey
     pod = _pod()
     pod.gpu_count = 1
     client = _Client(ps_sequence=[[pod]])
-    monkeypatch.setattr(client, "exec", lambda *args, **kwargs: {
+    monkeypatch.setattr(client, "_gpu_verification_command", lambda *args, **kwargs: {
         "success": False, "exit_code": 127, "stdout": "",
         "stderr": "nvidia-smi: command not found\n",
     })
@@ -167,12 +168,12 @@ def test_up_verify_gpus_retries_ssh_before_accepting_pod(monkeypatch):
     calls = []
 
     def eventually_ready(*args, **kwargs):
-        calls.append(kwargs["command"])
+        calls.append("nvidia-smi -L")
         if len(calls) == 1:
             raise OSError("connection refused")
         return {"success": True, "exit_code": 0, "stdout": "GPU 0: RTX 5090\n"}
 
-    monkeypatch.setattr(client, "exec", eventually_ready)
+    monkeypatch.setattr(client, "_gpu_verification_command", eventually_ready)
 
     assert client.up(executor_id="exec-1", wait=True, verify_gpus=True) == pod
     assert calls == ["nvidia-smi -L", "nvidia-smi -L"]
@@ -182,12 +183,58 @@ def test_up_verify_gpus_rejects_empty_success_output(monkeypatch):
     pod = _pod()
     pod.gpu_count = 1
     client = _Client(ps_sequence=[[pod]])
-    monkeypatch.setattr(client, "exec", lambda *args, **kwargs: {
+    monkeypatch.setattr(client, "_gpu_verification_command", lambda *args, **kwargs: {
         "success": True, "exit_code": 0, "stdout": "No devices were found\n",
     })
 
     with pytest.raises(LiumError, match="listed no GPUs.*pod-1"):
         client.up(executor_id="exec-1", wait=True, verify_gpus=True)
+
+
+def test_up_verify_gpus_retry_deadline_includes_connection_time(monkeypatch):
+    pod = _pod()
+    pod.gpu_count = 1
+    client = _Client(ps_sequence=[[pod]])
+    now = [0.0]
+    deadlines = []
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+
+    def slow_failure(pod, deadline):
+        deadlines.append(deadline)
+        now[0] += min(30, deadline - now[0])
+        raise OSError("connection timed out")
+
+    monkeypatch.setattr(client, "_gpu_verification_command", slow_failure)
+    with pytest.raises(LiumError, match="could not verify GPUs over SSH.*still billing"):
+        client.up(executor_id="exec-1", wait=True, verify_gpus=True)
+    assert now[0] == 90
+    assert deadlines == [90, 90, 90]
+
+
+def test_gpu_verification_bounds_connection_and_command(monkeypatch):
+    client = _Client()
+    pod = _pod()
+    now = [80.0]
+    seen = {}
+    stdin = SimpleNamespace(close=lambda: None)
+    channel = object()
+
+    @contextmanager
+    def connect(pod, *, deadline):
+        seen["connect_deadline"] = deadline
+        now[0] += 7
+        yield SimpleNamespace(exec_command=lambda command: (stdin, SimpleNamespace(channel=channel), None))
+
+    def drain(channel, cap, timeout, pod, command):
+        seen["command_timeout"] = timeout
+        return {"stdout": "GPU 0: RTX 5090\n", "exit_code": 0, "truncated": False}
+
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(client, "ssh_connection", connect)
+    monkeypatch.setattr(client, "_drain_capped", drain)
+    client._gpu_verification_command(pod, 90)
+    assert seen == {"connect_deadline": 90, "command_timeout": 3}
 
 
 def test_up_verify_gpus_requires_wait_before_renting():
