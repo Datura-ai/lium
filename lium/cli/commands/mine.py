@@ -90,7 +90,7 @@ def _run(cmd: list | str, check=True, capture=True, cwd: Optional[str] = None,
          timeout: Optional[int] = None) -> Tuple[str, str]:
     import subprocess
     if isinstance(cmd, list):
-        cmd_str = " ".join(cmd)
+        cmd_str = shlex.join(cmd)
     else:
         cmd_str = cmd
     # coreutils timeout kills the whole process group: a Python-side timeout would kill only the shell
@@ -170,14 +170,21 @@ def _show_setup_summary(register: bool = False):
 # Actions
 # --------------------------
 def _clone_or_update_repo(target_dir: Path, branch: str):
+    repo = "https://github.com/Datura-ai/lium-io.git"
+    # only a branch the repository has; checked before anything on disk changes
+    heads = _run(["git", "ls-remote", "--heads", repo, f"refs/heads/{branch}"])[0].splitlines()
+    if not any(line.split("\t", 1)[-1] == f"refs/heads/{branch}" for line in heads):
+        raise click.BadParameter(f"not a branch of {repo}: {branch!r}", param_hint="--branch")
     if target_dir.exists():
         if (target_dir / ".git").exists():
-            _run("git fetch --all", cwd=str(target_dir))
-            _run(f"git checkout {branch}", cwd=str(target_dir))
-            _run(f"git pull origin {branch}", cwd=str(target_dir))
+            cwd = str(target_dir)
+            _run("git fetch --all", cwd=cwd)
+            # switch, not checkout: checkout would read a name that is also a path as files to discard
+            _run(["git", "switch", branch], cwd=cwd)
+            _run(["git", "pull", "origin", branch], cwd=cwd)
 
     else:
-        _run(f"git clone --branch {branch} https://github.com/Datura-ai/lium-io.git {target_dir}")
+        _run(["git", "clone", "--branch", branch, repo, str(target_dir)])
 
 
 def _check_prereqs(compute_dir: Path | None = None, show=lambda text: None):
@@ -443,7 +450,7 @@ def _install_executor_tools(compute_dir: Path):
     if not script.exists():
         raise Exception(f"Install script not found at {script}")
 
-    _run(f"bash {script}")
+    _run(["bash", str(script)])
 
 
 def _setup_executor_env(
