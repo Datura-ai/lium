@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from urllib.parse import urlsplit
+
 import pytest
 import requests
 from requests.sessions import merge_setting
@@ -22,6 +25,7 @@ from lium.provider.errors import (
     ProviderPortalContractError,
     ProviderServerError,
 )
+from lium.provider import portal_http
 from lium.provider.portal_http import PortalHTTP
 
 
@@ -284,6 +288,8 @@ def test_a_same_origin_redirect_is_followed() -> None:
         "http://user:s3cret@portal.example.com",
         "https://user:s3cret@",
         "https://portal.example.com:s3cret",
+        "http://portal.example.com\\@localhost:8001",
+        "http://portal.example.com\t@localhost:8001",
     ],
 )
 def test_a_portal_url_without_https_is_refused_at_the_first_request(url: str) -> None:
@@ -327,3 +333,16 @@ def test_plain_http_to_this_machine_bypasses_a_host_proxy_set_on_the_session() -
 
     proxies = merge_setting(session.last_call["proxies"], real.proxies)
     assert select_proxy("http://127.0.0.1:8001/x", proxies) is None
+
+
+def test_the_loopback_check_reads_the_url_as_requests_sends_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    # without the character check, the prepared URL alone must still keep credentials off a remote host
+    monkeypatch.setattr(portal_http, "_UNSAFE_URL_CHARS", re.compile("(?!)"))
+    url = "http://portal.example.com\\@localhost:8001"
+    assert urlsplit(requests.Request("GET", url + "/x").prepare().url).hostname != "localhost"
+    session = _RecordingSession(_FakeResponse(200, {}))
+
+    with pytest.raises(ProviderError):
+        PortalHTTP(base_url=url, token_provider=lambda: "jwt-token", session=session).get("/x")
+
+    assert session.last_call is None

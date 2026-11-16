@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
@@ -43,6 +44,9 @@ logger = logging.getLogger("lium.provider.portal_http")
 # ``/api`` prefix. Override with ``LIUM_PORTAL_URL`` / ``--portal-url`` /
 # ``provider.portal_url`` in ~/.lium/config.ini.
 DEFAULT_PORTAL_URL = "https://provider-api.lium.io"
+
+# a portal URL never needs these; requests and urlsplit can read the host of a URL holding them differently
+_UNSAFE_URL_CHARS = re.compile(r"[\\\x00-\x20\x7f]")
 
 
 TokenProvider = Callable[[], str | None]
@@ -117,17 +121,20 @@ class PortalHTTP:
     ) -> dict[str, Any]:
         # the token and login go with these calls: plain http only to this machine. Checked here, not in
         # __init__, so the commands' ProviderError handlers report it (JSON envelope included)
+        url = self.base_url + (path if path.startswith("/") else "/" + path)
         try:
-            parsed = urlsplit(self.base_url)
+            if _UNSAFE_URL_CHARS.search(self.base_url):
+                raise ValueError
+            # checked on the URL as requests will send it, which can differ from how urlsplit reads the raw one
+            parsed = urlsplit(requests.Request(method, url).prepare().url)
             parsed.port  # a port that is not a number raises here, not later inside requests
             scheme, host = parsed.scheme, parsed.hostname
-        except ValueError:
+        except (ValueError, requests.RequestException):
             scheme, host = None, None
         loopback = scheme == "http" and host in ("localhost", "127.0.0.1", "::1")
         if not host or not (loopback or scheme == "https"):
             # the URL is not echoed: it may carry user:password
             raise ProviderError("portal URL must be a valid https URL", code=ARG_INVALID)
-        url = self.base_url + (path if path.startswith("/") else "/" + path)
         headers: dict[str, str] = {"Accept": "application/json"}
         if json_body is not None:
             headers["Content-Type"] = "application/json"
