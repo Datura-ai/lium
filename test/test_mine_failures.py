@@ -921,3 +921,48 @@ def test_another_step_2_failure_is_not_rerun(monkeypatch, tmp_path):
     monkeypatch.setattr(mine, "_rerun_in_docker_group", lambda: pytest.fail("re-run"))
     with pytest.raises(RuntimeError, match="apt"):
         mine._install_executor_tools(tmp_path)
+
+
+@pytest.mark.parametrize("spare_disk", [True, False])
+def test_storage_file_flag_creates_the_image_file_without_a_terminal_or_prompt(monkeypatch, spare_disk):
+    # --register runs without a terminal; --storage file is the consent given up front
+    calls = _storage_host(monkeypatch, tty=False, spare_disk=spare_disk)
+    mine._setup_docker_storage(True, None, "file")
+    assert calls[0] == ("plan", None) and calls[-1][0] == "execute" and "asked" not in calls
+
+
+def test_storage_disk_flag_formats_only_a_listed_spare_disk_without_a_prompt(monkeypatch):
+    calls = _storage_host(monkeypatch, tty=False)
+    mine._setup_docker_storage(True, None, "/dev/sdb")
+    assert calls == [("plan", "/dev/sdb"), ("execute", "plan")]
+
+
+@pytest.mark.parametrize("choice", ["/dev/nvme0n1", "/dev/sdz", "yes"])
+def test_storage_flag_naming_no_listed_disk_changes_nothing(monkeypatch, capsys, choice):
+    calls = _storage_host(monkeypatch, tty=False)
+    mine._setup_docker_storage(True, None, choice)
+    assert calls == []
+    assert "nothing was changed" in capsys.readouterr().out
+
+
+def test_storage_flag_without_root_changes_nothing(monkeypatch):
+    calls = _storage_host(monkeypatch, root=False, tty=False)
+    mine._setup_docker_storage(True, None, "file")
+    assert calls == []
+
+
+def test_host_tuning_turns_on_ntp_and_holds_only_installed_packages(monkeypatch):
+    ran = []
+
+    def run(cmd, **kw):
+        ran.append(cmd)
+        if cmd.startswith("dpkg-query"):
+            return "ii  nvidia-driver-580\nun  libnvidia-gl-580\nii  docker-ce\nii  containerd.io\n", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", run)
+    monkeypatch.setattr(mine.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(mine.console, "warning", lambda text: None)
+    mine._host_tuning()
+    assert ran[0] == "timedatectl set-ntp true"
+    assert ran[-1] == "apt-mark hold nvidia-driver-580 docker-ce containerd.io"

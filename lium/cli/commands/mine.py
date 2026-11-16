@@ -313,7 +313,7 @@ def _docker_storage_limited() -> bool:
     return build_verification_result(run_command, inspect_docker_state(run_command).docker_root_dir).passed
 
 
-def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None):
+def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None, choice: Optional[str] = None):
     """Offer to move Docker storage to an xfs pquota mount with `lium gpu-splitting setup`'s own plan and checks.
 
     One question is both the menu and the consent: every disk is listed and the person types the one to format, or
@@ -334,7 +334,8 @@ def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None):
         "image file on a single-disk host\n"
         f"Guide: {_STORAGE_GUIDE}"
     )
-    if auto or not sys.stdin.isatty():
+    # --storage file|<disk> is the consent given up front, so it also works without a terminal (--register)
+    if not choice and (auto or not sys.stdin.isatty()):
         console.warning(f"{reason}\n{manual}")
         return
     if os.geteuid() != 0:
@@ -363,8 +364,18 @@ def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None):
     rejected = [c for c in candidates if not c.allowed]
     if rejected:
         lines += ["", "Not offered:"] + [row(c, c.details) for c in rejected]
-    if not offered:
-        _offer_and_run_image_file_setup(preflight, lines, manual, mine_dir)
+    if choice == "file" or (not offered and not choice):
+        _offer_and_run_image_file_setup(preflight, lines, manual, mine_dir, consent=choice == "file")
+        return
+    if choice:
+        typed = choice
+        if typed not in {c.path for c in offered}:
+            console.warning("\n".join(lines) + f"\n\n--storage {typed} is not one of the disks listed; nothing was changed.\n{manual}")
+            return
+        try:
+            _execute_setup(_build_setup_plan(preflight, typed, mine_dir=mine_dir))
+        except RuntimeError as exc:
+            console.warning(f"Docker storage was not set up: {exc}\n{manual}")
         return
     lines += [
         "",
@@ -386,7 +397,8 @@ def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None):
         console.warning(f"Docker storage was not set up: {exc}\n{manual}")
 
 
-def _offer_and_run_image_file_setup(preflight: "PreflightResult", lines: list[str], manual: str, mine_dir: Optional[Path]):
+def _offer_and_run_image_file_setup(preflight: "PreflightResult", lines: list[str], manual: str, mine_dir: Optional[Path],
+                                    consent: bool = False):
     """Single-disk host: offer Docker storage in an XFS image file (what `lium gpu-splitting setup` plans with no device).
 
     Typing `file` is the consent; anything else leaves the host as it is.
@@ -411,7 +423,7 @@ def _offer_and_run_image_file_setup(preflight: "PreflightResult", lines: list[st
         *(f"  - {action}" for action in plan.destructive_actions),
     ]
     console.info("\n".join(lines))
-    typed = Prompt.ask("Type `file` to create it, or press Enter to skip", default="").strip()
+    typed = "file" if consent else Prompt.ask("Type `file` to create it, or press Enter to skip", default="").strip()
     if typed != "file":
         console.warning(f"Skipped. {manual}")
         return
@@ -419,6 +431,26 @@ def _offer_and_run_image_file_setup(preflight: "PreflightResult", lines: list[st
         _execute_setup(plan)
     except RuntimeError as exc:
         console.warning(f"Docker storage was not set up: {exc}\n{manual}")
+
+
+# docs.lium.io providers/troubleshooting "Hold driver updates": the packages the system must not update on its own
+_HELD_PACKAGES = ("docker-ce", "docker-ce-cli", "docker-buildx-plugin", "docker-compose-plugin", "containerd.io")
+
+
+def _host_tuning() -> None:
+    """--host-tuning: NTP on, and the documented `apt-mark hold` of the installed NVIDIA, Docker and containerd
+    packages. A failure is printed and the install carries on."""
+    sudo = "" if os.geteuid() == 0 else "sudo -n "
+    try:
+        _run(f"{sudo}timedatectl set-ntp true", timeout=_QUICK_CHECK_SECS)
+        installed = _run("dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\\n' 'nvidia-*' 'libnvidia-*' "
+                         + " ".join(_HELD_PACKAGES), check=False, timeout=_QUICK_CHECK_SECS)[0]
+        held = [line.split()[1] for line in installed.splitlines() if len(line.split()) == 2 and line.split()[0] == "ii"]
+        if held:
+            _run(f"{sudo}apt-mark hold " + " ".join(shlex.quote(p) for p in held), timeout=_QUICK_CHECK_SECS)
+        console.warning(f"--host-tuning: NTP on; held {len(held)} package(s): {' '.join(held) or 'none installed'}.")
+    except RuntimeError as exc:
+        console.warning(f"--host-tuning did not finish: {exc}")
 
 
 # The printed command fetches the official installer, never the checkout's copy (what `lium mine` runs itself).
@@ -1226,10 +1258,25 @@ def _renting_port_range(ctx, param, value: str | None) -> str | None:
     help="Ports rented pods are published on (RENTING_PORT_RANGE), e.g. 41000-41100 or 41000,41001,41002 "
     "(default: all ports). A second node behind the same public IP needs a range of its own.",
 )
+@click.option(
+    "--storage",
+    default=None,
+    metavar="file|DISK",
+    help="Set up Docker storage on xfs with pquota without asking (also under --register): `file` for an XFS image "
+    "file on this host's disk, or the path of a spare disk to FORMAT (erases it). Only used when Docker cannot cap "
+    "a container's disk yet; off by default.",
+)
+@click.option(
+    "--host-tuning",
+    is_flag=True,
+    default=False,
+    help="Turn on NTP time sync (timedatectl set-ntp true) and hold the NVIDIA driver, Docker and containerd packages "
+    "(apt-mark hold) so unattended upgrades do not change them under rentals. Off by default.",
+)
 @click.pass_context
 @handle_errors
 def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token, portal_url, price, gpu_type,
-                 wait_minutes, ip, internal_port, external_port, ssh_port, renting_port_range):
+                 wait_minutes, ip, internal_port, external_port, ssh_port, renting_port_range, storage, host_tuning):
     """Set up this host as a Lium provider node: clone, configure, start and validate the executor.
 
     Before `docker compose up`, the service and SSH ports are checked on this host: a port
@@ -1360,7 +1407,9 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             show("Docker storage")
             storage_ok = _docker_storage_limited()
         if not storage_ok:
-            _setup_docker_storage(auto, target_dir)   # outside the spinner: it prints the plan and may ask to confirm
+            _setup_docker_storage(auto, target_dir, storage)   # outside the spinner: it prints the plan and may ask to confirm
+        if host_tuning:
+            _host_tuning()
         _check_free_disk(target_dir / "neurons" / "executor")
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.
