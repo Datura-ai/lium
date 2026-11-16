@@ -105,3 +105,17 @@ def test_a_rerun_is_not_blocked_by_an_unrelated_tag_moved_upstream(tmp_path: Pat
     mine._clone_or_update_repo(target, name)
 
     assert _git("rev-parse", "HEAD", cwd=target) == _git("rev-parse", f"{name}^{{commit}}", cwd=origin)
+
+
+def test_a_rerun_stops_when_the_tag_cannot_be_refreshed(tmp_path: Path) -> None:
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git("init", "-q", "-b", "main", cwd=origin)
+    _git("commit", "-q", "--allow-empty", "-m", "one", cwd=origin)
+    _git("tag", "v1.0", cwd=origin)
+    target = tmp_path / "node"
+    _git("clone", "-q", "--branch", "v1.0", str(origin), str(target), cwd=tmp_path)
+    _git("tag", "-d", "v1.0", cwd=origin)  # the branch fetch succeeds, the tag fetch fails
+
+    with pytest.raises(RuntimeError, match="refs/tags/v1.0"):
+        mine._clone_or_update_repo(target, "v1.0")
