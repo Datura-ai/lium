@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 import requests
 
@@ -117,9 +118,25 @@ class PortalHTTP:
         # the token and login go with these calls. Checked here, not in __init__, so the commands'
         # ProviderError handlers report it (JSON envelope included)
         url = self.base_url + (path if path.startswith("/") else "/" + path)
-        if not url.lower().startswith("https://"):
-            # the URL is not echoed: it may carry user:password
-            raise ProviderError("portal URL must be an https URL", code=ARG_INVALID)
+        # the URL is never echoed: it may carry user:password. Refused here, so no later message or
+        # context (Requests' own errors included) can carry userinfo
+        try:
+            parts = urlsplit(url)
+            valid = (
+                parts.scheme.lower() == "https"
+                and bool(parts.hostname)
+                and parts.username is None
+                and parts.password is None
+                and "@" not in parts.netloc
+            )
+            _ = parts.port  # raises ValueError on a bad port
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ProviderError(
+                "portal URL must be an https URL with a host and no user or password",
+                code=ARG_INVALID,
+            )
         headers: dict[str, str] = {"Accept": "application/json"}
         if json_body is not None:
             headers["Content-Type"] = "application/json"
