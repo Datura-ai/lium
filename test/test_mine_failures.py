@@ -177,9 +177,52 @@ def test_a_late_sysbox_installer_failure_with_the_runtime_present_is_printed_as_
     assert len(warnings) == 1 and "kernel too old" in warnings[0]
 
 
+_DENIED = "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock"
+
+
+def _docker_group_host(monkeypatch, members):
+    monkeypatch.delenv("LIUM_MINE_DOCKER_GROUP_RERUN", raising=False)
+    monkeypatch.setattr(mine, "_exists", lambda cmd: True)
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ("", _DENIED))
+    monkeypatch.setattr("getpass.getuser", lambda: "provider")
+    monkeypatch.setattr("grp.getgrnam", lambda name: SimpleNamespace(gr_mem=members))
+    execs = []
+
+    def execvpe(file, args, env):
+        execs.append((file, args, env))
+        raise SystemExit(0)
+
+    monkeypatch.setattr(mine.os, "execvpe", execvpe)
+    monkeypatch.setattr(mine.console, "warning", lambda text: None)
+    return execs
+
+
+def test_a_session_without_the_new_docker_group_reruns_the_same_command_under_it(monkeypatch):
+    # the installer just added the user to the group; `sg docker` gives it to the re-run, no re-login by hand
+    execs = _docker_group_host(monkeypatch, ["provider"])
+    monkeypatch.setattr("sys.argv", ["/home/provider/.local/bin/lium", "mine", "--register", "tok en"])
+    with pytest.raises(SystemExit):
+        mine._check_prereqs(Path("/tmp/compute"))
+    (file, args, env), = execs
+    assert args == ["sg", "docker", "-c", "/home/provider/.local/bin/lium mine --register 'tok en'"]
+    assert env["LIUM_MINE_DOCKER_GROUP_RERUN"] == "1"
+
+
+@pytest.mark.parametrize("members, rerun", [([], ""), (["provider"], "1")])
+def test_prereqs_name_newgrp_when_a_rerun_cannot_help(monkeypatch, members, rerun):
+    # not in the group, or already re-run once: say what to do instead of looping
+    execs = _docker_group_host(monkeypatch, members)
+    if rerun:
+        monkeypatch.setenv("LIUM_MINE_DOCKER_GROUP_RERUN", rerun)
+    with pytest.raises(Exception, match="newgrp docker"):
+        mine._check_prereqs(Path("/tmp/compute"))
+    assert execs == []
+
+
 def test_prereqs_name_newgrp_when_the_session_lacks_the_docker_group(monkeypatch):
     # install_executor_on_ubuntu.sh just added the user to the group; this process does not have it yet
-    denied = "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock"
+    monkeypatch.setenv("LIUM_MINE_DOCKER_GROUP_RERUN", "1")
+    denied = _DENIED
     ran = []
     monkeypatch.setattr(mine, "_exists", lambda cmd: True)
     monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or ("", denied))
@@ -784,9 +827,11 @@ def test_a_held_dpkg_lock_stops_before_the_sysbox_installer_and_names_the_holder
         return plain(cmd, **kw)
 
     monkeypatch.setattr(mine, "_run", run)
+    monkeypatch.setattr(mine, "_DPKG_WAIT_SECS", 0)  # the wait itself: test_the_sysbox_install_waits_for_apt_...
+    monkeypatch.setattr(mine.console, "warning", lambda text: None)
     with pytest.raises(Exception, match="unattended-upgrade") as err:
         mine._check_prereqs(tmp_path)
-    assert "apt/dpkg is busy" in str(err.value)
+    assert "apt/dpkg is still busy" in str(err.value)
     assert not any("sysbox_setup" in cmd for cmd in ran)
 
 
@@ -797,3 +842,31 @@ def test_prereqs_name_each_sub_check_while_it_runs(monkeypatch, tmp_path):
     mine._check_prereqs(tmp_path, shown.append)
 
     assert shown[0] == "nvidia-smi" and "docker info" in shown and any("Sysbox" in s for s in shown)
+
+
+@pytest.mark.parametrize("busy_checks, installs", [(2, True), (None, False)])
+def test_the_sysbox_install_waits_for_apt_instead_of_stopping(monkeypatch, tmp_path, busy_checks, installs):
+    # unattended-upgrades right after a boot: wait for the lock; stop only when it outlasts the wait
+    script = tmp_path / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh"
+    script.parent.mkdir(parents=True)
+    script.touch()
+    checks = {"n": 0}
+
+    def holder(sudo):
+        checks["n"] += 1
+        return "123 00:42 /usr/bin/python3 /usr/bin/unattended-upgrade" if busy_checks is None or checks["n"] <= busy_checks else ""
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(mine, "_dpkg_lock_holder", holder)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    monkeypatch.setattr(mine.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(mine.console, "warning", lambda text: None)
+    ran = []
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or ("", ""))
+    if installs:
+        assert mine._install_sysbox(tmp_path) == ""
+        assert len(ran) == 1
+    else:
+        with pytest.raises(Exception, match="still busy after 15 minutes"):
+            mine._install_sysbox(tmp_path)
+        assert ran == [] and clock["t"] >= mine._DPKG_WAIT_SECS

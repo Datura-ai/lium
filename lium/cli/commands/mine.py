@@ -204,6 +204,7 @@ def _check_prereqs(compute_dir: Path | None = None, show=lambda text: None):
     show("docker info")
     if _exists("docker") and "permission denied while trying to connect" in _run(
             "docker info", check=False, timeout=_QUICK_CHECK_SECS)[1].lower():
+        _rerun_in_docker_group()
         raise Exception(
             "Docker is installed, but this session may not use it yet (permission denied on the Docker socket).\n"
             "Run `newgrp docker` (or log out and back in), then run `lium mine` again."
@@ -233,8 +234,28 @@ def _check_prereqs(compute_dir: Path | None = None, show=lambda text: None):
         console.warning(f"The Sysbox installer reported a failure after installing the runtime:\n{failure}")
 
 
+def _rerun_in_docker_group() -> None:
+    """Re-run this same command with the docker group (`sg docker`) when the user is in it but this session started
+    before the installer added them: the provider no longer runs `newgrp docker` and the command again by hand.
+    Returns only when that cannot help (not in the group, no `sg`, or already re-run once)."""
+    import getpass
+    import grp
+    import sys
+
+    if os.environ.get("LIUM_MINE_DOCKER_GROUP_RERUN") or not _exists("sg"):
+        return
+    try:
+        if getpass.getuser() not in grp.getgrnam("docker").gr_mem:
+            return
+    except (KeyError, OSError):
+        return
+    console.warning("Docker was just set up for this user; continuing with the docker group (no re-login needed).")
+    os.execvpe("sg", ["sg", "docker", "-c", shlex.join(sys.argv)], {**os.environ, "LIUM_MINE_DOCKER_GROUP_RERUN": "1"})
+
+
 _QUICK_CHECK_SECS = 60        # nvidia-smi and docker info answer in seconds; a hung GPU or daemon never does
 _SYSBOX_INSTALL_SECS = 1200   # downloads and installs packages
+_DPKG_WAIT_SECS = 900       # unattended-upgrades after a boot usually ends within minutes
 _DPKG_LOCKS = "/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock"
 
 
@@ -256,10 +277,18 @@ def _install_sysbox(compute_dir: Path) -> str:
     if not script.exists():
         return ""
     sudo = "" if os.geteuid() == 0 else "sudo -n "
+    # right after a boot unattended-upgrades often holds apt for a few minutes: wait for it instead of stopping
     holder = _dpkg_lock_holder(sudo)
+    deadline = time.monotonic() + _DPKG_WAIT_SECS
+    if holder:
+        console.warning(f"apt/dpkg is busy; waiting up to {_DPKG_WAIT_SECS // 60} minutes for it:\n{holder}")
+    while holder and time.monotonic() < deadline:
+        time.sleep(10)
+        holder = _dpkg_lock_holder(sudo)
     if holder:
         raise Exception(
-            "apt/dpkg is busy, so the Sysbox installer would wait for it. Holding the lock:\n"
+            f"apt/dpkg is still busy after {_DPKG_WAIT_SECS // 60} minutes, so the Sysbox installer would wait for it. "
+            "Holding the lock:\n"
             f"{holder}\n"
             "Let it finish (right after a boot this is often unattended-upgrades) or stop it, "
             "then run `lium mine` again."
