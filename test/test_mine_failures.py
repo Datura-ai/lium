@@ -900,26 +900,24 @@ def test_a_rerun_with_only_a_new_renting_range_keeps_the_saved_hotkey(monkeypatc
     assert mine._env_value(node / ".env", "MINER_ACCOUNT_CLAIM") == "claim"
 
 
-@pytest.mark.parametrize("port_range, extra", [
-    ("41000-41100", ["41000:41100/tcp"]),
-    ("41000,41002", ["41000/tcp", "41002/tcp"]),
-    ("", ["20000:65535/tcp"]),  # an empty range is every port from 20000 up
-])
-def test_open_firewall_allows_the_nodes_ports_in_an_active_ufw(monkeypatch, port_range, extra):
-    ran = []
-    monkeypatch.setattr(mine, "_exists", lambda cmd: True)
-    monkeypatch.setattr(mine.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or ("Status: active\n", ""))
-    monkeypatch.setattr(mine.console, "warning", lambda text: None)
-    mine._open_ufw({"service port": 8081, "SSH port": 2201}, port_range)
-    assert ran[1:] == [f"ufw allow {r}" for r in ["2201/tcp", "8081/tcp", *extra]]
+
+def test_step_2s_docker_group_exit_reruns_under_the_group(monkeypatch, tmp_path):
+    # install_executor_on_ubuntu.sh adds the user to the group, then exits 1 because this session lacks it
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "install_executor_on_ubuntu.sh").touch()
+    failure = "Command failed (1): Added to the docker group, but this session does not have it yet: run 'newgrp docker'"
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: (_ for _ in ()).throw(RuntimeError(failure)))
+    reruns = []
+    monkeypatch.setattr(mine, "_rerun_in_docker_group", lambda: reruns.append(1))
+    with pytest.raises(RuntimeError, match="newgrp docker"):  # reached only when the re-run could not happen
+        mine._install_executor_tools(tmp_path)
+    assert reruns == [1]
 
 
-@pytest.mark.parametrize("installed, status", [(False, ""), (True, "Status: inactive\n")])
-def test_open_firewall_changes_nothing_without_an_active_ufw(monkeypatch, installed, status):
-    ran = []
-    monkeypatch.setattr(mine, "_exists", lambda cmd: installed)
-    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or (status, ""))
-    monkeypatch.setattr(mine.console, "warning", lambda text: None)
-    mine._open_ufw({"service port": 8080}, "")
-    assert not any("allow" in c for c in ran)
+def test_another_step_2_failure_is_not_rerun(monkeypatch, tmp_path):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "install_executor_on_ubuntu.sh").touch()
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: (_ for _ in ()).throw(RuntimeError("Command failed (100): apt")))
+    monkeypatch.setattr(mine, "_rerun_in_docker_group", lambda: pytest.fail("re-run"))
+    with pytest.raises(RuntimeError, match="apt"):
+        mine._install_executor_tools(tmp_path)

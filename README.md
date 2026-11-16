@@ -391,9 +391,6 @@ lium mine --register <TOKEN> --external-port 8081 --ssh-port 2201 --renting-port
 # ...and give the first node its own range afterwards: a re-run keeps its saved hotkey and changes only the range
 lium mine --auto --renting-port-range 40000-40100
 
-# Host runs ufw: also allow the node's service, SSH and renting ports in it (off by default; ufw only)
-curl -fsSL https://lium.io/mine.sh | bash -s -- --register <TOKEN> --open-firewall
-
 # Provider-portal automation (same surface as the portal frontend)
 lium config set provider.coldkey miner-prod        # one-time: persist wallet identity
 lium config set provider.hotkey  miner-1
