@@ -19,7 +19,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import jwt as pyjwt
 
@@ -466,14 +466,22 @@ def read_nvlink_pairs(run: Callable[[str], tuple[str, str]]) -> int | None:
 
 
 # lium-io gpu_spec_table.MODDED_VRAM_MODELS: a memory-modded card reports its base card's name, and the validator lists
-# it as its own model from the VRAM reading. Base name -> (modded name, base card's top MiB); any reading above the
-# base card's window counts, since the validator's own reading can sit outside the window this host computes
-_MODDED_GPU_MODELS = {
-    "NVIDIA GeForce RTX 4090": ("NVIDIA GeForce RTX 4090 48GB", round(24576 * 1.05)),
-    "NVIDIA GeForce RTX 4080": ("NVIDIA GeForce RTX 4080 32GB", round(16384 * 1.05)),
-    "NVIDIA GeForce RTX 4080 SUPER": (
-        "NVIDIA GeForce RTX 4080 SUPER 32GB",
-        round(16384 * 1.05),
+# it as its own model from the VRAM reading. Any reading above the base card's window counts, since the validator's own
+# reading can sit outside the window this host computes
+class _ModdedGpuModel(NamedTuple):
+    modded_name: str
+    base_max_vram_mib: int
+
+
+_MODDED_GPU_MODELS: dict[str, _ModdedGpuModel] = {
+    "NVIDIA GeForce RTX 4090": _ModdedGpuModel(
+        "NVIDIA GeForce RTX 4090 48GB", round(24576 * 1.05)
+    ),
+    "NVIDIA GeForce RTX 4080": _ModdedGpuModel(
+        "NVIDIA GeForce RTX 4080 32GB", round(16384 * 1.05)
+    ),
+    "NVIDIA GeForce RTX 4080 SUPER": _ModdedGpuModel(
+        "NVIDIA GeForce RTX 4080 SUPER 32GB", round(16384 * 1.05)
     ),
 }
 
@@ -493,8 +501,8 @@ def _listed_gpu_model(
     modded = _MODDED_GPU_MODELS.get(
         _GPU_ALIASES.get(gpu_type.strip(), gpu_type.strip())
     )
-    if modded and vram_mib is not None and vram_mib > modded[1]:
-        return modded[0]
+    if modded and vram_mib is not None and vram_mib > modded.base_max_vram_mib:
+        return modded.modded_name
     return gpu_type
 
 
