@@ -56,6 +56,20 @@ def _options(pod: PodInfo) -> str:
 # --- pod_ssh_command: the command the JSON views print ------------------------------------------
 
 
+def test_pod_ssh_command_is_omitted_when_pod_dot_s_legacy_pin_cannot_be_moved(home, monkeypatch):
+    pod = _pod(pod_id=".")
+    legacy = home / ".lium" / "known_hosts"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("old key\n")
+
+    def read_only(*a, **k):
+        raise PermissionError(13, "Read-only file system")
+
+    monkeypatch.setattr("lium.sdk.client.os.link", read_only)
+
+    assert pod_ssh_command(pod) is None
+
+
 def test_pod_ssh_command_is_the_pinned_form_of_the_api_command_without_a_key(home):
     pod = _pod()
 

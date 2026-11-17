@@ -183,10 +183,25 @@ def _move_legacy_dot_pin(path: Path) -> None:
     """Older releases stored the pin of pod "." as the file ~/.lium/known_hosts itself (the "/." collapsed). Moved, not
     copied, so forgetting the pod cannot bring it back; a failed move raises, never a fresh first use."""
     legacy = path.parent.parent / "known_hosts"
-    if path.exists() or not legacy.is_file():
-        return
+    try:
+        if not stat.S_ISREG(os.lstat(legacy).st_mode):
+            return  # the directory of the other pods' pins
+    except FileNotFoundError:
+        return  # any other stat error propagates: the pod's connection fails closed
     _ensure_known_hosts_dir(path)
-    os.replace(legacy, path)
+    # link + unlink, not rename: a link never takes a directory a concurrent process put at `legacy` and never replaces
+    # a pin at `path`, so racing migrations and forgets cannot move other pods' pins
+    try:
+        os.link(legacy, path)
+    except FileNotFoundError:
+        return  # another process moved (and maybe forgot) it first
+    except FileExistsError:
+        pass
+    try:
+        if os.path.samefile(legacy, path):
+            os.unlink(legacy)
+    except FileNotFoundError:
+        pass
 
 def _pod_id_of(pod: Union[PodInfo, Dict[str, Any]]) -> str:
     return str(pod.get("id") if isinstance(pod, dict) else pod.id)
@@ -348,7 +363,13 @@ def pod_ssh_command(pod: PodInfo) -> Optional[str]:
         user, host, port = ssh_target(pod.ssh_cmd)
     except ValueError:
         return None
-    options = [*openssh_jump_options(pod, create_pin_file=False), *openssh_host_key_options(pod, create_pin_file=False)]
+    try:
+        options = [
+            *openssh_jump_options(pod, create_pin_file=False),
+            *openssh_host_key_options(pod, create_pin_file=False),
+        ]
+    except OSError:
+        return None  # the pin could not be moved (read-only home): no command beats one that skips the pin
     return shlex.join(["ssh", "-p", str(port), *options, f"{user}@{host}"])
 
 

@@ -1,3 +1,4 @@
+import os
 import warnings
 from types import SimpleNamespace
 
@@ -231,6 +232,51 @@ def test_forgetting_pod_dot_after_its_pin_moved_never_brings_the_old_pin_back(mo
     sdk_client.forget_host_key(".")
 
     assert not sdk_client.known_hosts_path(".").exists()
+
+def test_a_directory_of_pins_at_the_legacy_path_is_never_moved_as_pod_dot_s_pin(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    other = sdk_client.known_hosts_path("pod-a")
+    other.parent.mkdir(parents=True)
+    other.write_text("pinned")
+
+    path = sdk_client.known_hosts_path(".")
+
+    assert other.read_text() == "pinned"
+    assert not path.exists()
+
+
+def test_a_legacy_pin_moved_by_another_process_first_is_not_moved_again(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    legacy = tmp_path / ".lium" / "known_hosts"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("old key\n")
+    real_link = os.link
+
+    def raced(src, dst):
+        os.unlink(src)   # the other process moved and forgot it between our stat and our link
+        return real_link(src, dst)
+
+    monkeypatch.setattr(sdk_client.os, "link", raced)
+
+    path = sdk_client.known_hosts_path(".")
+
+    assert not path.exists() and not legacy.exists()
+
+
+def test_a_legacy_pin_that_cannot_be_read_fails_the_lookup_instead_of_unpinning_pod_dot(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    real_lstat = os.lstat
+
+    def broken(path, *a, **k):
+        if str(path).endswith("/.lium/known_hosts"):
+            raise OSError(5, "Input/output error")
+        return real_lstat(path, *a, **k)
+
+    monkeypatch.setattr(sdk_client.os, "lstat", broken)
+
+    with pytest.raises(OSError):
+        sdk_client.known_hosts_path(".")
+
 
 def test_ssh_insecure_env_installs_the_accept_any_key_policy(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
