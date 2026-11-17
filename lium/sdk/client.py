@@ -170,6 +170,8 @@ def known_hosts_path(pod: Union[PodInfo, str]) -> Path:
     """
     pod_id = pod if isinstance(pod, str) else pod.id
     safe_id = _POD_ID_SAFE.sub("_", pod_id or "unknown")
+    if safe_id in (".", ".."):  # the directory itself or its parent, not a pin file inside it
+        safe_id = safe_id.replace(".", "_")
     return Path.home() / ".lium" / "known_hosts" / safe_id
 
 

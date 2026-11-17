@@ -184,6 +184,17 @@ def test_known_hosts_path_sanitises_pod_id(monkeypatch, tmp_path):
     assert sdk_client.known_hosts_path(pod) == tmp_path / ".lium" / "known_hosts" / ".._etc_passwd"
 
 
+@pytest.mark.parametrize(("pod_id", "file_name"), [(".", "_"), ("..", "__")])
+def test_known_hosts_path_of_a_dot_id_is_a_file_inside_the_pin_directory(monkeypatch, tmp_path, pod_id, file_name):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    pins = tmp_path / ".lium" / "known_hosts"
+
+    path = sdk_client.known_hosts_path(pod_id)
+
+    assert path == pins / file_name
+    assert path.resolve().parent == pins.resolve()
+
+
 def test_ssh_insecure_env_installs_the_accept_any_key_policy(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
