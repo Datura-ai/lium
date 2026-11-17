@@ -168,11 +168,13 @@ def known_hosts_path(pod: Union[PodInfo, str]) -> Path:
     recycled address as a key change. Keying by pod id pins the key for the
     lifetime of the pod and lets a fresh pod on the same address start clean.
     """
-    pod_id = pod if isinstance(pod, str) else pod.id
-    safe_id = _POD_ID_SAFE.sub("_", pod_id or "unknown")
-    if safe_id in (".", ".."):  # the directory itself or its parent, not a pin file inside it
-        safe_id = safe_id.replace(".", "_")
-    return Path.home() / ".lium" / "known_hosts" / safe_id
+    pod_id = (pod if isinstance(pod, str) else pod.id) or "unknown"
+    name = pod_id
+    # Any other id (a path character, "." or "..") is named by its hash after "~", which no kept id contains,
+    # so two pods never share a pin file and forgetting one never drops another's.
+    if _POD_ID_SAFE.search(pod_id) or pod_id in (".", ".."):
+        name = "~" + hashlib.sha256(pod_id.encode()).hexdigest()
+    return Path.home() / ".lium" / "known_hosts" / name
 
 
 def _pod_id_of(pod: Union[PodInfo, Dict[str, Any]]) -> str:
