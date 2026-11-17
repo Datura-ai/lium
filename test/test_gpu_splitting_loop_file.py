@@ -212,6 +212,26 @@ def test_node_images_present_is_lium_mine_s_own_check_on_its_checkout(monkeypatc
     assert ("No `lium mine` checkout" in capsys.readouterr().out) is not checkout_exists
 
 
+def test_node_images_present_bounds_every_docker_probe(monkeypatch, tmp_path):
+    # a stuck daemon must read as "not present", not hang the planning step
+    from lium.cli.commands import mine
+
+    calls = []
+
+    def fake_run(cmd, check=True, capture=True, cwd=None, timeout=None):
+        calls.append((cmd, timeout))
+        if "config --images" in cmd:
+            return "repo/executor-runner:1 repo/other:2", ""
+        if "docker run" in cmd:
+            return "  image: repo/baked:3\n", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+
+    assert mine._node_images_present(tmp_path) is True
+    assert len(calls) > 3 and all(t == mine._QUICK_CHECK_SECS for _, t in calls)
+
+
 def test_loop_file_target_warns_and_plans_without_vram_when_nvidia_smi_is_missing(monkeypatch, capsys):
     preflight = _sample_preflight()
     monkeypatch.setattr(gpu_splitting, "load_mounted_filesystems", lambda *a: [])

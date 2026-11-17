@@ -425,19 +425,20 @@ GIB = 1024**3
 
 
 def _node_images_present(executor_dir: Path) -> bool:
-    """Every image this run would pull is already local. The runner image carries the compose file with the executor
+    """Every image this run would pull is already local (each probe is time-bounded: a stuck daemon reads as no). The runner image carries the compose file with the executor
     digest the runner injects at build, so that file, not the unrendered docker-compose.app.yml, names the images."""
     try:
-        images = set(_run("docker compose config --images", cwd=str(executor_dir))[0].split())
+        images = set(_run("docker compose config --images", cwd=str(executor_dir), timeout=_QUICK_CHECK_SECS)[0].split())
         runner = next(i for i in images if "executor-runner" in i)
         # inspect first: docker run pulls a missing image, which is the download this check exists to precede
         # (not --pull=never, which Docker before 20.10 rejects)
-        _run(f"docker image inspect {shlex.quote(runner)}")
-        baked = _run(f"docker run --rm --entrypoint cat {shlex.quote(runner)} /root/executor/docker-compose.yml")[0]
+        _run(f"docker image inspect {shlex.quote(runner)}", timeout=_QUICK_CHECK_SECS)
+        baked = _run(f"docker run --rm --entrypoint cat {shlex.quote(runner)} /root/executor/docker-compose.yml",
+                     timeout=_QUICK_CHECK_SECS)[0]
         images.update(re.findall(r"^\s*image:\s*(\S+)", baked, re.MULTILINE))
         images.add(PREFLIGHT_IMAGE)
         for image in images:
-            _run(f"docker image inspect {shlex.quote(image)}")
+            _run(f"docker image inspect {shlex.quote(image)}", timeout=_QUICK_CHECK_SECS)
     except (RuntimeError, StopIteration):
         return False
     return True
