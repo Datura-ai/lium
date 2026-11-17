@@ -244,6 +244,7 @@ def _build_setup_plan(
     image_file: Optional[str] = None,
     image_size_gib: Optional[int] = None,
     mine_dir: Optional[Path] = None,
+    progress: Optional[Callable[[str], None]] = None,
 ) -> SetupPlan:
     """Build the full destructive plan without mutating the host.
 
@@ -281,7 +282,7 @@ def _build_setup_plan(
             device,
         )
     elif image_file or image_size_gib:
-        target = _loop_file_target(preflight, image_file, image_size_gib, mine_dir)
+        target = _loop_file_target(preflight, image_file, image_size_gib, mine_dir, progress)
     else:
         try:
             target = auto_select_target(
@@ -301,7 +302,7 @@ def _build_setup_plan(
                     # a Docker partition on the system disk cannot be reformatted while the OS runs from that disk
                     message += f". {SINGLE_DISK_HINT}"
                 raise RuntimeError(message) from exc
-            target = _loop_file_target(preflight, None, None, mine_dir)
+            target = _loop_file_target(preflight, None, None, mine_dir, progress)
 
     loop_file = target.classification == "loop_file"
     if not loop_file:
@@ -381,7 +382,11 @@ def _destructive_actions(preflight: PreflightResult, target: TargetPlan, loop_fi
 
 
 def _loop_file_target(
-    preflight: PreflightResult, image_file: Optional[str], image_size_gib: Optional[int], mine_dir: Optional[Path] = None
+    preflight: PreflightResult,
+    image_file: Optional[str],
+    image_size_gib: Optional[int],
+    mine_dir: Optional[Path] = None,
+    progress: Optional[Callable[[str], None]] = None,
 ) -> TargetPlan:
     """Plan the XFS image file; `findmnt --json --bytes --list --real ...` via `load_mounted_filesystems(...)`,
     `nvidia-smi --query-gpu=memory.total ...` via `_total_gpu_vram_bytes()`, `du -sxb <docker-root>` via
@@ -400,13 +405,15 @@ def _loop_file_target(
         image_file,
         image_size_gib * 1024**3 if image_size_gib else None,
         total_vram_bytes,
-        _docker_data_bytes(preflight.docker_state.docker_root_dir),
+        _docker_data_bytes(preflight.docker_state.docker_root_dir, progress),
         # the switch to overlay2 hides images in the containerd store, so lium mine pulls them again
         preflight.docker_state.storage_driver != "overlayfs" and _node_images_present(mine_dir or DEFAULT_MINE_DIR),
     )
 
 
-def _docker_data_bytes(docker_root: str) -> int:
+def _docker_data_bytes(docker_root: str, progress: Optional[Callable[[str], None]] = None) -> int:
+    # du walks every file: on a large Docker root it runs for many minutes with no output (ticket-1262: 20 min)
+    (progress or console.info)(f"measuring {docker_root} with du; a large Docker root can take many minutes")
     return int(run_command(["du", "-sxb", docker_root], True, True).stdout.split()[0])
 
 
@@ -1426,9 +1433,14 @@ def gpu_splitting_check_command(
     _print_gpu_splitting_requirements()
     with timed_step_status(1, 2, "Running preflight inspection"):
         preflight = _preflight()
-    with timed_step_status(2, 2, "Resolving target"):
+    with timed_step_status(2, 2, "Resolving target") as show:
         plan = _build_setup_plan(
-            preflight, str(device) if device else None, str(image_file) if image_file else None, image_size_gib, mine_dir
+            preflight,
+            str(device) if device else None,
+            str(image_file) if image_file else None,
+            image_size_gib,
+            mine_dir,
+            show,
         )
 
     console.print(_docker_state_table(preflight))
@@ -1478,9 +1490,14 @@ def gpu_splitting_setup_command(
     _print_gpu_splitting_requirements()
     with timed_step_status(1, 2, "Running preflight inspection"):
         preflight = _preflight()
-    with timed_step_status(2, 2, "Resolving target"):
+    with timed_step_status(2, 2, "Resolving target") as show:
         plan = _build_setup_plan(
-            preflight, str(device) if device else None, str(image_file) if image_file else None, image_size_gib, mine_dir
+            preflight,
+            str(device) if device else None,
+            str(image_file) if image_file else None,
+            image_size_gib,
+            mine_dir,
+            show,
         )
 
     try:

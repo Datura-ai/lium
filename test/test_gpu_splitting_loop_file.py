@@ -223,6 +223,20 @@ def test_loop_file_target_warns_and_plans_without_vram_when_nvidia_smi_is_missin
     assert "GPU VRAM could not be read" in capsys.readouterr().out
 
 
+def test_docker_data_bytes_says_du_is_running_before_it_starts(monkeypatch, capsys):
+    # ticket-1262: du ran 20 min under a bare spinner and the provider could not tell whether it hung
+    seen = []
+    probe = _host_probes(docker_data_gib=3)
+    monkeypatch.setattr(gpu_splitting, "run_command", lambda args, *a: seen.append(args[0]) or probe(args, *a))
+
+    assert gpu_splitting._docker_data_bytes("/var/lib/docker", seen.append) == 3 * GIB
+    assert seen == ["measuring /var/lib/docker with du; a large Docker root can take many minutes", "du"]
+
+    # with no spinner to carry it (the `lium mine` path), the line is printed
+    gpu_splitting._docker_data_bytes("/var/lib/docker")
+    assert "measuring /var/lib/docker with du" in capsys.readouterr().out
+
+
 def test_plan_refuses_device_together_with_file(monkeypatch):
     with pytest.raises(RuntimeError, match="pass one of them"):
         gpu_splitting._build_setup_plan(_sample_preflight(), "/dev/sdb", image_file="/pool.xfs")

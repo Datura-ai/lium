@@ -406,7 +406,7 @@ lium provider machine estimate --gpu-type "NVIDIA H200 NVL" --gpu-count 8
 lium provider --json status                        # JSON envelope for scripts/agents
 
 # Inspect or configure Docker storage for GPU splitting (Ubuntu/Debian + systemd, run setup as root)
-lium gpu-splitting check
+lium gpu-splitting check                 # with no spare disk, step [2/2] sizes /var/lib/docker with du (minutes on a large one)
 sudo lium gpu-splitting setup --yes
 lium gpu-splitting verify
 
