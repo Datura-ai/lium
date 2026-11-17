@@ -678,7 +678,8 @@ def test_a_rerun_keeps_renting_port_mappings_unless_a_range_replaces_them(
 
     monkeypatch.setattr(mine, "_finish_preflight_pull", stop_after_start)
     result = CliRunner().invoke(mine.mine_command, ["--auto", "-k", _HK, "--dir", str(tmp_path / "repo"), *flags])
-    assert "stop after start" in result.output, result.output
+    # under rentals the node check (and so the preflight pull) is skipped and the run completes
+    assert ("Node setup complete" if rentals else "stop after start") in " ".join(result.output.split()), result.output
     assert mine._env_value(node / ".env", "RENTING_PORT_MAPPINGS") == mappings
     assert mine._env_value(node / ".env", "RENTING_PORT_RANGE") == rng
     assert [c for c in calls if c.startswith("docker compose up")] == [up]
@@ -768,6 +769,33 @@ def test_one_host_port_for_service_and_ssh_is_a_usage_error(monkeypatch, tmp_pat
     else:
         assert result.exit_code == 2, result.output
         assert "both 8081" in result.output
+
+
+def test_a_dev_stack_central_miner_lands_in_env(tmp_path: Path):
+    """DAH-6051: the executor trusts DEFAULT_MINER_HOTKEY; on a dev stack it must be that stack's central miner."""
+    env = tmp_path / ".env"
+    env.write_text("INTERNAL_PORT=8080\n")
+    central = "5E9mXBKNan8FbRGs71LnXaP8dAVkCVViDvkhbuNsfLwBzLsi"  # gitleaks:allow (public ss58 address)
+    mine._apply_env_overrides(tmp_path, internal="8080", external="8080", ssh="2200", ssh_pub="", rng="",
+                              central_miner_hotkey=central)
+    assert f"DEFAULT_MINER_HOTKEY={central}" in env.read_text().splitlines()
+    assert "DEFAULT_MINER_HOTKEY" in mine._RESTART_KEYS   # a changed one recreates a running executor
+
+
+def test_a_rerun_without_a_token_keeps_the_dev_stack_and_a_prod_token_clears_it(tmp_path: Path):
+    """DAH-6051 review: a plain rerun rebuilds .env from the template; the dev-stack choice must survive it."""
+    central = "5E9mXBKNan8FbRGs71LnXaP8dAVkCVViDvkhbuNsfLwBzLsi"  # gitleaks:allow (public ss58 address)
+    (tmp_path / ".env.template").write_text("MINER_HOTKEY_SS58_ADDRESS=\nINTERNAL_PORT=8080\n")
+    (tmp_path / ".env").write_text(f"LIUM_DEV_STACK=1\nDEFAULT_MINER_HOTKEY={central}\n")
+    mine._setup_executor_env(tmp_path, hotkey=central)
+    mine._apply_env_overrides(tmp_path, internal="8080", external="8080", ssh="2200", ssh_pub="", rng="")
+    lines = (tmp_path / ".env").read_text().splitlines()
+    assert "LIUM_DEV_STACK=1" in lines and f"DEFAULT_MINER_HOTKEY={central}" in lines
+
+    mine._apply_env_overrides(tmp_path, internal="8080", external="8080", ssh="2200", ssh_pub="", rng="",
+                              dev_stack=False)
+    text = (tmp_path / ".env").read_text()
+    assert "LIUM_DEV_STACK" not in text and "DEFAULT_MINER_HOTKEY" not in text
 
 
 def test_a_step_command_that_hangs_is_stopped_at_its_timeout_with_the_command_named():
@@ -911,6 +939,32 @@ def test_a_rerun_with_only_a_new_renting_range_keeps_the_saved_hotkey(monkeypatc
     assert mine._env_value(node / ".env", "MINER_HOTKEY_SS58_ADDRESS") == _HK
     assert mine._env_value(node / ".env", "RENTING_PORT_RANGE") == "40000-40100"
     assert mine._env_value(node / ".env", "MINER_ACCOUNT_CLAIM") == "claim"
+
+
+@pytest.mark.parametrize("rentals", [["pod_ab12"], []])
+def test_a_rerun_runs_the_node_check_only_when_no_rental_runs(monkeypatch, tmp_path: Path, rentals):
+    # the node check runs --gpus all with a matrix work-proof: under a rental it competes with the renter for the GPUs
+    node = tmp_path / "repo" / "neurons" / "executor"
+    node.mkdir(parents=True)
+    (node / ".env").write_text(f"MINER_HOTKEY_SS58_ADDRESS={_HK}\nRENTING_PORT_RANGE=\n")
+    (node / ".env.template").write_text(
+        "MINER_HOTKEY_SS58_ADDRESS=\nINTERNAL_PORT=8080\nEXTERNAL_PORT=8080\nSSH_PORT=2200\nSSH_PUBLIC_PORT=2200\n"
+    )
+    for name in ("_clone_or_update_repo", "_install_executor_tools", "_check_prereqs", "_check_free_disk",
+                 "_check_ports_free", "_start_executor", "_finish_preflight_pull"):
+        monkeypatch.setattr(mine, name, lambda *a, **k: None)
+    monkeypatch.setattr(mine, "_docker_storage_limited", lambda: True)
+    monkeypatch.setattr(mine, "_start_preflight_pull", lambda: SimpleNamespace(poll=lambda: 0))
+    monkeypatch.setattr(mine, "_rental_pods", lambda: rentals)
+    checks = []
+    monkeypatch.setattr(mine, "_validate_executor", lambda *a, **k: checks.append(1))
+
+    result = CliRunner().invoke(
+        mine.mine_command, ["--auto", "--renting-port-range", "40000-40100", "--dir", str(tmp_path / "repo")]
+    )
+
+    assert checks == ([] if rentals else [1]), result.output
+    assert ("node check was skipped" in " ".join(result.output.split())) == bool(rentals)
 
 
 
