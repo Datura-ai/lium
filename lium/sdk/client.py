@@ -183,9 +183,11 @@ def _move_legacy_dot_pin(path: Path) -> None:
     """Older releases stored the pin of pod "." as the file ~/.lium/known_hosts itself (the "/." collapsed). Moved, not
     copied, so forgetting the pod cannot bring it back; a failed move raises, never a fresh first use."""
     legacy = path.parent.parent / "known_hosts"
+    # a symlink to a pin file is a pin (OpenSSH and Paramiko follow it); link() on Linux would copy the symlink itself,
+    # which dangles in another directory when relative, so the resolved file is what gets linked
+    source = os.path.realpath(legacy)
     try:
-        # stat, not lstat: a symlink to a pin file is a pin (OpenSSH and Paramiko follow it); link() then pins its target
-        if not stat.S_ISREG(os.stat(legacy).st_mode):
+        if not stat.S_ISREG(os.stat(source).st_mode):
             return  # the directory of the other pods' pins
     except FileNotFoundError:
         return  # any other stat error propagates: the pod's connection fails closed
@@ -193,7 +195,7 @@ def _move_legacy_dot_pin(path: Path) -> None:
     # link + unlink, not rename: a link never takes a directory a concurrent process put at `legacy` and never replaces
     # a pin at `path`, so racing migrations and forgets cannot move other pods' pins
     try:
-        os.link(legacy, path)
+        os.link(source, path)
     except FileNotFoundError:
         return  # another process moved (and maybe forgot) it first
     except FileExistsError:

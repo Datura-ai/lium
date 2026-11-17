@@ -270,10 +270,11 @@ def test_a_legacy_pin_that_is_a_symlink_to_a_pin_file_stays_pod_dot_s_pin(monkey
     target.write_text("[pod]:22 ssh-ed25519 AAAA\n")
     legacy = tmp_path / ".lium" / "known_hosts"
     legacy.parent.mkdir()
-    legacy.symlink_to(target)
+    legacy.symlink_to(os.path.relpath(target, legacy.parent))   # relative: it would dangle if copied as a symlink
 
     path = sdk_client.known_hosts_path(".")
 
+    assert not path.is_symlink()
     assert path.read_text() == "[pod]:22 ssh-ed25519 AAAA\n"
     assert target.read_text() == "[pod]:22 ssh-ed25519 AAAA\n"
 
