@@ -490,6 +490,16 @@ _MODDED_GPU_MODELS: dict[str, _ModdedGpuModel] = {
     "NVIDIA GeForce RTX 4080 SUPER": _ModdedGpuModel(
         "NVIDIA GeForce RTX 4080 SUPER 32GB", round(16384 * 1.05)
     ),
+    "NVIDIA GeForce RTX 4090 D": _ModdedGpuModel(
+        "NVIDIA GeForce RTX 4090 D 48GB", round(24576 * 1.05)
+    ),
+    "NVIDIA GeForce RTX 3080": _ModdedGpuModel(
+        "NVIDIA GeForce RTX 3080 20GB",
+        round(12288 * 1.05),  # the 12 GB factory variant
+    ),
+    "NVIDIA GeForce RTX 2080 Ti": _ModdedGpuModel(
+        "NVIDIA GeForce RTX 2080 Ti 22GB", round(11264 * 1.05)
+    ),
 }
 
 
