@@ -269,6 +269,30 @@ def test_a_planning_command_that_hangs_fails_naming_it(monkeypatch):
     assert gpu_splitting._command_watch is None
 
 
+def test_a_blkid_that_hangs_while_planning_stops_setup_before_docker_is_stopped(monkeypatch):
+    partition = TargetPlan(
+        selection_mode="auto",
+        requested_device=None,
+        resolved_target="/dev/nvme1n1p1",
+        parent_disk="/dev/nvme1n1",
+        classification="partition",
+        needs_partition_creation=False,
+        needs_format=True,
+        existing_fs_type=None,
+        selection_reason="spare partition",
+    )
+
+    def hang(args, **kwargs):
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    monkeypatch.setattr(gpu_splitting.subprocess, "run", hang)
+    monkeypatch.setattr(gpu_splitting, "auto_select_target", lambda *a: partition)
+    monkeypatch.setattr(gpu_splitting, "_check_target_device", lambda *a: None)
+
+    with pytest.raises(RuntimeError, match=r"`blkid -s UUID -o value /dev/nvme1n1p1` did not finish within 120 s"):
+        gpu_splitting._build_setup_plan(_sample_preflight(), None)
+
+
 def test_plan_refuses_device_together_with_file(monkeypatch):
     with pytest.raises(RuntimeError, match="pass one of them"):
         gpu_splitting._build_setup_plan(_sample_preflight(), "/dev/sdb", image_file="/pool.xfs")

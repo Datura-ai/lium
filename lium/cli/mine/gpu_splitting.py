@@ -399,7 +399,10 @@ def _plan_setup(
     elif not target.needs_partition_creation:
         try:
             fstab_entry = _fstab_entry(f"UUID={_get_uuid(target_path)}", "defaults,pquota")
-        except RuntimeError:
+        except RuntimeError as exc:
+            # a hung blkid would hang again after Docker is stopped, with no deadline there
+            if isinstance(exc.__cause__, subprocess.TimeoutExpired):
+                raise
             fstab_entry = ""
 
     destructive_actions = _destructive_actions(preflight, target, loop_file)
