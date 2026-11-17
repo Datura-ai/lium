@@ -250,7 +250,9 @@ def _rerun_in_docker_group() -> None:
     except (KeyError, OSError):
         return
     console.warning("Docker was just set up for this user; continuing with the docker group (no re-login needed).")
-    os.execvpe("sg", ["sg", "docker", "-c", shlex.join(sys.argv)], {**os.environ, "LIUM_MINE_DOCKER_GROUP_RERUN": "1"})
+    # setuid sg drops LD_LIBRARY_PATH but keeps _PYI_*: the binary must redo its library setup in the re-run
+    os.execvpe("sg", ["sg", "docker", "-c", shlex.join(sys.argv)],
+               {**_subprocess_env(), "LIUM_MINE_DOCKER_GROUP_RERUN": "1", "PYINSTALLER_RESET_ENVIRONMENT": "1"})
 
 
 _QUICK_CHECK_SECS = 60        # nvidia-smi and docker info answer in seconds; a hung GPU or daemon never does
@@ -277,7 +279,16 @@ def _install_sysbox(compute_dir: Path) -> str:
     if not script.exists():
         return ""
     sudo = "" if os.geteuid() == 0 else "sudo -n "
-    # right after a boot unattended-upgrades often holds apt for a few minutes: wait for it instead of stopping
+    _wait_for_dpkg(sudo, "the Sysbox installer")
+    try:
+        _run(f"{sudo}bash {shlex.quote(str(script))} < /dev/null", timeout=_SYSBOX_INSTALL_SECS)
+    except RuntimeError as exc:
+        return str(exc)[-2000:]
+    return ""
+
+
+def _wait_for_dpkg(sudo: str, waiter: str) -> None:
+    """Right after a boot unattended-upgrades often holds apt for a few minutes: wait for it instead of stopping."""
     holder = _dpkg_lock_holder(sudo)
     deadline = time.monotonic() + _DPKG_WAIT_SECS
     if holder:
@@ -287,17 +298,12 @@ def _install_sysbox(compute_dir: Path) -> str:
         holder = _dpkg_lock_holder(sudo)
     if holder:
         raise Exception(
-            f"apt/dpkg is still busy after {_DPKG_WAIT_SECS // 60} minutes, so the Sysbox installer would wait for it. "
+            f"apt/dpkg is still busy after {_DPKG_WAIT_SECS // 60} minutes, so {waiter} would wait for it. "
             "Holding the lock:\n"
             f"{holder}\n"
             "Let it finish (right after a boot this is often unattended-upgrades) or stop it, "
             "then run `lium mine` again."
         )
-    try:
-        _run(f"{sudo}bash {shlex.quote(str(script))} < /dev/null", timeout=_SYSBOX_INSTALL_SECS)
-    except RuntimeError as exc:
-        return str(exc)[-2000:]
-    return ""
 
 
 # Validators are to score 0 a node whose Docker cannot cap a container's disk (STORAGE_LIMIT_REQUIRED): one renter
@@ -512,6 +518,7 @@ def _install_executor_tools(compute_dir: Path):
     if not script.exists():
         raise Exception(f"Install script not found at {script}")
 
+    _wait_for_dpkg("" if os.geteuid() == 0 else "sudo -n ", "the install script")
     try:
         _run(["bash", str(script)])
     except RuntimeError as exc:

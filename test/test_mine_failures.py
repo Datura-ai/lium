@@ -206,6 +206,8 @@ def test_a_session_without_the_new_docker_group_reruns_the_same_command_under_it
     (file, args, env), = execs
     assert args == ["sg", "docker", "-c", "/home/provider/.local/bin/lium mine --register 'tok en'"]
     assert env["LIUM_MINE_DOCKER_GROUP_RERUN"] == "1"
+    # the binary's re-run must redo its library setup: setuid sg drops LD_LIBRARY_PATH but keeps _PYI_*
+    assert env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
 
 
 @pytest.mark.parametrize("members, rerun", [([], ""), (["provider"], "1")])
@@ -905,6 +907,7 @@ def test_step_2s_docker_group_exit_reruns_under_the_group(monkeypatch, tmp_path)
     # install_executor_on_ubuntu.sh adds the user to the group, then exits 1 because this session lacks it
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "install_executor_on_ubuntu.sh").touch()
+    monkeypatch.setattr(mine, "_wait_for_dpkg", lambda sudo, waiter: None)
     failure = "Command failed (1): Added to the docker group, but this session does not have it yet: run 'newgrp docker'"
     monkeypatch.setattr(mine, "_run", lambda cmd, **kw: (_ for _ in ()).throw(RuntimeError(failure)))
     reruns = []
@@ -914,9 +917,21 @@ def test_step_2s_docker_group_exit_reruns_under_the_group(monkeypatch, tmp_path)
     assert reruns == [1]
 
 
+def test_step_2_waits_for_a_held_apt_lock_before_the_install_script(monkeypatch, tmp_path):
+    # after a boot unattended-upgrades holds the lock; the script's apt-get would fail on it in about 20s
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "install_executor_on_ubuntu.sh").touch()
+    order = []
+    monkeypatch.setattr(mine, "_wait_for_dpkg", lambda sudo, waiter: order.append(("wait", waiter)))
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: order.append("script") or ("", ""))
+    mine._install_executor_tools(tmp_path)
+    assert order == [("wait", "the install script"), "script"]
+
+
 def test_another_step_2_failure_is_not_rerun(monkeypatch, tmp_path):
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "install_executor_on_ubuntu.sh").touch()
+    monkeypatch.setattr(mine, "_wait_for_dpkg", lambda sudo, waiter: None)
     monkeypatch.setattr(mine, "_run", lambda cmd, **kw: (_ for _ in ()).throw(RuntimeError("Command failed (100): apt")))
     monkeypatch.setattr(mine, "_rerun_in_docker_group", lambda: pytest.fail("re-run"))
     with pytest.raises(RuntimeError, match="apt"):
