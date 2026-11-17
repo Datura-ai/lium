@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -11,10 +12,16 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "pr_changelog_check.py"
 
 
+def api_item(line: str) -> str:
+    """`status<TAB>filename[<TAB>previous_filename[<TAB>patch]]` -> one PR files API object, as ci.yml prints it."""
+    status, filename, previous, patch = (line.split("\t", 3) + [None, None])[:4]
+    return json.dumps({"status": status, "filename": filename, "previous_filename": previous, "patch": patch})
+
+
 def run(lines: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SCRIPT)],
-        input="".join(f"{line}\n" for line in lines),
+        input="".join(f"{api_item(line)}\n" for line in lines),
         capture_output=True,
         text=True,
         check=False,
@@ -38,6 +45,12 @@ def run(lines: list[str]) -> subprocess.CompletedProcess[str]:
             "modified\tlium_entry.py",
             "modified\tchangelog.d/README.md",
         ],  # the README is no entry
+        # a CHANGELOG.md edit that adds no `## [X.Y.Z]` section: the release counts none
+        ["modified\tlium/sdk.py", "modified\tCHANGELOG.md\t\t@@ -1 +1 @@\n-# Changelog\n+# Change log"],
+        ["modified\tlium/sdk.py", "modified\tCHANGELOG.md\t\t@@ -7,0 +8,3 @@\n+## [Unreleased]\n+### Fixed\n+- x"],
+        ["modified\tlium/sdk.py", "modified\tCHANGELOG.md\t\t@@ -8 +7,0 @@\n-## [0.4.3] - 2025-10-23"],
+        ["modified\tlium/sdk.py", "modified\tCHANGELOG.md"],  # no patch (the API omits a huge one)
+        ["renamed\tlium/new.py\tlium/old.py"],  # a move inside lium/
     ],
 )
 def test_shipped_code_without_an_entry_fails_and_names_the_files(
@@ -53,7 +66,7 @@ def test_shipped_code_without_an_entry_fails_and_names_the_files(
     "lines",
     [
         ["modified\tlium/cli/mine/storage.py", "added\tchangelog.d/DAH-5983.md"],
-        ["modified\tlium/sdk.py", "modified\tCHANGELOG.md"],
+        ["modified\tlium/sdk.py", "modified\tCHANGELOG.md\t\t@@ -7,0 +8,3 @@\n+## [0.4.4] - 2026-11-17\n+### Fixed\n+- x"],
         [
             "modified\t.github/workflows/ci.yml",
             "modified\tREADME.md",
@@ -67,6 +80,13 @@ def test_shipped_code_without_an_entry_fails_and_names_the_files(
 )
 def test_an_entry_or_no_shipped_code_passes(lines: list[str]) -> None:
     assert run(lines).returncode == 0
+
+
+def test_a_file_moved_out_of_lium_counts_its_old_path() -> None:
+    result = run(["renamed\tscripts/old_helper.py\tlium/old_helper.py"])
+
+    assert result.returncode == 1
+    assert "lium/old_helper.py" in result.stdout
 
 
 def test_the_ci_step_runs_after_the_suite_with_pipefail() -> None:
@@ -89,3 +109,4 @@ def test_the_ci_step_runs_after_the_suite_with_pipefail() -> None:
     )  # bash -eo pipefail: a failed gh api call fails the step
     assert "!cancelled()" in step["if"]  # still runs when the suite failed
     assert workflow["jobs"]["test"]["permissions"]["pull-requests"] == "read"
+    assert "previous_filename" in step["run"] and "patch" in step["run"]  # renames and the CHANGELOG.md diff reach it

@@ -61,7 +61,7 @@ jobs:
       run: |
         labels="$(gh api "repos/${{ github.repository }}/pulls/$PR" -q '.labels[].name')"
         if grep -qx 'no-changelog' <<<"$labels"; then echo "labelled no-changelog: skipped"; exit 0; fi
-        files="$(gh api --paginate "repos/${{ github.repository }}/pulls/$PR/files" -q '.[] | "\(.status)\t\(.filename)"')"
+        files="$(gh api --paginate "repos/${{ github.repository }}/pulls/$PR/files" -q '.[] | {status, filename, previous_filename, patch} | tojson')"
         printf '%s\n' "$files" | python3 scripts/pr_changelog_check.py
 
   packaging:

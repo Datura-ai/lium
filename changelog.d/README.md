@@ -25,5 +25,5 @@ nothing; the duplicate-version refusal and the Unreleased warning run in a dry r
 
 PR CI checks it as well (`scripts/pr_changelog_check.py`, in the `pytest` job): a PR that changes `lium/`,
 `lium_entry.py` or `pyproject.toml` (what `scripts/next_version.py --check` counts at release) and adds no fragment and
-no `CHANGELOG.md` entry fails, so the gap shows on the PR rather than as a refused release. A PR with nothing to tell
-gets the `no-changelog` label and a re-run of the job; the release then needs `allow-version-skip`.
+no new `## [X.Y.Z]` section in `CHANGELOG.md` fails (an `## [Unreleased]` edit does not count: the release skips it),
+so the gap shows on the PR rather than as a refused release. A PR with nothing to tell gets the `no-changelog` label and a re-run of the job; the release then needs `allow-version-skip`.
