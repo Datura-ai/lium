@@ -175,16 +175,17 @@ def _clone_or_update_repo(target_dir: Path, branch: str):
     heads = _run(["git", "ls-remote", "--heads", repo, f"refs/heads/{branch}"])[0].splitlines()
     if not any(line.split("\t", 1)[-1] == f"refs/heads/{branch}" for line in heads):
         raise click.BadParameter(f"not a branch of {repo}: {branch!r}", param_hint="--branch")
+    # only the branch's latest commit: the node needs its files, never its history (the full clone is ~550 MB)
     if target_dir.exists():
         if (target_dir / ".git").exists():
             cwd = str(target_dir)
-            _run("git fetch --all", cwd=cwd)
-            # switch, not checkout: checkout would read a name that is also a path as files to discard
-            _run(["git", "switch", branch], cwd=cwd)
-            _run(["git", "pull", "origin", branch], cwd=cwd)
+            _run(["git", "fetch", "--depth", "1", "origin", branch], cwd=cwd)
+            # switch, not checkout: checkout would read a name that is also a path as files to discard.
+            # -C onto the fetched commit: a shallow clone shares no history to merge with, so `pull` cannot update it
+            _run(["git", "switch", "-C", branch, "FETCH_HEAD"], cwd=cwd)
 
     else:
-        _run(["git", "clone", "--branch", branch, repo, str(target_dir)])
+        _run(["git", "clone", "--depth", "1", "--single-branch", "--branch", branch, repo, str(target_dir)])
 
 
 def _check_prereqs(compute_dir: Path | None = None, show=lambda text: None):
