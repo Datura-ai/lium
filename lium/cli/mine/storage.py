@@ -290,13 +290,14 @@ def inspect_free_regions(runner: Runner, disk_path: str) -> list[tuple[int, int]
 
     Command run:
 
-    - `parted -m <disk> unit B print free`
+    - `parted -s -m <disk> unit B print free`
 
     The machine-readable `-m` output is parsed into `(start, end)` byte ranges
     so target selection can allow only the simple case of one unambiguous free
     region.
     """
-    result = runner(["parted", "-m", disk_path, "unit", "B", "print", "free"], False, True)
+    # -s: without script mode parted stops to ask (a GPT it reads as damaged, a VM disk) and the check hung on it
+    result = runner(["parted", "-s", "-m", disk_path, "unit", "B", "print", "free"], False, True)
     if result.returncode != 0:
         return []
     return _parse_parted_free_regions(result.stdout or "")
@@ -360,7 +361,7 @@ def classify_target(
 
     - `_classify_partition(...)`, which may call `xfs_info` and temporary
       read-only `mount`/`umount`
-    - `_classify_disk(...)`, which may call `parted -m ... print free`
+    - `_classify_disk(...)`, which may call `parted -s -m ... print free`
 
     The return value is the core policy decision used by both `check` and
     `setup`.
@@ -450,7 +451,7 @@ def resolve_explicit_target(
 
     Commands are delegated through `classify_target(...)`, which may run:
 
-    - `parted -m <disk> unit B print free`
+    - `parted -s -m <disk> unit B print free`
     - `xfs_info <partition>`
     - `mount -o ro,nouuid <partition> <tempdir>`
     - `umount <tempdir>`
@@ -512,7 +513,7 @@ def auto_select_target(
     `classify_target(...)` for each disk/partition, so the effective inspection
     command set is:
 
-    - `parted -m <disk> unit B print free`
+    - `parted -s -m <disk> unit B print free`
     - `xfs_info <partition>`
     - `mount -o ro,nouuid <partition> <tempdir>`
     - `umount <tempdir>`

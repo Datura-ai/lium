@@ -100,6 +100,22 @@ class _SetupExecutionState:
     loop_file_removed: bool = False
 
 
+# Planning (step 2) runs only read-only commands; each gets this long before it counts as hung.
+PLAN_COMMAND_TIMEOUT_SECONDS = 120
+# du walks the whole Docker root: minutes on a large one, so it waits longer.
+DU_TIMEOUT_SECONDS = 3600
+
+
+@dataclass
+class _CommandWatch:
+    show: Optional[Callable[[str], None]]
+    timeout: float
+
+
+# set by `_build_setup_plan` for the duration of planning; None while setup mutates the host (no deadline there)
+_command_watch: Optional[_CommandWatch] = None
+
+
 def run_command(args: list[str], check: bool = True, capture: bool = True) -> CommandResult:
     """Run one host command and normalize its output.
 
@@ -118,7 +134,21 @@ def run_command(args: list[str], check: bool = True, capture: bool = True) -> Co
     - stub host interactions in tests
     - avoid `shell=True` for the new storage-migration code
     """
-    result = subprocess.run(args, text=True, capture_output=capture)
+    command = " ".join(args)
+    watch = _command_watch
+    timeout = None
+    if watch is not None:
+        timeout = DU_TIMEOUT_SECONDS if args[0] == "du" else watch.timeout
+        if watch.show:
+            watch.show(f"running {command}")
+    try:
+        # stdin is never a terminal: a tool that stops to ask (parted without -s) gets EOF instead of waiting forever
+        result = subprocess.run(args, text=True, capture_output=capture, stdin=subprocess.DEVNULL, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"`{command}` did not finish within {int(exc.timeout)} s and was stopped. Nothing on the host was "
+            "changed. Run that command by hand to see where it waits (a disk or driver that does not answer)."
+        ) from exc
     command_result = CommandResult(
         args=args,
         stdout=result.stdout or "",
@@ -246,6 +276,26 @@ def _build_setup_plan(
     mine_dir: Optional[Path] = None,
     progress: Optional[Callable[[str], None]] = None,
 ) -> SetupPlan:
+    """`_plan_setup` with every command it runs under a deadline and named through `progress` (the step line).
+
+    Planning is read-only, so a command that does not answer is a hang, not work: on a provider's VM `parted`
+    sat 20+ minutes on one disk with only a spinner showing. With no `progress` (`lium mine`) the deadlines still apply.
+    """
+    global _command_watch
+    previous, _command_watch = _command_watch, _CommandWatch(progress, PLAN_COMMAND_TIMEOUT_SECONDS)
+    try:
+        return _plan_setup(preflight, device, image_file, image_size_gib, mine_dir)
+    finally:
+        _command_watch = previous
+
+
+def _plan_setup(
+    preflight: PreflightResult,
+    device: Optional[str],
+    image_file: Optional[str] = None,
+    image_size_gib: Optional[int] = None,
+    mine_dir: Optional[Path] = None,
+) -> SetupPlan:
     """Build the full destructive plan without mutating the host.
 
     Commands run directly here:
@@ -282,7 +332,7 @@ def _build_setup_plan(
             device,
         )
     elif image_file or image_size_gib:
-        target = _loop_file_target(preflight, image_file, image_size_gib, mine_dir, progress)
+        target = _loop_file_target(preflight, image_file, image_size_gib, mine_dir)
     else:
         try:
             target = auto_select_target(
@@ -302,7 +352,7 @@ def _build_setup_plan(
                     # a Docker partition on the system disk cannot be reformatted while the OS runs from that disk
                     message += f". {SINGLE_DISK_HINT}"
                 raise RuntimeError(message) from exc
-            target = _loop_file_target(preflight, None, None, mine_dir, progress)
+            target = _loop_file_target(preflight, None, None, mine_dir)
 
     loop_file = target.classification == "loop_file"
     if not loop_file:
@@ -382,11 +432,7 @@ def _destructive_actions(preflight: PreflightResult, target: TargetPlan, loop_fi
 
 
 def _loop_file_target(
-    preflight: PreflightResult,
-    image_file: Optional[str],
-    image_size_gib: Optional[int],
-    mine_dir: Optional[Path] = None,
-    progress: Optional[Callable[[str], None]] = None,
+    preflight: PreflightResult, image_file: Optional[str], image_size_gib: Optional[int], mine_dir: Optional[Path] = None
 ) -> TargetPlan:
     """Plan the XFS image file; `findmnt --json --bytes --list --real ...` via `load_mounted_filesystems(...)`,
     `nvidia-smi --query-gpu=memory.total ...` via `_total_gpu_vram_bytes()`, `du -sxb <docker-root>` via
@@ -405,15 +451,13 @@ def _loop_file_target(
         image_file,
         image_size_gib * 1024**3 if image_size_gib else None,
         total_vram_bytes,
-        _docker_data_bytes(preflight.docker_state.docker_root_dir, progress),
+        _docker_data_bytes(preflight.docker_state.docker_root_dir),
         # the switch to overlay2 hides images in the containerd store, so lium mine pulls them again
         preflight.docker_state.storage_driver != "overlayfs" and _node_images_present(mine_dir or DEFAULT_MINE_DIR),
     )
 
 
-def _docker_data_bytes(docker_root: str, progress: Optional[Callable[[str], None]] = None) -> int:
-    # du walks every file: on a large Docker root it runs for many minutes with no output (ticket-1262: 20 min)
-    (progress or console.info)(f"measuring {docker_root} with du; a large Docker root can take many minutes")
+def _docker_data_bytes(docker_root: str) -> int:
     return int(run_command(["du", "-sxb", docker_root], True, True).stdout.split()[0])
 
 

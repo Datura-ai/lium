@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import subprocess
+
 import pytest
 from test_gpu_splitting_storage import (
     _patch_execute_setup_dependencies,
@@ -223,18 +225,48 @@ def test_loop_file_target_warns_and_plans_without_vram_when_nvidia_smi_is_missin
     assert "GPU VRAM could not be read" in capsys.readouterr().out
 
 
-def test_docker_data_bytes_says_du_is_running_before_it_starts(monkeypatch, capsys):
-    # ticket-1262: du ran 20 min under a bare spinner and the provider could not tell whether it hung
-    seen = []
-    probe = _host_probes(docker_data_gib=3)
-    monkeypatch.setattr(gpu_splitting, "run_command", lambda args, *a: seen.append(args[0]) or probe(args, *a))
+def test_planning_commands_get_a_deadline_no_stdin_and_are_named(monkeypatch):
+    # ticket-1262: `parted` without -s sat 20+ min in step [2/2] under a bare spinner on a provider's VM
+    calls, shown = [], []
 
-    assert gpu_splitting._docker_data_bytes("/var/lib/docker", seen.append) == 3 * GIB
-    assert seen == ["measuring /var/lib/docker with du; a large Docker root can take many minutes", "du"]
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, "1\t/var/lib/docker\n", "")
 
-    # with no spinner to carry it (the `lium mine` path), the line is printed
-    gpu_splitting._docker_data_bytes("/var/lib/docker")
-    assert "measuring /var/lib/docker with du" in capsys.readouterr().out
+    monkeypatch.setattr(gpu_splitting.subprocess, "run", fake_run)
+
+    def plan(*_args):
+        gpu_splitting.run_command(["lsblk", "--json"])
+        return gpu_splitting._docker_data_bytes("/var/lib/docker")
+
+    monkeypatch.setattr(gpu_splitting, "_plan_setup", plan)
+    assert gpu_splitting._build_setup_plan(_sample_preflight(), None, progress=shown.append) == 1
+
+    assert shown == ["running lsblk --json", "running du -sxb /var/lib/docker"]
+    assert [kw["timeout"] for _, kw in calls] == [
+        gpu_splitting.PLAN_COMMAND_TIMEOUT_SECONDS,
+        gpu_splitting.DU_TIMEOUT_SECONDS,
+    ]
+    assert all(kw["stdin"] is subprocess.DEVNULL for _, kw in calls)
+    # outside planning (setup mutating the host) there is no deadline
+    gpu_splitting.run_command(["systemctl", "stop", "docker"])
+    assert calls[-1][1]["timeout"] is None
+
+
+def test_a_planning_command_that_hangs_fails_naming_it(monkeypatch):
+    def hang(args, **kwargs):
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    monkeypatch.setattr(gpu_splitting.subprocess, "run", hang)
+    monkeypatch.setattr(
+        gpu_splitting,
+        "_plan_setup",
+        lambda *_a: gpu_splitting.run_command(["parted", "-s", "-m", "/dev/nvme3n1", "unit", "B", "print", "free"]),
+    )
+
+    with pytest.raises(RuntimeError, match=r"`parted -s -m /dev/nvme3n1 unit B print free` did not finish within 120 s"):
+        gpu_splitting._build_setup_plan(_sample_preflight(), None)
+    assert gpu_splitting._command_watch is None
 
 
 def test_plan_refuses_device_together_with_file(monkeypatch):
