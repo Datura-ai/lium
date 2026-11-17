@@ -72,6 +72,12 @@ class RegisterToken:
     account_claim: str | None = None
     """``MINER_ACCOUNT_CLAIM`` for the executor's ``.env``: the token's ``node_claim``. Every custodied node reports the
     same pool hotkey, so the portal adds a pool-hotkey node only to the account whose claim it reports."""
+    dev_stack: bool = False
+    """A staging/dev portal's token (DAH-6051): start ``docker-compose.dev.yml``, whose runner pins the executor build
+    that trusts that stack's validator; the default compose runs the mainnet build, which that validator cannot reach."""
+    central_miner_hotkey: str | None = None
+    """``DEFAULT_MINER_HOTKEY`` for the executor's ``.env`` on a dev stack: the stack's central miner signs as itself,
+    and the executor's built-in default is mainnet's."""
 
     def seconds_left(self, now: int | None = None) -> int | None:
         if self.exp is None:
@@ -128,7 +134,12 @@ def parse_register_token(token: str, *, now: int | None = None) -> RegisterToken
     node_claim = subject.get("node_claim")
     if not isinstance(node_claim, str) or not _NODE_CLAIM.fullmatch(node_claim):
         node_claim = None
+    central = subject.get("central_miner_hotkey")
+    dev_stack = subject.get("dev_stack") is True
     return RegisterToken(
+        dev_stack=dev_stack,
+        # into .env verbatim like node_hotkey, so only an SS58 value
+        central_miner_hotkey=central if dev_stack and isinstance(central, str) and _SS58.fullmatch(central) else None,
         token=token,
         miner_hotkey=account,
         node_hotkey=node_hotkey,
