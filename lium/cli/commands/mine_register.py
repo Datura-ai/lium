@@ -317,6 +317,9 @@ class NodeRecord:
     node_id: str | None
     """None when the add succeeded but the list did not show the node in 6 tries 5 s apart: registered, not watchable here."""
     already_registered: bool
+    port_check: dict | None = None
+    """The portal's own probe of ``ip_address:port`` from outside (``{"reachable": bool, "message": str}``); None
+    when the portal sent none (a re-run of an existing node, or an older portal)."""
 
 
 def register_node(
@@ -346,8 +349,12 @@ def register_node(
         "gpu_count": gpu_count,
     }
     already = False
+    port_check = None
     try:
-        http.post(EXECUTORS, json_body=payload)
+        body = http.post(EXECUTORS, json_body=payload)
+        # PortalHTTP unwraps ``{success, data}`` to ``data``
+        if isinstance(body, dict) and isinstance(body.get("port_check"), dict):
+            port_check = body["port_check"]
     except ProviderError as e:
         status = (e.context or {}).get("status")
         detail = _detail(e)
@@ -416,7 +423,7 @@ def register_node(
         ProviderError
     ):  # rate limited: the add went through, only the list read did not
         node_id = None
-    return NodeRecord(node_id=node_id, already_registered=False)
+    return NodeRecord(node_id=node_id, already_registered=False, port_check=port_check)
 
 
 FIND_NODE_ATTEMPTS = 6

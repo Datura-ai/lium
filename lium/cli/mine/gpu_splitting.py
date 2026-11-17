@@ -244,6 +244,7 @@ def _build_setup_plan(
     image_file: Optional[str] = None,
     image_size_gib: Optional[int] = None,
     mine_dir: Optional[Path] = None,
+    force_image_file: bool = False,
 ) -> SetupPlan:
     """Build the full destructive plan without mutating the host.
 
@@ -280,7 +281,7 @@ def _build_setup_plan(
             preflight.docker_mount,
             device,
         )
-    elif image_file or image_size_gib:
+    elif image_file or image_size_gib or force_image_file:
         target = _loop_file_target(preflight, image_file, image_size_gib, mine_dir)
     else:
         try:

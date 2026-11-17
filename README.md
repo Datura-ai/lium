@@ -388,6 +388,12 @@ lium mine --auto --hotkey <HOTKEY> --ip <VPS_IP> --external-port <FORWARDED_PORT
 # (without these flags it registers at the first node's address; --register refuses that when the two
 # machines' GPUs differ, but cannot tell apart two machines with the same GPU model and count)
 lium mine --register <TOKEN> --external-port 8081 --ssh-port 2201 --renting-port-range 41000-41100
+# ...and give the first node its own range afterwards: a re-run keeps its saved hotkey and changes only the range
+lium mine --auto --renting-port-range 40000-40100
+
+# Opt-in host setup in the same run (off by default): Docker storage on xfs/pquota in an image file
+# (or --storage /dev/<spare disk> to FORMAT that disk), NTP on and the driver/Docker/containerd packages held
+curl -fsSL https://lium.io/mine.sh | bash -s -- --register <TOKEN> --storage file --host-tuning
 
 # Provider-portal automation (same surface as the portal frontend)
 lium config set provider.coldkey miner-prod        # one-time: persist wallet identity
