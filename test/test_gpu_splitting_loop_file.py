@@ -1102,3 +1102,27 @@ def test_execute_setup_image_file_rollback_after_restore_failure_unmounts_first(
     assert commands.index(["umount", docker_root]) < commands.index(["rmdir", docker_root])
     assert ["mv", plan.backup_dir, docker_root] in commands
     assert (Path(docker_root) / "image-layers").exists()
+
+
+@pytest.mark.parametrize("detect_virt, markers, kind", [
+    (("container-other\n", 0), set(), "container-other"),
+    (("none\n", 1), {"/.dockerenv"}, "docker"),
+    (("none\n", 1), {"/run/.containerenv"}, "podman"),
+    (("none\n", 1), set(), None),
+    (None, set(), None),
+])
+def test_container_kind(monkeypatch, detect_virt, markers, kind):
+    monkeypatch.setattr(gpu_splitting.shutil, "which", lambda name: "/usr/bin/x" if detect_virt else None)
+    monkeypatch.setattr(gpu_splitting, "run_command",
+                        lambda args, check=True, capture=True: CommandResult(args, detect_virt[0], "", detect_virt[1]))
+    monkeypatch.setattr(gpu_splitting.os.path, "exists", lambda path: path in markers)
+    assert gpu_splitting._container_kind() == kind
+
+
+def test_preflight_refuses_a_container_before_reading_any_disk(monkeypatch):
+    monkeypatch.setattr(gpu_splitting.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(gpu_splitting.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(gpu_splitting, "_container_kind", lambda: "container-other")
+    monkeypatch.setattr(gpu_splitting, "_detect_distro", lambda: pytest.fail("read the host after finding a container"))
+    with pytest.raises(gpu_splitting.ContainerHostError, match="full VM or bare metal"):
+        gpu_splitting._preflight()

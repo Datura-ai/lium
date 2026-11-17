@@ -98,6 +98,10 @@ def _build_block_device(item: dict) -> BlockDevice:
     )
 
 
+def _device_node_exists(device: BlockDevice) -> bool:
+    return os.path.exists(device.path) or os.path.exists(f"/dev/{device.kernel_name}")
+
+
 def load_block_devices(runner: Runner) -> list[BlockDevice]:
     """Load block device inventory from `lsblk`.
 
@@ -106,7 +110,8 @@ def load_block_devices(runner: Runner) -> list[BlockDevice]:
     - `lsblk --json --bytes -o NAME,KNAME,PATH,TYPE,SIZE,FSTYPE,FSAVAIL,FSUSE%,MOUNTPOINTS,PKNAME,MODEL,SERIAL,RM,TRAN`
 
     The result preserves tree structure so callers can reason about both whole
-    disks and their child partitions.
+    disks and their child partitions. A disk whose /dev node does not exist is
+    left out.
     """
     data = run_json_command(
         runner,
@@ -119,6 +124,8 @@ def load_block_devices(runner: Runner) -> list[BlockDevice]:
         ],
     )
     devices = [_build_block_device(item) for item in data.get("blockdevices", [])]
+    # a container's lsblk lists the host's disks without their /dev nodes: nothing there can be inspected or used
+    devices = [d for d in devices if _device_node_exists(d)]
     for disk in devices:
         family = flatten_devices([disk])
         paths = frozenset({d.path for d in family} | {f"/dev/{d.kernel_name}" for d in family})

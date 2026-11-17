@@ -186,6 +186,33 @@ def _require_binary(name: str):
         raise RuntimeError(f"Required tool not found: {name}")
 
 
+class ContainerHostError(RuntimeError):
+    """The CLI runs inside a container, which cannot be a Lium node."""
+
+
+def _container_kind() -> Optional[str]:
+    """Name the container this process runs in (`systemd-detect-virt -c`, then the runtime marker files), or None."""
+    if shutil.which("systemd-detect-virt"):
+        result = run_command(["systemd-detect-virt", "-c"], False, True)
+        kind = result.stdout.strip()
+        if result.returncode == 0 and kind and kind != "none":
+            return kind
+    for marker, kind in (("/.dockerenv", "docker"), ("/run/.containerenv", "podman")):
+        if os.path.exists(marker):
+            return kind
+    return None
+
+
+def _refuse_container_host() -> None:
+    kind = _container_kind()
+    if kind:
+        raise ContainerHostError(
+            f"This host is a container ({kind}). A Lium node must be a full VM or bare metal: a container "
+            "cannot see or format the real disks or give renters their own containers. Run lium mine on the VM "
+            "or machine itself."
+        )
+
+
 def _detect_distro() -> Optional[str]:
     release = Path("/etc/os-release")
     if not release.exists():
@@ -204,6 +231,7 @@ def _preflight() -> PreflightResult:
 
     Commands run directly here:
 
+    - `systemd-detect-virt -c` via `_container_kind()`: a container is refused before anything else
     - `systemctl --version` to prove `systemd` tooling is available
 
     Commands delegated through helpers:
@@ -221,6 +249,7 @@ def _preflight() -> PreflightResult:
         raise RuntimeError("gpu-splitting requires root privileges")
     if platform.system() != "Linux":
         raise RuntimeError("gpu-splitting is only supported on Linux")
+    _refuse_container_host()
 
     distro_id = _detect_distro()
     if distro_id not in {"ubuntu", "debian"}:

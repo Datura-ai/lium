@@ -296,7 +296,14 @@ def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None):
 
     from rich.prompt import Prompt
 
-    from ..mine.gpu_splitting import _build_setup_plan, _execute_setup, _preflight, run_command
+    from ..mine.gpu_splitting import (
+        ContainerHostError,
+        _build_setup_plan,
+        _execute_setup,
+        _preflight,
+        _refuse_container_host,
+        run_command,
+    )
     from ..mine.storage import evaluate_candidates, get_device_by_path
 
     reason = "Docker cannot limit a container's disk on this host (needs xfs with pquota)."
@@ -305,6 +312,11 @@ def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None):
         "image file on a single-disk host\n"
         f"Guide: {_STORAGE_GUIDE}"
     )
+    try:
+        _refuse_container_host()
+    except ContainerHostError as exc:
+        console.warning(str(exc))
+        return
     if auto or not sys.stdin.isatty():
         console.warning(f"{reason}\n{manual}")
         return

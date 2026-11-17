@@ -243,6 +243,7 @@ def _storage_host(monkeypatch, *, root: bool = True, tty: bool = True, typed: st
         if execute_error:
             raise execute_error
 
+    monkeypatch.setattr(gs, "_container_kind", lambda: None)
     monkeypatch.setattr(gs, "_preflight", lambda: preflight)
     monkeypatch.setattr(st, "evaluate_candidates", lambda *a: candidates)
     monkeypatch.setattr(gs, "_build_setup_plan", plan)
@@ -256,6 +257,15 @@ def test_storage_setup_never_formats_without_a_terminal_whatever_the_flags(monke
     mine._setup_docker_storage()
     assert calls == []
     assert "lium gpu-splitting setup --device" in capsys.readouterr().out
+
+
+def test_storage_setup_in_a_container_stops_and_says_vm_or_bare_metal(monkeypatch, capsys):
+    calls = _storage_host(monkeypatch)
+    monkeypatch.setattr("lium.cli.mine.gpu_splitting._container_kind", lambda: "container-other")
+    mine._setup_docker_storage()
+    out = " ".join(capsys.readouterr().out.split())
+    assert calls == []
+    assert "full VM or bare metal" in out and "gpu-splitting setup --device" not in out
 
 
 def test_storage_setup_without_root_prints_the_sudo_command(monkeypatch, capsys):
