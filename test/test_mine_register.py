@@ -306,6 +306,19 @@ def test_register_node_posts_and_finds_the_id_with_the_token() -> None:
     assert get["params"] == {"miner_hotkey": HOTKEY, "page": 1, "limit": 100}
 
 
+def test_register_node_keeps_the_portals_outside_port_check() -> None:
+    # the portal dials ip:port from outside when the node is added; mine shows a failure at once, not after the wait
+    check = {"reachable": False, "message": "203.0.113.7:8080 did not answer; open it in the firewall."}
+    portal = _Portal()
+    portal.on("POST", "/executors", _Resp(200, {"success": True, "data": {"message": "queued", "port_check": check}}))
+    portal.on("GET", "/executors", _listing())
+    record = reg.register_node(
+        _http(portal), miner_hotkey=HOTKEY, gpu_type="NVIDIA L4", gpu_count=1,
+        ip_address="203.0.113.7", port=8080, price_per_gpu=0.11,
+    )
+    assert record == reg.NodeRecord(node_id="node-1", already_registered=False, port_check=check)
+
+
 def _status(status: str, message: str = "", last_error: dict | None = None) -> _Resp:
     computed = {"status": status, "message": message, "last_error": last_error}
     return _Resp(200, {"id": "node-1", "computed_status": computed})

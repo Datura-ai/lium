@@ -303,6 +303,7 @@ def _build_setup_plan(
     image_file: Optional[str] = None,
     image_size_gib: Optional[int] = None,
     mine_dir: Optional[Path] = None,
+    force_image_file: bool = False,
     progress: Optional[Callable[[str], None]] = None,
 ) -> SetupPlan:
     """`_plan_setup` with every command it runs under a deadline and named through `progress` (the step line).
@@ -313,7 +314,7 @@ def _build_setup_plan(
     global _command_watch
     previous, _command_watch = _command_watch, _CommandWatch(progress, PLAN_COMMAND_TIMEOUT_SECONDS)
     try:
-        return _plan_setup(preflight, device, image_file, image_size_gib, mine_dir)
+        return _plan_setup(preflight, device, image_file, image_size_gib, mine_dir, force_image_file)
     finally:
         _command_watch = previous
 
@@ -324,6 +325,7 @@ def _plan_setup(
     image_file: Optional[str] = None,
     image_size_gib: Optional[int] = None,
     mine_dir: Optional[Path] = None,
+    force_image_file: bool = False,
 ) -> SetupPlan:
     """Build the full destructive plan without mutating the host.
 
@@ -360,7 +362,7 @@ def _plan_setup(
             preflight.docker_mount,
             device,
         )
-    elif image_file or image_size_gib:
+    elif image_file or image_size_gib or force_image_file:
         target = _loop_file_target(preflight, image_file, image_size_gib, mine_dir)
     else:
         try:

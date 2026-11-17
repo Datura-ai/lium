@@ -177,9 +177,54 @@ def test_a_late_sysbox_installer_failure_with_the_runtime_present_is_printed_as_
     assert len(warnings) == 1 and "kernel too old" in warnings[0]
 
 
+_DENIED = "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock"
+
+
+def _docker_group_host(monkeypatch, members):
+    monkeypatch.delenv("LIUM_MINE_DOCKER_GROUP_RERUN", raising=False)
+    monkeypatch.setattr(mine, "_exists", lambda cmd: True)
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ("", _DENIED))
+    monkeypatch.setattr("getpass.getuser", lambda: "provider")
+    monkeypatch.setattr("grp.getgrnam", lambda name: SimpleNamespace(gr_mem=members))
+    execs = []
+
+    def execvpe(file, args, env):
+        execs.append((file, args, env))
+        raise SystemExit(0)
+
+    monkeypatch.setattr(mine.os, "execvpe", execvpe)
+    monkeypatch.setattr(mine.console, "warning", lambda text: None)
+    return execs
+
+
+def test_a_session_without_the_new_docker_group_reruns_the_same_command_under_it(monkeypatch):
+    # the installer just added the user to the group; `sg docker` gives it to the re-run, no re-login by hand
+    execs = _docker_group_host(monkeypatch, ["provider"])
+    monkeypatch.setattr("sys.argv", ["/home/provider/.local/bin/lium", "mine", "--register", "tok en"])
+    with pytest.raises(SystemExit):
+        mine._check_prereqs(Path("/tmp/compute"))
+    (file, args, env), = execs
+    assert args == ["sg", "docker", "-c", "/home/provider/.local/bin/lium mine --register 'tok en'"]
+    assert env["LIUM_MINE_DOCKER_GROUP_RERUN"] == "1"
+    # the binary's re-run must redo its library setup: setuid sg drops LD_LIBRARY_PATH but keeps _PYI_*
+    assert env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+
+
+@pytest.mark.parametrize("members, rerun", [([], ""), (["provider"], "1")])
+def test_prereqs_name_newgrp_when_a_rerun_cannot_help(monkeypatch, members, rerun):
+    # not in the group, or already re-run once: say what to do instead of looping
+    execs = _docker_group_host(monkeypatch, members)
+    if rerun:
+        monkeypatch.setenv("LIUM_MINE_DOCKER_GROUP_RERUN", rerun)
+    with pytest.raises(Exception, match="newgrp docker"):
+        mine._check_prereqs(Path("/tmp/compute"))
+    assert execs == []
+
+
 def test_prereqs_name_newgrp_when_the_session_lacks_the_docker_group(monkeypatch):
     # install_executor_on_ubuntu.sh just added the user to the group; this process does not have it yet
-    denied = "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock"
+    monkeypatch.setenv("LIUM_MINE_DOCKER_GROUP_RERUN", "1")
+    denied = _DENIED
     ran = []
     monkeypatch.setattr(mine, "_exists", lambda cmd: True)
     monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or ("", denied))
@@ -232,9 +277,9 @@ def _storage_host(monkeypatch, *, root: bool = True, tty: bool = True, typed: st
     monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: tty))
     monkeypatch.setattr(Prompt, "ask", lambda *a, **k: calls.append("asked") or typed)
 
-    def plan(pf, device, mine_dir=None, progress=None):
+    def plan(pf, device, mine_dir=None, force_image_file=False, progress=None):
         assert progress is not None  # lium mine names each planning step, as gpu-splitting setup does
-        calls.append(("plan", device))
+        calls.append(("plan", "image-file" if force_image_file else device))
         if plan_error:
             raise plan_error
         return "plan" if device else image_file_plan
@@ -795,9 +840,11 @@ def test_a_held_dpkg_lock_stops_before_the_sysbox_installer_and_names_the_holder
         return plain(cmd, **kw)
 
     monkeypatch.setattr(mine, "_run", run)
+    monkeypatch.setattr(mine, "_DPKG_WAIT_SECS", 0)  # the wait itself: test_the_sysbox_install_waits_for_apt_...
+    monkeypatch.setattr(mine.console, "warning", lambda text: None)
     with pytest.raises(Exception, match="unattended-upgrade") as err:
         mine._check_prereqs(tmp_path)
-    assert "apt/dpkg is busy" in str(err.value)
+    assert "apt/dpkg is still busy" in str(err.value)
     assert not any("sysbox_setup" in cmd for cmd in ran)
 
 
@@ -808,3 +855,153 @@ def test_prereqs_name_each_sub_check_while_it_runs(monkeypatch, tmp_path):
     mine._check_prereqs(tmp_path, shown.append)
 
     assert shown[0] == "nvidia-smi" and "docker info" in shown and any("Sysbox" in s for s in shown)
+
+
+@pytest.mark.parametrize("busy_checks, installs", [(2, True), (None, False)])
+def test_the_sysbox_install_waits_for_apt_instead_of_stopping(monkeypatch, tmp_path, busy_checks, installs):
+    # unattended-upgrades right after a boot: wait for the lock; stop only when it outlasts the wait
+    script = tmp_path / "neurons" / "executor" / "nvidia_docker_sysbox_setup.sh"
+    script.parent.mkdir(parents=True)
+    script.touch()
+    checks = {"n": 0}
+
+    def holder(sudo):
+        checks["n"] += 1
+        return "123 00:42 /usr/bin/python3 /usr/bin/unattended-upgrade" if busy_checks is None or checks["n"] <= busy_checks else ""
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(mine, "_dpkg_lock_holder", holder)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    monkeypatch.setattr(mine.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(mine.console, "warning", lambda text: None)
+    ran = []
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: ran.append(cmd) or ("", ""))
+    if installs:
+        assert mine._install_sysbox(tmp_path) == ""
+        assert len(ran) == 1
+    else:
+        with pytest.raises(Exception, match="still busy after 15 minutes"):
+            mine._install_sysbox(tmp_path)
+        assert ran == [] and clock["t"] >= mine._DPKG_WAIT_SECS
+
+
+def test_a_rerun_with_only_a_new_renting_range_keeps_the_saved_hotkey(monkeypatch, tmp_path: Path):
+    # the second-node docs: `lium mine --auto --renting-port-range ...` on the first node; after --register its hotkey
+    # is the portal's, which the provider never typed, so the rerun must not ask for or drop it
+    node = tmp_path / "repo" / "neurons" / "executor"
+    node.mkdir(parents=True)
+    (node / ".env").write_text(f"MINER_HOTKEY_SS58_ADDRESS={_HK}\nMINER_ACCOUNT_CLAIM=claim\nRENTING_PORT_RANGE=\n")
+    (node / ".env.template").write_text(
+        "MINER_HOTKEY_SS58_ADDRESS=\nINTERNAL_PORT=8080\nEXTERNAL_PORT=8080\nSSH_PORT=2200\nSSH_PUBLIC_PORT=2200\n"
+    )
+    for name in ("_clone_or_update_repo", "_install_executor_tools", "_check_prereqs", "_check_free_disk",
+                 "_check_ports_free"):
+        monkeypatch.setattr(mine, name, lambda *a, **k: None)
+    monkeypatch.setattr(mine, "_docker_storage_limited", lambda: True)
+    monkeypatch.setattr(mine, "_start_preflight_pull", lambda: SimpleNamespace(poll=lambda: 0))
+    stop = lambda *a, **k: (_ for _ in ()).throw(SystemExit(99))  # noqa: E731
+    monkeypatch.setattr(mine, "_finish_preflight_pull", stop)
+    monkeypatch.setattr(mine, "_start_executor", stop)
+
+    result = CliRunner().invoke(
+        mine.mine_command, ["--auto", "--renting-port-range", "40000-40100", "--dir", str(tmp_path / "repo")]
+    )
+
+    assert result.exit_code == 99, result.output
+    assert mine._env_value(node / ".env", "MINER_HOTKEY_SS58_ADDRESS") == _HK
+    assert mine._env_value(node / ".env", "RENTING_PORT_RANGE") == "40000-40100"
+    assert mine._env_value(node / ".env", "MINER_ACCOUNT_CLAIM") == "claim"
+
+
+
+def test_step_2s_docker_group_exit_reruns_under_the_group(monkeypatch, tmp_path):
+    # install_executor_on_ubuntu.sh adds the user to the group, then exits 1 because this session lacks it
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "install_executor_on_ubuntu.sh").touch()
+    monkeypatch.setattr(mine, "_wait_for_dpkg", lambda sudo, waiter: None)
+    failure = "Command failed (1): Added to the docker group, but this session does not have it yet: run 'newgrp docker'"
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: (_ for _ in ()).throw(RuntimeError(failure)))
+    reruns = []
+    monkeypatch.setattr(mine, "_rerun_in_docker_group", lambda: reruns.append(1))
+    with pytest.raises(RuntimeError, match="newgrp docker"):  # reached only when the re-run could not happen
+        mine._install_executor_tools(tmp_path)
+    assert reruns == [1]
+
+
+def test_step_2_waits_for_a_held_apt_lock_before_the_install_script(monkeypatch, tmp_path):
+    # after a boot unattended-upgrades holds the lock; the script's apt-get would fail on it in about 20s
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "install_executor_on_ubuntu.sh").touch()
+    order = []
+    monkeypatch.setattr(mine, "_wait_for_dpkg", lambda sudo, waiter: order.append(("wait", waiter)))
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: order.append("script") or ("", ""))
+    mine._install_executor_tools(tmp_path)
+    assert order == [("wait", "the install script"), "script"]
+
+
+def test_another_step_2_failure_is_not_rerun(monkeypatch, tmp_path):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "install_executor_on_ubuntu.sh").touch()
+    monkeypatch.setattr(mine, "_wait_for_dpkg", lambda sudo, waiter: None)
+    monkeypatch.setattr(mine, "_run", lambda cmd, **kw: (_ for _ in ()).throw(RuntimeError("Command failed (100): apt")))
+    monkeypatch.setattr(mine, "_rerun_in_docker_group", lambda: pytest.fail("re-run"))
+    with pytest.raises(RuntimeError, match="apt"):
+        mine._install_executor_tools(tmp_path)
+
+
+@pytest.mark.parametrize("spare_disk", [True, False])
+def test_storage_file_flag_creates_the_image_file_without_a_terminal_or_prompt(monkeypatch, spare_disk):
+    # --register runs without a terminal; --storage file is the consent given up front
+    calls = _storage_host(monkeypatch, tty=False, spare_disk=spare_disk)
+    mine._setup_docker_storage(True, None, "file")
+    assert calls[0] == ("plan", "image-file") and calls[-1][0] == "execute" and "asked" not in calls
+
+
+def test_forced_image_file_plan_skips_the_spare_disk_auto_select(monkeypatch):
+    import lium.cli.mine.gpu_splitting as gs
+
+    # one spare disk: without the force, --storage file got the disk target and crashed on its missing file size
+    monkeypatch.setattr(gs, "auto_select_target", lambda *a: pytest.fail("auto-selected a disk"))
+    planned = []
+    monkeypatch.setattr(gs, "_loop_file_target", lambda pf, f, size, mine_dir=None: planned.append(f) or SimpleNamespace())
+    preflight = SimpleNamespace(docker_state=SimpleNamespace(docker_root_dir=gs.DEFAULT_DOCKER_ROOT))
+    with pytest.raises(AttributeError):  # the rest of the plan needs a real host; only the target choice is under test
+        gs._build_setup_plan(preflight, None, force_image_file=True)
+    assert planned == [None]
+
+
+def test_storage_disk_flag_formats_only_a_listed_spare_disk_without_a_prompt(monkeypatch):
+    calls = _storage_host(monkeypatch, tty=False)
+    mine._setup_docker_storage(True, None, "/dev/sdb")
+    assert calls == [("plan", "/dev/sdb"), ("execute", "plan")]
+
+
+@pytest.mark.parametrize("choice", ["/dev/nvme0n1", "/dev/sdz", "yes"])
+def test_storage_flag_naming_no_listed_disk_changes_nothing(monkeypatch, capsys, choice):
+    calls = _storage_host(monkeypatch, tty=False)
+    mine._setup_docker_storage(True, None, choice)
+    assert calls == []
+    assert "nothing was changed" in capsys.readouterr().out
+
+
+def test_storage_flag_without_root_changes_nothing(monkeypatch):
+    calls = _storage_host(monkeypatch, root=False, tty=False)
+    mine._setup_docker_storage(True, None, "file")
+    assert calls == []
+
+
+def test_host_tuning_turns_on_ntp_and_holds_only_installed_packages(monkeypatch):
+    ran = []
+
+    def run(cmd, **kw):
+        ran.append(cmd)
+        if cmd.startswith("dpkg-query"):
+            return "ii  nvidia-driver-580\nun  libnvidia-gl-580\nii  docker-ce\nii  containerd.io\n", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", run)
+    monkeypatch.setattr(mine.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(mine.console, "warning", lambda text: None)
+    mine._host_tuning()
+    assert ran[0] == "timedatectl set-ntp true"
+    assert ran[-1] == "apt-mark hold nvidia-driver-580 docker-ce containerd.io"
