@@ -211,6 +211,34 @@ def test_forgetting_a_pod_keeps_the_pin_of_a_pod_whose_id_maps_alike(monkeypatch
     assert kept.read_text() == "pinned"
 
 
+@pytest.mark.parametrize(("pod_id", "legacy_name"), [("a/b", "a_b"), ("", "unknown")])
+def test_upgrading_keeps_the_pin_an_older_release_stored_under_the_sanitised_name(
+    monkeypatch, tmp_path, pod_id, legacy_name
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    legacy = tmp_path / ".lium" / "known_hosts" / legacy_name
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("[pod]:22 ssh-ed25519 AAAA\n")
+
+    path = sdk_client.known_hosts_path(pod_id)
+
+    assert path.read_text() == "[pod]:22 ssh-ed25519 AAAA\n"
+    assert legacy.exists()
+
+
+def test_forgetting_a_hashed_pod_never_brings_back_its_legacy_pin(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    legacy = tmp_path / ".lium" / "known_hosts" / "a_b"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("old key\n")
+    sdk_client.known_hosts_path("a/b")
+
+    sdk_client.forget_host_key("a/b")
+
+    assert sdk_client.known_hosts_path("a/b").read_text() == ""
+    assert legacy.read_text() == "old key\n"
+
+
 def test_ssh_insecure_env_installs_the_accept_any_key_policy(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
