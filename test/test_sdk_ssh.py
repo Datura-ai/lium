@@ -199,7 +199,7 @@ def test_known_hosts_path_of_a_dot_id_is_a_file_inside_the_pin_directory(monkeyp
     assert path.resolve().parent == pins.resolve()
 
 
-@pytest.mark.parametrize(("pod_id", "other_id"), [(".", "_"), ("..", "__"), ("a/b", "a_b")])
+@pytest.mark.parametrize(("pod_id", "other_id"), [(".", "_"), ("..", "__"), ("a/b", "a_b"), ("", "unknown")])
 def test_forgetting_a_pod_keeps_the_pin_of_a_pod_whose_id_maps_alike(monkeypatch, tmp_path, pod_id, other_id):
     monkeypatch.setenv("HOME", str(tmp_path))
     kept = sdk_client.known_hosts_path(other_id)
