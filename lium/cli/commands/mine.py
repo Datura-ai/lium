@@ -90,7 +90,7 @@ def _run(cmd: list | str, check=True, capture=True, cwd: Optional[str] = None,
          timeout: Optional[int] = None) -> Tuple[str, str]:
     import subprocess
     if isinstance(cmd, list):
-        cmd_str = " ".join(cmd)
+        cmd_str = shlex.join(cmd)
     else:
         cmd_str = cmd
     # coreutils timeout kills the whole process group: a Python-side timeout would kill only the shell
@@ -170,14 +170,21 @@ def _show_setup_summary(register: bool = False):
 # Actions
 # --------------------------
 def _clone_or_update_repo(target_dir: Path, branch: str):
+    repo = "https://github.com/Datura-ai/lium-io.git"
+    # only a branch the repository has; checked before anything on disk changes
+    heads = _run(["git", "ls-remote", "--heads", repo, f"refs/heads/{branch}"])[0].splitlines()
+    if not any(line.split("\t", 1)[-1] == f"refs/heads/{branch}" for line in heads):
+        raise click.BadParameter(f"not a branch of {repo}: {branch!r}", param_hint="--branch")
     if target_dir.exists():
         if (target_dir / ".git").exists():
-            _run("git fetch --all", cwd=str(target_dir))
-            _run(f"git checkout {branch}", cwd=str(target_dir))
-            _run(f"git pull origin {branch}", cwd=str(target_dir))
+            cwd = str(target_dir)
+            _run("git fetch --all", cwd=cwd)
+            # switch, not checkout: checkout would read a name that is also a path as files to discard
+            _run(["git", "switch", branch], cwd=cwd)
+            _run(["git", "pull", "origin", branch], cwd=cwd)
 
     else:
-        _run(f"git clone --branch {branch} https://github.com/Datura-ai/lium-io.git {target_dir}")
+        _run(["git", "clone", "--branch", branch, repo, str(target_dir)])
 
 
 def _check_prereqs(compute_dir: Path | None = None, show=lambda text: None):
@@ -197,6 +204,7 @@ def _check_prereqs(compute_dir: Path | None = None, show=lambda text: None):
     show("docker info")
     if _exists("docker") and "permission denied while trying to connect" in _run(
             "docker info", check=False, timeout=_QUICK_CHECK_SECS)[1].lower():
+        _rerun_in_docker_group()
         raise Exception(
             "Docker is installed, but this session may not use it yet (permission denied on the Docker socket).\n"
             "Run `newgrp docker` (or log out and back in), then run `lium mine` again."
@@ -226,8 +234,30 @@ def _check_prereqs(compute_dir: Path | None = None, show=lambda text: None):
         console.warning(f"The Sysbox installer reported a failure after installing the runtime:\n{failure}")
 
 
+def _rerun_in_docker_group() -> None:
+    """Re-run this same command with the docker group (`sg docker`) when the user is in it but this session started
+    before the installer added them: the provider no longer runs `newgrp docker` and the command again by hand.
+    Returns only when that cannot help (not in the group, no `sg`, or already re-run once)."""
+    import getpass
+    import grp
+    import sys
+
+    if os.environ.get("LIUM_MINE_DOCKER_GROUP_RERUN") or not _exists("sg"):
+        return
+    try:
+        if getpass.getuser() not in grp.getgrnam("docker").gr_mem:
+            return
+    except (KeyError, OSError):
+        return
+    console.warning("Docker was just set up for this user; continuing with the docker group (no re-login needed).")
+    # setuid sg drops LD_LIBRARY_PATH but keeps _PYI_*: the binary must redo its library setup in the re-run
+    os.execvpe("sg", ["sg", "docker", "-c", shlex.join(sys.argv)],
+               {**_subprocess_env(), "LIUM_MINE_DOCKER_GROUP_RERUN": "1", "PYINSTALLER_RESET_ENVIRONMENT": "1"})
+
+
 _QUICK_CHECK_SECS = 60        # nvidia-smi and docker info answer in seconds; a hung GPU or daemon never does
 _SYSBOX_INSTALL_SECS = 1200   # downloads and installs packages
+_DPKG_WAIT_SECS = 900       # unattended-upgrades after a boot usually ends within minutes
 _DPKG_LOCKS = "/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock"
 
 
@@ -249,19 +279,31 @@ def _install_sysbox(compute_dir: Path) -> str:
     if not script.exists():
         return ""
     sudo = "" if os.geteuid() == 0 else "sudo -n "
-    holder = _dpkg_lock_holder(sudo)
-    if holder:
-        raise Exception(
-            "apt/dpkg is busy, so the Sysbox installer would wait for it. Holding the lock:\n"
-            f"{holder}\n"
-            "Let it finish (right after a boot this is often unattended-upgrades) or stop it, "
-            "then run `lium mine` again."
-        )
+    _wait_for_dpkg(sudo, "the Sysbox installer")
     try:
         _run(f"{sudo}bash {shlex.quote(str(script))} < /dev/null", timeout=_SYSBOX_INSTALL_SECS)
     except RuntimeError as exc:
         return str(exc)[-2000:]
     return ""
+
+
+def _wait_for_dpkg(sudo: str, waiter: str) -> None:
+    """Right after a boot unattended-upgrades often holds apt for a few minutes: wait for it instead of stopping."""
+    holder = _dpkg_lock_holder(sudo)
+    deadline = time.monotonic() + _DPKG_WAIT_SECS
+    if holder:
+        console.warning(f"apt/dpkg is busy; waiting up to {_DPKG_WAIT_SECS // 60} minutes for it:\n{holder}")
+    while holder and time.monotonic() < deadline:
+        time.sleep(10)
+        holder = _dpkg_lock_holder(sudo)
+    if holder:
+        raise Exception(
+            f"apt/dpkg is still busy after {_DPKG_WAIT_SECS // 60} minutes, so {waiter} would wait for it. "
+            "Holding the lock:\n"
+            f"{holder}\n"
+            "Let it finish (right after a boot this is often unattended-upgrades) or stop it, "
+            "then run `lium mine` again."
+        )
 
 
 # Validators are to score 0 a node whose Docker cannot cap a container's disk (STORAGE_LIMIT_REQUIRED): one renter
@@ -277,7 +319,7 @@ def _docker_storage_limited() -> bool:
     return build_verification_result(run_command, inspect_docker_state(run_command).docker_root_dir).passed
 
 
-def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None):
+def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None, choice: Optional[str] = None):
     """Offer to move Docker storage to an xfs pquota mount with `lium gpu-splitting setup`'s own plan and checks.
 
     One question is both the menu and the consent: every disk is listed and the person types the one to format, or
@@ -298,7 +340,8 @@ def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None):
         "image file on a single-disk host\n"
         f"Guide: {_STORAGE_GUIDE}"
     )
-    if auto or not sys.stdin.isatty():
+    # --storage file|<disk> is the consent given up front, so it also works without a terminal (--register)
+    if not choice and (auto or not sys.stdin.isatty()):
         console.warning(f"{reason}\n{manual}")
         return
     if os.geteuid() != 0:
@@ -327,8 +370,18 @@ def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None):
     rejected = [c for c in candidates if not c.allowed]
     if rejected:
         lines += ["", "Not offered:"] + [row(c, c.details) for c in rejected]
-    if not offered:
-        _offer_and_run_image_file_setup(preflight, lines, manual, mine_dir)
+    if choice == "file" or (not offered and not choice):
+        _offer_and_run_image_file_setup(preflight, lines, manual, mine_dir, consent=choice == "file")
+        return
+    if choice:
+        typed = choice
+        if typed not in {c.path for c in offered}:
+            console.warning("\n".join(lines) + f"\n\n--storage {typed} is not one of the disks listed; nothing was changed.\n{manual}")
+            return
+        try:
+            _execute_setup(_build_setup_plan(preflight, typed, mine_dir=mine_dir))
+        except RuntimeError as exc:
+            console.warning(f"Docker storage was not set up: {exc}\n{manual}")
         return
     lines += [
         "",
@@ -350,7 +403,8 @@ def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None):
         console.warning(f"Docker storage was not set up: {exc}\n{manual}")
 
 
-def _offer_and_run_image_file_setup(preflight: "PreflightResult", lines: list[str], manual: str, mine_dir: Optional[Path]):
+def _offer_and_run_image_file_setup(preflight: "PreflightResult", lines: list[str], manual: str, mine_dir: Optional[Path],
+                                    consent: bool = False):
     """Single-disk host: offer Docker storage in an XFS image file (what `lium gpu-splitting setup` plans with no device).
 
     Typing `file` is the consent; anything else leaves the host as it is.
@@ -360,7 +414,8 @@ def _offer_and_run_image_file_setup(preflight: "PreflightResult", lines: list[st
     from ..mine.gpu_splitting import _build_setup_plan, _execute_setup
 
     try:
-        plan = _build_setup_plan(preflight, None, mine_dir=mine_dir)
+        # --storage file means the image file even when a spare disk would be auto-selected
+        plan = _build_setup_plan(preflight, None, mine_dir=mine_dir, force_image_file=consent)
     except RuntimeError as exc:
         console.warning("\n".join(lines) + f"\n\n{exc}\n{manual}")
         return
@@ -375,7 +430,7 @@ def _offer_and_run_image_file_setup(preflight: "PreflightResult", lines: list[st
         *(f"  - {action}" for action in plan.destructive_actions),
     ]
     console.info("\n".join(lines))
-    typed = Prompt.ask("Type `file` to create it, or press Enter to skip", default="").strip()
+    typed = "file" if consent else Prompt.ask("Type `file` to create it, or press Enter to skip", default="").strip()
     if typed != "file":
         console.warning(f"Skipped. {manual}")
         return
@@ -383,6 +438,26 @@ def _offer_and_run_image_file_setup(preflight: "PreflightResult", lines: list[st
         _execute_setup(plan)
     except RuntimeError as exc:
         console.warning(f"Docker storage was not set up: {exc}\n{manual}")
+
+
+# docs.lium.io providers/troubleshooting "Hold driver updates": the packages the system must not update on its own
+_HELD_PACKAGES = ("docker-ce", "docker-ce-cli", "docker-buildx-plugin", "docker-compose-plugin", "containerd.io")
+
+
+def _host_tuning() -> None:
+    """--host-tuning: NTP on, and the documented `apt-mark hold` of the installed NVIDIA, Docker and containerd
+    packages. A failure is printed and the install carries on."""
+    sudo = "" if os.geteuid() == 0 else "sudo -n "
+    try:
+        _run(f"{sudo}timedatectl set-ntp true", timeout=_QUICK_CHECK_SECS)
+        installed = _run("dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\\n' 'nvidia-*' 'libnvidia-*' "
+                         + " ".join(_HELD_PACKAGES), check=False, timeout=_QUICK_CHECK_SECS)[0]
+        held = [line.split()[1] for line in installed.splitlines() if len(line.split()) == 2 and line.split()[0] == "ii"]
+        if held:
+            _run(f"{sudo}apt-mark hold " + " ".join(shlex.quote(p) for p in held), timeout=_QUICK_CHECK_SECS)
+        console.warning(f"--host-tuning: NTP on; held {len(held)} package(s): {' '.join(held) or 'none installed'}.")
+    except RuntimeError as exc:
+        console.warning(f"--host-tuning did not finish: {exc}")
 
 
 # The printed command fetches the official installer, never the checkout's copy (what `lium mine` runs itself).
@@ -443,7 +518,15 @@ def _install_executor_tools(compute_dir: Path):
     if not script.exists():
         raise Exception(f"Install script not found at {script}")
 
-    _run(f"bash {script}")
+    _wait_for_dpkg("" if os.geteuid() == 0 else "sudo -n ", "the install script")
+    try:
+        _run(["bash", str(script)])
+    except RuntimeError as exc:
+        # the script just added the user to the docker group and exits 1 because this session lacks it: re-run
+        # under the group instead of asking for `newgrp docker` and a re-run
+        if "Added to the docker group" in str(exc):
+            _rerun_in_docker_group()
+        raise
 
 
 def _setup_executor_env(
@@ -1183,10 +1266,25 @@ def _renting_port_range(ctx, param, value: str | None) -> str | None:
     help="Ports rented pods are published on (RENTING_PORT_RANGE), e.g. 41000-41100 or 41000,41001,41002 "
     "(default: all ports). A second node behind the same public IP needs a range of its own.",
 )
+@click.option(
+    "--storage",
+    default=None,
+    metavar="file|DISK",
+    help="Set up Docker storage on xfs with pquota without asking (also under --register): `file` for an XFS image "
+    "file on this host's disk, or the path of a spare disk to FORMAT (erases it). Only used when Docker cannot cap "
+    "a container's disk yet; off by default.",
+)
+@click.option(
+    "--host-tuning",
+    is_flag=True,
+    default=False,
+    help="Turn on NTP time sync (timedatectl set-ntp true) and hold the NVIDIA driver, Docker and containerd packages "
+    "(apt-mark hold) so unattended upgrades do not change them under rentals. Off by default.",
+)
 @click.pass_context
 @handle_errors
 def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token, portal_url, price, gpu_type,
-                 wait_minutes, ip, internal_port, external_port, ssh_port, renting_port_range):
+                 wait_minutes, ip, internal_port, external_port, ssh_port, renting_port_range, storage, host_tuning):
     """Set up this host as a Lium provider node: clone, configure, start and validate the executor.
 
     Before `docker compose up`, the service and SSH ports are checked on this host: a port
@@ -1281,6 +1379,8 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
     ssh_port = ssh_port or (int(saved["SSH_PORT"]) if saved["SSH_PORT"].isdigit() else None)
     ssh_public = saved["SSH_PUBLIC_PORT"] if saved["SSH_PUBLIC_PORT"] != saved["SSH_PORT"] else ""  # equal: follows SSH_PORT
     renting_port_range = renting_port_range or saved["RENTING_PORT_RANGE"] or None
+    # a rerun on an installed node keeps its hotkey: after --register it is the portal's, which the provider never saw
+    hotkey = hotkey or parsed.get("MINER_HOTKEY_SS58_ADDRESS") or None
     answers = _gather_inputs(hotkey, auto, internal_port, external_port, ssh_port, renting_port_range, ssh_public)
     # the flag and the prompt answer get the same check: spaces dropped, format, size and overlap
     answers["port_range"] = answers["port_range"].replace(" ", "")
@@ -1315,7 +1415,9 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             show("Docker storage")
             storage_ok = _docker_storage_limited()
         if not storage_ok:
-            _setup_docker_storage(auto, target_dir)   # outside the spinner: it prints the plan and may ask to confirm
+            _setup_docker_storage(auto, target_dir, storage)   # outside the spinner: it prints the plan and may ask to confirm
+        if host_tuning:
+            _host_tuning()
         _check_free_disk(target_dir / "neurons" / "executor")
 
         # Docker is confirmed; fetch the preflight image while steps 4–5 run.
@@ -1472,6 +1574,10 @@ def _register_and_wait(
     except Exception as e:   # RegisterError, a portal error, nvidia-smi exiting non-zero, an unreadable .env: same shape as steps 1–6
         console.error(f"❌ {escape(str(e))}")
         return 1
+
+    if record.port_check and record.port_check.get("reachable") is False:
+        # the portal dialled the node from outside and got no answer: say so now, not after the listing wait times out
+        console.warning(escape(record.port_check.get("message") or f"The portal could not reach {ip}:{port} from outside."))
 
     if record.node_id is None:
         # the add went through; the list did not show it within ~30 s — nothing to poll, nothing failed, but the node
