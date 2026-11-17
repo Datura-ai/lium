@@ -363,7 +363,7 @@ def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None):
         console.warning(f"{typed} is not one of the disks listed above; nothing was changed.\n{manual}")
         return
     try:
-        _execute_setup(_build_setup_plan(preflight, typed, mine_dir=mine_dir))
+        _execute_setup(_build_setup_plan(preflight, typed, mine_dir=mine_dir, progress=console.dim))
     except RuntimeError as exc:
         # a refusal (containers running, Docker down, no backup space, target checks) stops only the storage setup
         console.warning(f"Docker storage was not set up: {exc}\n{manual}")
@@ -379,7 +379,7 @@ def _offer_and_run_image_file_setup(preflight: "PreflightResult", lines: list[st
     from ..mine.gpu_splitting import _build_setup_plan, _execute_setup
 
     try:
-        plan = _build_setup_plan(preflight, None, mine_dir=mine_dir)
+        plan = _build_setup_plan(preflight, None, mine_dir=mine_dir, progress=console.dim)
     except RuntimeError as exc:
         console.warning("\n".join(lines) + f"\n\n{exc}\n{manual}")
         return

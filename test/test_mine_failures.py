@@ -232,7 +232,8 @@ def _storage_host(monkeypatch, *, root: bool = True, tty: bool = True, typed: st
     monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: tty))
     monkeypatch.setattr(Prompt, "ask", lambda *a, **k: calls.append("asked") or typed)
 
-    def plan(pf, device, mine_dir=None):
+    def plan(pf, device, mine_dir=None, progress=None):
+        assert progress is not None  # lium mine names each planning step, as gpu-splitting setup does
         calls.append(("plan", device))
         if plan_error:
             raise plan_error
