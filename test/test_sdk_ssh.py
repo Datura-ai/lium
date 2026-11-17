@@ -263,16 +263,31 @@ def test_a_legacy_pin_moved_by_another_process_first_is_not_moved_again(monkeypa
     assert not path.exists() and not legacy.exists()
 
 
+def test_a_legacy_pin_that_is_a_symlink_to_a_pin_file_stays_pod_dot_s_pin(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    target = tmp_path / "dotfiles" / "lium_known_hosts"
+    target.parent.mkdir()
+    target.write_text("[pod]:22 ssh-ed25519 AAAA\n")
+    legacy = tmp_path / ".lium" / "known_hosts"
+    legacy.parent.mkdir()
+    legacy.symlink_to(target)
+
+    path = sdk_client.known_hosts_path(".")
+
+    assert path.read_text() == "[pod]:22 ssh-ed25519 AAAA\n"
+    assert target.read_text() == "[pod]:22 ssh-ed25519 AAAA\n"
+
+
 def test_a_legacy_pin_that_cannot_be_read_fails_the_lookup_instead_of_unpinning_pod_dot(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
-    real_lstat = os.lstat
+    real_stat = os.stat
 
     def broken(path, *a, **k):
         if str(path).endswith("/.lium/known_hosts"):
             raise OSError(5, "Input/output error")
-        return real_lstat(path, *a, **k)
+        return real_stat(path, *a, **k)
 
-    monkeypatch.setattr(sdk_client.os, "lstat", broken)
+    monkeypatch.setattr(sdk_client.os, "stat", broken)
 
     with pytest.raises(OSError):
         sdk_client.known_hosts_path(".")

@@ -184,7 +184,8 @@ def _move_legacy_dot_pin(path: Path) -> None:
     copied, so forgetting the pod cannot bring it back; a failed move raises, never a fresh first use."""
     legacy = path.parent.parent / "known_hosts"
     try:
-        if not stat.S_ISREG(os.lstat(legacy).st_mode):
+        # stat, not lstat: a symlink to a pin file is a pin (OpenSSH and Paramiko follow it); link() then pins its target
+        if not stat.S_ISREG(os.stat(legacy).st_mode):
             return  # the directory of the other pods' pins
     except FileNotFoundError:
         return  # any other stat error propagates: the pod's connection fails closed
