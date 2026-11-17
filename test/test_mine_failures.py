@@ -667,7 +667,8 @@ def test_a_rerun_keeps_renting_port_mappings_unless_a_range_replaces_them(
 
     monkeypatch.setattr(mine, "_finish_preflight_pull", stop_after_start)
     result = CliRunner().invoke(mine.mine_command, ["--auto", "-k", _HK, "--dir", str(tmp_path / "repo"), *flags])
-    assert "stop after start" in result.output, result.output
+    # under rentals the node check (and so the preflight pull) is skipped and the run completes
+    assert ("Node setup complete" if rentals else "stop after start") in " ".join(result.output.split()), result.output
     assert mine._env_value(node / ".env", "RENTING_PORT_MAPPINGS") == mappings
     assert mine._env_value(node / ".env", "RENTING_PORT_RANGE") == rng
     assert [c for c in calls if c.startswith("docker compose up")] == [up]
@@ -927,6 +928,32 @@ def test_a_rerun_with_only_a_new_renting_range_keeps_the_saved_hotkey(monkeypatc
     assert mine._env_value(node / ".env", "MINER_HOTKEY_SS58_ADDRESS") == _HK
     assert mine._env_value(node / ".env", "RENTING_PORT_RANGE") == "40000-40100"
     assert mine._env_value(node / ".env", "MINER_ACCOUNT_CLAIM") == "claim"
+
+
+@pytest.mark.parametrize("rentals", [["pod_ab12"], []])
+def test_a_rerun_runs_the_node_check_only_when_no_rental_runs(monkeypatch, tmp_path: Path, rentals):
+    # the node check runs --gpus all with a matrix work-proof: under a rental it competes with the renter for the GPUs
+    node = tmp_path / "repo" / "neurons" / "executor"
+    node.mkdir(parents=True)
+    (node / ".env").write_text(f"MINER_HOTKEY_SS58_ADDRESS={_HK}\nRENTING_PORT_RANGE=\n")
+    (node / ".env.template").write_text(
+        "MINER_HOTKEY_SS58_ADDRESS=\nINTERNAL_PORT=8080\nEXTERNAL_PORT=8080\nSSH_PORT=2200\nSSH_PUBLIC_PORT=2200\n"
+    )
+    for name in ("_clone_or_update_repo", "_install_executor_tools", "_check_prereqs", "_check_free_disk",
+                 "_check_ports_free", "_start_executor", "_finish_preflight_pull"):
+        monkeypatch.setattr(mine, name, lambda *a, **k: None)
+    monkeypatch.setattr(mine, "_docker_storage_limited", lambda: True)
+    monkeypatch.setattr(mine, "_start_preflight_pull", lambda: SimpleNamespace(poll=lambda: 0))
+    monkeypatch.setattr(mine, "_rental_pods", lambda: rentals)
+    checks = []
+    monkeypatch.setattr(mine, "_validate_executor", lambda *a, **k: checks.append(1))
+
+    result = CliRunner().invoke(
+        mine.mine_command, ["--auto", "--renting-port-range", "40000-40100", "--dir", str(tmp_path / "repo")]
+    )
+
+    assert checks == ([] if rentals else [1]), result.output
+    assert ("node check was skipped" in " ".join(result.output.split())) == bool(rentals)
 
 
 

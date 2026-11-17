@@ -831,14 +831,19 @@ def _executor_env_stale(executor_dir: Path) -> bool:
     return False
 
 
+def _rental_pods() -> list[str]:
+    # the validator names rental pods pod_* (lium-io const.py)
+    names = _run("docker ps --filter status=created --filter status=running --format '{{.Names}}'", check=False)[0].split()
+    return [n for n in names if n.startswith("pod_")]
+
+
 def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = False):
     # Start using the default docker-compose.yml
     # recreate: an executor already running keeps its old .env, so a new MINER_ACCOUNT_CLAIM never reaches it;
     # a plain re-run leaves a running executor alone
     ps_cmd = "docker compose -f docker-compose.app.yml ps -q executor"
-    # a restart under running rentals interrupts them; the validator names rental pods pod_* (lium-io const.py)
-    names = _run("docker ps --filter status=created --filter status=running --format '{{.Names}}'", check=False)[0].split()
-    rentals = [n for n in names if n.startswith("pod_")]
+    # a restart under running rentals interrupts them
+    rentals = _rental_pods()
     if rentals and recreate:
         console.warning(
             f"{len(rentals)} rental(s) running on this node, so the executor was not restarted. "
@@ -1476,21 +1481,30 @@ def mine_command(ctx, hotkey, dir_, branch, auto, verbose, help_, register_token
             # rerun after a restart skipped under rentals still delivers what .env already holds
             _start_executor(executor_dir, recreate=_executor_env_stale(executor_dir))
 
-        console.dim(
-            "Validation runs the validator's preflight image: GPU check, matrix "
-            "work-proof and VerifyX (RAM, disk throughput, network). Typically 2–4 minutes."
-        )
-        step6 = _StepMessage("Validating node")
-        with timed_step_status(6, TOTAL_STEPS, step6):
-            if preflight_pull.poll() is None:
-                step6.detail = "pulling preflight image"
-            _finish_preflight_pull(preflight_pull)
+        rentals = _rental_pods()
+        if rentals:
+            # the preflight runs --gpus all with a matrix work-proof: on a rented node it competes with the renters
+            console.warning(
+                f"{len(rentals)} rental(s) running on this node, so the node check was skipped: it uses all GPUs "
+                "for 2–4 minutes. The validator still checks the node; rerun this command once the rentals end "
+                "to check it here."
+            )
+        else:
+            console.dim(
+                "Validation runs the validator's preflight image: GPU check, matrix "
+                "work-proof and VerifyX (RAM, disk throughput, network). Typically 2–4 minutes."
+            )
+            step6 = _StepMessage("Validating node")
+            with timed_step_status(6, TOTAL_STEPS, step6):
+                if preflight_pull.poll() is None:
+                    step6.detail = "pulling preflight image"
+                _finish_preflight_pull(preflight_pull)
 
-            def _show_check(name: str) -> None:
-                step6.detail = name
+                def _show_check(name: str) -> None:
+                    step6.detail = name
 
-            # Pass any extra arguments to the validator
-            _validate_executor(ctx.args if ctx.args else None, on_check=_show_check)
+                # Pass any extra arguments to the validator
+                _validate_executor(ctx.args if ctx.args else None, on_check=_show_check)
 
     except Exception as e:
         # the message carries tool output verbatim (compose `ps -a`, log tails, a stderr tail): escaped, or a
