@@ -168,28 +168,12 @@ def known_hosts_path(pod: Union[PodInfo, str]) -> Path:
     recycled address as a key change. Keying by pod id pins the key for the
     lifetime of the pod and lets a fresh pod on the same address start clean.
     """
-    pod_id = (pod if isinstance(pod, str) else pod.id) or ""
-    name = pod_id
-    # Any other id (empty, a path character, "." or "..") is named by its hash after "~", which no kept id
-    # contains, so two pods never share a pin file and forgetting one never drops another's.
-    pins = Path.home() / ".lium" / "known_hosts"
-    if not pod_id or _POD_ID_SAFE.search(pod_id) or pod_id in (".", ".."):
-        path = pins / ("~" + hashlib.sha256(pod_id.encode()).hexdigest())
-        _carry_legacy_pin(pins / _POD_ID_SAFE.sub("_", pod_id or "unknown"), path)
-        return path
-    return pins / pod_id
-
-
-def _carry_legacy_pin(legacy: Path, path: Path) -> None:
-    """Seed a hash-named pin from the name older releases used, so an upgrade never re-trusts a pinned pod.
-    The old name could be shared by two ids: its key then fails closed (a key mismatch), never a silent first use."""
-    if path.exists() or legacy.name in (".", "..") or not legacy.is_file():
-        return
-    try:
-        path.write_bytes(legacy.read_bytes())
-        os.chmod(path, 0o600)
-    except OSError:
-        pass  # best effort, as for the directory mode; the legacy file stays for the next try
+    pod_id = pod if isinstance(pod, str) else pod.id
+    if pod_id in (".", ".."):
+        # as a name these are the pin directory and its parent, and "_"/"__" are other pods' pins
+        return Path.home() / ".lium" / "known_hosts_dot_ids" / ("dot" if pod_id == "." else "dotdot")
+    safe_id = _POD_ID_SAFE.sub("_", pod_id or "unknown")
+    return Path.home() / ".lium" / "known_hosts" / safe_id
 
 
 def _pod_id_of(pod: Union[PodInfo, Dict[str, Any]]) -> str:
@@ -198,15 +182,8 @@ def _pod_id_of(pod: Union[PodInfo, Dict[str, Any]]) -> str:
 
 def forget_host_key(pod: Union[PodInfo, str]) -> None:
     """Drop the pinned host key of a pod (its container, and so its key, is being replaced)."""
-    path = known_hosts_path(pod)
     try:
-        if path.name.startswith("~"):
-            # an empty pin, not none: a missing hash-named file would be seeded again from the legacy name
-            _ensure_known_hosts_dir(path)
-            path.write_bytes(b"")
-            os.chmod(path, 0o600)
-        else:
-            path.unlink()
+        known_hosts_path(pod).unlink()
     except FileNotFoundError:
         pass  # nothing pinned yet: forgetting is idempotent
     except OSError:

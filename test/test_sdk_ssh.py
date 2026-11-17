@@ -181,63 +181,33 @@ def test_known_hosts_path_sanitises_pod_id(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     pod = _pod()
     pod.id = "../etc/passwd"
-    pins = tmp_path / ".lium" / "known_hosts"
-
-    path = sdk_client.known_hosts_path(pod)
-
-    assert path.parent == pins
-    assert path.name.startswith("~")
+    assert sdk_client.known_hosts_path(pod) == tmp_path / ".lium" / "known_hosts" / ".._etc_passwd"
 
 
-@pytest.mark.parametrize("pod_id", [".", ".."])
-def test_known_hosts_path_of_a_dot_id_is_a_file_inside_the_pin_directory(monkeypatch, tmp_path, pod_id):
+@pytest.mark.parametrize(("pod_id", "name"), [(".", "dot"), ("..", "dotdot")])
+def test_known_hosts_path_of_a_dot_id_is_its_own_file_in_a_sibling_directory(monkeypatch, tmp_path, pod_id, name):
     monkeypatch.setenv("HOME", str(tmp_path))
-    pins = tmp_path / ".lium" / "known_hosts"
 
     path = sdk_client.known_hosts_path(pod_id)
 
-    assert path.resolve().parent == pins.resolve()
+    assert path == tmp_path / ".lium" / "known_hosts_dot_ids" / name
 
 
-@pytest.mark.parametrize(("pod_id", "other_id"), [(".", "_"), ("..", "__"), ("a/b", "a_b"), ("", "unknown")])
-def test_forgetting_a_pod_keeps_the_pin_of_a_pod_whose_id_maps_alike(monkeypatch, tmp_path, pod_id, other_id):
+@pytest.mark.parametrize(("pod_id", "other_id"), [(".", "_"), ("..", "__"), (".", "..")])
+def test_forgetting_a_dot_id_keeps_the_pin_of_the_pod_it_used_to_share_a_name_with(
+    monkeypatch, tmp_path, pod_id, other_id
+):
     monkeypatch.setenv("HOME", str(tmp_path))
     kept = sdk_client.known_hosts_path(other_id)
     kept.parent.mkdir(parents=True)
     kept.write_text("pinned")
+    sdk_client.known_hosts_path(pod_id).parent.mkdir(parents=True, exist_ok=True)
+    sdk_client.known_hosts_path(pod_id).write_text("own")
 
     sdk_client.forget_host_key(pod_id)
 
     assert kept.read_text() == "pinned"
-
-
-@pytest.mark.parametrize(("pod_id", "legacy_name"), [("a/b", "a_b"), ("", "unknown")])
-def test_upgrading_keeps_the_pin_an_older_release_stored_under_the_sanitised_name(
-    monkeypatch, tmp_path, pod_id, legacy_name
-):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    legacy = tmp_path / ".lium" / "known_hosts" / legacy_name
-    legacy.parent.mkdir(parents=True)
-    legacy.write_text("[pod]:22 ssh-ed25519 AAAA\n")
-
-    path = sdk_client.known_hosts_path(pod_id)
-
-    assert path.read_text() == "[pod]:22 ssh-ed25519 AAAA\n"
-    assert legacy.exists()
-
-
-def test_forgetting_a_hashed_pod_never_brings_back_its_legacy_pin(monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    legacy = tmp_path / ".lium" / "known_hosts" / "a_b"
-    legacy.parent.mkdir(parents=True)
-    legacy.write_text("old key\n")
-    sdk_client.known_hosts_path("a/b")
-
-    sdk_client.forget_host_key("a/b")
-
-    assert sdk_client.known_hosts_path("a/b").read_text() == ""
-    assert legacy.read_text() == "old key\n"
-
+    assert not sdk_client.known_hosts_path(pod_id).exists()
 
 def test_ssh_insecure_env_installs_the_accept_any_key_policy(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
