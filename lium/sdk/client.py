@@ -171,40 +171,23 @@ def known_hosts_path(pod: Union[PodInfo, str]) -> Path:
     pod_id = pod if isinstance(pod, str) else pod.id
     if pod_id in (".", ".."):
         # as a name these are the pin directory and its parent, and "_"/"__" are other pods' pins
-        path = Path.home() / ".lium" / "known_hosts_dot_ids" / ("dot" if pod_id == "." else "dotdot")
-        if pod_id == ".":
-            _move_legacy_dot_pin(path)
-        return path
+        if pod_id == "." and _is_pin_file(Path.home() / ".lium" / "known_hosts"):
+            # older releases stored pod "."'s pin as this file (the "/." collapsed): it stays the pin, never moved, so
+            # no migration can race a forget; forgetting the pod unlinks it
+            return Path.home() / ".lium" / "known_hosts"
+        return Path.home() / ".lium" / "known_hosts_dot_ids" / ("dot" if pod_id == "." else "dotdot")
     safe_id = _POD_ID_SAFE.sub("_", pod_id or "unknown")
     return Path.home() / ".lium" / "known_hosts" / safe_id
 
 
-def _move_legacy_dot_pin(path: Path) -> None:
-    """Older releases stored the pin of pod "." as the file ~/.lium/known_hosts itself (the "/." collapsed). Moved, not
-    copied, so forgetting the pod cannot bring it back; a failed move raises, never a fresh first use."""
-    legacy = path.parent.parent / "known_hosts"
-    # a symlink to a pin file is a pin (OpenSSH and Paramiko follow it); link() on Linux would copy the symlink itself,
-    # which dangles in another directory when relative, so the resolved file is what gets linked
-    source = os.path.realpath(legacy)
+def _is_pin_file(path: Path) -> bool:
+    """A regular file, or a symlink to one (OpenSSH and Paramiko follow it). Only a missing path is "no pin": any other
+    stat error propagates, so the connection fails closed instead of starting a fresh first use."""
     try:
-        if not stat.S_ISREG(os.stat(source).st_mode):
-            return  # the directory of the other pods' pins
+        return stat.S_ISREG(os.stat(path).st_mode)
     except FileNotFoundError:
-        return  # any other stat error propagates: the pod's connection fails closed
-    _ensure_known_hosts_dir(path)
-    # link + unlink, not rename: a link never takes a directory a concurrent process put at `legacy` and never replaces
-    # a pin at `path`, so racing migrations and forgets cannot move other pods' pins
-    try:
-        os.link(source, path)
-    except FileNotFoundError:
-        return  # another process moved (and maybe forgot) it first
-    except FileExistsError:
-        pass
-    try:
-        if os.path.samefile(legacy, path):
-            os.unlink(legacy)
-    except FileNotFoundError:
-        pass
+        return False
+
 
 def _pod_id_of(pod: Union[PodInfo, Dict[str, Any]]) -> str:
     return str(pod.get("id") if isinstance(pod, dict) else pod.id)
