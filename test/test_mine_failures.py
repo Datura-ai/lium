@@ -275,8 +275,8 @@ def _storage_host(monkeypatch, *, root: bool = True, tty: bool = True, typed: st
     monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: tty))
     monkeypatch.setattr(Prompt, "ask", lambda *a, **k: calls.append("asked") or typed)
 
-    def plan(pf, device, mine_dir=None):
-        calls.append(("plan", device))
+    def plan(pf, device, mine_dir=None, force_image_file=False):
+        calls.append(("plan", "image-file" if force_image_file else device))
         if plan_error:
             raise plan_error
         return "plan" if device else image_file_plan
@@ -928,7 +928,20 @@ def test_storage_file_flag_creates_the_image_file_without_a_terminal_or_prompt(m
     # --register runs without a terminal; --storage file is the consent given up front
     calls = _storage_host(monkeypatch, tty=False, spare_disk=spare_disk)
     mine._setup_docker_storage(True, None, "file")
-    assert calls[0] == ("plan", None) and calls[-1][0] == "execute" and "asked" not in calls
+    assert calls[0] == ("plan", "image-file") and calls[-1][0] == "execute" and "asked" not in calls
+
+
+def test_forced_image_file_plan_skips_the_spare_disk_auto_select(monkeypatch):
+    import lium.cli.mine.gpu_splitting as gs
+
+    # one spare disk: without the force, --storage file got the disk target and crashed on its missing file size
+    monkeypatch.setattr(gs, "auto_select_target", lambda *a: pytest.fail("auto-selected a disk"))
+    planned = []
+    monkeypatch.setattr(gs, "_loop_file_target", lambda pf, f, size, mine_dir=None: planned.append(f) or SimpleNamespace())
+    preflight = SimpleNamespace(docker_state=SimpleNamespace(docker_root_dir=gs.DEFAULT_DOCKER_ROOT))
+    with pytest.raises(AttributeError):  # the rest of the plan needs a real host; only the target choice is under test
+        gs._build_setup_plan(preflight, None, force_image_file=True)
+    assert planned == [None]
 
 
 def test_storage_disk_flag_formats_only_a_listed_spare_disk_without_a_prompt(monkeypatch):

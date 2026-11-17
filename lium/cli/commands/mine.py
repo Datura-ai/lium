@@ -408,7 +408,8 @@ def _offer_and_run_image_file_setup(preflight: "PreflightResult", lines: list[st
     from ..mine.gpu_splitting import _build_setup_plan, _execute_setup
 
     try:
-        plan = _build_setup_plan(preflight, None, mine_dir=mine_dir)
+        # --storage file means the image file even when a spare disk would be auto-selected
+        plan = _build_setup_plan(preflight, None, mine_dir=mine_dir, force_image_file=consent)
     except RuntimeError as exc:
         console.warning("\n".join(lines) + f"\n\n{exc}\n{manual}")
         return
