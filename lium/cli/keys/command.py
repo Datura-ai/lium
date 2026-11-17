@@ -196,8 +196,9 @@ def keys_create_command(
     """Create an API key bound to a workspace; the key is printed once.
 
     Without --scope the key gets read, rent and manage. `--scope billing` gives the money routes (card
-    payments, credit transfers, crypto top-ups) and nothing else: it is never added on its own, it prints the
-    server's warning first, and it cannot be combined with another scope (refused here, before any request).
+    payments, credit transfers, crypto top-ups): it is never added on its own and it prints the server's
+    warning first. It may be named alone or next to read, rent or manage (a combined key needs a newer Lium
+    server; an older one answers 422 and makes no key).
     Budgets are USD per window — day, month, lifetime; at one, the server deletes the key's pods (data
     outside a volume is lost) and refuses a rent, a pod extend or a top-up through it with
     `API_KEY_BUDGET_EXCEEDED` (exit 6), naming the window hit.
