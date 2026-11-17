@@ -189,10 +189,12 @@ class ControlMaster:
             return
         name = self.pod.name or self.pod.huid
         if any(marker in message for marker in _HOST_KEY_CHANGED):
+            from .client import known_hosts_path
+
             raise LiumHostKeyError(
                 f"Host key for pod {name} ({self.destination}) changed: the container, and its key, were replaced "
                 f"(a reboot or template change), or the connection is being intercepted. If you trust the new key, "
-                f"delete the pod's file under ~/.lium/known_hosts/ and reconnect; LIUM_SSH_INSECURE=1 disables pinning."
+                f"delete {known_hosts_path(self.pod)} and reconnect; LIUM_SSH_INSECURE=1 disables pinning."
             )
         detail = message.splitlines()[-1] if message else f"ssh exited {started.returncode}"
         raise LiumSSHError(f"SSH to pod {name} ({self.destination}) failed: {detail}")

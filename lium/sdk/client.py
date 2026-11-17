@@ -171,10 +171,22 @@ def known_hosts_path(pod: Union[PodInfo, str]) -> Path:
     pod_id = pod if isinstance(pod, str) else pod.id
     if pod_id in (".", ".."):
         # as a name these are the pin directory and its parent, and "_"/"__" are other pods' pins
-        return Path.home() / ".lium" / "known_hosts_dot_ids" / ("dot" if pod_id == "." else "dotdot")
+        path = Path.home() / ".lium" / "known_hosts_dot_ids" / ("dot" if pod_id == "." else "dotdot")
+        if pod_id == ".":
+            _move_legacy_dot_pin(path)
+        return path
     safe_id = _POD_ID_SAFE.sub("_", pod_id or "unknown")
     return Path.home() / ".lium" / "known_hosts" / safe_id
 
+
+def _move_legacy_dot_pin(path: Path) -> None:
+    """Older releases stored the pin of pod "." as the file ~/.lium/known_hosts itself (the "/." collapsed). Moved, not
+    copied, so forgetting the pod cannot bring it back; a failed move raises, never a fresh first use."""
+    legacy = path.parent.parent / "known_hosts"
+    if path.exists() or not legacy.is_file():
+        return
+    _ensure_known_hosts_dir(path)
+    os.replace(legacy, path)
 
 def _pod_id_of(pod: Union[PodInfo, Dict[str, Any]]) -> str:
     return str(pod.get("id") if isinstance(pod, dict) else pod.id)

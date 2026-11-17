@@ -298,9 +298,14 @@ def test_a_symlinked_socket_dir_is_refused_and_its_target_left_alone(tmp_path):
 _OUTPUT_600_OUT_401_ERR = [sys.executable, "-c", "import os; os.write(1, b'o' * 600); os.write(2, b'e' * 401)"]
 
 
+def test_a_changed_key_of_a_dot_pod_names_its_own_pin_file(home, monkeypatch):
+    from lium.sdk import LiumHostKeyError
 
+    stderr = b"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\nWARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n"
+    monkeypatch.setattr(ssh_mux.subprocess, "run", _Ssh(live=False, start_stderr=stderr, start_code=255))
 
+    with pytest.raises(LiumHostKeyError) as exc:
+        ssh_mux.exec_over_master(_lium(home), _pod(pod_id="."), command="true")
 
-
-
+    assert str(home / ".lium" / "known_hosts_dot_ids" / "dot") in str(exc.value)
 

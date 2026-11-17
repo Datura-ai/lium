@@ -209,6 +209,29 @@ def test_forgetting_a_dot_id_keeps_the_pin_of_the_pod_it_used_to_share_a_name_wi
     assert kept.read_text() == "pinned"
     assert not sdk_client.known_hosts_path(pod_id).exists()
 
+def test_the_pin_an_older_release_stored_for_pod_dot_moves_to_its_own_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    legacy = tmp_path / ".lium" / "known_hosts"   # the old SDK's ~/.lium/known_hosts/. collapsed to this file
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("[pod]:22 ssh-ed25519 AAAA\n")
+
+    path = sdk_client.known_hosts_path(".")
+
+    assert path.read_text() == "[pod]:22 ssh-ed25519 AAAA\n"
+    assert not legacy.exists()
+
+
+def test_forgetting_pod_dot_after_its_pin_moved_never_brings_the_old_pin_back(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    legacy = tmp_path / ".lium" / "known_hosts"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("old key\n")
+    sdk_client.known_hosts_path(".")
+
+    sdk_client.forget_host_key(".")
+
+    assert not sdk_client.known_hosts_path(".").exists()
+
 def test_ssh_insecure_env_installs_the_accept_any_key_policy(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
