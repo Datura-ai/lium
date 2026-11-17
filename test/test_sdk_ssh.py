@@ -210,19 +210,20 @@ def test_forgetting_a_dot_id_keeps_the_pin_of_the_pod_it_used_to_share_a_name_wi
     assert kept.read_text() == "pinned"
     assert not sdk_client.known_hosts_path(pod_id).exists()
 
-def test_the_pin_an_older_release_stored_for_pod_dot_stays_its_pin_in_place(monkeypatch, tmp_path):
+@pytest.mark.parametrize("pod_id", [".", "pod-a", "gateway-203.0.113.10"])
+def test_a_file_left_at_the_pin_directory_path_refuses_every_pin_and_is_left_alone(monkeypatch, tmp_path, pod_id):
     monkeypatch.setenv("HOME", str(tmp_path))
     legacy = tmp_path / ".lium" / "known_hosts"   # the old SDK's ~/.lium/known_hosts/. collapsed to this file
     legacy.parent.mkdir(parents=True)
     legacy.write_text("[pod]:22 ssh-ed25519 AAAA\n")
 
-    path = sdk_client.known_hosts_path(".")
+    with pytest.raises(NotADirectoryError):
+        sdk_client.known_hosts_path(pod_id)
 
-    assert path == legacy
-    assert path.read_text() == "[pod]:22 ssh-ed25519 AAAA\n"
+    assert legacy.read_text() == "[pod]:22 ssh-ed25519 AAAA\n"
 
 
-def test_forgetting_pod_dot_drops_its_legacy_pin_for_good(monkeypatch, tmp_path):
+def test_forgetting_a_pod_while_a_file_is_at_the_pin_directory_path_leaves_the_file(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     legacy = tmp_path / ".lium" / "known_hosts"
     legacy.parent.mkdir(parents=True)
@@ -230,38 +231,32 @@ def test_forgetting_pod_dot_drops_its_legacy_pin_for_good(monkeypatch, tmp_path)
 
     sdk_client.forget_host_key(".")
 
-    assert not legacy.exists()
-    assert not sdk_client.known_hosts_path(".").exists()
+    assert legacy.read_text() == "old key\n"
 
 
-def test_a_directory_of_pins_at_the_legacy_path_is_not_pod_dot_s_pin(monkeypatch, tmp_path):
+def test_a_dangling_symlink_at_the_pin_directory_path_refuses_the_pin(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
-    other = sdk_client.known_hosts_path("pod-a")
-    other.parent.mkdir(parents=True)
-    other.write_text("pinned")
-
-    path = sdk_client.known_hosts_path(".")
-
-    assert path == tmp_path / ".lium" / "known_hosts_dot_ids" / "dot"
-    assert other.read_text() == "pinned"
-
-
-def test_a_legacy_pin_that_is_a_relative_symlink_to_a_pin_file_stays_pod_dot_s_pin(monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    target = tmp_path / "dotfiles" / "lium_known_hosts"
-    target.parent.mkdir()
-    target.write_text("[pod]:22 ssh-ed25519 AAAA\n")
     legacy = tmp_path / ".lium" / "known_hosts"
-    legacy.parent.mkdir()
-    legacy.symlink_to(os.path.relpath(target, legacy.parent))
+    legacy.parent.mkdir(parents=True)
+    legacy.symlink_to(tmp_path / "unmounted" / "known_hosts")
 
-    path = sdk_client.known_hosts_path(".")
-
-    assert path == legacy
-    assert path.read_text() == "[pod]:22 ssh-ed25519 AAAA\n"
+    with pytest.raises(NotADirectoryError):
+        sdk_client.known_hosts_path(".")
 
 
-def test_a_legacy_pin_that_cannot_be_read_fails_the_lookup_instead_of_unpinning_pod_dot(monkeypatch, tmp_path):
+def test_a_symlink_to_a_directory_of_pins_is_the_pin_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    real = tmp_path / "dotfiles" / "lium_known_hosts"
+    real.mkdir(parents=True)
+    (tmp_path / ".lium").mkdir()
+    (tmp_path / ".lium" / "known_hosts").symlink_to(real)
+
+    path = sdk_client.known_hosts_path("pod-a")
+
+    assert path == tmp_path / ".lium" / "known_hosts" / "pod-a"
+
+
+def test_a_pin_directory_that_cannot_be_read_fails_the_lookup_instead_of_unpinning(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     real_stat = os.stat
 

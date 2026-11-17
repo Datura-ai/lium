@@ -10,7 +10,6 @@ things left: the same command in `lium ps --format json` / `lium describe --json
 `PodInfo` predates the restart (host and port may have moved).
 """
 
-import os
 import shlex
 
 import pytest
@@ -57,16 +56,11 @@ def _options(pod: PodInfo) -> str:
 # --- pod_ssh_command: the command the JSON views print ------------------------------------------
 
 
-def test_pod_ssh_command_is_omitted_when_pod_dot_s_legacy_pin_cannot_be_read(home, monkeypatch):
-    pod = _pod(pod_id=".")
-    real_stat = os.stat
-
-    def unreadable(path, *a, **k):
-        if str(path).endswith("/.lium/known_hosts"):
-            raise PermissionError(13, "Permission denied")
-        return real_stat(path, *a, **k)
-
-    monkeypatch.setattr("lium.sdk.client.os.stat", unreadable)
+def test_pod_ssh_command_is_omitted_while_a_file_is_at_the_pin_directory_path(home):
+    pod = _pod()
+    legacy = home / ".lium" / "known_hosts"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("old key\n")
 
     assert pod_ssh_command(pod) is None
 

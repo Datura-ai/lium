@@ -1,6 +1,7 @@
 """Lium SDK - Clean, Unix-style SDK for GPU pod management."""
 
 import codecs
+import errno
 import getpass
 import hashlib
 import ipaddress
@@ -171,22 +172,29 @@ def known_hosts_path(pod: Union[PodInfo, str]) -> Path:
     pod_id = pod if isinstance(pod, str) else pod.id
     if pod_id in (".", ".."):
         # as a name these are the pin directory and its parent, and "_"/"__" are other pods' pins
-        if pod_id == "." and _is_pin_file(Path.home() / ".lium" / "known_hosts"):
-            # older releases stored pod "."'s pin as this file (the "/." collapsed): it stays the pin, never moved, so
-            # no migration can race a forget; forgetting the pod unlinks it
-            return Path.home() / ".lium" / "known_hosts"
-        return Path.home() / ".lium" / "known_hosts_dot_ids" / ("dot" if pod_id == "." else "dotdot")
-    safe_id = _POD_ID_SAFE.sub("_", pod_id or "unknown")
-    return Path.home() / ".lium" / "known_hosts" / safe_id
+        path = Path.home() / ".lium" / "known_hosts_dot_ids" / ("dot" if pod_id == "." else "dotdot")
+    else:
+        path = Path.home() / ".lium" / "known_hosts" / _POD_ID_SAFE.sub("_", pod_id or "unknown")
+    _require_pin_directory(Path.home() / ".lium" / "known_hosts")
+    return path
 
 
-def _is_pin_file(path: Path) -> bool:
-    """A regular file, or a symlink to one (OpenSSH and Paramiko follow it). Only a missing path is "no pin": any other
-    stat error propagates, so the connection fails closed instead of starting a fresh first use."""
+def _require_pin_directory(pins: Path) -> None:
+    """Older releases could leave a file at ~/.lium/known_hosts (pod "." collapsed to it). While it is there no pod's
+    pin can be saved, so ssh would accept a new key on every connection: refuse instead, and never move it ourselves
+    (an automatic move races a concurrent forget or an older SDK sharing this home)."""
     try:
-        return stat.S_ISREG(os.stat(path).st_mode)
+        if stat.S_ISDIR(os.stat(pins).st_mode):
+            return
     except FileNotFoundError:
-        return False
+        if not os.path.lexists(pins):
+            return  # created on first pin
+    raise NotADirectoryError(
+        errno.ENOTDIR,
+        "is not a directory of pod host-key pins (an older lium release may have left a pin file there); "
+        "move it away and reconnect",
+        str(pins),
+    )
 
 
 def _pod_id_of(pod: Union[PodInfo, Dict[str, Any]]) -> str:
