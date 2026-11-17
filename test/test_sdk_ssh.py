@@ -256,19 +256,45 @@ def test_a_symlink_to_a_directory_of_pins_is_the_pin_directory(monkeypatch, tmp_
     assert path == tmp_path / ".lium" / "known_hosts" / "pod-a"
 
 
-def test_a_pin_directory_that_cannot_be_read_fails_the_lookup_instead_of_unpinning(monkeypatch, tmp_path):
+@pytest.mark.parametrize("call", ["lstat", "stat"])
+def test_a_pin_directory_that_cannot_be_read_fails_the_lookup_instead_of_unpinning(monkeypatch, tmp_path, call):
     monkeypatch.setenv("HOME", str(tmp_path))
-    real_stat = os.stat
+    (tmp_path / ".lium").mkdir()
+    (tmp_path / ".lium" / "known_hosts").symlink_to(tmp_path / "unmounted" / "known_hosts")
+    real = getattr(os, call)
 
     def broken(path, *a, **k):
         if str(path).endswith("/.lium/known_hosts"):
             raise OSError(5, "Input/output error")
-        return real_stat(path, *a, **k)
+        return real(path, *a, **k)
 
-    monkeypatch.setattr(sdk_client.os, "stat", broken)
+    monkeypatch.setattr(sdk_client.os, call, broken)
 
     with pytest.raises(OSError):
         sdk_client.known_hosts_path(".")
+
+
+def test_the_refusal_says_how_to_keep_the_old_pin_of_pod_dot(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".lium").mkdir()
+    (tmp_path / ".lium" / "known_hosts").write_text("old key\n")
+
+    with pytest.raises(NotADirectoryError) as exc:
+        sdk_client.known_hosts_path(".")
+
+    assert "mv ~/.lium/known_hosts ~/.lium/known_hosts_dot_ids/dot" in str(exc.value)
+
+
+def test_host_key_options_without_a_pin_file_raise_when_the_pin_directory_cannot_be_made(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def read_only(*a, **k):
+        raise PermissionError(13, "Read-only file system")
+
+    monkeypatch.setattr(sdk_client.Path, "mkdir", read_only)
+
+    with pytest.raises(PermissionError):
+        sdk_client.openssh_host_key_options("pod-a", create_pin_file=False)
 
 
 def test_ssh_insecure_env_installs_the_accept_any_key_policy(monkeypatch, tmp_path):

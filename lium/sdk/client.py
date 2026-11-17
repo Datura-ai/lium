@@ -184,15 +184,18 @@ def _require_pin_directory(pins: Path) -> None:
     pin can be saved, so ssh would accept a new key on every connection: refuse instead, and never move it ourselves
     (an automatic move races a concurrent forget or an older SDK sharing this home)."""
     try:
+        os.lstat(pins)
+    except FileNotFoundError:
+        return  # created on first pin; any other error propagates (fail closed)
+    try:
         if stat.S_ISDIR(os.stat(pins).st_mode):
             return
     except FileNotFoundError:
-        if not os.path.lexists(pins):
-            return  # created on first pin
+        pass  # a dangling symlink: its target (maybe the old pin) is unreachable
     raise NotADirectoryError(
         errno.ENOTDIR,
-        "is not a directory of pod host-key pins (an older lium release may have left a pin file there); "
-        "move it away and reconnect",
+        "is not a directory of pod host-key pins; an older lium release may have kept pod '.'s pin there. To keep "
+        "that pin run: mkdir -p ~/.lium/known_hosts_dot_ids && mv ~/.lium/known_hosts ~/.lium/known_hosts_dot_ids/dot",
         str(pins),
     )
 
@@ -241,10 +244,7 @@ def openssh_host_key_options(pod: Union[PodInfo, str], *, create_pin_file: bool 
     if create_pin_file:
         _ensure_known_hosts_file(hosts_file)
     else:
-        try:
-            _ensure_known_hosts_dir(hosts_file)
-        except OSError:
-            pass  # a read-only home: the command is still right, ssh says it could not record the key
+        _ensure_known_hosts_dir(hosts_file)  # an error propagates: ssh given an unwritable pin path accepts any key
     # OpenSSH splits an unquoted UserKnownHostsFile value on whitespace (it takes several files); the
     # quotes keep a home directory with a space in it as one path.
     return ["-o", "StrictHostKeyChecking=accept-new", "-o", f'UserKnownHostsFile="{hosts_file}"']
