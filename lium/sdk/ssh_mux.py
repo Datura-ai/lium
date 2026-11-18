@@ -16,6 +16,7 @@ with ``LIUM_SSH_PERSIST=0``; the caller then runs the command over paramiko as b
 from __future__ import annotations
 
 import hashlib
+import re
 import os
 import shutil
 import stat
@@ -36,6 +37,7 @@ DEFAULT_PERSIST_SECONDS = 600
 # A unix socket path is limited to 104 bytes on macOS (108 on Linux); ssh adds a 17-character
 # suffix while it creates the socket, and the name here is 24 characters.
 _MAX_SOCKET_DIR_LEN = 104 - 17 - 24 - 2
+_OFFENDING_PIN = re.compile(r"Offending \S+ key in (.+):\d+\s*$", re.MULTILINE)
 _HOST_KEY_CHANGED = ("REMOTE HOST IDENTIFICATION HAS CHANGED", "Host key verification failed")
 
 
@@ -189,10 +191,13 @@ class ControlMaster:
             return
         name = self.pod.name or self.pod.huid
         if any(marker in message for marker in _HOST_KEY_CHANGED):
+            # the pod's or the gateway's pin: only ssh's own diagnostic says which file refused the key
+            offending = _OFFENDING_PIN.search(message)
+            pin = offending.group(1) if offending else "this pod's (or its gateway's) pin file under ~/.lium/"
             raise LiumHostKeyError(
                 f"Host key for pod {name} ({self.destination}) changed: the container, and its key, were replaced "
                 f"(a reboot or template change), or the connection is being intercepted. If you trust the new key, "
-                f"delete the pod's file under ~/.lium/known_hosts/ and reconnect; LIUM_SSH_INSECURE=1 disables pinning."
+                f"delete {pin} and reconnect; LIUM_SSH_INSECURE=1 disables pinning."
             )
         detail = message.splitlines()[-1] if message else f"ssh exited {started.returncode}"
         raise LiumSSHError(f"SSH to pod {name} ({self.destination}) failed: {detail}")

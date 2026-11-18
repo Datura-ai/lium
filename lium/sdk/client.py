@@ -1,6 +1,7 @@
 """Lium SDK - Clean, Unix-style SDK for GPU pod management."""
 
 import codecs
+import errno
 import getpass
 import hashlib
 import ipaddress
@@ -169,8 +170,34 @@ def known_hosts_path(pod: Union[PodInfo, str]) -> Path:
     lifetime of the pod and lets a fresh pod on the same address start clean.
     """
     pod_id = pod if isinstance(pod, str) else pod.id
-    safe_id = _POD_ID_SAFE.sub("_", pod_id or "unknown")
-    return Path.home() / ".lium" / "known_hosts" / safe_id
+    if pod_id in (".", ".."):
+        # as a name these are the pin directory and its parent, and "_"/"__" are other pods' pins
+        path = Path.home() / ".lium" / "known_hosts_dot_ids" / ("dot" if pod_id == "." else "dotdot")
+    else:
+        path = Path.home() / ".lium" / "known_hosts" / _POD_ID_SAFE.sub("_", pod_id or "unknown")
+    _require_pin_directory(Path.home() / ".lium" / "known_hosts")
+    return path
+
+
+def _require_pin_directory(pins: Path) -> None:
+    """Older releases could leave a file at ~/.lium/known_hosts (pod "." collapsed to it). While it is there no pod's
+    pin can be saved, so ssh would accept a new key on every connection: refuse instead, and never move it ourselves
+    (an automatic move races a concurrent forget or an older SDK sharing this home)."""
+    try:
+        os.lstat(pins)
+    except FileNotFoundError:
+        return  # created on first pin; any other error propagates (fail closed)
+    try:
+        if stat.S_ISDIR(os.stat(pins).st_mode):
+            return
+    except FileNotFoundError:
+        pass  # a dangling symlink: its target (maybe the old pin) is unreachable
+    raise NotADirectoryError(
+        errno.ENOTDIR,
+        "is not a directory of pod host-key pins; an older lium release may have kept pod '.'s pin there. To keep "
+        "that pin run: mkdir -p ~/.lium/known_hosts_dot_ids && mv ~/.lium/known_hosts ~/.lium/known_hosts_dot_ids/dot",
+        str(pins),
+    )
 
 
 def _pod_id_of(pod: Union[PodInfo, Dict[str, Any]]) -> str:
@@ -217,10 +244,7 @@ def openssh_host_key_options(pod: Union[PodInfo, str], *, create_pin_file: bool 
     if create_pin_file:
         _ensure_known_hosts_file(hosts_file)
     else:
-        try:
-            _ensure_known_hosts_dir(hosts_file)
-        except OSError:
-            pass  # a read-only home: the command is still right, ssh says it could not record the key
+        _ensure_known_hosts_dir(hosts_file)  # an error propagates: ssh given an unwritable pin path accepts any key
     # OpenSSH splits an unquoted UserKnownHostsFile value on whitespace (it takes several files); the
     # quotes keep a home directory with a space in it as one path.
     return ["-o", "StrictHostKeyChecking=accept-new", "-o", f'UserKnownHostsFile="{hosts_file}"']
@@ -333,7 +357,13 @@ def pod_ssh_command(pod: PodInfo) -> Optional[str]:
         user, host, port = ssh_target(pod.ssh_cmd)
     except ValueError:
         return None
-    options = [*openssh_jump_options(pod, create_pin_file=False), *openssh_host_key_options(pod, create_pin_file=False)]
+    try:
+        options = [
+            *openssh_jump_options(pod, create_pin_file=False),
+            *openssh_host_key_options(pod, create_pin_file=False),
+        ]
+    except OSError:
+        return None  # the pin could not be moved (read-only home): no command beats one that skips the pin
     return shlex.join(["ssh", "-p", str(port), *options, f"{user}@{host}"])
 
 
