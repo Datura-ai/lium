@@ -25,13 +25,6 @@ SCOPES_ROUTE = "/keys/scopes"
 # the money routes (owner, 21 Sep 2026: the elevated key is off by default).
 DEFAULT_SCOPES = ("read", "rent", "manage")
 BILLING_SCOPE = "billing"
-# Ruling of 21 Sep 2026: `billing` is "and nothing else" — a key that moves money holds no other scope. Checked
-# here, before any request, so the refusal reads the same from the CLI and the SDK; a server that enforces the
-# rule answers 422 to the same body.
-BILLING_ALONE = (
-    "The 'billing' scope stands alone: a key that moves money holds no other scope — make it a key of its own "
-    "(billing with read, rent or manage is refused)"
-)
 BUDGET_FIELDS = ("daily_budget_usd", "monthly_budget_usd", "max_budget_usd")
 REFUSALS_ROUTE = "/keys/{id}/refusals"
 POD_VISIBILITIES = ("own", "account")
@@ -148,12 +141,10 @@ def _refusal(d: Dict[str, Any]) -> ApiKeyRefusal:
 
 
 def check_scopes(scopes: List[str]) -> List[str]:
-    """The scopes a key may be minted with: at least one, and `billing` on its own (:data:`BILLING_ALONE`).
+    """The scopes a key may be minted with: at least one (`billing` may sit next to the others since 16 Nov 2026).
     Raises ``ValueError`` (the CLI's exit 2) before any request."""
     if not scopes:
         raise ValueError("a key needs at least one scope")
-    if BILLING_SCOPE in scopes and len(scopes) > 1:
-        raise ValueError(BILLING_ALONE)
     return scopes
 
 
@@ -290,7 +281,7 @@ class ApiKeysClient:
         """Mint a key (``POST /keys``); the secret is in the returned ``key`` this once.
 
         ``scopes`` defaults to :data:`DEFAULT_SCOPES` (``read``, ``rent``, ``manage``) and is always sent, so
-        ``billing`` — the money routes — is on a key only when named, and then alone (:data:`BILLING_ALONE`).
+        ``billing`` — the money routes — is on a key only when named, alone or next to the other scopes.
         The three budgets (``daily_budget_usd`` per UTC day, ``monthly_budget_usd`` per UTC month,
         ``max_budget_usd`` for the key's lifetime) are sent as numbers (USD ≥ 1, whole cents) only when given,
         daily ≤ monthly ≤ max. ``pod_visibility`` (``own``: the key sees only the pods it creates; ``account``:
@@ -364,7 +355,6 @@ __all__ = [
     "SCOPES_ROUTE",
     "DEFAULT_SCOPES",
     "BILLING_SCOPE",
-    "BILLING_ALONE",
     "BUDGET_FIELDS",
     "REFUSALS_ROUTE",
     "POD_VISIBILITIES",

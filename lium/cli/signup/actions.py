@@ -380,8 +380,8 @@ class FingerprintSignupAction:
 class MintBillingKeyAction:
     """Mint a key holding only the `billing` scope for a new account and keep it as ``[api] billing_api_key``.
 
-    A key that pays is not a key that rents: the server grants `billing` alone and only to a signed-in
-    session (``POST /keys``), so this logs in with the credentials the account was just made with (e-mail
+    This key holds `billing` alone (a key may also hold it next to read/rent/manage); the server grants `billing`
+    only to a signed-in session (``POST /keys``), so this logs in with the credentials the account was just made with (e-mail
     and password, or the fingerprint). The key can open card payment pages and crypto invoices and read
     the balance; it reaches no pods.
     """

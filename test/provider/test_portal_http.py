@@ -6,6 +6,7 @@ import pytest
 import requests
 
 from lium.provider.errors import (
+    ARG_INVALID,
     PORTAL_AUTH_INVALID,
     PORTAL_FORBIDDEN,
     PORTAL_CONTRACT_DRIFT,
@@ -270,3 +271,20 @@ def test_a_same_origin_redirect_is_followed() -> None:
         "https://portal.example.com/v2/auth/me",
     ]
     assert session.calls[1]["headers"]["Authorization"] == "Bearer jwt-token"
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://user:s3cret@portal.example.com", "https://user:s3cret@", "https://user:s3cret@portal.example.com"],
+)
+def test_a_portal_url_without_https_or_with_a_password_is_refused_at_the_first_request(base_url: str) -> None:
+    session = _RecordingSession(_FakeResponse(200, {}))
+    http = PortalHTTP(base_url=base_url, token_provider=lambda: "jwt-token", session=session)
+
+    with pytest.raises(ProviderError) as exc:
+        http.get("/auth/me")
+
+    assert exc.value.code == ARG_INVALID
+    assert "s3cret" not in str(exc.value)
+    assert "s3cret" not in repr(exc.value.context)
+    assert session.last_call is None

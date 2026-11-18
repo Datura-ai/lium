@@ -19,7 +19,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import jwt as pyjwt
 
@@ -72,6 +72,12 @@ class RegisterToken:
     account_claim: str | None = None
     """``MINER_ACCOUNT_CLAIM`` for the executor's ``.env``: the token's ``node_claim``. Every custodied node reports the
     same pool hotkey, so the portal adds a pool-hotkey node only to the account whose claim it reports."""
+    dev_stack: bool = False
+    """A staging/dev portal's token (DAH-6051): start ``docker-compose.dev.yml``, whose runner pins the executor build
+    that trusts that stack's validator; the default compose runs the mainnet build, which that validator cannot reach."""
+    central_miner_hotkey: str | None = None
+    """``DEFAULT_MINER_HOTKEY`` for the executor's ``.env`` on a dev stack: the stack's central miner signs as itself,
+    and the executor's built-in default is mainnet's."""
 
     def seconds_left(self, now: int | None = None) -> int | None:
         if self.exp is None:
@@ -128,7 +134,12 @@ def parse_register_token(token: str, *, now: int | None = None) -> RegisterToken
     node_claim = subject.get("node_claim")
     if not isinstance(node_claim, str) or not _NODE_CLAIM.fullmatch(node_claim):
         node_claim = None
+    central = subject.get("central_miner_hotkey")
+    dev_stack = subject.get("dev_stack") is True
     return RegisterToken(
+        dev_stack=dev_stack,
+        # into .env verbatim like node_hotkey, so only an SS58 value
+        central_miner_hotkey=central if dev_stack and isinstance(central, str) and _SS58.fullmatch(central) else None,
         token=token,
         miner_hotkey=account,
         node_hotkey=node_hotkey,
@@ -317,6 +328,9 @@ class NodeRecord:
     node_id: str | None
     """None when the add succeeded but the list did not show the node in 6 tries 5 s apart: registered, not watchable here."""
     already_registered: bool
+    port_check: dict | None = None
+    """The portal's own probe of ``ip_address:port`` from outside (``{"reachable": bool, "message": str}``); None
+    when the portal sent none (a re-run of an existing node, or an older portal)."""
 
 
 def register_node(
@@ -346,8 +360,12 @@ def register_node(
         "gpu_count": gpu_count,
     }
     already = False
+    port_check = None
     try:
-        http.post(EXECUTORS, json_body=payload)
+        body = http.post(EXECUTORS, json_body=payload)
+        # PortalHTTP unwraps ``{success, data}`` to ``data``
+        if isinstance(body, dict) and isinstance(body.get("port_check"), dict):
+            port_check = body["port_check"]
     except ProviderError as e:
         status = (e.context or {}).get("status")
         detail = _detail(e)
@@ -387,7 +405,7 @@ def register_node(
         )
         if info.get("machine_name"):  # validated: compare the validator's measured name
             # the H100 adapter relabel is hardware (NVLink), so its raw name must not match an HGX node; the
-            # RTX 4090 48GB relabel depends on the validator's flag and VRAM reading, so either name may be listed
+            # memory-modded relabel depends on the validator's VRAM reading, so either name may be listed
             adapter = listed == "NVIDIA H100 PCIe" and not _same_gpu_model(hw, listed)
             measured = {**row, "gpu_type": info["machine_name"]}
             another = all(
@@ -416,7 +434,7 @@ def register_node(
         ProviderError
     ):  # rate limited: the add went through, only the list read did not
         node_id = None
-    return NodeRecord(node_id=node_id, already_registered=False)
+    return NodeRecord(node_id=node_id, already_registered=False, port_check=port_check)
 
 
 FIND_NODE_ATTEMPTS = 6
@@ -465,9 +483,25 @@ def read_nvlink_pairs(run: Callable[[str], tuple[str, str]]) -> int | None:
     return sum(len(re.findall(r"\bNV\d+\b", ln)) for ln in rows) // 2 if rows else None
 
 
-# lium-io classify_gpu_model names a plain RTX 4090 with 48 GB VRAM "...48GB" while RTX_4090_48GB_MODEL_ENABLED is on;
-# any reading above the 24 GB card's window counts, since the validator's own reading can sit outside the window this host computes
-_RTX_4090_24GB_MAX_MIB = round(24576 * 1.05)
+# lium-io gpu_spec_table.MODDED_VRAM_MODELS: a memory-modded card reports its base card's name, and the validator lists
+# it as its own model from the VRAM reading. Any reading above the base card's window counts, since the validator's own
+# reading can sit outside the window this host computes
+class _ModdedGpuModel(NamedTuple):
+    modded_name: str
+    base_max_vram_mib: int
+
+
+_MODDED_GPU_MODELS: dict[str, _ModdedGpuModel] = {
+    "NVIDIA GeForce RTX 4090": _ModdedGpuModel(
+        "NVIDIA GeForce RTX 4090 48GB", round(24576 * 1.05)
+    ),
+    "NVIDIA GeForce RTX 4080": _ModdedGpuModel(
+        "NVIDIA GeForce RTX 4080 32GB", round(16384 * 1.05)
+    ),
+    "NVIDIA GeForce RTX 4080 SUPER": _ModdedGpuModel(
+        "NVIDIA GeForce RTX 4080 SUPER 32GB", round(16384 * 1.05)
+    ),
+}
 
 
 def _listed_gpu_model(
@@ -482,13 +516,11 @@ def _listed_gpu_model(
         == "NVIDIA H100 80GB HBM3"
     ):
         return "NVIDIA H100 PCIe"
-    if (
+    modded = _MODDED_GPU_MODELS.get(
         _GPU_ALIASES.get(gpu_type.strip(), gpu_type.strip())
-        == "NVIDIA GeForce RTX 4090"
-        and vram_mib is not None
-        and vram_mib > _RTX_4090_24GB_MAX_MIB
-    ):
-        return "NVIDIA GeForce RTX 4090 48GB"
+    )
+    if modded and vram_mib is not None and vram_mib > modded.base_max_vram_mib:
+        return modded.modded_name
     return gpu_type
 
 

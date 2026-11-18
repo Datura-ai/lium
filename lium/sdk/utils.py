@@ -255,9 +255,11 @@ def request_same_origin(
         if callable(close):
             close()
         try:
-            next_url = urljoin(url, location)
-            other_origin = origin(next_url) != origin(url)
-        except ValueError as exc:  # a `Location` that does not parse as a URL
+            # both sides compared as Requests sends them: the raw string can name another host, and a Unicode
+            # host is sent IDNA-encoded
+            next_url = requests.Request("GET", urljoin(url, location)).prepare().url
+            other_origin = origin(next_url) != origin(requests.Request("GET", url).prepare().url)
+        except (ValueError, requests.RequestException) as exc:  # a `Location` that does not parse as a URL
             raise LiumError(f"{host_label(url)} redirected {method.upper()} to a Location that is not a URL") from exc
         if other_origin:
             raise LiumError(
