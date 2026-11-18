@@ -3472,7 +3472,7 @@ class Lium:
         included), ``pod_balance_floor_usd`` (this pod's part of the balance floor: 15 minutes of
         ``price_per_hour``) and, when supplied by the server for a signed-in caller, ``rent_balance_required_usd`` (what the balance must be more than
         for this rent: 15 minutes of this pod and of each open pod, or 60 minutes of this pod and of each open pod while
-        the payer holds only a signup credit granted before 17 November 2026 (new accounts get none); 0 for an exempt account). Nothing is reserved. Returned as a :class:`JobQuote`.
+        the payer holds only a signup credit (new accounts get none); 0 for an exempt account). Nothing is reserved. Returned as a :class:`JobQuote`.
 
         Args:
             executor: Node UUID, or the HUID ``lium ls`` prints for it.
