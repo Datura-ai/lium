@@ -56,6 +56,15 @@ def _options(pod: PodInfo) -> str:
 # --- pod_ssh_command: the command the JSON views print ------------------------------------------
 
 
+def test_pod_ssh_command_is_omitted_while_a_file_is_at_the_pin_directory_path(home):
+    pod = _pod()
+    legacy = home / ".lium" / "known_hosts"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("old key\n")
+
+    assert pod_ssh_command(pod) is None
+
+
 def test_pod_ssh_command_is_the_pinned_form_of_the_api_command_without_a_key(home):
     pod = _pod()
 
