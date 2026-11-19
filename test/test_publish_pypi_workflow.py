@@ -105,6 +105,7 @@ def test_upload_uses_the_publisher_image_by_digest_with_upstream_defaults(path):
     assert len(step["uses"]) == len(PYPI_ACTION) + 64
     assert step["with"]["user"] == "__token__" and step["with"]["packages-dir"] == "dist/"
     assert step["with"]["repository-url"] == "https://upload.pypi.org/legacy/"
+    assert step["with"]["password"] == ""  # set -u entrypoint: unset INPUT_PASSWORD aborts the upload
     assert step["with"]["verify-metadata"] is True and step["with"]["attestations"] is True
 
 
