@@ -156,10 +156,10 @@ class LiumInsufficientBalanceError(LiumPermissionError):
     """The account cannot pay for this (403 with a balance reason).
 
     ``required`` and ``available`` are the USD amounts printed in the server's
-    refusal, when present, else ``None``. The balance must be more than
-    ``required`` whichever wording the server used: older servers print
-    "requires at least" but refuse a balance equal to the amount, rounded to
-    the cent. Callers that catch
+    refusal, when present, else ``None``. On current servers ``required`` is
+    the smallest whole-cent balance that rents; older servers printed the
+    15-minute cost rounded to the cent and refused a balance at or below the
+    unrounded cost. Callers that catch
     :class:`LiumPermissionError` keep working; ones that want the numbers catch
     this class.
     """

@@ -439,9 +439,9 @@ def _satisfies_spec(executor: ExecutorInfo, spec: Dict[str, Any]) -> bool:
 
 _USD = r"\$([0-9][0-9,]*(?:\.[0-9]+)?)"
 # The platform's balance refusals: "Insufficient balance" from the auth dependency and
-# "Insufficient balance. This node costs $X/hour, so renting it requires more than $Y
-# (N minutes of runtime). Your balance is $Z." from the rent path ("requires at least $Y" from older servers).
-_REQUIRED_RE = re.compile(r"requires (?:more than|at least) " + _USD, re.I)
+# "Insufficient balance. This node costs $X/hour, so renting it requires at least $Y
+# (N minutes of runtime). Your balance is $Z." from the rent path.
+_REQUIRED_RE = re.compile(r"requires at least " + _USD, re.I)
 _AVAILABLE_RE = re.compile(r"balance is " + _USD, re.I)
 
 
@@ -3477,7 +3477,8 @@ class Lium:
         this pod and of each open pod while the payer has an open signup credit and either has no completed card,
         crypto, TAO or alpha top-ups or has less than the minimum top-up in those top-ups, bonuses included; 0 for
         an admin or a validator renting a node on its own validator, who are exempt from this pod-cost reserve
-        only and still need a payer balance above $0, except the Lium validator renting its own nodes). Nothing is reserved. Returned as a
+        only and still need a payer balance above $0, except the Lium validator renting its own nodes and paying
+        from its own account; through a workspace its billing owner still needs a balance above $0). Nothing is reserved. Returned as a
         :class:`JobQuote`.
 
         Args:
