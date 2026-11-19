@@ -341,6 +341,9 @@ OUTPUT_ENV = "LIUM_OUTPUT"    # LIUM_OUTPUT=json: every failure is a JSON envelo
 # What to do next, by error code. A failure without a next step leaves an agent
 # (or a person) guessing; a code that has no entry here falls back to the
 # exit-code family below, so no error leaves without one.
+_RESET_UNFINISHED = ("The reset did not finish, for the reason above; each GPU's result says whether it was reset. "
+                     "Running it again first tries to start a stopped container (that can fail again) and helps "
+                     "only if the reason was temporary. If a GPU stays stuck, rent another node with 'lium up'")
 _HINTS_BY_CODE: Dict[str, str] = {
     "no_api_key": "Set LIUM_API_KEY, or run 'lium init' (headless: 'lium init --api-key <key>', "
                   "or 'lium init --no-browser'); "
@@ -369,13 +372,9 @@ _HINTS_BY_CODE: Dict[str, str] = {
     "gpu_in_use_outside_pod": "A process outside your pod holds the GPU (named above), so a reset from the pod "
                               "cannot run and a retry will not help; only the provider can stop it. "
                               "To get a GPU you can reset, rent another node with 'lium up'",
-    "reset_not_supported": "The node did not reset the GPUs, for the reason above; a retry helps only if that "
-                           "reason was temporary. If a GPU stays stuck, rent another node with 'lium up'",
-    # the GPUs were reset (each GPU's result says so) and the pod's container did not start again
-    "container_not_restarted": "The GPU reset ran (each GPU's result is above), but the pod's container did not "
-                               "start again ('lium ps' may still show it running). Run 'lium reset-gpu <pod>' once "
-                               "more: a reset starts a stopped container first. If that fails too, contact support "
-                               "with the pod name",
+    # also a reset whose GPUs were reset but whose container did not start again: the GPU results tell them apart
+    "reset_not_supported": _RESET_UNFINISHED,
+    "container_not_restarted": _RESET_UNFINISHED,
     "rate_limited": "Wait a few seconds and retry; back off if it repeats",
     "server_error": "Retry; if it persists, re-run with LIUM_DEBUG=1 and report the request",
     "api_timeout": "Check the network (or LIUM_BASE_URL) and retry; if the command changes something "

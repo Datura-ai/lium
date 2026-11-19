@@ -133,7 +133,7 @@ def test_an_invalid_gpu_index_does_not_say_retry(monkeypatch):
     assert "nvidia-smi" in json.loads(result.stderr)["error"]["hint"]
 
 
-@pytest.mark.parametrize("code", ["gpu_in_use_outside_pod", "reset_not_supported"])
+@pytest.mark.parametrize("code", ["gpu_in_use_outside_pod", "reset_not_supported", "container_not_restarted"])
 def test_a_refused_reset_names_a_next_step_that_is_not_retry(monkeypatch, code):
     # DAH-6741: a reset the host refuses is not fixed by trying again
     refused = LiumError("GPU reset failed: a process outside the pod holds the GPU open on the host: Xorg (pid 1500)",
@@ -153,34 +153,6 @@ def test_a_refusal_before_the_pod_stopped_says_nothing_about_the_container(monke
     result, _ = _run(monkeypatch, ["my-pod", "--yes"], refused)
 
     assert "the pod was not stopped" in result.output and "did not start the container" not in result.output
-
-
-def test_gpus_reset_with_a_container_that_did_not_start_is_not_called_a_refused_reset(monkeypatch):
-    # DAH-6741 review: the backend's container_not_restarted, after every GPU reset
-    reset_gpu = {**FAILED_GPU, "result": "reset", "detail": None}
-    failed = LiumGpuOperationError("GPU reset failed: the container did not start again: no such container",
-                                   code="container_not_restarted", container_restarted=False,
-                                   gpus=[GpuResetOutcome(**reset_gpu)])
-
-    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], failed)
-
-    hint = json.loads(result.stderr)["error"]["hint"]
-    assert "GPU reset ran" in hint and "lium reset-gpu" in hint and "did not reset" not in hint
-    assert "reboot" not in hint  # not shown to bring such a pod back (DAH-6741 review)
-
-
-def test_gpus_reset_with_a_container_that_did_not_start_get_the_container_hint_under_the_old_code(monkeypatch):
-    # DAH-6741 review: a backend before the fix maps this case to reset_not_supported; the GPU results decide
-    reset_gpu = {**FAILED_GPU, "result": "reset", "detail": None}
-    failed = LiumGpuOperationError("GPU reset failed: the container did not start again: no such container",
-                                   code="reset_not_supported", container_restarted=False,
-                                   gpus=[GpuResetOutcome(**reset_gpu)])
-
-    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], failed)
-
-    error = json.loads(result.stderr)["error"]
-    assert error["code"] == "reset_not_supported" and "GPU reset ran" in error["hint"]
-    assert "did not reset" not in error["hint"]
 
 
 def test_a_failed_gpu_shows_the_gpus_and_exits_non_zero(monkeypatch):
