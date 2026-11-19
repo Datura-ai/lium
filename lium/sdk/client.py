@@ -3485,8 +3485,8 @@ class Lium:
         this pod and of each open pod while the payer has an open signup credit and either has no completed card,
         crypto, TAO or alpha top-ups or has less than the minimum top-up in those top-ups, bonuses included; 0 when
         the renter is exempt from this pod-cost reserve: an admin, or a validator renting a node on its own
-        validator; also 0 for a free pod with no open pods, which the server does not tell apart from an exempt
-        renter). Who pays must still have a balance above zero, except the Lium validator paying from its own
+        validator; also 0 for a free pod when the hourly prices of the open pods counted toward the reserve sum
+        to zero, which the server does not tell apart from an exempt renter). Who pays must still have a balance above zero, except the Lium validator paying from its own
         account. Nothing is reserved. Returned as a :class:`JobQuote`.
 
         Args:
