@@ -465,6 +465,7 @@ _GPU_ALIASES = {
     "Tesla V100-PCIE-16GB": "NVIDIA Tesla V100 Tensor Core GPU",
     "Tesla V100-PCIE-32GB": "NVIDIA Tesla V100 Tensor Core GPU",
     "Tesla H100 80GB HBM3": "NVIDIA H100 80GB HBM3",
+    "NVIDIA H100": "NVIDIA H100 PCIe",
     "Tesla T4": "NVIDIA T4 Tensor Core GPU",
     "NVIDIA T4": "NVIDIA T4 Tensor Core GPU",
     "NVIDIA A10": "NVIDIA A10 Tensor Core GPU",
