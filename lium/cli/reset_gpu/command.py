@@ -7,6 +7,7 @@ import click
 from lium.sdk import GpuResetOutcome, Lium, LiumGpuOperationError, LiumServerError
 from lium.cli import ui
 from lium.cli.utils import (
+    _HINTS_BY_CODE,
     handle_errors,
     narrate_on_stderr_under_json,
     one_pod,
@@ -71,7 +72,11 @@ def reset_gpu_command(target: str, gpus: tuple[int, ...], yes: bool, json_output
             if e.container_restarted is False:
                 ui.warning(f"The reset did not start the container of {pod.huid} again, "
                            "even if 'lium ps' still shows it running.")
-        raise sdk_error_failure(e, {"container_restarted": e.container_restarted, "gpus": [g.to_dict() for g in e.gpus]})
+        failure = sdk_error_failure(e, {"container_restarted": e.container_restarted, "gpus": [g.to_dict() for g in e.gpus]})
+        if e.container_restarted is False and e.gpus and all(g.result == "reset" for g in e.gpus):
+            # every GPU was reset, whatever the code says: a backend before DAH-6741 sends reset_not_supported here
+            failure.hint = _HINTS_BY_CODE["container_not_restarted"]
+        raise failure
 
     if json_output:
         click.echo(json.dumps(result.to_dict(), sort_keys=True))

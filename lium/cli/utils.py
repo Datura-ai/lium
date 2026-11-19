@@ -373,8 +373,9 @@ _HINTS_BY_CODE: Dict[str, str] = {
                            "reason was temporary. If a GPU stays stuck, rent another node with 'lium up'",
     # the GPUs were reset (each GPU's result says so) and the pod's container did not start again
     "container_not_restarted": "The GPU reset ran (each GPU's result is above), but the pod's container did not "
-                               "start again, and a second reset will not start it. 'lium ps' may still show the pod "
-                               "running; contact support with the pod name",
+                               "start again ('lium ps' may still show it running). Run 'lium reset-gpu <pod>' once "
+                               "more: a reset starts a stopped container first. If that fails too, contact support "
+                               "with the pod name",
     "rate_limited": "Wait a few seconds and retry; back off if it repeats",
     "server_error": "Retry; if it persists, re-run with LIUM_DEBUG=1 and report the request",
     "api_timeout": "Check the network (or LIUM_BASE_URL) and retry; if the command changes something "
