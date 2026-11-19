@@ -81,6 +81,19 @@ def _held(subtensor, hotkey: str) -> int:
     return int((deposit or {}).get("balance") or 0)
 
 
+def _pending(bt, subtensor, address: str) -> bool:
+    """A transaction from ``address`` is still in the pool: the pool's next nonce is past the chain's.
+    Its outcome is unknown (a reply lost or interrupted), and the deposit read now may not show it yet."""
+    substrate = getattr(subtensor, "substrate", None)
+    if substrate is not None:
+        pool = substrate.get_account_next_index(address)
+        account = substrate.query("System", "Account", [address])
+    else:  # bittensor 11: prepare_call takes the pool's next nonce
+        pool = subtensor.prepare_call(bt.calls.Utility.batch_all(calls=[]), address=address).nonce
+        account = subtensor.query(("System", "Account"), [address])
+    return int(pool) > int((getattr(account, "value", account) or {}).get("nonce") or 0)
+
+
 def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, json_output: bool) -> None:
     from .actions import UnlockColdkeyAction
 
@@ -91,6 +104,13 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
     expected = ui.load("Quoting gamma", lambda: _sim_gamma(subtensor, tao_rao))
     min_out = min_gamma_out(expected)
     tao = tao_rao / _UNITS
+    # an earlier mint or spend whose outcome was unknown must settle first: until then the deposit read
+    # below may still count gamma it spends, and a payment built on it would fail or be paid twice
+    if ui.load("Checking for pending transactions", lambda: _pending(bt, subtensor, coldkey_ss58)):
+        raise LiumError(
+            f"An earlier transaction from {coldkey_ss58} is still pending. "
+            "Run this again once it has landed (usually within a minute)."
+        )
 
     if json_output and not yes:
         raise LiumError("confirmation required: pass --yes")
@@ -157,28 +177,39 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
 
     # the batch spent the minimum it could count on: what the mint gave above it (the price margin) is
     # spent now, with the key already unlocked, so the whole payment is credited
-    rest_spent = 0
+    rest_spent = rest_pending = rest = 0
     if spec_493:
         try:
             rest = _held(subtensor, coldkey_ss58)
             if rest > 0:
-                rest_ok, rest_error = ui.load(
-                    "Spending the rest at Lium",
-                    lambda: submit([("spend_gamma", {"service": payee, "netuid": NETUID, "amount": rest})]),
-                )
-                if not rest_ok:
+                try:
+                    rest_ok, rest_error = ui.load(
+                        "Spending the rest at Lium",
+                        lambda: submit([("spend_gamma", {"service": payee, "netuid": NETUID, "amount": rest})]),
+                    )
+                except (Exception, KeyboardInterrupt):  # sent, but the answer was lost
+                    rest_pending = rest
+                    raise
+                if not rest_ok:  # the chain answered: refused, nothing spent
                     raise LiumError(rest_error or "spend failed")
                 rest_spent = rest
         except (Exception, KeyboardInterrupt) as e:  # noqa: BLE001 - the payment itself has landed
-            ui.warning(
-                f"Paid, but the gamma left in the deposit was not spent ({e}); "
-                "it is spent with your next 'lium fund --gamma'"
-            )
+            if rest_pending:
+                ui.warning(
+                    f"Paid. Spending the {rest / _UNITS:.4f} gamma left in the deposit may still land ({e}); "
+                    "Lium credits it if it does, and the next 'lium fund --gamma' waits until it has settled"
+                )
+            else:
+                ui.warning(
+                    f"Paid, but the gamma left in the deposit was not spent ({e}); "
+                    "it is spent with your next 'lium fund --gamma'"
+                )
 
     if json_output:
         click.echo(json.dumps({"ok": True, "tx": {
             "coldkey": coldkey_ss58, "netuid": NETUID, "usd": usd, "amount_tao": tao,
             "gamma_expected": expected / _UNITS, "gamma_min": min_out / _UNITS, "gamma_rest_spent": rest_spent / _UNITS,
+            "gamma_rest_pending": rest_pending / _UNITS,
             "service" if spec_493 else "spender": payee,
         }}, sort_keys=True))
         return

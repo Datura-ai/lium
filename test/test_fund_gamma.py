@@ -31,6 +31,12 @@ class FakeSubstrate:
         # held: the deposit balance at each read (before the batch, then after it), None for no deposit
         self.spec_493, self.held, self.submissions = spec_493, list(held or [None, None]), []
 
+    pending = False  # a transaction from the coldkey still in the pool
+
+    def get_account_next_index(self, address):
+        assert address == "5Cold"
+        return 8 if self.pending else 7
+
     def get_metadata_call_function(self, module, function):
         # the shape finney's metadata returns: a Variant whose value lists the call's fields
         assert (module, function) == ("SubtensorModule", "mint_gamma")
@@ -38,6 +44,8 @@ class FakeSubstrate:
         return types.SimpleNamespace(value={"name": "mint_gamma", "fields": [{"name": n} for n in names + ["daily_spend_cap"]]})
 
     def query(self, module, storage, params):
+        if (module, storage) == ("System", "Account"):
+            return types.SimpleNamespace(value={"nonce": 7})
         assert (module, storage, params) == ("SubtensorModule", "GammaDeposits", [51, "5Cold"])
         held = self.held.pop(0)
         return types.SimpleNamespace(value=None if held is None else {"coldkey": "5Cold", "balance": held})
@@ -71,7 +79,15 @@ class FakeV11Subtensor:
     def __init__(self, success=True, held=None):
         self.success, self.submitted, self.held, self.submissions = success, None, list(held or [None, None]), []
 
+    pending = False
+
+    def prepare_call(self, call, address):
+        assert call == ("Utility", "batch_all", {"calls": []}) and address == "5Cold"
+        return types.SimpleNamespace(nonce=8 if self.pending else 7)
+
     def query(self, item, params):
+        if item == ("System", "Account"):
+            return {"nonce": 7}
         assert (item, params) == (("SubtensorModule", "GammaDeposits"), [51, "5Cold"])
         held = self.held.pop(0)
         return None if held is None else {"coldkey": "5Cold", "balance": held}
@@ -224,3 +240,32 @@ def test_bittensor_11_built_for_runtime_493_batches_mint_and_spend(monkeypatch, 
     assert [call for call, _ in substrate.submissions[1:]] == (
         [("SubtensorModule", "spend_gamma", {"service": "5Service", "netuid": 51, "amount": rest})] if rest else []
     )
+
+
+@pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
+def test_a_transaction_still_pending_stops_the_next_payment_before_anything_is_signed(monkeypatch, chain):
+    substrate = chain()
+    substrate.pending = True
+
+    result, events, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
+
+    assert result.exit_code != 0 and "still pending" in result.output
+    assert substrate.submissions == [] and "unlock" not in events
+
+
+@pytest.mark.parametrize("lost", [_lost_reply, _interrupted], ids=["lost_reply", "interrupted"])
+def test_a_rest_spend_with_an_unknown_outcome_is_reported_pending_not_unspent(monkeypatch, lost):
+    def submit(extrinsic):
+        if substrate.submissions:  # the rest spend, after the batch landed
+            return lost(extrinsic)
+        substrate.submissions.append(extrinsic)
+        return types.SimpleNamespace(is_success=True, error_message=None)
+
+    substrate = FakeSubstrate(spec_493=True, held=[None, 300_000_000], submit=submit)
+
+    result, _, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
+
+    assert result.exit_code == 0, result.output
+    assert "may still land" in result.output and "was not spent" not in result.output
+    tx = json.loads(result.output.strip().splitlines()[-1])["tx"]
+    assert (tx["gamma_rest_spent"], tx["gamma_rest_pending"]) == (0, 0.3)
