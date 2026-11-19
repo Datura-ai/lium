@@ -19,7 +19,8 @@ WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 PUBLISH = WORKFLOWS / "publish-pypi.yml"
 RELEASE = WORKFLOWS / "release.yml"
 STUBS = [WORKFLOWS / "release-lium-alias.yml", WORKFLOWS / "release-deprecate-lium-cli.yml"]
-PYPI_ACTION = "pypa/gh-action-pypi-publish"
+# the publisher image by digest: the upstream action generates a movable-tag runs.image in every revision
+PYPI_ACTION = "docker://ghcr.io/pypa/gh-action-pypi-publish@sha256:"
 TAG_CHECK_STEP = "Release tag must point at this commit, and the commit must be on main"
 GUARD_STEP = "Environment pypi must require a reviewer other than the loop's account"
 
@@ -94,6 +95,17 @@ def test_stubs_run_by_hand_in_the_pypi_environment_behind_the_reviewer_guard(pat
     for name, other in workflow["jobs"].items():
         if other is not job:
             assert environment_name(other) is None and "id-token" not in other.get("permissions", {}), name
+
+
+@pytest.mark.parametrize("path", [PUBLISH, *STUBS], ids=lambda p: p.name)
+def test_upload_uses_the_publisher_image_by_digest_with_upstream_defaults(path):
+    workflow = load(path)
+    (job,) = jobs_uploading(workflow).values()
+    (step,) = steps_using(job, PYPI_ACTION)
+    assert len(step["uses"]) == len(PYPI_ACTION) + 64
+    assert step["with"]["user"] == "__token__" and step["with"]["packages-dir"] == "dist/"
+    assert step["with"]["repository-url"] == "https://upload.pypi.org/legacy/"
+    assert step["with"]["verify-metadata"] is True and step["with"]["attestations"] is True
 
 
 @pytest.mark.parametrize("path", [PUBLISH, RELEASE, *STUBS, REPO_ROOT / "RELEASING.md"], ids=lambda p: p.name)
