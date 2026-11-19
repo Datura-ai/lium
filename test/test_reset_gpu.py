@@ -145,6 +145,16 @@ def test_a_refused_reset_names_a_next_step_that_is_not_retry(monkeypatch, code):
     assert result.exit_code == EXIT_API_ERROR and "lium up" in hint and not hint.startswith("Retry")
 
 
+def test_a_refusal_before_the_pod_stopped_says_nothing_about_the_container(monkeypatch):
+    # DAH-6741 review: such a refusal carries container_restarted false and no GPU results; the pod still runs
+    refused = LiumError("GPU reset failed: a process outside the pod holds the GPU open on the host: Xorg (pid 1500)."
+                        " The GPUs were not reset and the pod was not stopped", code="gpu_in_use_outside_pod")
+
+    result, _ = _run(monkeypatch, ["my-pod", "--yes"], refused)
+
+    assert "the pod was not stopped" in result.output and "did not start the container" not in result.output
+
+
 def test_gpus_reset_with_a_container_that_did_not_start_is_not_called_a_refused_reset(monkeypatch):
     # DAH-6741 review: the backend's container_not_restarted, after every GPU reset
     reset_gpu = {**FAILED_GPU, "result": "reset", "detail": None}
