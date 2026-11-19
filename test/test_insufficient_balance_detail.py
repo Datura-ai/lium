@@ -6,16 +6,21 @@ from lium.sdk.client import permission_error
 from lium.sdk.exceptions import LiumInsufficientBalanceError
 
 
-def test_the_rent_refusal_fills_required_and_available():
+@pytest.mark.parametrize(
+    ("phrase", "required"),
+    [("requires at least $0.75", 0.75), ("requires more than $0.74", 0.74)],
+)
+def test_the_rent_refusal_fills_required_and_available(phrase, required):
+    # both server wordings: required is the amount printed in each
     detail = (
-        "Insufficient balance. This node costs $2.99/hour, so renting it requires at least $0.75 "
+        f"Insufficient balance. This node costs $2.99/hour, so renting it {phrase} "
         "(15 minutes of runtime). Your balance is $0.70."
     )
 
     error = permission_error(detail, code="insufficient_balance")
 
     assert isinstance(error, LiumInsufficientBalanceError)
-    assert error.required == pytest.approx(0.75)
+    assert error.required == pytest.approx(required)
     assert error.available == pytest.approx(0.70)
 
 

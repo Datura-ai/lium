@@ -441,7 +441,7 @@ _USD = r"\$([0-9][0-9,]*(?:\.[0-9]+)?)"
 # The platform's balance refusals: "Insufficient balance" from the auth dependency and
 # "Insufficient balance. This node costs $X/hour, so renting it requires at least $Y
 # (N minutes of runtime). Your balance is $Z." from the rent path.
-_REQUIRED_RE = re.compile(r"requires at least " + _USD, re.I)
+_REQUIRED_RE = re.compile(r"requires (?:at least|more than) " + _USD, re.I)
 
 
 def _signed_usd(match: Optional[re.Match]) -> Optional[float]:

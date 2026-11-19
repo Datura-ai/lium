@@ -83,7 +83,7 @@ def quote_command(node, hours, gpu_count, volume_gb, backup_gb, output_format, j
     ui.print(table)
     ui.info(f"Total {_money(quote.total_usd)} (egress not included)")
     if quote.rent_balance_required_usd is None:
-        ui.dim(f"This pod's balance floor: {_money(quote.pod_balance_floor_usd)}")
+        ui.dim(f"This pod's 15-minute compute cost: {_money(quote.pod_balance_floor_usd)}")
     elif quote.rent_balance_required_usd == 0 and quote.pod_balance_floor_usd == 0:
         # a free pod: the server's two zeros are the same for an exempt and a non-exempt renter, so claim neither
         ui.dim(f"Quoted pod-cost reserve: {_money(0)}. The rent API checks the paying account separately")

@@ -163,7 +163,7 @@ def test_quote_without_the_required_balance_prints_only_this_pods_floor(requests
     out = CliRunner().invoke(cli, ["quote", NODE, "--hours", "2", "--gpus", "8"])
 
     assert out.exit_code == 0, out.output
-    assert "This pod's balance floor: $2.0000" in out.output and "open pods" not in out.output
+    assert "This pod's 15-minute compute cost: $2.0000" in out.output and "open pods" not in out.output
 
 
 def test_exempt_quote_names_the_reserve_exemption_and_the_payer_check(requests_seen, monkeypatch):
