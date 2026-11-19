@@ -3472,7 +3472,8 @@ class Lium:
         included), ``pod_balance_floor_usd`` (this pod's part of the balance floor: 15 minutes of
         ``price_per_hour``) and, when supplied by the server for a signed-in caller, ``rent_balance_required_usd`` (what the balance must be more than
         for this rent: 15 minutes of this pod and of each open pod (running, starting, rebooting, stopped,
-        failed or failed to reboot; pods on nodes of the payer's own validator do not count), or 60 minutes of
+        failed to reboot, or failed and awaiting an automatic retry; pods on nodes of the payer's own validator
+        do not count), or 60 minutes of
         this pod and of each open pod while the payer has an open signup credit and either has no completed card,
         crypto, TAO or alpha top-ups or has less than the minimum top-up in those top-ups, bonuses included; 0 for
         an admin, or for a validator renting a node on its own validator). Nothing is reserved. Returned as a
