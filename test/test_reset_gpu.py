@@ -155,7 +155,8 @@ def test_gpus_reset_with_a_container_that_did_not_start_is_not_called_a_refused_
     result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], failed)
 
     hint = json.loads(result.stderr)["error"]["hint"]
-    assert "GPU reset ran" in hint and "lium reboot" in hint and "did not reset" not in hint
+    assert "GPU reset ran" in hint and "contact support" in hint and "did not reset" not in hint
+    assert "reboot" not in hint  # not shown to bring such a pod back (DAH-6741 review)
 
 
 def test_a_failed_gpu_shows_the_gpus_and_exits_non_zero(monkeypatch):
