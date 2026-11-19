@@ -76,10 +76,17 @@ class FakeSubstrate:
 class FakeV11Subtensor:
     """bittensor 11: no ``.substrate``; ``runtime`` reads and ``submit_call`` sends a ``bt.calls`` builder."""
 
-    def __init__(self, success=True, held=None):
+    def __init__(self, success=True, held=None, spec_493=False):
         self.success, self.submitted, self.held, self.submissions = success, None, list(held or [None, None]), []
+        self.spec_493 = spec_493  # the connected runtime, whatever the installed SDK was generated for
 
     pending = False
+
+    def compose(self, call):
+        _, function, params = call
+        # the runtime refuses fields it does not have: a builder from another runtime cannot slip through
+        assert ("spender" in params) != self.spec_493 if function == "mint_gamma" else True
+        return ("composed", call)
 
     def prepare_call(self, call, address):
         assert call == ("Utility", "batch_all", {"calls": []}) and address == "5Cold"
@@ -88,6 +95,10 @@ class FakeV11Subtensor:
     def query(self, item, params):
         if item == ("System", "Account"):
             return {"nonce": 7}
+        if item == ("SubtensorModule", "GammaSpent"):
+            if not self.spec_493:
+                raise type("StorageFunctionNotFound", (ValueError,), {})("SubtensorModule.GammaSpent")
+            return 0
         assert (item, params) == (("SubtensorModule", "GammaDeposits"), [51, "5Cold"])
         held = self.held.pop(0)
         return None if held is None else {"coldkey": "5Cold", "balance": held}
@@ -147,11 +158,17 @@ def _run(monkeypatch, args, substrate, calls=None):
     return CliRunner().invoke(cli, args), events, coldkey
 
 
-@pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
-def test_gamma_links_the_coldkey_and_mints_naming_the_spender(monkeypatch, chain):
-    substrate = chain()
+@pytest.mark.parametrize(
+    "chain, sdk_493",
+    [(FakeSubstrate, False), (FakeV11Subtensor, False), (FakeV11Subtensor, True)],
+    ids=["bittensor<=10", "bittensor11", "bittensor11-built-for-493"],
+)
+def test_gamma_links_the_coldkey_and_mints_naming_the_spender(monkeypatch, chain, sdk_493):
+    substrate = chain()  # a runtime before 493
 
-    result, events, coldkey = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
+    result, events, coldkey = _run(
+        monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate, calls=_calls(sdk_493)
+    )
 
     assert result.exit_code == 0, result.output
     assert events == ["unlock", ("sign", "challenge"), ("link", "5Cold", "0x0102")]
@@ -223,18 +240,21 @@ def test_from_runtime_493_one_batch_mints_and_spends_at_the_service(monkeypatch,
     )
 
 
+@pytest.mark.parametrize("sdk_493", [True, False], ids=["built-for-493", "built-before-493"])
 @pytest.mark.parametrize("held, spent_extra, rest", HELD)
-def test_bittensor_11_built_for_runtime_493_batches_mint_and_spend(monkeypatch, held, spent_extra, rest):
-    substrate = FakeV11Subtensor(held=held)
+def test_bittensor_11_on_runtime_493_batches_mint_and_spend(monkeypatch, held, spent_extra, rest, sdk_493):
+    substrate = FakeV11Subtensor(held=held, spec_493=True)
 
     result, _, coldkey = _run(
-        monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate, calls=_calls(spec_493=True)
+        monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate, calls=_calls(sdk_493)
     )
 
     assert result.exit_code == 0, result.output
     (module, function, params), keypair = substrate.submitted
     assert (module, function, keypair) == ("Utility", "batch_all", coldkey)
-    (_, _, mint), (_, _, spend) = params["calls"]
+    # composed against the connected runtime before nesting
+    (tag_mint, (_, _, mint)), (tag_spend, (_, _, spend)) = params["calls"]
+    assert tag_mint == tag_spend == "composed"
     assert "spender" not in mint
     assert spend == {"service": "5Service", "netuid": 51, "amount": mint["min_amount_out"] + spent_extra}
     assert [call for call, _ in substrate.submissions[1:]] == (

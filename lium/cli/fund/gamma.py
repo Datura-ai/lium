@@ -11,7 +11,6 @@ there. The coldkey is that hotkey, so one ``batch_all`` mints and spends with on
 signature, and a failed spend reverts the mint (DAH-6771).
 """
 
-import inspect
 import json
 from decimal import ROUND_CEILING, Decimal
 
@@ -58,15 +57,25 @@ def min_gamma_out(expected: int) -> int:
     return expected * (10_000 - SLIPPAGE_BPS) // 10_000
 
 
-def _spec_493(bt, subtensor) -> bool:
-    """Deposits have no spender: the runtime's ``mint_gamma`` takes no ``spender`` (bittensor <= 10
-    reads the connected chain's call metadata; bittensor 11's generated builders follow the runtime
-    it was built for)."""
+ZERO_ACCOUNT = "5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM"  # any well-formed key: the read is a probe
+
+
+def _spec_493(subtensor) -> bool:
+    """Deposits have no spender, read from the connected runtime, never the installed SDK: bittensor
+    <= 10 reads ``mint_gamma``'s fields from the call metadata; bittensor 11, which exposes no call
+    metadata, reads ``GammaSpent``, the storage runtime 493 adds with it (its codec raises
+    ``StorageFunctionNotFound`` for an item the runtime lacks)."""
     substrate = getattr(subtensor, "substrate", None)
     if substrate is not None:
         call = substrate.get_metadata_call_function("SubtensorModule", "mint_gamma")
         return "spender" not in {field["name"] for field in getattr(call, "value", call)["fields"]}
-    return "spender" not in inspect.signature(bt.calls.SubtensorModule.mint_gamma).parameters
+    try:
+        subtensor.query(("SubtensorModule", "GammaSpent"), [NETUID, ZERO_ACCOUNT, ZERO_ACCOUNT])
+    except Exception as e:  # only the runtime lacking the item means "before 493"
+        if any(cls.__name__ == "StorageFunctionNotFound" for cls in type(e).__mro__):
+            return False
+        raise
+    return True
 
 
 def _held(subtensor, hotkey: str) -> int:
@@ -81,7 +90,7 @@ def _held(subtensor, hotkey: str) -> int:
     return int((deposit or {}).get("balance") or 0)
 
 
-def _pending(bt, subtensor, address: str) -> bool:
+def _pending(subtensor, address: str) -> bool:
     """A transaction from ``address`` is still in the pool: the pool's next nonce is past the chain's.
     Its outcome is unknown (a reply lost or interrupted), and the deposit read now may not show it yet."""
     substrate = getattr(subtensor, "substrate", None)
@@ -89,7 +98,7 @@ def _pending(bt, subtensor, address: str) -> bool:
         pool = substrate.get_account_next_index(address)
         account = substrate.query("System", "Account", [address])
     else:  # bittensor 11: prepare_call takes the pool's next nonce
-        pool = subtensor.prepare_call(bt.calls.Utility.batch_all(calls=[]), address=address).nonce
+        pool = subtensor.prepare_call(("Utility", "batch_all", {"calls": []}), address=address).nonce
         account = subtensor.query(("System", "Account"), [address])
     return int(pool) > int((getattr(account, "value", account) or {}).get("nonce") or 0)
 
@@ -106,7 +115,7 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
     tao = tao_rao / _UNITS
     # an earlier mint or spend whose outcome was unknown must settle first: until then the deposit read
     # below may still count gamma it spends, and a payment built on it would fail or be paid twice
-    if ui.load("Checking for pending transactions", lambda: _pending(bt, subtensor, coldkey_ss58)):
+    if ui.load("Checking for pending transactions", lambda: _pending(subtensor, coldkey_ss58)):
         raise LiumError(
             f"An earlier transaction from {coldkey_ss58} is still pending. "
             "Run this again once it has landed (usually within a minute)."
@@ -130,7 +139,7 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
         "Linking wallet to your Lium account",
         lambda: lium.link_gamma_hotkey(coldkey_ss58, lambda m: "0x" + coldkey.sign(m).hex()),
     )
-    spec_493 = _spec_493(bt, subtensor)
+    spec_493 = _spec_493(subtensor)
     payee = link.get("service") if spec_493 else link.get("spender")
     if not payee:
         raise LiumError(
@@ -147,9 +156,11 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
     def submit(calls: list[tuple[str, dict]]) -> tuple[bool, str | None]:
         """Sign ``calls`` (SubtensorModule functions) with the coldkey, as one ``batch_all`` when several."""
         substrate = getattr(subtensor, "substrate", None)
-        if substrate is None:  # bittensor 11: raw calls go through submit_call
-            built = [getattr(bt.calls.SubtensorModule, function)(**args) for function, args in calls]
-            call = built[0] if len(built) == 1 else bt.calls.Utility.batch_all(calls=built)
+        if substrate is None:  # bittensor 11: (module, function, params) calls, composed against the
+            # connected runtime, not the SDK's generated builders (which follow the runtime it was built for);
+            # calls nested in a batch are composed first, as bittensor 11 requires
+            built = [("SubtensorModule", function, args) for function, args in calls]
+            call = built[0] if len(built) == 1 else ("Utility", "batch_all", {"calls": [subtensor.compose(c) for c in built]})
             # the unlocked keypair, not the wallet: bittensor 11 unlocks a wallet again at signing,
             # and that second password prompt sits unseen under the spinner
             resp = subtensor.submit_call(call, coldkey, wait_for_inclusion=True, wait_for_finalization=True)
