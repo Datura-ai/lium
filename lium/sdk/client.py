@@ -439,9 +439,9 @@ def _satisfies_spec(executor: ExecutorInfo, spec: Dict[str, Any]) -> bool:
 
 _USD = r"\$([0-9][0-9,]*(?:\.[0-9]+)?)"
 # The platform's balance refusals: "Insufficient balance" from the auth dependency and
-# "Insufficient balance. This node costs $X/hour, so renting it requires at least $Y
-# (N minutes of runtime). Your balance is $Z." from the rent path.
-_REQUIRED_RE = re.compile(r"requires at least " + _USD, re.I)
+# "Insufficient balance. This node costs $X/hour, so renting it requires more than $Y
+# (N minutes of runtime). Your balance is $Z." from the rent path ("requires at least $Y" from older servers).
+_REQUIRED_RE = re.compile(r"requires (?:more than|at least) " + _USD, re.I)
 _AVAILABLE_RE = re.compile(r"balance is " + _USD, re.I)
 
 

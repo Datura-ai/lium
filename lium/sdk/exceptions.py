@@ -156,7 +156,7 @@ class LiumInsufficientBalanceError(LiumPermissionError):
     """The account cannot pay for this (403 with a balance reason).
 
     ``required`` and ``available`` are USD amounts when the server said what
-    they are, else ``None``. Callers that catch :class:`LiumPermissionError`
+    they are, else ``None``. The balance must be more than ``required``. Callers that catch :class:`LiumPermissionError`
     keep working; ones that want the numbers catch this class.
     """
 

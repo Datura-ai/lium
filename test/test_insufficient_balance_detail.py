@@ -1,0 +1,24 @@
+"""The rent path's 403 detail fills LiumInsufficientBalanceError's required and available amounts."""
+
+import pytest
+
+from lium.sdk.client import permission_error
+from lium.sdk.exceptions import LiumInsufficientBalanceError
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "Insufficient balance. This node costs $2.99/hour, so renting it requires more than $0.74 "
+        "(15 minutes of runtime). Your balance is $0.70.",
+        # an older server's wording stays parseable
+        "Insufficient balance. This node costs $2.99/hour, so renting it requires at least $0.74 "
+        "(15 minutes of runtime). Your balance is $0.70.",
+    ],
+)
+def test_the_rent_refusal_fills_required_and_available(detail):
+    error = permission_error(detail, code="insufficient_balance")
+
+    assert isinstance(error, LiumInsufficientBalanceError)
+    assert error.required == pytest.approx(0.74)
+    assert error.available == pytest.approx(0.70)
