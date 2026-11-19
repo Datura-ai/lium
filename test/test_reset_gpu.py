@@ -175,7 +175,7 @@ def test_a_container_that_did_not_start_has_a_next_step_without_claiming_one_sto
     result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], LiumError("x", code="reset_not_supported"))
 
     hint = json.loads(result.stderr)["error"]["hint"]
-    assert "If it says the container did not start again, contact support with the pod name" in hint
+    assert "If it says the container is not running or did not start, contact support with the pod name" in hint
 
 
 @pytest.mark.parametrize("stopped", [False, True])
@@ -188,9 +188,20 @@ def test_the_outside_holder_hint_covers_a_refusal_before_the_stop_and_a_containe
     result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], LiumError(message, code="gpu_in_use_outside_pod"))
 
     error = json.loads(result.stderr)["error"]
-    assert "If it says the container did not start again, contact support with the pod name" in error["hint"]
+    assert "If it says the container is not running or did not start, contact support with the pod name" in error["hint"]
     assert ("did not start again" in error["message"]) == stopped
     assert error["hint"].index("contact support") < error["hint"].index("Otherwise stop it")
+
+
+def test_a_stopped_container_the_node_could_not_start_gets_the_support_step(monkeypatch):
+    # DAH-6741 review: the node's words when a container found stopped would not start
+    message = "GPU reset failed: the container is not running; it did not start: no such device"
+
+    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], LiumError(message, code="reset_not_supported"))
+
+    hint = json.loads(result.stderr)["error"]["hint"]
+    assert "is not running or did not start, contact support with the pod name" in hint
+    assert "is not running" in message and "did not start" in message
 
 
 def test_a_refusal_before_the_pod_stopped_says_nothing_about_the_container(monkeypatch):

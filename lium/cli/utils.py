@@ -347,7 +347,8 @@ _KEEPS_BILLING = ("; renting another node does not end this pod, which stays ren
 # the failure message names that node: on a split host 'lium ls' lists it while it has free GPUs
 _OTHER_NODE = "pick a node in 'lium ls' other than the one this pod is on and rent it with 'lium up <node>'"
 # conditional: a refusal before the stop left the container running, so it must not read as stopped
-_NOT_STARTED = "If it says the container did not start again, contact support with the pod name. "
+# the node's words for a container left down: "did not start again", "is not running; it did not start"
+_NOT_STARTED = "If it says the container is not running or did not start, contact support with the pod name. "
 _RESET_UNFINISHED = ("The reset did not finish, for the reason above; a retry helps only if that reason was "
                      "temporary. " + _NOT_STARTED + "If a GPU stays stuck, " + _OTHER_NODE + _KEEPS_BILLING)
 _HINTS_BY_CODE: Dict[str, str] = {
