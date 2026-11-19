@@ -3479,15 +3479,11 @@ class Lium:
         ``unit``, ``rate_usd``, ``quantity``, ``amount_usd``, ``note``), ``total_usd`` (egress not
         included), ``pod_balance_floor_usd`` (this pod's part of the balance floor: 15 minutes of
         ``price_per_hour``) and, when supplied by the server for a signed-in caller, ``rent_balance_required_usd`` (what the balance must be more than
-        for this rent: 15 minutes of this pod and of each open pod (running, starting, rebooting, stopped,
-        failed to reboot, or in Failed status, a failed creation not included; pods on nodes of the payer's own
-        validator do not count), or 60 minutes of
-        this pod and of each open pod while the payer has an open signup credit and either has no completed card,
-        crypto, TAO or alpha top-ups or has less than the minimum top-up in those top-ups, bonuses included; 0 when
+        for this rent: 15 minutes of this pod and of each open pod, more for some older accounts; 0 when
         the renter is exempt from this pod-cost reserve: an admin, or a validator renting a node on its own
         validator; also 0 for a free pod when the hourly prices of the open pods counted toward the reserve sum
-        to zero, which the server does not tell apart from an exempt renter). Who pays must still have a balance above zero, except the Lium validator paying from its own
-        account. Nothing is reserved. Returned as a :class:`JobQuote`.
+        to zero, which the server does not tell apart from an exempt renter). Who pays must still have a balance
+        above zero, except the Lium validator paying from its own account. Nothing is reserved. Returned as a :class:`JobQuote`.
 
         Args:
             executor: Node UUID, or the HUID ``lium ls`` prints for it.
