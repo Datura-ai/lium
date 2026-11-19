@@ -133,6 +133,18 @@ def test_an_invalid_gpu_index_does_not_say_retry(monkeypatch):
     assert "nvidia-smi" in json.loads(result.stderr)["error"]["hint"]
 
 
+@pytest.mark.parametrize("code", ["gpu_in_use_outside_pod", "reset_not_supported"])
+def test_a_refused_reset_names_a_next_step_that_is_not_retry(monkeypatch, code):
+    # DAH-6741: a reset the host refuses is not fixed by trying again
+    refused = LiumError("GPU reset failed: a process outside the pod holds the GPU open on the host: Xorg (pid 1500)",
+                        code=code)
+
+    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], refused)
+
+    hint = json.loads(result.stderr)["error"]["hint"]
+    assert result.exit_code == EXIT_API_ERROR and "lium up" in hint and not hint.startswith("Retry")
+
+
 def test_a_failed_gpu_shows_the_gpus_and_exits_non_zero(monkeypatch):
     failed = LiumGpuOperationError("API error 409: GPU 0 failed", code="reset_not_supported",
                                    container_restarted=True, gpus=[GpuResetOutcome(**FAILED_GPU)])

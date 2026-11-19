@@ -365,6 +365,12 @@ _HINTS_BY_CODE: Dict[str, str] = {
     "rent_outcome_unknown": "Do not re-run the rent yet: the pod may be rented and billing. "
                             "'lium ps' shows whether it exists; 'lium rm <pod>' removes it",
     "invalid_gpu_index": "Pass a GPU index that 'nvidia-smi' shows inside the pod, or omit --gpu to reset all",
+    # a refused GPU reset: the exit-3 "Retry" cannot help with a cause on the host (DAH-6741)
+    "gpu_in_use_outside_pod": "A process outside your pod holds the GPU (named above), so a reset from the pod "
+                              "cannot run and a retry will not help; only the provider can stop it. "
+                              "To get a GPU you can reset, rent another node with 'lium up'",
+    "reset_not_supported": "The node did not reset the GPUs, for the reason above; a retry helps only if that "
+                           "reason was temporary. If a GPU stays stuck, rent another node with 'lium up'",
     "rate_limited": "Wait a few seconds and retry; back off if it repeats",
     "server_error": "Retry; if it persists, re-run with LIUM_DEBUG=1 and report the request",
     "api_timeout": "Check the network (or LIUM_BASE_URL) and retry; if the command changes something "
