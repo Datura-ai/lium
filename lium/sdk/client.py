@@ -3473,8 +3473,8 @@ class Lium:
         ``price_per_hour``) and, when supplied by the server for a signed-in caller, ``rent_balance_required_usd`` (what the balance must be more than
         for this rent: 15 minutes of this pod and of each open pod (running, starting, rebooting,
         stopped, failed or failed to reboot), or 60 minutes of this pod and of each open pod while the payer has an open signup credit and
-        the total of its completed card, crypto, TAO or alpha top-ups, bonuses included, is below the minimum top-up,
-        or there are none (counted as $0); 0 for an exempt account). Nothing is reserved. Returned as a
+        the total of its completed card, crypto, TAO or alpha top-ups, bonuses included, is below the minimum top-up
+        (a $0 total if there are none); 0 for an exempt account). Nothing is reserved. Returned as a
         :class:`JobQuote`.
 
         Args:
