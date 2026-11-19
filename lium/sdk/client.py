@@ -3475,11 +3475,10 @@ class Lium:
         failed to reboot, or in Failed status, a failed creation not included; pods on nodes of the payer's own
         validator do not count), or 60 minutes of
         this pod and of each open pod while the payer has an open signup credit and either has no completed card,
-        crypto, TAO or alpha top-ups or has less than the minimum top-up in those top-ups, bonuses included; 0 for
-        an admin or a validator renting a node on its own validator, who are exempt from this pod-cost reserve
-        only and still need a payer balance above $0, except the Lium validator renting its own nodes and paying
-        from its own account; through a workspace its billing owner still needs a balance above $0). Nothing is reserved. Returned as a
-        :class:`JobQuote`.
+        crypto, TAO or alpha top-ups or has less than the minimum top-up in those top-ups, bonuses included; 0 when
+        the renter is exempt from this pod-cost reserve: an admin, or a validator renting a node on its own
+        validator). Who pays must still have a balance above zero, except the Lium validator paying from its own
+        account. Nothing is reserved. Returned as a :class:`JobQuote`.
 
         Args:
             executor: Node UUID, or the HUID ``lium ls`` prints for it.
