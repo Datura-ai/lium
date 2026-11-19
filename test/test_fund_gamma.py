@@ -26,8 +26,16 @@ def test_usd_is_sized_to_tao_rounded_up_and_floored_two_percent():
 class FakeSubstrate:
     """bittensor <= 10: ``Subtensor().substrate`` composes, signs and submits."""
 
-    def __init__(self, success=True, submit=None):
+    def __init__(self, success=True, submit=None, spec_493=False, held=None):
         self.success, self.calls, self.submitted, self.submit = success, [], None, submit
+        self.spec_493, self.held = spec_493, held
+
+    def get_metadata_storage_function(self, module, storage):
+        return object() if self.spec_493 and (module, storage) == ("SubtensorModule", "GammaSpent") else None
+
+    def query(self, module, storage, params):
+        assert (module, storage, params) == ("SubtensorModule", "GammaDeposits", [51, "5Cold"])
+        return types.SimpleNamespace(value=None if self.held is None else {"coldkey": "5Cold", "balance": self.held})
 
     def runtime_call(self, api, method, params):
         assert (api, method, params[0]) == ("GammaRuntimeApi", "sim_mint_gamma", 51)
@@ -72,16 +80,28 @@ class FakeV11Subtensor:
         return self
 
 
-def _calls():
-    mint = lambda **params: ("SubtensorModule", "mint_gamma", params)  # noqa: E731
-    return types.SimpleNamespace(SubtensorModule=types.SimpleNamespace(mint_gamma=mint))
+def _calls(spec_493=False):
+    """bittensor 11's generated builders, as built for the runtime before or from 493 (no spender)."""
+    def mint(hotkey, netuid, amount, min_amount_out, spender, daily_spend_cap):
+        return ("SubtensorModule", "mint_gamma", dict(locals()))
+
+    def mint_493(hotkey, netuid, amount, min_amount_out, daily_spend_cap):
+        return ("SubtensorModule", "mint_gamma", dict(locals()))
+
+    def spend(service, netuid, amount):
+        return ("SubtensorModule", "spend_gamma", dict(locals()))
+
+    return types.SimpleNamespace(
+        SubtensorModule=types.SimpleNamespace(mint_gamma=mint_493 if spec_493 else mint, spend_gamma=spend),
+        Utility=types.SimpleNamespace(batch_all=lambda calls: ("Utility", "batch_all", {"calls": calls})),
+    )
 
 
-def _run(monkeypatch, args, substrate):
+def _run(monkeypatch, args, substrate, calls=None):
     events = []
     coldkey = types.SimpleNamespace(sign=lambda m: (events.append(("sign", m)), b"\x01\x02")[1])
     wallet = types.SimpleNamespace(coldkey=coldkey, unlock_coldkey=lambda: events.append("unlock"))
-    monkeypatch.setitem(sys.modules, "bittensor", types.SimpleNamespace(Subtensor=substrate.subtensor, calls=_calls()))
+    monkeypatch.setitem(sys.modules, "bittensor", types.SimpleNamespace(Subtensor=substrate.subtensor, calls=calls or _calls()))
 
     class FakeLoadWalletAction:
         def execute(self, ctx):
@@ -90,7 +110,7 @@ def _run(monkeypatch, args, substrate):
     class FakeLium:
         def link_gamma_hotkey(self, hotkey, sign):
             events.append(("link", hotkey, sign("challenge")))
-            return {"hotkey": hotkey, "netuid": 51, "spender": "5Spender"}
+            return {"hotkey": hotkey, "netuid": 51, "spender": "5Spender", "service": "5Service"}
 
     monkeypatch.setattr(fund_module, "LoadWalletAction", FakeLoadWalletAction)
     monkeypatch.setattr(gamma_module, "Lium", FakeLium)
@@ -146,3 +166,34 @@ def test_gamma_refuses_alpha_options(monkeypatch):
     result = CliRunner().invoke(cli, ["fund", "--gamma", "--netuid", "64", "-a", "25"])
 
     assert result.exit_code != 0 and "drop --alpha, --hotkey and --netuid" in result.output
+
+
+# DAH-6771: from subtensor runtime 493 deposits have no spender; the coldkey (the hotkey) spends at Lium's service
+@pytest.mark.parametrize("held, spent_extra", [(None, 0), (3 * 10**9, 3 * 10**9)])
+def test_from_runtime_493_one_batch_mints_and_spends_at_the_service(monkeypatch, held, spent_extra):
+    substrate = FakeSubstrate(spec_493=True, held=held)
+
+    result, _, coldkey = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
+
+    assert result.exit_code == 0, result.output
+    (module, function, params), keypair = substrate.submitted
+    assert (module, function, keypair) == ("Utility", "batch_all", coldkey)
+    (_, _, mint), (_, spend_fn, spend) = params["calls"]
+    min_out = mint["min_amount_out"]
+    assert "spender" not in mint and mint["hotkey"] == "5Cold" and mint["daily_spend_cap"] is None
+    assert (spend_fn, spend) == ("spend_gamma", {"service": "5Service", "netuid": 51, "amount": min_out + spent_extra})
+    assert json.loads(result.output.strip().splitlines()[-1])["tx"]["service"] == "5Service"
+
+
+def test_bittensor_11_built_for_runtime_493_batches_mint_and_spend(monkeypatch):
+    substrate = FakeV11Subtensor()
+
+    result, _, coldkey = _run(
+        monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate, calls=_calls(spec_493=True)
+    )
+
+    assert result.exit_code == 0, result.output
+    (module, function, params), keypair = substrate.submitted
+    assert (module, function, keypair) == ("Utility", "batch_all", coldkey)
+    (_, _, mint), (_, _, spend) = params["calls"]
+    assert "spender" not in mint and spend == {"service": "5Service", "netuid": 51, "amount": mint["min_amount_out"]}
