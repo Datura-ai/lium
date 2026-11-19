@@ -16,6 +16,11 @@ from lium.cli.fund import gamma as gamma_module
 GAMMA_PER_TAO = 210_561_193_201  # sim_mint_gamma(51, 1 TAO) on finney, 13 Nov 2026
 
 
+@pytest.fixture(autouse=True)
+def _unresolved_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(gamma_module, "UNRESOLVED", tmp_path / "unresolved.json")
+
+
 def test_usd_is_sized_to_tao_rounded_up_and_floored_two_percent():
     rao = gamma_module.tao_rao_for_usd(25, GAMMA_PER_TAO)
 
@@ -30,12 +35,13 @@ class FakeSubstrate:
         self.success, self.calls, self.submitted, self.submit = success, [], None, submit
         # held: the deposit balance at each read (before the batch, then after it), None for no deposit
         self.spec_493, self.held, self.submissions = spec_493, list(held or [None, None]), []
+        self.nonces, self.final_nonce = [], 7
 
     pending = False  # a transaction from the coldkey still in the pool
 
     def get_account_next_index(self, address):
         assert address == "5Cold"
-        return 8 if self.pending else 7
+        return self.final_nonce + (1 if self.pending else 0)
 
     def get_metadata_call_function(self, module, function):
         # the shape finney's metadata returns: a Variant whose value lists the call's fields
@@ -43,9 +49,10 @@ class FakeSubstrate:
         names = ["hotkey", "netuid", "amount", "min_amount_out"] + ([] if self.spec_493 else ["spender"])
         return types.SimpleNamespace(value={"name": "mint_gamma", "fields": [{"name": n} for n in names + ["daily_spend_cap"]]})
 
-    def query(self, module, storage, params):
+    def query(self, module, storage, params, block_hash=None):
         if (module, storage) == ("System", "Account"):
-            return types.SimpleNamespace(value={"nonce": 7})
+            assert block_hash == "0xfinal"  # settled means finalized
+            return types.SimpleNamespace(value={"nonce": self.final_nonce})
         assert (module, storage, params) == ("SubtensorModule", "GammaDeposits", [51, "5Cold"])
         held = self.held.pop(0)
         return types.SimpleNamespace(value=None if held is None else {"coldkey": "5Cold", "balance": held})
@@ -58,8 +65,13 @@ class FakeSubstrate:
     def compose_call(self, call_module, call_function, call_params):
         return (call_module, call_function, call_params)
 
-    def create_signed_extrinsic(self, call, keypair):
+    def create_signed_extrinsic(self, call, keypair, nonce, era):
+        assert era == {"period": gamma_module.ERA_PERIOD}
+        self.nonces.append(nonce)
         return (call, keypair)
+
+    def get_chain_finalised_head(self):
+        return "0xfinal"
 
     def submit_extrinsic(self, extrinsic, wait_for_inclusion, wait_for_finalization):
         assert wait_for_inclusion and wait_for_finalization
@@ -73,12 +85,16 @@ class FakeSubstrate:
         return types.SimpleNamespace(substrate=self)
 
 
+SIGNED = "signed by the coldkey"
+
+
 class FakeV11Subtensor:
     """bittensor 11: no ``.substrate``; ``runtime`` reads and ``submit_call`` sends a ``bt.calls`` builder."""
 
     def __init__(self, success=True, held=None, spec_493=False):
         self.success, self.submitted, self.held, self.submissions = success, None, list(held or [None, None]), []
         self.spec_493 = spec_493  # the connected runtime, whatever the installed SDK was generated for
+        self.nonces, self.final_nonce, self.finalized_block, self.unknown = [], 7, 100, False
 
     pending = False
 
@@ -88,13 +104,18 @@ class FakeV11Subtensor:
         assert ("spender" in params) != self.spec_493 if function == "mint_gamma" else True
         return ("composed", call)
 
-    def prepare_call(self, call, address):
-        assert call == ("Utility", "batch_all", {"calls": []}) and address == "5Cold"
-        return types.SimpleNamespace(nonce=8 if self.pending else 7)
+    def prepare_call(self, call, address, nonce=None, period=None):
+        assert address == "5Cold"
+        if nonce is None:  # the pool's next nonce
+            assert call == ("Utility", "batch_all", {"calls": []})
+            return types.SimpleNamespace(nonce=self.final_nonce + (1 if self.pending else 0))
+        assert period == gamma_module.ERA_PERIOD
+        return types.SimpleNamespace(nonce=nonce, payload=b"payload", call=call)
 
-    def query(self, item, params):
+    def query(self, item, params, block=None):
         if item == ("System", "Account"):
-            return {"nonce": 7}
+            assert block == self.finalized_block  # settled means finalized
+            return {"nonce": self.final_nonce}
         if item == ("SubtensorModule", "GammaSpent"):
             if not self.spec_493:
                 raise type("StorageFunctionNotFound", (ValueError,), {})("SubtensorModule.GammaSpent")
@@ -107,13 +128,15 @@ class FakeV11Subtensor:
         assert method == ("GammaRuntimeApi", "sim_mint_gamma") and params[0] == 51
         return {"Ok": (1, 1, params[1] * GAMMA_PER_TAO // 10**9)}
 
-    def submit_call(self, call, signer, wait_for_inclusion, wait_for_finalization):
-        # the unlocked keypair itself: given a wallet, bittensor 11 unlocks it again and prompts under the spinner
-        assert wait_for_inclusion and wait_for_finalization and not hasattr(signer, "unlock_coldkey")
-        module, function, params = call
-        self.submissions.append(((module, function, params), signer))
+    def submit_signature(self, unsigned, signature, wait_for_inclusion, wait_for_finalization):
+        # signed by the unlocked keypair itself (the fake coldkey signs b"\x01\x02"): never a second unlock
+        assert wait_for_inclusion and wait_for_finalization and signature == b"\x01\x02"
+        self.nonces.append(unsigned.nonce)
+        if self.unknown and self.submissions:  # the rest spend: broadcast, answer lost
+            return types.SimpleNamespace(success=False, message="disconnected", data={"submission_outcome_unknown": True})
+        self.submissions.append((tuple(unsigned.call), SIGNED))
         self.submitted = self.submitted or self.submissions[-1]
-        return types.SimpleNamespace(success=self.success, message="" if self.success else "Slippage")
+        return types.SimpleNamespace(success=self.success, message="" if self.success else "Slippage", data={})
 
     def subtensor(self):
         return self
@@ -171,11 +194,15 @@ def test_gamma_links_the_coldkey_and_mints_naming_the_spender(monkeypatch, chain
     )
 
     assert result.exit_code == 0, result.output
-    assert events == ["unlock", ("sign", "challenge"), ("link", "5Cold", "0x0102")]
+    # bittensor 11 also signs the payload of the payment it prepared
+    assert events == ["unlock", ("sign", "challenge"), ("link", "5Cold", "0x0102")] + (
+        [] if chain is FakeSubstrate else [("sign", b"payload")]
+    )
     (module, function, params), keypair = substrate.submitted
     rao = gamma_module.tao_rao_for_usd(25, GAMMA_PER_TAO)
     expected = rao * GAMMA_PER_TAO // 10**9
-    assert (module, function, keypair) == ("SubtensorModule", "mint_gamma", coldkey)
+    assert (module, function, keypair) == ("SubtensorModule", "mint_gamma", coldkey if chain is FakeSubstrate else SIGNED)
+    assert substrate.nonces == [7]  # signed with the nonce checked as settled
     assert params == {"hotkey": "5Cold", "netuid": 51, "amount": rao, "min_amount_out": expected * 98 // 100,
                       "spender": "5Spender", "daily_spend_cap": None}
     assert json.loads(result.output.strip().splitlines()[-1])["tx"]["spender"] == "5Spender"
@@ -245,13 +272,14 @@ def test_from_runtime_493_one_batch_mints_and_spends_at_the_service(monkeypatch,
 def test_bittensor_11_on_runtime_493_batches_mint_and_spend(monkeypatch, held, spent_extra, rest, sdk_493):
     substrate = FakeV11Subtensor(held=held, spec_493=True)
 
-    result, _, coldkey = _run(
+    result, _, _ = _run(
         monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate, calls=_calls(sdk_493)
     )
 
     assert result.exit_code == 0, result.output
     (module, function, params), keypair = substrate.submitted
-    assert (module, function, keypair) == ("Utility", "batch_all", coldkey)
+    assert (module, function, keypair) == ("Utility", "batch_all", SIGNED)
+    assert substrate.nonces == ([7, 8] if rest else [7])
     # composed against the connected runtime before nesting
     (tag_mint, (_, _, mint)), (tag_spend, (_, _, spend)) = params["calls"]
     assert tag_mint == tag_spend == "composed"
@@ -269,7 +297,7 @@ def test_a_transaction_still_pending_stops_the_next_payment_before_anything_is_s
 
     result, events, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
 
-    assert result.exit_code != 0 and "still pending" in result.output
+    assert result.exit_code != 0 and "has not settled yet" in result.output
     assert substrate.submissions == [] and "unlock" not in events
 
 
@@ -289,3 +317,66 @@ def test_a_rest_spend_with_an_unknown_outcome_is_reported_pending_not_unspent(mo
     assert "may still land" in result.output and "was not spent" not in result.output
     tx = json.loads(result.output.strip().splitlines()[-1])["tx"]
     assert (tx["gamma_rest_spent"], tx["gamma_rest_pending"]) == (0, 0.3)
+
+
+def _gone(substrate):
+    """bittensor 11 dropping the answer to the rest spend after broadcasting it."""
+    substrate.unknown = True
+    return substrate
+
+
+@pytest.mark.parametrize(
+    "make", [lambda: FakeSubstrate(spec_493=True, held=[None, 300_000_000], submit=None), None],
+    ids=["bittensor<=10-raised", "bittensor11-submission-outcome-unknown"],
+)
+def test_an_unknown_rest_spend_blocks_the_next_payment_until_finalized_state_settles_it(monkeypatch, make):
+    if make is None:
+        substrate = _gone(FakeV11Subtensor(held=[None, 300_000_000], spec_493=True))
+    else:
+        substrate = make()
+
+        def submit(extrinsic):
+            if substrate.submissions:
+                raise ConnectionError("websocket closed")
+            substrate.submissions.append(extrinsic)
+            return types.SimpleNamespace(is_success=True, error_message=None)
+
+        substrate.submit = submit
+    args = ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"]
+
+    result, _, _ = _run(monkeypatch, args, substrate)
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output.strip().splitlines()[-1])["tx"]["gamma_rest_pending"] == 0.3
+    assert substrate.nonces[-1] == 8 and json.loads(gamma_module.UNRESOLVED.read_text())["5Cold"]["nonce"] == 8
+
+    # the pool no longer shows it (dropped, or not yet propagated), but finalized state has not passed it
+    substrate.final_nonce, done = 8, len(substrate.nonces)
+    result, events, _ = _run(monkeypatch, args, substrate)
+    assert result.exit_code != 0 and "has not settled yet" in result.output
+    assert len(substrate.nonces) == done and "unlock" not in events
+
+    # finalized past it: settled either way, the entry is cleared and the next payment signs above it
+    substrate.final_nonce, substrate.unknown = 9, False
+    substrate.held, substrate.submit = [None, None], None
+    result, _, _ = _run(monkeypatch, args, substrate)
+    assert result.exit_code == 0, result.output
+    assert substrate.nonces[done] == 9 and "5Cold" not in json.loads(gamma_module.UNRESOLVED.read_text())
+
+
+def test_an_unknown_mint_blocks_until_its_era_has_passed(monkeypatch):
+    substrate = FakeSubstrate(submit=_lost_reply)
+    args = ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"]
+
+    result, _, _ = _run(monkeypatch, args, substrate)
+    assert result.exit_code != 0 and json.loads(gamma_module.UNRESOLVED.read_text())["5Cold"]["nonce"] == 7
+
+    result, _, _ = _run(monkeypatch, args, substrate)
+    assert result.exit_code != 0 and "has not settled yet" in result.output
+
+    # past its mortal era it can no longer land: the finalized nonce is authoritative again
+    now = gamma_module.time.time()
+    monkeypatch.setattr(gamma_module.time, "time", lambda: now + gamma_module.UNRESOLVED_EXPIRES + 1)
+    substrate.submit = None
+    result, _, _ = _run(monkeypatch, args, substrate)
+    assert result.exit_code == 0, result.output

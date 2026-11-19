@@ -12,7 +12,9 @@ signature, and a failed spend reverts the mint (DAH-6771).
 """
 
 import json
+import time
 from decimal import ROUND_CEILING, Decimal
+from pathlib import Path
 
 import click
 
@@ -90,17 +92,63 @@ def _held(subtensor, hotkey: str) -> int:
     return int((deposit or {}).get("balance") or 0)
 
 
-def _pending(subtensor, address: str) -> bool:
-    """A transaction from ``address`` is still in the pool: the pool's next nonce is past the chain's.
-    Its outcome is unknown (a reply lost or interrupted), and the deposit read now may not show it yet."""
+# {coldkey: {"nonce": highest nonce it signed whose outcome is unknown, "at": unix time}}: kept across runs until
+# finalized state resolves it, or until its mortal era has passed and it can no longer land
+UNRESOLVED = Path.home() / ".lium" / "gamma_unresolved.json"
+ERA_PERIOD = 128  # blocks a signed payment stays valid (bittensor 11's default; ~26 min at 12 s)
+UNRESOLVED_EXPIRES = ERA_PERIOD * 12 + 600  # seconds, with a margin
+
+
+class OutcomeUnknown(Exception):
+    """Broadcast, but the answer was lost: the transaction may still land."""
+
+
+def _unresolved() -> dict:
+    try:
+        return json.loads(UNRESOLVED.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_unresolved(entries: dict) -> None:
+    UNRESOLVED.parent.mkdir(parents=True, exist_ok=True)
+    UNRESOLVED.write_text(json.dumps(entries))
+
+
+def _remember_unresolved(address: str, nonce: int) -> None:
+    entries = _unresolved()
+    entries[address] = {"nonce": max(nonce, entries.get(address, {}).get("nonce", -1)), "at": time.time()}
+    _write_unresolved(entries)
+
+
+def _settled_nonce(subtensor, address: str) -> int:
+    """The nonce this run signs with: the finalized chain's, once nothing from ``address`` is unsettled.
+
+    Refuses while the pool holds a transaction from it, or while a nonce it signed with an unknown
+    outcome (this or an earlier run) is not yet below the finalized nonce. Signing every call with the
+    nonce checked here also closes the race of an earlier broadcast reaching the pool after the check:
+    both carry this nonce, so at most one of them executes."""
     substrate = getattr(subtensor, "substrate", None)
     if substrate is not None:
         pool = substrate.get_account_next_index(address)
-        account = substrate.query("System", "Account", [address])
+        final = substrate.query("System", "Account", [address], block_hash=substrate.get_chain_finalised_head())
     else:  # bittensor 11: prepare_call takes the pool's next nonce
         pool = subtensor.prepare_call(("Utility", "batch_all", {"calls": []}), address=address).nonce
-        account = subtensor.query(("System", "Account"), [address])
-    return int(pool) > int((getattr(account, "value", account) or {}).get("nonce") or 0)
+        final = subtensor.query(("System", "Account"), [address], block=subtensor.finalized_block)
+    final = int((getattr(final, "value", final) or {}).get("nonce") or 0)
+    recorded = _unresolved().get(address)
+    if recorded is not None and time.time() - recorded["at"] > UNRESOLVED_EXPIRES:
+        recorded = None  # its era has passed: it landed (final counts it) or can never land
+    if int(pool) > final or (recorded is not None and final <= recorded["nonce"]):
+        raise LiumError(
+            f"An earlier transaction from {address} has not settled yet (its outcome was unknown or it is "
+            "still in the pool). Run this again once it is finalized, usually within a minute."
+        )
+    if address in _unresolved():
+        entries = _unresolved()
+        entries.pop(address, None)
+        _write_unresolved(entries)
+    return final
 
 
 def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, json_output: bool) -> None:
@@ -115,11 +163,7 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
     tao = tao_rao / _UNITS
     # an earlier mint or spend whose outcome was unknown must settle first: until then the deposit read
     # below may still count gamma it spends, and a payment built on it would fail or be paid twice
-    if ui.load("Checking for pending transactions", lambda: _pending(subtensor, coldkey_ss58)):
-        raise LiumError(
-            f"An earlier transaction from {coldkey_ss58} is still pending. "
-            "Run this again once it has landed (usually within a minute)."
-        )
+    nonce = ui.load("Checking for unsettled transactions", lambda: _settled_nonce(subtensor, coldkey_ss58))
 
     if json_output and not yes:
         raise LiumError("confirmation required: pass --yes")
@@ -153,17 +197,23 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
     params["daily_spend_cap"] = None
     spend = {"service": payee, "netuid": NETUID, "amount": min_out + _held(subtensor, coldkey_ss58)}
 
-    def submit(calls: list[tuple[str, dict]]) -> tuple[bool, str | None]:
-        """Sign ``calls`` (SubtensorModule functions) with the coldkey, as one ``batch_all`` when several."""
+    def submit(calls: list[tuple[str, dict]], nonce: int) -> tuple[bool, str | None]:
+        """Sign ``calls`` (SubtensorModule functions) with the coldkey at ``nonce``, as one ``batch_all`` when
+        several. False only when the chain answered; OutcomeUnknown when the answer was lost."""
         substrate = getattr(subtensor, "substrate", None)
         if substrate is None:  # bittensor 11: (module, function, params) calls, composed against the
             # connected runtime, not the SDK's generated builders (which follow the runtime it was built for);
             # calls nested in a batch are composed first, as bittensor 11 requires
             built = [("SubtensorModule", function, args) for function, args in calls]
             call = built[0] if len(built) == 1 else ("Utility", "batch_all", {"calls": [subtensor.compose(c) for c in built]})
-            # the unlocked keypair, not the wallet: bittensor 11 unlocks a wallet again at signing,
-            # and that second password prompt sits unseen under the spinner
-            resp = subtensor.submit_call(call, coldkey, wait_for_inclusion=True, wait_for_finalization=True)
+            # signed here with the unlocked keypair at the checked nonce (submit_call takes no nonce, and given a
+            # wallet bittensor 11 unlocks it again, its password prompt unseen under the spinner)
+            unsigned = subtensor.prepare_call(call, address=coldkey_ss58, nonce=nonce, period=ERA_PERIOD)
+            resp = subtensor.submit_signature(
+                unsigned, coldkey.sign(unsigned.payload), wait_for_inclusion=True, wait_for_finalization=True
+            )
+            if not resp.success and (getattr(resp, "data", None) or {}).get("submission_outcome_unknown"):
+                raise OutcomeUnknown(resp.message or "submission outcome unknown")
             return resp.success, None if resp.success else resp.message
         built = [
             substrate.compose_call(call_module="SubtensorModule", call_function=function, call_params=args)
@@ -172,16 +222,19 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
         call = built[0] if len(built) == 1 else substrate.compose_call(
             call_module="Utility", call_function="batch_all", call_params={"calls": built}
         )
-        extrinsic = substrate.create_signed_extrinsic(call=call, keypair=coldkey)
+        extrinsic = substrate.create_signed_extrinsic(
+            call=call, keypair=coldkey, nonce=nonce, era={"period": ERA_PERIOD}  # mortal: see UNRESOLVED_EXPIRES
+        )
         receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=True)
         return receipt.is_success, None if receipt.is_success else receipt.error_message
 
     def mint() -> tuple[bool, str | None]:
-        return submit([("mint_gamma", params)] + ([("spend_gamma", spend)] if spec_493 else []))
+        return submit([("mint_gamma", params)] + ([("spend_gamma", spend)] if spec_493 else []), nonce)
 
     try:
         ok, error = ui.load("Minting gamma", mint)
     except (Exception, KeyboardInterrupt) as e:  # noqa: BLE001 - a submit that raised or was interrupted may still land
+        _remember_unresolved(coldkey_ss58, nonce)  # the next run waits until finalized state resolves it
         ok, error = False, str(e) or type(e).__name__
     if not ok:
         raise CliFailure("transfer_failed", f"Gamma mint failed: {error}", EXIT_GENERAL_ERROR, hint=FAILED_HINT)
@@ -196,10 +249,11 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
                 try:
                     rest_ok, rest_error = ui.load(
                         "Spending the rest at Lium",
-                        lambda: submit([("spend_gamma", {"service": payee, "netuid": NETUID, "amount": rest})]),
+                        lambda: submit([("spend_gamma", {"service": payee, "netuid": NETUID, "amount": rest})], nonce + 1),
                     )
                 except (Exception, KeyboardInterrupt):  # sent, but the answer was lost
                     rest_pending = rest
+                    _remember_unresolved(coldkey_ss58, nonce + 1)
                     raise
                 if not rest_ok:  # the chain answered: refused, nothing spent
                     raise LiumError(rest_error or "spend failed")
