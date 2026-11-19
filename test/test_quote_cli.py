@@ -179,8 +179,10 @@ def test_exempt_quote_names_the_reserve_exemption_and_the_payer_check(requests_s
     assert "No balance floor" not in text and "more than" not in text
 
 
-def test_a_zero_reserve_on_a_free_pod_promises_no_exemption(requests_seen, monkeypatch):
-    # a $0/h listing and no open pods also give 0; the server refuses a balance equal to it, so no exemption is claimed
+@pytest.mark.parametrize("renter", ["the Lium validator on its own node", "a renter on another validator's node"])
+def test_a_zero_reserve_on_a_free_pod_promises_no_exemption_and_no_amount(requests_seen, monkeypatch, renter):
+    # the server sends the same two zeros for both renters of a free pod, so the quote claims neither an exemption
+    # nor an amount the payer must exceed
     monkeypatch.setitem(QUOTE, "pod_balance_floor_usd", 0.0)
     monkeypatch.setitem(QUOTE, "rent_balance_required_usd", 0.0)
 
@@ -188,4 +190,5 @@ def test_a_zero_reserve_on_a_free_pod_promises_no_exemption(requests_seen, monke
 
     assert out.exit_code == 0, out.output
     text = " ".join(out.output.split())
-    assert "exempt" not in text and "more than $0" in text
+    assert "Quoted pod-cost reserve: $0" in text and "checks the paying account separately" in text, renter
+    assert "exempt" not in text and "more than" not in text
