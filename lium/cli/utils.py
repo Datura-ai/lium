@@ -369,10 +369,11 @@ _HINTS_BY_CODE: Dict[str, str] = {
                             "'lium ps' shows whether it exists; 'lium rm <pod>' removes it",
     "invalid_gpu_index": "Pass a GPU index that 'nvidia-smi' shows inside the pod, or omit --gpu to reset all",
     # a refused GPU reset: the exit-3 "Retry" cannot help with a cause on the host (DAH-6741)
-    "gpu_in_use_outside_pod": "A process outside your pod holds the GPU (named above), so a reset from the pod "
-                              "cannot run and a retry will not help; only the provider can stop it. "
-                              "To get a GPU you can reset, pick a different node in 'lium ls' and rent it with "
-                              "'lium up <node>'",
+    # the node could not prove the holder is the pod's (an unreadable cgroup counts as outside), so no certainty here
+    "gpu_in_use_outside_pod": "The node found a process it could not place in your pod holding the GPU (named "
+                              "above). If that process is yours, stop it and retry; if it is not under your "
+                              "control, contact the provider, or pick a different node in 'lium ls' and rent it "
+                              "with 'lium up <node>'",
     # also a reset whose GPUs were reset but whose container did not start again, and a refusal with no GPU results
     "reset_not_supported": _RESET_UNFINISHED,
     "container_not_restarted": _RESET_UNFINISHED,

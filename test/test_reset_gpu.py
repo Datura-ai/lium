@@ -146,6 +146,16 @@ def test_a_refused_reset_names_a_next_step_that_is_not_retry(monkeypatch, code):
     assert "different node in 'lium ls'" in hint  # a bare 'lium up' can pick the same node again
 
 
+def test_the_outside_holder_hint_does_not_claim_the_process_is_not_the_renters(monkeypatch):
+    # DAH-6741 review: the node counts a holder whose cgroup it cannot read as outside, so it may be the renter's own
+    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"],
+                     LiumError("GPU 0 is used outside the pod", code="gpu_in_use_outside_pod"))
+
+    hint = json.loads(result.stderr)["error"]["hint"]
+    assert "stop it and retry" in hint and "contact the provider" in hint
+    assert "only the provider" not in hint and "will not help" not in hint
+
+
 def test_a_refusal_before_the_pod_stopped_says_nothing_about_the_container(monkeypatch):
     # DAH-6741 review: such a refusal carries container_restarted false and no GPU results; the pod still runs
     refused = LiumError("GPU reset failed: a process outside the pod holds the GPU open on the host: Xorg (pid 1500)."
