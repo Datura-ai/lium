@@ -441,8 +441,16 @@ _USD = r"\$([0-9][0-9,]*(?:\.[0-9]+)?)"
 # The platform's balance refusals: "Insufficient balance" from the auth dependency and
 # "Insufficient balance. This node costs $X/hour, so renting it requires at least $Y
 # (N minutes of runtime). Your balance is $Z." from the rent path.
-_REQUIRED_RE = re.compile(r"requires at least " + _USD, re.I)
-_AVAILABLE_RE = re.compile(r"balance is " + _USD, re.I)
+_REQUIRED_RE = re.compile(r"requires (?:at least|more than) " + _USD, re.I)
+
+
+def _signed_usd(match: Optional[re.Match]) -> Optional[float]:
+    if not match:
+        return None
+    value = float(match.group(2).replace(",", ""))
+    return -abs(value) if match.group(1) else value
+# a negative balance prints as "-$0.30" (zero-balance refusal) or "$-0.30"; both keep the sign
+_AVAILABLE_RE = re.compile(r"balance is (-?)\$(-?[0-9][0-9,]*(?:\.[0-9]+)?)", re.I)
 
 
 def _response_error_code(response: requests.Response) -> Optional[str]:
@@ -550,7 +558,7 @@ def permission_error(
     return LiumInsufficientBalanceError(
         message,
         required=usd(_REQUIRED_RE.search(detail)),
-        available=usd(_AVAILABLE_RE.search(detail)),
+        available=_signed_usd(_AVAILABLE_RE.search(detail)),
         code=code,
         **context,
     )
@@ -3471,8 +3479,11 @@ class Lium:
         ``unit``, ``rate_usd``, ``quantity``, ``amount_usd``, ``note``), ``total_usd`` (egress not
         included), ``pod_balance_floor_usd`` (this pod's part of the balance floor: 15 minutes of
         ``price_per_hour``) and, when supplied by the server for a signed-in caller, ``rent_balance_required_usd`` (what the balance must be more than
-        for this rent: 15 minutes of this pod and of each open pod, or 60 minutes of this pod and of each open pod while
-        the payer has only the signup credit; 0 for an exempt account). Nothing is reserved. Returned as a :class:`JobQuote`.
+        for this rent: 15 minutes of this pod and of each open pod, more for some older accounts; 0 when
+        the renter is exempt from this pod-cost reserve: an admin, or a validator renting a node on its own
+        validator; also 0 for a free pod when the hourly prices of the open pods counted toward the reserve sum
+        to zero, which the server does not tell apart from an exempt renter). Who pays must still have a balance
+        above zero, except the Lium validator paying from its own account. Nothing is reserved. Returned as a :class:`JobQuote`.
 
         Args:
             executor: Node UUID, or the HUID ``lium ls`` prints for it.

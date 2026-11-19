@@ -163,15 +163,32 @@ def test_quote_without_the_required_balance_prints_only_this_pods_floor(requests
     out = CliRunner().invoke(cli, ["quote", NODE, "--hours", "2", "--gpus", "8"])
 
     assert out.exit_code == 0, out.output
-    assert "This pod's balance floor: $2.0000" in out.output and "open pods" not in out.output
+    assert "This pod's 15-minute compute cost: $2.0000" in out.output and "open pods" not in out.output
 
 
-def test_exempt_quote_says_no_balance_floor_applies(requests_seen, monkeypatch):
-    # the server sends 0 for an account the floor exempts: a zero balance can rent
+def test_exempt_quote_names_the_reserve_exemption_and_the_payer_check(requests_seen, monkeypatch):
+    # the server sends 0 for a renter the pod-cost reserve exempts; the payer still needs a positive balance
     monkeypatch.setitem(QUOTE, "pod_balance_floor_usd", 2.0)
     monkeypatch.setitem(QUOTE, "rent_balance_required_usd", 0.0)
 
     out = CliRunner().invoke(cli, ["quote", NODE, "--hours", "2", "--gpus", "8"])
 
     assert out.exit_code == 0, out.output
-    assert "No balance floor applies to this account" in out.output and "more than" not in out.output
+    text = " ".join(out.output.split())
+    assert "exempt from the pod-cost reserve" in text and "still needs a balance above zero" in text
+    assert "No balance floor" not in text and "more than" not in text
+
+
+@pytest.mark.parametrize("renter", ["the Lium validator on its own node", "a renter on another validator's node"])
+def test_a_zero_reserve_on_a_free_pod_promises_no_exemption_and_no_amount(requests_seen, monkeypatch, renter):
+    # the server sends the same two zeros for both renters of a free pod, so the quote claims neither an exemption
+    # nor an amount the payer must exceed
+    monkeypatch.setitem(QUOTE, "pod_balance_floor_usd", 0.0)
+    monkeypatch.setitem(QUOTE, "rent_balance_required_usd", 0.0)
+
+    out = CliRunner().invoke(cli, ["quote", NODE, "--hours", "2", "--gpus", "8"])
+
+    assert out.exit_code == 0, out.output
+    text = " ".join(out.output.split())
+    assert "Quoted pod-cost reserve: $0" in text and "checks the paying account separately" in text, renter
+    assert "exempt" not in text and "more than" not in text
