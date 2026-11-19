@@ -347,9 +347,9 @@ _KEEPS_BILLING = ("; renting another node does not end this pod, which stays ren
 # the failure message names that node: on a split host 'lium ls' lists it while it has free GPUs
 _OTHER_NODE = "pick a node in 'lium ls' other than the one this pod is on and rent it with 'lium up <node>'"
 # conditional: a refusal before the stop left the container running, so it must not read as stopped
+_NOT_STARTED = "If it says the container did not start again, contact support with the pod name. "
 _RESET_UNFINISHED = ("The reset did not finish, for the reason above; a retry helps only if that reason was "
-                     "temporary. If it says the container did not start again, contact support with the pod name. "
-                     "If a GPU stays stuck, " + _OTHER_NODE + _KEEPS_BILLING)
+                     "temporary. " + _NOT_STARTED + "If a GPU stays stuck, " + _OTHER_NODE + _KEEPS_BILLING)
 _HINTS_BY_CODE: Dict[str, str] = {
     "no_api_key": "Set LIUM_API_KEY, or run 'lium init' (headless: 'lium init --api-key <key>', "
                   "or 'lium init --no-browser'); "
@@ -377,10 +377,12 @@ _HINTS_BY_CODE: Dict[str, str] = {
     # a refused GPU reset: the exit-3 "Retry" cannot help with a cause on the host (DAH-6741)
     # the node could not prove the holder is the pod's (an unreadable cgroup counts as outside), so no certainty here
     # and its PID is the host's, which can name a different process inside the pod
+    # also sent after the stop, when a holder appeared and the container did not start again
     "gpu_in_use_outside_pod": "The node found a process it could not place in your pod holding the GPU (named "
-                              "above with its host PID, which is not the PID inside your pod). Stop it only if you "
-                              "can tell it is yours from inside the pod, then retry; otherwise give that host PID to "
-                              "the provider or support, or " + _OTHER_NODE + _KEEPS_BILLING,
+                              "above with its host PID, which is not the PID inside your pod). " + _NOT_STARTED +
+                              "Otherwise stop it only if you can tell it is yours from inside the pod, then retry; "
+                              "if not, give that host PID to the provider or support, or " + _OTHER_NODE
+                              + _KEEPS_BILLING,
     # also a reset whose GPUs were reset but whose container did not start again, and a refusal with no GPU results
     "reset_not_supported": _RESET_UNFINISHED,
     "container_not_restarted": _RESET_UNFINISHED,

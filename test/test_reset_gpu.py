@@ -178,6 +178,21 @@ def test_a_container_that_did_not_start_has_a_next_step_without_claiming_one_sto
     assert "If it says the container did not start again, contact support with the pod name" in hint
 
 
+@pytest.mark.parametrize("stopped", [False, True])
+def test_the_outside_holder_hint_covers_a_refusal_before_the_stop_and_a_container_that_did_not_start(
+        monkeypatch, stopped):
+    # DAH-6741 review: a holder that appears after the stop comes with the same code and a container that is down
+    message = ("GPU 0 is used outside the pod. The GPUs were not reset and the pod was not stopped" if not stopped else
+               "GPU 0 is used outside the pod; the container did not start again")
+
+    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], LiumError(message, code="gpu_in_use_outside_pod"))
+
+    error = json.loads(result.stderr)["error"]
+    assert "If it says the container did not start again, contact support with the pod name" in error["hint"]
+    assert ("did not start again" in error["message"]) == stopped
+    assert error["hint"].index("contact support") < error["hint"].index("Otherwise stop it")
+
+
 def test_a_refusal_before_the_pod_stopped_says_nothing_about_the_container(monkeypatch):
     # DAH-6741 review: such a refusal carries container_restarted false and no GPU results; the pod still runs
     refused = LiumError("GPU reset failed: a process outside the pod holds the GPU open on the host: Xorg (pid 1500)."
