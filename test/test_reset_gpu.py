@@ -144,6 +144,7 @@ def test_a_refused_reset_names_a_next_step_that_is_not_retry(monkeypatch, code):
     hint = json.loads(result.stderr)["error"]["hint"]
     assert result.exit_code == EXIT_API_ERROR and "lium up <node>" in hint and not hint.startswith("Retry")
     assert "different node in 'lium ls'" in hint  # a bare 'lium up' can pick the same node again
+    assert "stays rented and billing" in hint and "lium rm <pod>" in hint  # renting another node ends nothing
 
 
 def test_the_outside_holder_hint_does_not_claim_the_process_is_not_the_renters(monkeypatch):

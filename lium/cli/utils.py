@@ -341,9 +341,12 @@ OUTPUT_ENV = "LIUM_OUTPUT"    # LIUM_OUTPUT=json: every failure is a JSON envelo
 # What to do next, by error code. A failure without a next step leaves an agent
 # (or a person) guessing; a code that has no entry here falls back to the
 # exit-code family below, so no error leaves without one.
+# a second pod does not end the first one, which keeps billing
+_KEEPS_BILLING = ("; renting another node does not end this pod, which stays rented and billing, so remove it "
+                  "with 'lium rm <pod>' once you no longer need its data")
 _RESET_UNFINISHED = ("The reset did not finish, for the reason above; a retry helps only if that reason was "
                      "temporary. If a GPU stays stuck, pick a different node in 'lium ls' and rent it "
-                     "with 'lium up <node>'")
+                     "with 'lium up <node>'" + _KEEPS_BILLING)
 _HINTS_BY_CODE: Dict[str, str] = {
     "no_api_key": "Set LIUM_API_KEY, or run 'lium init' (headless: 'lium init --api-key <key>', "
                   "or 'lium init --no-browser'); "
@@ -373,7 +376,7 @@ _HINTS_BY_CODE: Dict[str, str] = {
     "gpu_in_use_outside_pod": "The node found a process it could not place in your pod holding the GPU (named "
                               "above). If that process is yours, stop it and retry; if it is not under your "
                               "control, contact the provider, or pick a different node in 'lium ls' and rent it "
-                              "with 'lium up <node>'",
+                              "with 'lium up <node>'" + _KEEPS_BILLING,
     # also a reset whose GPUs were reset but whose container did not start again, and a refusal with no GPU results
     "reset_not_supported": _RESET_UNFINISHED,
     "container_not_restarted": _RESET_UNFINISHED,
