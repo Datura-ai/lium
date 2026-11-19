@@ -75,7 +75,7 @@ def test_sdk_failed_gpu_409_keeps_the_gpus_and_releases_ssh(monkeypatch):
     assert released == [pod]
 
 
-def _run(monkeypatch, args, outcome=RESULT):
+def _run(monkeypatch, args, outcome=RESULT, executor=None):
     seen = {}
 
     class _Lium:
@@ -83,7 +83,8 @@ def _run(monkeypatch, args, outcome=RESULT):
             pass
 
         def ps(self):
-            return [SimpleNamespace(id="pod-uuid-1", huid="eager-wolf-aa", name="my-pod", executor=None, created_at="")]
+            return [SimpleNamespace(id="pod-uuid-1", huid="eager-wolf-aa", name="my-pod", executor=executor,
+                                    created_at="")]
 
         def reset_gpu(self, pod, gpu_indices=None, on_progress=None):
             seen["gpu_indices"] = gpu_indices
@@ -143,7 +144,7 @@ def test_a_refused_reset_names_a_next_step_that_is_not_retry(monkeypatch, code):
 
     hint = json.loads(result.stderr)["error"]["hint"]
     assert result.exit_code == EXIT_API_ERROR and "lium up <node>" in hint and not hint.startswith("Retry")
-    assert "different node in 'lium ls'" in hint  # a bare 'lium up' can pick the same node again
+    assert "other than the one this pod is on" in hint  # a bare 'lium up' can pick the same node again
     assert "stays rented and billing" in hint and "lium rm <pod>" in hint  # renting another node ends nothing
 
 
@@ -153,8 +154,28 @@ def test_the_outside_holder_hint_does_not_claim_the_process_is_not_the_renters(m
                      LiumError("GPU 0 is used outside the pod", code="gpu_in_use_outside_pod"))
 
     hint = json.loads(result.stderr)["error"]["hint"]
-    assert "stop it and retry" in hint and "contact the provider" in hint
+    assert "host PID" in hint and "only if you can tell it is yours from inside the pod" in hint
     assert "only the provider" not in hint and "will not help" not in hint
+
+
+@pytest.mark.parametrize("code", ["gpu_in_use_outside_pod", "reset_not_supported", "container_not_restarted"])
+def test_a_reset_that_sends_the_renter_elsewhere_names_the_pods_node(monkeypatch, code):
+    # DAH-6741 review: 'lium ls' lists a split node while it has free GPUs, and 'lium ps' shows pod names, not nodes
+    node = SimpleNamespace(id="exec-uuid-9", huid="brave-raven-a1")
+
+    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], LiumError("GPU reset failed", code=code), node)
+
+    error = json.loads(result.stderr)["error"]
+    assert json.loads(result.stderr)["data"]["node"] == {"id": "exec-uuid-9", "huid": "brave-raven-a1"}
+    assert "on node brave-raven-a1 (exec-uuid-9)" in error["message"]
+
+
+def test_a_container_that_did_not_start_has_a_next_step_without_claiming_one_stopped(monkeypatch):
+    # DAH-6741 review: an older backend sends reset_not_supported for a reset whose container did not start again
+    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], LiumError("x", code="reset_not_supported"))
+
+    hint = json.loads(result.stderr)["error"]["hint"]
+    assert "If it says the container did not start again, contact support with the pod name" in hint
 
 
 def test_a_refusal_before_the_pod_stopped_says_nothing_about_the_container(monkeypatch):

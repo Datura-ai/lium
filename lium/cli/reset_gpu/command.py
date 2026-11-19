@@ -4,7 +4,7 @@ import json
 
 import click
 
-from lium.sdk import GpuResetOutcome, Lium, LiumGpuOperationError, LiumServerError
+from lium.sdk import GpuResetOutcome, Lium, LiumError, LiumGpuOperationError, LiumServerError
 from lium.cli import ui
 from lium.cli.utils import (
     handle_errors,
@@ -71,13 +71,35 @@ def reset_gpu_command(target: str, gpus: tuple[int, ...], yes: bool, json_output
             if e.container_restarted is False:
                 ui.warning(f"The reset did not start the container of {pod.huid} again, "
                            "even if 'lium ps' still shows it running.")
-        raise sdk_error_failure(e, {"container_restarted": e.container_restarted, "gpus": [g.to_dict() for g in e.gpus]})
+        data = {"container_restarted": e.container_restarted, "gpus": [g.to_dict() for g in e.gpus]}
+        raise sdk_error_failure(e, {**data, **_node_data(pod, e)}, note=_node_note(pod, e))
+    except LiumError as e:
+        # a refusal before the stop (no GPU results): still name the node its hint says to avoid
+        if e.code not in _AVOID_THIS_NODE:
+            raise
+        raise sdk_error_failure(e, _node_data(pod, e), note=_node_note(pod, e))
 
     if json_output:
         click.echo(json.dumps(result.to_dict(), sort_keys=True))
     else:
         _print_gpu_reset_table(result.gpus)
         ui.success(f"GPU reset done for {pod.huid}")
+
+
+# codes whose hint sends the renter to another node: on a split host 'lium ls' still lists this one (it shows
+# node names, 'lium ps' shows pod names), so the failure names it
+_AVOID_THIS_NODE = {"gpu_in_use_outside_pod", "reset_not_supported", "container_not_restarted"}
+
+
+def _node_data(pod, error: LiumError) -> dict:
+    if error.code not in _AVOID_THIS_NODE or pod.executor is None:
+        return {}
+    return {"node": {"id": pod.executor.id, "huid": pod.executor.huid}}
+
+
+def _node_note(pod, error: LiumError) -> str:
+    node = _node_data(pod, error).get("node")
+    return f" The pod is on node {node['huid']} ({node['id']})." if node else ""
 
 
 def _print_gpu_reset_table(gpus: list[GpuResetOutcome]) -> None:
