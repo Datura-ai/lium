@@ -442,7 +442,15 @@ _USD = r"\$([0-9][0-9,]*(?:\.[0-9]+)?)"
 # "Insufficient balance. This node costs $X/hour, so renting it requires at least $Y
 # (N minutes of runtime). Your balance is $Z." from the rent path.
 _REQUIRED_RE = re.compile(r"requires at least " + _USD, re.I)
-_AVAILABLE_RE = re.compile(r"balance is " + _USD, re.I)
+
+
+def _signed_usd(match: Optional[re.Match]) -> Optional[float]:
+    if not match:
+        return None
+    value = float(match.group(2).replace(",", ""))
+    return -abs(value) if match.group(1) else value
+# a negative balance prints as "-$0.30" (zero-balance refusal) or "$-0.30"; both keep the sign
+_AVAILABLE_RE = re.compile(r"balance is (-?)\$(-?[0-9][0-9,]*(?:\.[0-9]+)?)", re.I)
 
 
 def _response_error_code(response: requests.Response) -> Optional[str]:
@@ -550,7 +558,7 @@ def permission_error(
     return LiumInsufficientBalanceError(
         message,
         required=usd(_REQUIRED_RE.search(detail)),
-        available=usd(_AVAILABLE_RE.search(detail)),
+        available=_signed_usd(_AVAILABLE_RE.search(detail)),
         code=code,
         **context,
     )

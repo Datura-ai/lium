@@ -166,12 +166,14 @@ def test_quote_without_the_required_balance_prints_only_this_pods_floor(requests
     assert "This pod's balance floor: $2.0000" in out.output and "open pods" not in out.output
 
 
-def test_exempt_quote_says_no_balance_floor_applies(requests_seen, monkeypatch):
-    # the server sends 0 for an account the floor exempts: a zero balance can rent
+def test_exempt_quote_names_the_reserve_exemption_and_the_payer_check(requests_seen, monkeypatch):
+    # the server sends 0 for a renter the pod-cost reserve exempts; the payer still needs a positive balance
     monkeypatch.setitem(QUOTE, "pod_balance_floor_usd", 2.0)
     monkeypatch.setitem(QUOTE, "rent_balance_required_usd", 0.0)
 
     out = CliRunner().invoke(cli, ["quote", NODE, "--hours", "2", "--gpus", "8"])
 
     assert out.exit_code == 0, out.output
-    assert "No balance floor applies to this account" in out.output and "more than" not in out.output
+    text = " ".join(out.output.split())
+    assert "exempt from the pod-cost reserve" in text and "still needs a balance above zero" in text
+    assert "No balance floor" not in text and "more than" not in text
