@@ -142,7 +142,8 @@ def test_a_refused_reset_names_a_next_step_that_is_not_retry(monkeypatch, code):
     result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], refused)
 
     hint = json.loads(result.stderr)["error"]["hint"]
-    assert result.exit_code == EXIT_API_ERROR and "lium up" in hint and not hint.startswith("Retry")
+    assert result.exit_code == EXIT_API_ERROR and "lium up <node>" in hint and not hint.startswith("Retry")
+    assert "different node in 'lium ls'" in hint  # a bare 'lium up' can pick the same node again
 
 
 def test_a_refusal_before_the_pod_stopped_says_nothing_about_the_container(monkeypatch):

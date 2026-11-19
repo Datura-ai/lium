@@ -342,7 +342,8 @@ OUTPUT_ENV = "LIUM_OUTPUT"    # LIUM_OUTPUT=json: every failure is a JSON envelo
 # (or a person) guessing; a code that has no entry here falls back to the
 # exit-code family below, so no error leaves without one.
 _RESET_UNFINISHED = ("The reset did not finish, for the reason above; a retry helps only if that reason was "
-                     "temporary. If a GPU stays stuck, rent another node with 'lium up'")
+                     "temporary. If a GPU stays stuck, pick a different node in 'lium ls' and rent it "
+                     "with 'lium up <node>'")
 _HINTS_BY_CODE: Dict[str, str] = {
     "no_api_key": "Set LIUM_API_KEY, or run 'lium init' (headless: 'lium init --api-key <key>', "
                   "or 'lium init --no-browser'); "
@@ -370,7 +371,8 @@ _HINTS_BY_CODE: Dict[str, str] = {
     # a refused GPU reset: the exit-3 "Retry" cannot help with a cause on the host (DAH-6741)
     "gpu_in_use_outside_pod": "A process outside your pod holds the GPU (named above), so a reset from the pod "
                               "cannot run and a retry will not help; only the provider can stop it. "
-                              "To get a GPU you can reset, rent another node with 'lium up'",
+                              "To get a GPU you can reset, pick a different node in 'lium ls' and rent it with "
+                              "'lium up <node>'",
     # also a reset whose GPUs were reset but whose container did not start again, and a refusal with no GPU results
     "reset_not_supported": _RESET_UNFINISHED,
     "container_not_restarted": _RESET_UNFINISHED,
