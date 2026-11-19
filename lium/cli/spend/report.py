@@ -1,9 +1,9 @@
 """What the active pods cost: per pod, per hour, and how long the balance lasts.
 
 The platform bills a pod its own hourly price while it is RUNNING (or in a
-reboot state) and nothing while it is PENDING, or while the API marks it
-`billing_paused` (its node is down, or a REBOOT_FAILED a platform step left
-stopped); the API reports the price and
+reboot state) and nothing while it is PENDING. The burn also leaves out a pod
+the /pods row marks `billing_paused`; the CLI reads that flag as sent and knows
+no more about why. The API reports the price and
 `created_at` but neither what it has billed nor when RUNNING began. So "spent"
 is price × wall time since creation for a pod that is billing — an estimate
 that counts the start-up minutes and ignores restarts and price changes — and
@@ -24,8 +24,8 @@ from lium.cli.ps.display import _gpu_config, _parse_timestamp
 ESTIMATE_NOTE = (
     "spent is price × wall time since creation (it counts the start-up minutes; the API does not report billed "
     "spend or when RUNNING began) and $0 for a PENDING pod, which is not billing yet. "
-    "burn counts RUNNING/REBOOT_PENDING/REBOOT_FAILED pods the API does not mark billing_paused (the platform's "
-    "billing rules; an older server that does not send the flag is read as billing) and excludes volume storage"
+    "burn counts RUNNING/REBOOT_PENDING/REBOOT_FAILED pods the API does not mark billing_paused (a server that "
+    "does not send the flag is read as billing) and excludes volume storage"
 )
 # The platform bills a pod in these statuses (a reboot keeps the reservation);
 # a PENDING or FAILED pod is not charged now, so it is not part of the burn.
@@ -71,7 +71,7 @@ def pod_spend(pod: PodInfo, now: Optional[datetime] = None) -> PodSpend:
         since=created.isoformat(timespec="seconds") if created else None,
         uptime_hours=hours,
         spent_usd=spent,
-        # the API's own flag, set by the platform's billing rules: a billable status alone does not say the pod is charged
+        # the /pods row's own flag, read as sent: a billable status alone does not say the pod is charged
         billable=status in BILLABLE_STATUSES and not getattr(pod, "billing_paused", False),
     )
 
