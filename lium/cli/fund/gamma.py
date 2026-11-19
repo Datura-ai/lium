@@ -32,6 +32,7 @@ FAILED_HINT = (
     "Do not re-send yet: the mint may have reached the chain. Check 'lium balance' "
     "(gamma credits can take a few minutes) before funding again"
 )
+NOT_SENT_HINT = "Nothing was signed or sent, so nothing can land: fix the error above and run the command again"
 
 
 def _sim_gamma(subtensor, rao: int) -> int:
@@ -101,6 +102,10 @@ UNRESOLVED_EXPIRES = ERA_PERIOD * 12 + 600  # seconds, with a margin
 
 class OutcomeUnknown(Exception):
     """Broadcast, but the answer was lost: the transaction may still land."""
+
+
+class NotSent(Exception):
+    """Failed before anything was signed and broadcast (composing or signing): nothing can land."""
 
 
 def _unresolved() -> dict:
@@ -205,26 +210,31 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
             # connected runtime, not the SDK's generated builders (which follow the runtime it was built for);
             # calls nested in a batch are composed first, as bittensor 11 requires
             built = [("SubtensorModule", function, args) for function, args in calls]
-            call = built[0] if len(built) == 1 else ("Utility", "batch_all", {"calls": [subtensor.compose(c) for c in built]})
             # signed here with the unlocked keypair at the checked nonce (submit_call takes no nonce, and given a
             # wallet bittensor 11 unlocks it again, its password prompt unseen under the spinner)
-            unsigned = subtensor.prepare_call(call, address=coldkey_ss58, nonce=nonce, period=ERA_PERIOD)
-            resp = subtensor.submit_signature(
-                unsigned, coldkey.sign(unsigned.payload), wait_for_inclusion=True, wait_for_finalization=True
-            )
+            try:
+                call = built[0] if len(built) == 1 else ("Utility", "batch_all", {"calls": [subtensor.compose(c) for c in built]})
+                unsigned = subtensor.prepare_call(call, address=coldkey_ss58, nonce=nonce, period=ERA_PERIOD)
+                signature = coldkey.sign(unsigned.payload)
+            except Exception as e:
+                raise NotSent(str(e) or type(e).__name__) from e
+            resp = subtensor.submit_signature(unsigned, signature, wait_for_inclusion=True, wait_for_finalization=True)
             if not resp.success and (getattr(resp, "data", None) or {}).get("submission_outcome_unknown"):
                 raise OutcomeUnknown(resp.message or "submission outcome unknown")
             return resp.success, None if resp.success else resp.message
-        built = [
-            substrate.compose_call(call_module="SubtensorModule", call_function=function, call_params=args)
-            for function, args in calls
-        ]
-        call = built[0] if len(built) == 1 else substrate.compose_call(
-            call_module="Utility", call_function="batch_all", call_params={"calls": built}
-        )
-        extrinsic = substrate.create_signed_extrinsic(
-            call=call, keypair=coldkey, nonce=nonce, era={"period": ERA_PERIOD}  # mortal: see UNRESOLVED_EXPIRES
-        )
+        try:
+            built = [
+                substrate.compose_call(call_module="SubtensorModule", call_function=function, call_params=args)
+                for function, args in calls
+            ]
+            call = built[0] if len(built) == 1 else substrate.compose_call(
+                call_module="Utility", call_function="batch_all", call_params={"calls": built}
+            )
+            extrinsic = substrate.create_signed_extrinsic(
+                call=call, keypair=coldkey, nonce=nonce, era={"period": ERA_PERIOD}  # mortal: see UNRESOLVED_EXPIRES
+            )
+        except Exception as e:
+            raise NotSent(str(e) or type(e).__name__) from e
         receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=True)
         return receipt.is_success, None if receipt.is_success else receipt.error_message
 
@@ -233,6 +243,8 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
 
     try:
         ok, error = ui.load("Minting gamma", mint)
+    except NotSent as e:  # failed before signing: nothing was broadcast, nothing to wait for
+        raise CliFailure("transfer_failed", f"Gamma mint failed: {e}", EXIT_GENERAL_ERROR, hint=NOT_SENT_HINT) from e
     except (Exception, KeyboardInterrupt) as e:  # noqa: BLE001 - a submit that raised or was interrupted may still land
         _remember_unresolved(coldkey_ss58, nonce)  # the next run waits until finalized state resolves it
         ok, error = False, str(e) or type(e).__name__
@@ -251,6 +263,8 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
                         "Spending the rest at Lium",
                         lambda: submit([("spend_gamma", {"service": payee, "netuid": NETUID, "amount": rest})], nonce + 1),
                     )
+                except NotSent:  # failed before signing: nothing was broadcast, so nothing is pending
+                    raise
                 except (Exception, KeyboardInterrupt):  # sent, but the answer was lost
                     rest_pending = rest
                     _remember_unresolved(coldkey_ss58, nonce + 1)

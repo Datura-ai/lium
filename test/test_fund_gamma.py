@@ -380,3 +380,30 @@ def test_an_unknown_mint_blocks_until_its_era_has_passed(monkeypatch):
     substrate.submit = None
     result, _, _ = _run(monkeypatch, args, substrate)
     assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
+def test_a_mint_that_fails_before_signing_records_nothing_and_the_next_run_proceeds(monkeypatch, chain):
+    substrate = chain()
+
+    def broken(*args, **kwargs):
+        raise ValueError("metadata encoding failed")
+
+    original = substrate.create_signed_extrinsic if chain is FakeSubstrate else substrate.prepare_call
+    if chain is FakeSubstrate:
+        substrate.create_signed_extrinsic = broken
+    else:
+        substrate.prepare_call = lambda call, address, nonce=None, period=None: (
+            original(call, address) if nonce is None else broken()
+        )
+    args = ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"]
+
+    result, _, _ = _run(monkeypatch, args, substrate)
+
+    assert result.exit_code != 0 and "Nothing was signed or sent" in result.output, result.output
+    assert not gamma_module.UNRESOLVED.exists() and substrate.submissions == []
+    if chain is FakeSubstrate:
+        substrate.create_signed_extrinsic = original
+    else:
+        substrate.prepare_call = original
+    assert _run(monkeypatch, args, substrate)[0].exit_code == 0
