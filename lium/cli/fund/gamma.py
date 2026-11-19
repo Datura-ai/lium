@@ -59,11 +59,13 @@ def min_gamma_out(expected: int) -> int:
 
 
 def _spec_493(bt, subtensor) -> bool:
-    """Deposits have no spender: the runtime has ``GammaSpent`` (bittensor <= 10 reads the chain's
-    metadata; bittensor 11's generated calls follow the runtime it was built for)."""
+    """Deposits have no spender: the runtime's ``mint_gamma`` takes no ``spender`` (bittensor <= 10
+    reads the connected chain's call metadata; bittensor 11's generated builders follow the runtime
+    it was built for)."""
     substrate = getattr(subtensor, "substrate", None)
     if substrate is not None:
-        return substrate.get_metadata_storage_function("SubtensorModule", "GammaSpent") is not None
+        call = substrate.get_metadata_call_function("SubtensorModule", "mint_gamma")
+        return "spender" not in {field["name"] for field in getattr(call, "value", call)["fields"]}
     return "spender" not in inspect.signature(bt.calls.SubtensorModule.mint_gamma).parameters
 
 
@@ -71,9 +73,11 @@ def _held(subtensor, hotkey: str) -> int:
     """Gamma units already in the deposit at ``hotkey`` (minted before runtime 493 and not yet
     spent, or an earlier mint's slippage margin), so this payment spends them too."""
     substrate = getattr(subtensor, "substrate", None)
-    if substrate is None:
-        return 0  # shortcut: bittensor 11 reads are not wired here; the web Pay or btcli gamma spend covers a leftover
-    deposit = getattr(substrate.query("SubtensorModule", "GammaDeposits", [NETUID, hotkey]), "value", None)
+    if substrate is not None:
+        result = substrate.query("SubtensorModule", "GammaDeposits", [NETUID, hotkey])
+    else:  # bittensor 11 reads storage by a (pallet, item) pair
+        result = subtensor.query(("SubtensorModule", "GammaDeposits"), [NETUID, hotkey])
+    deposit = getattr(result, "value", result)
     return int((deposit or {}).get("balance") or 0)
 
 
@@ -120,27 +124,29 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
     params["daily_spend_cap"] = None
     spend = {"service": payee, "netuid": NETUID, "amount": min_out + _held(subtensor, coldkey_ss58)}
 
-    def mint() -> tuple[bool, str | None]:
+    def submit(calls: list[tuple[str, dict]]) -> tuple[bool, str | None]:
+        """Sign ``calls`` (SubtensorModule functions) with the coldkey, as one ``batch_all`` when several."""
         substrate = getattr(subtensor, "substrate", None)
         if substrate is None:  # bittensor 11: raw calls go through submit_call
-            call = bt.calls.SubtensorModule.mint_gamma(**params)
-            if spec_493:
-                call = bt.calls.Utility.batch_all(calls=[call, bt.calls.SubtensorModule.spend_gamma(**spend)])
+            built = [getattr(bt.calls.SubtensorModule, function)(**args) for function, args in calls]
+            call = built[0] if len(built) == 1 else bt.calls.Utility.batch_all(calls=built)
             # the unlocked keypair, not the wallet: bittensor 11 unlocks a wallet again at signing,
             # and that second password prompt sits unseen under the spinner
             resp = subtensor.submit_call(call, coldkey, wait_for_inclusion=True, wait_for_finalization=True)
             return resp.success, None if resp.success else resp.message
-        call = substrate.compose_call(call_module="SubtensorModule", call_function="mint_gamma", call_params=params)
-        if spec_493:
-            spend_call = substrate.compose_call(
-                call_module="SubtensorModule", call_function="spend_gamma", call_params=spend
-            )
-            call = substrate.compose_call(
-                call_module="Utility", call_function="batch_all", call_params={"calls": [call, spend_call]}
-            )
+        built = [
+            substrate.compose_call(call_module="SubtensorModule", call_function=function, call_params=args)
+            for function, args in calls
+        ]
+        call = built[0] if len(built) == 1 else substrate.compose_call(
+            call_module="Utility", call_function="batch_all", call_params={"calls": built}
+        )
         extrinsic = substrate.create_signed_extrinsic(call=call, keypair=coldkey)
         receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=True)
         return receipt.is_success, None if receipt.is_success else receipt.error_message
+
+    def mint() -> tuple[bool, str | None]:
+        return submit([("mint_gamma", params)] + ([("spend_gamma", spend)] if spec_493 else []))
 
     try:
         ok, error = ui.load("Minting gamma", mint)
@@ -149,10 +155,30 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
     if not ok:
         raise CliFailure("transfer_failed", f"Gamma mint failed: {error}", EXIT_GENERAL_ERROR, hint=FAILED_HINT)
 
+    # the batch spent the minimum it could count on: what the mint gave above it (the price margin) is
+    # spent now, with the key already unlocked, so the whole payment is credited
+    rest_spent = 0
+    if spec_493:
+        try:
+            rest = _held(subtensor, coldkey_ss58)
+            if rest > 0:
+                rest_ok, rest_error = ui.load(
+                    "Spending the rest at Lium",
+                    lambda: submit([("spend_gamma", {"service": payee, "netuid": NETUID, "amount": rest})]),
+                )
+                if not rest_ok:
+                    raise LiumError(rest_error or "spend failed")
+                rest_spent = rest
+        except (Exception, KeyboardInterrupt) as e:  # noqa: BLE001 - the payment itself has landed
+            ui.warning(
+                f"Paid, but the gamma left in the deposit was not spent ({e}); "
+                "it is spent with your next 'lium fund --gamma'"
+            )
+
     if json_output:
         click.echo(json.dumps({"ok": True, "tx": {
             "coldkey": coldkey_ss58, "netuid": NETUID, "usd": usd, "amount_tao": tao,
-            "gamma_expected": expected / _UNITS, "gamma_min": min_out / _UNITS,
+            "gamma_expected": expected / _UNITS, "gamma_min": min_out / _UNITS, "gamma_rest_spent": rest_spent / _UNITS,
             "service" if spec_493 else "spender": payee,
         }}, sort_keys=True))
         return

@@ -5729,11 +5729,10 @@ class Lium:
 
         ``sign(message) -> str`` signs the server's challenge with the hotkey's key
         (0x-hex sr25519). Linking an already-linked hotkey is a no-op. Returns
-        ``{"hotkey", "netuid", "spender", "service"}``. Before subtensor runtime 493 a
-        ``mint_gamma`` into the hotkey's deposit must name ``spender``. From runtime 493
-        deposits have no spender: the hotkey spends its gamma with
-        ``spend_gamma(service, netuid, amount)``, and Lium credits what it spent at
-        ``service``, including gamma spent there before the hotkey was linked.
+        ``{"hotkey", "netuid", "spender"}``; a ``mint_gamma`` must name ``spender``.
+        Servers that accept gamma spent at a service (subtensor runtime 493, which
+        removes deposit spenders) also return ``service``: the hotkey then spends its
+        gamma with ``spend_gamma(service, netuid, amount)``.
         """
         message = self._request(
             "GET", "/gamma/hotkeys/challenge", params={"hotkey": hotkey}

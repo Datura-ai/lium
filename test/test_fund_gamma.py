@@ -28,14 +28,19 @@ class FakeSubstrate:
 
     def __init__(self, success=True, submit=None, spec_493=False, held=None):
         self.success, self.calls, self.submitted, self.submit = success, [], None, submit
-        self.spec_493, self.held = spec_493, held
+        # held: the deposit balance at each read (before the batch, then after it), None for no deposit
+        self.spec_493, self.held, self.submissions = spec_493, list(held or [None, None]), []
 
-    def get_metadata_storage_function(self, module, storage):
-        return object() if self.spec_493 and (module, storage) == ("SubtensorModule", "GammaSpent") else None
+    def get_metadata_call_function(self, module, function):
+        # the shape finney's metadata returns: a Variant whose value lists the call's fields
+        assert (module, function) == ("SubtensorModule", "mint_gamma")
+        names = ["hotkey", "netuid", "amount", "min_amount_out"] + ([] if self.spec_493 else ["spender"])
+        return types.SimpleNamespace(value={"name": "mint_gamma", "fields": [{"name": n} for n in names + ["daily_spend_cap"]]})
 
     def query(self, module, storage, params):
         assert (module, storage, params) == ("SubtensorModule", "GammaDeposits", [51, "5Cold"])
-        return types.SimpleNamespace(value=None if self.held is None else {"coldkey": "5Cold", "balance": self.held})
+        held = self.held.pop(0)
+        return types.SimpleNamespace(value=None if held is None else {"coldkey": "5Cold", "balance": held})
 
     def runtime_call(self, api, method, params):
         assert (api, method, params[0]) == ("GammaRuntimeApi", "sim_mint_gamma", 51)
@@ -52,7 +57,8 @@ class FakeSubstrate:
         assert wait_for_inclusion and wait_for_finalization
         if self.submit:
             return self.submit(extrinsic)
-        self.submitted = extrinsic
+        self.submissions.append(extrinsic)
+        self.submitted = self.submitted or extrinsic
         return types.SimpleNamespace(is_success=self.success, error_message=None if self.success else "Slippage")
 
     def subtensor(self):
@@ -62,8 +68,13 @@ class FakeSubstrate:
 class FakeV11Subtensor:
     """bittensor 11: no ``.substrate``; ``runtime`` reads and ``submit_call`` sends a ``bt.calls`` builder."""
 
-    def __init__(self, success=True):
-        self.success, self.submitted = success, None
+    def __init__(self, success=True, held=None):
+        self.success, self.submitted, self.held, self.submissions = success, None, list(held or [None, None]), []
+
+    def query(self, item, params):
+        assert (item, params) == (("SubtensorModule", "GammaDeposits"), [51, "5Cold"])
+        held = self.held.pop(0)
+        return None if held is None else {"coldkey": "5Cold", "balance": held}
 
     def runtime(self, method, params):
         assert method == ("GammaRuntimeApi", "sim_mint_gamma") and params[0] == 51
@@ -73,7 +84,8 @@ class FakeV11Subtensor:
         # the unlocked keypair itself: given a wallet, bittensor 11 unlocks it again and prompts under the spinner
         assert wait_for_inclusion and wait_for_finalization and not hasattr(signer, "unlock_coldkey")
         module, function, params = call
-        self.submitted = ((module, function, params), signer)
+        self.submissions.append(((module, function, params), signer))
+        self.submitted = self.submitted or self.submissions[-1]
         return types.SimpleNamespace(success=self.success, message="" if self.success else "Slippage")
 
     def subtensor(self):
@@ -169,8 +181,12 @@ def test_gamma_refuses_alpha_options(monkeypatch):
 
 
 # DAH-6771: from subtensor runtime 493 deposits have no spender; the coldkey (the hotkey) spends at Lium's service
-@pytest.mark.parametrize("held, spent_extra", [(None, 0), (3 * 10**9, 3 * 10**9)])
-def test_from_runtime_493_one_batch_mints_and_spends_at_the_service(monkeypatch, held, spent_extra):
+# held: the deposit before the batch and after it (the mint's price margin above the minimum it spent)
+HELD = [([None, None], 0, 0), ([3 * 10**9, 2 * 10**8], 3 * 10**9, 2 * 10**8)]
+
+
+@pytest.mark.parametrize("held, spent_extra, rest", HELD)
+def test_from_runtime_493_one_batch_mints_and_spends_at_the_service(monkeypatch, held, spent_extra, rest):
     substrate = FakeSubstrate(spec_493=True, held=held)
 
     result, _, coldkey = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
@@ -182,11 +198,18 @@ def test_from_runtime_493_one_batch_mints_and_spends_at_the_service(monkeypatch,
     min_out = mint["min_amount_out"]
     assert "spender" not in mint and mint["hotkey"] == "5Cold" and mint["daily_spend_cap"] is None
     assert (spend_fn, spend) == ("spend_gamma", {"service": "5Service", "netuid": 51, "amount": min_out + spent_extra})
-    assert json.loads(result.output.strip().splitlines()[-1])["tx"]["service"] == "5Service"
+    tx = json.loads(result.output.strip().splitlines()[-1])["tx"]
+    assert (tx["service"], tx["gamma_rest_spent"]) == ("5Service", rest / 10**9)
+    # the margin is spent right after, with the key already unlocked: the whole payment is credited
+    assert substrate.submissions[1:] == (
+        [(("SubtensorModule", "spend_gamma", {"service": "5Service", "netuid": 51, "amount": rest}), coldkey)]
+        if rest else []
+    )
 
 
-def test_bittensor_11_built_for_runtime_493_batches_mint_and_spend(monkeypatch):
-    substrate = FakeV11Subtensor()
+@pytest.mark.parametrize("held, spent_extra, rest", HELD)
+def test_bittensor_11_built_for_runtime_493_batches_mint_and_spend(monkeypatch, held, spent_extra, rest):
+    substrate = FakeV11Subtensor(held=held)
 
     result, _, coldkey = _run(
         monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate, calls=_calls(spec_493=True)
@@ -196,4 +219,8 @@ def test_bittensor_11_built_for_runtime_493_batches_mint_and_spend(monkeypatch):
     (module, function, params), keypair = substrate.submitted
     assert (module, function, keypair) == ("Utility", "batch_all", coldkey)
     (_, _, mint), (_, _, spend) = params["calls"]
-    assert "spender" not in mint and spend == {"service": "5Service", "netuid": 51, "amount": mint["min_amount_out"]}
+    assert "spender" not in mint
+    assert spend == {"service": "5Service", "netuid": 51, "amount": mint["min_amount_out"] + spent_extra}
+    assert [call for call, _ in substrate.submissions[1:]] == (
+        [("SubtensorModule", "spend_gamma", {"service": "5Service", "netuid": 51, "amount": rest})] if rest else []
+    )
