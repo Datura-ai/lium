@@ -3471,8 +3471,11 @@ class Lium:
         ``unit``, ``rate_usd``, ``quantity``, ``amount_usd``, ``note``), ``total_usd`` (egress not
         included), ``pod_balance_floor_usd`` (this pod's part of the balance floor: 15 minutes of
         ``price_per_hour``) and, when supplied by the server for a signed-in caller, ``rent_balance_required_usd`` (what the balance must be more than
-        for this rent: 15 minutes of this pod and of each open pod, or 60 minutes of this pod and of each open pod while
-        the payer has an open signup credit and completed card, crypto, TAO or alpha top-ups, bonuses included, under the minimum top-up (new accounts get none); 0 for an exempt account). Nothing is reserved. Returned as a :class:`JobQuote`.
+        for this rent: 15 minutes of this pod and of each open pod (running, starting, stopped or awaiting an
+        automatic retry), or 60 minutes of this pod and of each open pod while the payer has an open signup credit and
+        the total of its completed card, crypto, TAO or alpha top-ups, bonuses included, is below the minimum top-up,
+        or there are none (counted as $0); 0 for an exempt account). Nothing is reserved. Returned as a
+        :class:`JobQuote`.
 
         Args:
             executor: Node UUID, or the HUID ``lium ls`` prints for it.
