@@ -84,8 +84,9 @@ def quote_command(node, hours, gpu_count, volume_gb, backup_gb, output_format, j
     ui.info(f"Total {_money(quote.total_usd)} (egress not included)")
     if quote.rent_balance_required_usd is None:
         ui.dim(f"This pod's balance floor: {_money(quote.pod_balance_floor_usd)}")
-    elif quote.rent_balance_required_usd == 0:
-        # the server's 0: the renter is exempt from the pod-cost reserve, not from the payer's balance check
+    elif quote.rent_balance_required_usd == 0 and quote.pod_balance_floor_usd > 0:
+        # a 0 against a priced pod means the renter is exempt from the reserve, not from the payer's balance check;
+        # a $0/h pod with no open pods also gives 0, and the server then still wants a balance above it (else branch)
         ui.dim(
             "This rent is exempt from the pod-cost reserve; the paying account still needs a balance above zero, "
             "except the Lium validator paying from its own account"

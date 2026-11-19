@@ -177,3 +177,15 @@ def test_exempt_quote_names_the_reserve_exemption_and_the_payer_check(requests_s
     text = " ".join(out.output.split())
     assert "exempt from the pod-cost reserve" in text and "still needs a balance above zero" in text
     assert "No balance floor" not in text and "more than" not in text
+
+
+def test_a_zero_reserve_on_a_free_pod_promises_no_exemption(requests_seen, monkeypatch):
+    # a $0/h listing and no open pods also give 0; the server refuses a balance equal to it, so no exemption is claimed
+    monkeypatch.setitem(QUOTE, "pod_balance_floor_usd", 0.0)
+    monkeypatch.setitem(QUOTE, "rent_balance_required_usd", 0.0)
+
+    out = CliRunner().invoke(cli, ["quote", NODE, "--hours", "2", "--gpus", "8"])
+
+    assert out.exit_code == 0, out.output
+    text = " ".join(out.output.split())
+    assert "exempt" not in text and "more than $0" in text
