@@ -69,7 +69,7 @@ def reset_gpu_command(target: str, gpus: tuple[int, ...], yes: bool, json_output
         if not json_output:
             _print_gpu_reset_table(e.gpus)
             if e.container_restarted is False:
-                ui.warning(f"The container of {pod.huid} is still stopped.")
+                ui.warning(f"The reset did not start the container of {pod.huid} again; 'lium ps' shows its state.")
         raise sdk_error_failure(e, {"container_restarted": e.container_restarted, "gpus": [g.to_dict() for g in e.gpus]})
 
     if json_output:

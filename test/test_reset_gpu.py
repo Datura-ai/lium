@@ -145,16 +145,29 @@ def test_a_refused_reset_names_a_next_step_that_is_not_retry(monkeypatch, code):
     assert result.exit_code == EXIT_API_ERROR and "lium up" in hint and not hint.startswith("Retry")
 
 
+def test_gpus_reset_with_a_container_that_did_not_start_is_not_called_a_refused_reset(monkeypatch):
+    # DAH-6741 review: the backend's container_not_restarted, after every GPU reset
+    reset_gpu = {**FAILED_GPU, "result": "reset", "detail": None}
+    failed = LiumGpuOperationError("GPU reset failed: the container did not start again: no such container",
+                                   code="container_not_restarted", container_restarted=False,
+                                   gpus=[GpuResetOutcome(**reset_gpu)])
+
+    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], failed)
+
+    hint = json.loads(result.stderr)["error"]["hint"]
+    assert "GPU reset ran" in hint and "lium reboot" in hint and "did not reset" not in hint
+
+
 def test_a_failed_gpu_shows_the_gpus_and_exits_non_zero(monkeypatch):
     failed = LiumGpuOperationError("API error 409: GPU 0 failed", code="reset_not_supported",
                                    container_restarted=True, gpus=[GpuResetOutcome(**FAILED_GPU)])
     result, _ = _run(monkeypatch, ["my-pod", "--yes"], failed)
     assert result.exit_code == EXIT_API_ERROR
-    assert "refused" in result.output and "still stopped" not in result.output
+    assert "refused" in result.output and "did not start the container" not in result.output
 
     failed.container_restarted = False
     result, _ = _run(monkeypatch, ["my-pod", "--yes"], failed)
-    assert "still stopped" in result.output
+    assert "did not start the container of" in result.output
     failed.container_restarted = True
 
     result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], failed)
