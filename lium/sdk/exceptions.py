@@ -156,7 +156,10 @@ class LiumInsufficientBalanceError(LiumPermissionError):
     """The account cannot pay for this (403 with a balance reason).
 
     ``required`` and ``available`` are the USD amounts printed in the server's
-    refusal, when present, else ``None``. Callers that catch
+    refusal, when present, else ``None``. ``required_exclusive`` says how to
+    read ``required``: when True ("requires more than"), fund more than
+    ``required``; when False ("requires at least"), at least ``required``;
+    ``None`` when the refusal printed no amount. Callers that catch
     :class:`LiumPermissionError` keep working; ones that want the numbers catch
     this class.
     """
@@ -167,12 +170,14 @@ class LiumInsufficientBalanceError(LiumPermissionError):
         *,
         required: float | None = None,
         available: float | None = None,
+        required_exclusive: bool | None = None,
         code: str | None = None,
         hint: str | None = None,
         request_id: str | None = None,
     ) -> None:
         super().__init__(message, code=code, hint=hint, request_id=request_id)
         self.required = required
+        self.required_exclusive = required_exclusive
         self.available = available
 
 

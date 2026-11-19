@@ -441,7 +441,7 @@ _USD = r"\$([0-9][0-9,]*(?:\.[0-9]+)?)"
 # The platform's balance refusals: "Insufficient balance" from the auth dependency and
 # "Insufficient balance. This node costs $X/hour, so renting it requires more than $Y
 # (N minutes of runtime). Your balance is $Z." from the rent path ("requires at least $Y" from older servers).
-_REQUIRED_RE = re.compile(r"requires (?:more than|at least) " + _USD, re.I)
+_REQUIRED_RE = re.compile(r"requires (more than|at least) " + _USD, re.I)
 _AVAILABLE_RE = re.compile(r"balance is " + _USD, re.I)
 
 
@@ -544,12 +544,14 @@ def permission_error(
     if not insufficient:
         return LiumPermissionError(message, code=code, **context)
 
-    def usd(match: Optional[re.Match]) -> Optional[float]:
-        return float(match.group(1).replace(",", "")) if match else None
+    def usd(match: Optional[re.Match], group: int = 1) -> Optional[float]:
+        return float(match.group(group).replace(",", "")) if match else None
 
+    required = _REQUIRED_RE.search(detail)
     return LiumInsufficientBalanceError(
         message,
-        required=usd(_REQUIRED_RE.search(detail)),
+        required=usd(required, 2),
+        required_exclusive=required.group(1).lower() == "more than" if required else None,
         available=usd(_AVAILABLE_RE.search(detail)),
         code=code,
         **context,
