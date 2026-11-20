@@ -18,6 +18,7 @@ from lium.cli.utils import (
     CliFailure,
     TargetMatch,
     batch_refusal_failure,
+    json_output_requested,
     handle_errors,
     resolve_output_format,
 )
@@ -328,8 +329,9 @@ def rm_command(
                     {"huid": huid, "code": e.code, "hint": e.hint} for huid, e in zip(funding_huids, funding_errors)
                 ]
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-    elif removed_huids:
-        # Say what happened: silence is indistinguishable from having done nothing.
+    elif removed_huids and not (refusals and json_output_requested()):
+        # Say what happened: silence is indistinguishable from having done nothing. (Under LIUM_OUTPUT=json a refused
+        # batch reports this inside its one error envelope instead.)
         ui.success(f"{done_verb} {len(removed_huids)} pod(s): {', '.join(removed_huids)}")
         if not plan.termination_time:
             for pod in done_pods:
@@ -339,9 +341,14 @@ def rm_command(
         # A 402 (the key's budget, or an account with no balance) is not a generic failed huid. Print scheduled/failed
         # first so `rm a b --in 2h` still shows that b was rescheduled, then exit 6 naming every refused pod by kind,
         # since their fixes differ. The refused pod is not retried.
-        if output_format != "json" and failed_huids:
+        if output_format != "json" and not json_output_requested() and failed_huids:
             ui.error(f"Failed to schedule removal for pods: {', '.join(failed_huids)}")
-        raise batch_refusal_failure(list(zip(budget_huids, budget_errors)), list(zip(funding_huids, funding_errors)))
+        raise batch_refusal_failure(
+            list(zip(budget_huids, budget_errors)),
+            list(zip(funding_huids, funding_errors)),
+            done=("scheduled" if plan.termination_time else "removed", removed_huids),
+            failed=failed_huids,
+        )
     if failed_huids:
         if output_format == "json":
             # The payload already names the failures; a second message on stdout

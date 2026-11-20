@@ -11,6 +11,7 @@ from lium.cli.utils import (
     EXIT_POD_NOT_FOUND,
     batch_refusal_failure,
     handle_errors,
+    json_output_requested,
 )
 from . import validation, parsing
 from .actions import CancelSchedulesAction
@@ -50,12 +51,15 @@ def schedules_rm_command(indices: str):
     budget = list(zip(result.data.get("budget_huids") or [], result.data.get("budget_errors") or []))
     funding = list(zip(result.data.get("funding_huids") or [], result.data.get("funding_errors") or []))
     if budget or funding:
-        # report what went through first, then exit 6 naming every refused pod by kind (as in `rm --in`)
-        if result.data.get("cancelled"):
-            ui.success(f"Cancelled schedules for {', '.join(result.data['cancelled'])}")
-        if result.data.get("failures"):
-            ui.error(f"Failed to cancel schedules: {', '.join(result.data['failures'])}")
-        raise batch_refusal_failure(budget, funding)
+        # report what went through first, then exit 6 naming every refused pod by kind (as in `rm --in`); a JSON
+        # reader gets the same report inside the one error envelope, so no prose goes to stdout then
+        cancelled, failures = result.data.get("cancelled") or [], result.data.get("failures") or []
+        if not json_output_requested():
+            if cancelled:
+                ui.success(f"Cancelled schedules for {', '.join(cancelled)}")
+            if failures:
+                ui.error(f"Failed to cancel schedules: {', '.join(failures)}")
+        raise batch_refusal_failure(budget, funding, done=("cancelled", cancelled), failed=failures)
     # Only error if anything failed
     if not result.ok:
         failures = result.data.get("failures", [])

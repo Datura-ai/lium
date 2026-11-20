@@ -36,7 +36,7 @@ def _pods():
             id=f"id-{h}", huid=h, name=h, executor=SimpleNamespace(price_per_hour=1.0),
             created_at="2026-11-20T00:00:00", removal_scheduled_at="2026-11-21T00:00:00",
         )
-        for h in ("pod-a", "pod-b")
+        for h in ("pod-a", "pod-b", "pod-c")
     ]
 
 
@@ -157,3 +157,50 @@ def test_a_refused_batch_carries_both_groups_in_the_json_error_envelope(monkeypa
         assert (row["code"], row["hint"]) == ("account_unfunded", HINT)
     for row in envelope["data"].get("budget_refused", []):
         assert (row["code"], row["hint"]) == ("API_KEY_BUDGET_EXCEEDED", BUDGET_HINT)
+
+
+def _broken():
+    return RuntimeError("node unreachable")
+
+
+# pod-a goes through, pod-b fails for an ordinary reason, pod-c is refused with a 402 (reboot sees only funding ones)
+FULL_BATCH = {
+    "rm --in": (["rm", "pod-a,pod-b,pod-c", "--in", "2h", "--yes"], "scheduled", (_budget, _funding)),
+    "schedules rm": (["schedules", "rm", "1,2,3"], "cancelled", (_budget, _funding)),
+    "reboot": (["reboot", "pod-a,pod-b,pod-c"], "rebooted", (_funding,)),
+}
+
+
+@pytest.mark.parametrize("name", FULL_BATCH)
+@pytest.mark.parametrize("kind", [0, 1])
+def test_json_envelope_carries_the_whole_batch_and_no_prose_goes_to_stdout(monkeypatch, name, kind):
+    args, done_key, kinds = FULL_BATCH[name]
+    if kind >= len(kinds):
+        pytest.skip("reboot has no key-budget refusal")
+    module = COMMANDS[name][0]
+    monkeypatch.setattr(module, "Lium", _fake({"pod-b": _broken, "pod-c": kinds[kind]}))
+    monkeypatch.setenv("LIUM_OUTPUT", "json")
+
+    result = CliRunner().invoke(cli, args)
+
+    envelope = json.loads(result.stderr.strip().splitlines()[-1])
+    data = envelope["data"]
+    assert result.exit_code == EXIT_PERMISSION_DENIED, result.output
+    assert data[done_key] == ["pod-a"]
+    assert [f.split(" ")[0] for f in data["failed"]] == ["pod-b"]
+    refused = data.get("funding_refused", []) + data.get("budget_refused", [])
+    assert [r["huid"] for r in refused] == ["pod-c"]
+    assert result.stdout.strip() == ""
+
+
+@pytest.mark.parametrize("name", FULL_BATCH)
+def test_text_mode_still_reports_the_done_and_failed_pods_before_the_refusal(monkeypatch, name):
+    args, _, kinds = FULL_BATCH[name]
+    module = COMMANDS[name][0]
+    monkeypatch.setattr(module, "Lium", _fake({"pod-b": _broken, "pod-c": kinds[-1]}))
+
+    result = CliRunner().invoke(cli, args)
+
+    text = " ".join(result.output.split())
+    assert result.exit_code == EXIT_PERMISSION_DENIED, result.output
+    assert "pod-a" in text and "pod-b" in text and "No balance on the account for pods: pod-c" in text

@@ -11,7 +11,9 @@ from lium.cli.utils import (
     EXIT_CONFIGURATION_ERROR,
     EXIT_GENERAL_ERROR,
     EXIT_POD_NOT_FOUND,
+    batch_refusal_failure,
     handle_errors,
+    json_output_requested,
     resolve_volume_huid,
 )
 from . import validation, parsing
@@ -59,12 +61,15 @@ def reboot_command(targets: Optional[str], all: bool, volume_id: Optional[str]):
     rebooted = result.data.get("rebooted", [])
     refusals = result.data.get("refusals") or []
     if refusals:
-        # report what went through first, then the funding refusal itself (exit 6 with its hint)
-        if rebooted:
-            ui.success(f"Reboot requested for {', '.join(rebooted)}")
-        if result.data.get("failures"):
-            ui.error(f"Failed to reboot pods: {', '.join(result.data['failures'])}")
-        raise refusals[0]
+        # report what went through first, then exit 6 naming every pod refused for no balance (as in `rm --in`);
+        # a JSON reader gets the same report inside the one error envelope, so no prose goes to stdout then
+        failures = result.data.get("failures") or []
+        if not json_output_requested():
+            if rebooted:
+                ui.success(f"Reboot requested for {', '.join(rebooted)}")
+            if failures:
+                ui.error(f"Failed to reboot pods: {', '.join(failures)}")
+        raise batch_refusal_failure([], refusals, done=("rebooted", rebooted), failed=failures)
     if not result.ok:
         # a batch that partly failed still names what was rebooted, so a retry targets only the failures
         done = f"Reboot requested for {', '.join(rebooted)}. " if rebooted else ""
