@@ -872,7 +872,7 @@ def test_an_endpoint_without_the_block_history_keeps_the_record_until_an_archive
     result, events, _ = _run(monkeypatch, ARGS, substrate)
 
     assert result.exit_code != 0 and "no history for block 104" in result.output, result.output
-    assert "BT_SUBTENSOR_NETWORK=archive" in result.output
+    assert "BT_SUBTENSOR_NETWORK=archive" in result.output and "delete" not in result.output
     assert _record() == recorded and substrate.nonces == [7] and "unlock" not in events
 
     substrate.missing = frozenset()  # an archive endpoint
@@ -883,6 +883,30 @@ def test_an_endpoint_without_the_block_history_keeps_the_record_until_an_archive
         assert result.exit_code != 0 and "gamma_payment_landed" in result.output and substrate.nonces == [7]
     else:
         assert result.exit_code == 0 and substrate.nonces == [7, 7], result.output
+
+
+@CHAINS
+def test_a_payment_that_finalizes_after_a_history_gap_inside_its_era_is_never_paid_twice(monkeypatch, chain):
+    substrate = chain()
+    _lose_answers(substrate)
+    _run(monkeypatch, ARGS, substrate)
+    recorded = _record()
+
+    # inside its era the endpoint lacks block 101: nothing is proved, so the record is kept with no delete advice
+    _lose_answers(substrate, lost=False)
+    _finalize(substrate, 101)
+    substrate.missing = frozenset({101})
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code != 0 and "no history for block 101" in result.output, result.output
+    assert "delete" not in result.output and _record() == recorded and substrate.nonces == [7]
+
+    # the payment then finalizes in block 104 and the history is readable again: it is reported, never re-signed
+    substrate.missing, substrate.final_nonce = frozenset(), 8
+    _finalize(substrate, 104)
+    substrate.blocks = {104: [(recorded["hash"], "ExtrinsicSuccess")]}
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code != 0 and "gamma_payment_landed" in result.output, result.output
+    assert substrate.nonces == [7] and _record() is None
 
 
 @CHAINS

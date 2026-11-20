@@ -356,10 +356,9 @@ def _landed(subtensor, address: str, recorded: dict, number: int) -> tuple[int, 
         if extrinsics is None:
             raise LiumError(
                 f"The chain endpoint has no history for block {block}, so whether the earlier gamma payment "
-                f"{recorded['hash']} reached the chain cannot be read. Run this again with an archive endpoint "
-                "(BT_SUBTENSOR_NETWORK=archive), which settles it automatically; otherwise check the wallet's recent "
-                f"transactions and 'lium balance', then delete {UNRESOLVED / (address + '.json')} to pay "
-                "again. Nothing new was signed."
+                f"{recorded['hash']} reached the chain cannot be read. It can still land until block "
+                f"{recorded['dies']}, so its record is kept. Run this again with an archive endpoint "
+                "(BT_SUBTENSOR_NETWORK=archive), which reads the chain and settles it. Nothing new was signed."
             )
         hashes = [_hash_of(e) for e in extrinsics]
         if recorded["hash"] not in hashes:
