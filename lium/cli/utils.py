@@ -341,6 +341,18 @@ OUTPUT_ENV = "LIUM_OUTPUT"    # LIUM_OUTPUT=json: every failure is a JSON envelo
 # What to do next, by error code. A failure without a next step leaves an agent
 # (or a person) guessing; a code that has no entry here falls back to the
 # exit-code family below, so no error leaves without one.
+# a second pod does not end the first one, which keeps billing
+_KEEPS_BILLING = ("; renting another node does not end this pod, which stays rented and billing, so remove it "
+                  "with 'lium rm <pod>' once you no longer need its data")
+# the failure message names that node: on a split host 'lium ls' lists it while it has free GPUs
+_OTHER_NODE = "pick a node in 'lium ls' other than the one this pod is on and rent it with 'lium up <node>'"
+# conditional: a refusal before the stop left the container running, so it must not read as stopped
+# the node's words for a container left down: "did not start again", "is not running; it did not start",
+# "was not started again while the GPU reset still runs" (a hung reset: a second one would run beside it)
+_NOT_STARTED = ("If it says the container is not running, did not start or was not started, contact support with "
+                "the pod name. If it says the GPU reset still runs, do not retry while it runs. ")
+_RESET_UNFINISHED = ("The reset did not finish, for the reason above; a retry helps only if that reason was "
+                     "temporary. " + _NOT_STARTED + "If a GPU stays stuck, " + _OTHER_NODE + _KEEPS_BILLING)
 _HINTS_BY_CODE: Dict[str, str] = {
     "no_api_key": "Set LIUM_API_KEY, or run 'lium init' (headless: 'lium init --api-key <key>', "
                   "or 'lium init --no-browser'); "
@@ -365,6 +377,18 @@ _HINTS_BY_CODE: Dict[str, str] = {
     "rent_outcome_unknown": "Do not re-run the rent yet: the pod may be rented and billing. "
                             "'lium ps' shows whether it exists; 'lium rm <pod>' removes it",
     "invalid_gpu_index": "Pass a GPU index that 'nvidia-smi' shows inside the pod, or omit --gpu to reset all",
+    # a refused GPU reset: the exit-3 "Retry" cannot help with a cause on the host (DAH-6741)
+    # the node could not prove the holder is the pod's (an unreadable cgroup counts as outside), so no certainty here
+    # and its PID is the host's, which can name a different process inside the pod
+    # also sent after the stop, when a holder appeared and the container did not start again
+    "gpu_in_use_outside_pod": "The node found a process it could not place in your pod holding the GPU (named "
+                              "above with its host PID, which is not the PID inside your pod). " + _NOT_STARTED +
+                              "Otherwise stop it only if you can tell it is yours from inside the pod, then retry; "
+                              "if not, give that host PID to the provider or support, or " + _OTHER_NODE
+                              + _KEEPS_BILLING,
+    # also a reset whose GPUs were reset but whose container did not start again, and a refusal with no GPU results
+    "reset_not_supported": _RESET_UNFINISHED,
+    "container_not_restarted": _RESET_UNFINISHED,
     "rate_limited": "Wait a few seconds and retry; back off if it repeats",
     "server_error": "Retry; if it persists, re-run with LIUM_DEBUG=1 and report the request",
     "api_timeout": "Check the network (or LIUM_BASE_URL) and retry; if the command changes something "

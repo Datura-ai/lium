@@ -75,7 +75,7 @@ def test_sdk_failed_gpu_409_keeps_the_gpus_and_releases_ssh(monkeypatch):
     assert released == [pod]
 
 
-def _run(monkeypatch, args, outcome=RESULT):
+def _run(monkeypatch, args, outcome=RESULT, executor=None):
     seen = {}
 
     class _Lium:
@@ -83,7 +83,8 @@ def _run(monkeypatch, args, outcome=RESULT):
             pass
 
         def ps(self):
-            return [SimpleNamespace(id="pod-uuid-1", huid="eager-wolf-aa", name="my-pod", executor=None, created_at="")]
+            return [SimpleNamespace(id="pod-uuid-1", huid="eager-wolf-aa", name="my-pod", executor=executor,
+                                    created_at="")]
 
         def reset_gpu(self, pod, gpu_indices=None, on_progress=None):
             seen["gpu_indices"] = gpu_indices
@@ -133,16 +134,107 @@ def test_an_invalid_gpu_index_does_not_say_retry(monkeypatch):
     assert "nvidia-smi" in json.loads(result.stderr)["error"]["hint"]
 
 
+@pytest.mark.parametrize("code", ["gpu_in_use_outside_pod", "reset_not_supported", "container_not_restarted"])
+def test_a_refused_reset_names_a_next_step_that_is_not_retry(monkeypatch, code):
+    # DAH-6741: a reset the host refuses is not fixed by trying again
+    refused = LiumError("GPU reset failed: a process outside the pod holds the GPU open on the host: Xorg (pid 1500)",
+                        code=code)
+
+    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], refused)
+
+    hint = json.loads(result.stderr)["error"]["hint"]
+    assert result.exit_code == EXIT_API_ERROR and "lium up <node>" in hint and not hint.startswith("Retry")
+    assert "other than the one this pod is on" in hint  # a bare 'lium up' can pick the same node again
+    assert "stays rented and billing" in hint and "lium rm <pod>" in hint  # renting another node ends nothing
+
+
+def test_the_outside_holder_hint_does_not_claim_the_process_is_not_the_renters(monkeypatch):
+    # DAH-6741 review: the node counts a holder whose cgroup it cannot read as outside, so it may be the renter's own
+    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"],
+                     LiumError("GPU 0 is used outside the pod", code="gpu_in_use_outside_pod"))
+
+    hint = json.loads(result.stderr)["error"]["hint"]
+    assert "host PID" in hint and "only if you can tell it is yours from inside the pod" in hint
+    assert "only the provider" not in hint and "will not help" not in hint
+
+
+@pytest.mark.parametrize("code", ["gpu_in_use_outside_pod", "reset_not_supported", "container_not_restarted"])
+def test_a_reset_that_sends_the_renter_elsewhere_names_the_pods_node(monkeypatch, code):
+    # DAH-6741 review: 'lium ls' lists a split node while it has free GPUs, and 'lium ps' shows pod names, not nodes
+    node = SimpleNamespace(id="exec-uuid-9", huid="brave-raven-a1")
+
+    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], LiumError("GPU reset failed", code=code), node)
+
+    error = json.loads(result.stderr)["error"]
+    assert json.loads(result.stderr)["data"]["node"] == {"id": "exec-uuid-9", "huid": "brave-raven-a1"}
+    assert "on node brave-raven-a1 (exec-uuid-9)" in error["message"]
+
+
+def test_a_container_that_did_not_start_has_a_next_step_without_claiming_one_stopped(monkeypatch):
+    # DAH-6741 review: an older backend sends reset_not_supported for a reset whose container did not start again
+    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], LiumError("x", code="reset_not_supported"))
+
+    hint = json.loads(result.stderr)["error"]["hint"]
+    assert "If it says the container is not running, did not start or was not started, contact support with the pod name" in hint
+
+
+@pytest.mark.parametrize("stopped", [False, True])
+def test_the_outside_holder_hint_covers_a_refusal_before_the_stop_and_a_container_that_did_not_start(
+        monkeypatch, stopped):
+    # DAH-6741 review: a holder that appears after the stop comes with the same code and a container that is down
+    message = ("GPU 0 is used outside the pod. The GPUs were not reset and the pod was not stopped" if not stopped else
+               "GPU 0 is used outside the pod; the container did not start again")
+
+    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], LiumError(message, code="gpu_in_use_outside_pod"))
+
+    error = json.loads(result.stderr)["error"]
+    assert "If it says the container is not running, did not start or was not started, contact support with the pod name" in error["hint"]
+    assert ("did not start again" in error["message"]) == stopped
+    assert error["hint"].index("contact support") < error["hint"].index("Otherwise stop it")
+
+
+def test_a_stopped_container_the_node_could_not_start_gets_the_support_step(monkeypatch):
+    # DAH-6741 review: the node's words when a container found stopped would not start
+    message = "GPU reset failed: the container is not running; it did not start: no such device"
+
+    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], LiumError(message, code="reset_not_supported"))
+
+    hint = json.loads(result.stderr)["error"]["hint"]
+    assert "did not start or was not started, contact support with the pod name" in hint
+    assert "is not running" in message and "did not start" in message
+
+
+def test_a_reset_that_still_runs_gets_the_support_step_and_no_retry(monkeypatch):
+    # DAH-6741 review: the node's words when its host reset unit hangs; the pod is stopped and a retry would overlap
+    message = "GPU reset failed: the container was not started again while the GPU reset still runs"
+
+    result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], LiumError(message, code="reset_not_supported"))
+
+    hint = json.loads(result.stderr)["error"]["hint"]
+    assert "was not started, contact support with the pod name" in hint
+    assert "If it says the GPU reset still runs, do not retry while it runs" in hint
+
+
+def test_a_refusal_before_the_pod_stopped_says_nothing_about_the_container(monkeypatch):
+    # DAH-6741 review: such a refusal carries container_restarted false and no GPU results; the pod still runs
+    refused = LiumError("GPU reset failed: a process outside the pod holds the GPU open on the host: Xorg (pid 1500)."
+                        " The GPUs were not reset and the pod was not stopped", code="gpu_in_use_outside_pod")
+
+    result, _ = _run(monkeypatch, ["my-pod", "--yes"], refused)
+
+    assert "the pod was not stopped" in result.output and "did not start the container" not in result.output
+
+
 def test_a_failed_gpu_shows_the_gpus_and_exits_non_zero(monkeypatch):
     failed = LiumGpuOperationError("API error 409: GPU 0 failed", code="reset_not_supported",
                                    container_restarted=True, gpus=[GpuResetOutcome(**FAILED_GPU)])
     result, _ = _run(monkeypatch, ["my-pod", "--yes"], failed)
     assert result.exit_code == EXIT_API_ERROR
-    assert "refused" in result.output and "still stopped" not in result.output
+    assert "refused" in result.output and "did not start the container" not in result.output
 
     failed.container_restarted = False
     result, _ = _run(monkeypatch, ["my-pod", "--yes"], failed)
-    assert "still stopped" in result.output
+    assert "did not start the container of" in result.output
     failed.container_restarted = True
 
     result, _ = _run(monkeypatch, ["my-pod", "--yes", "--json"], failed)
