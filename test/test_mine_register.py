@@ -1058,6 +1058,11 @@ def test_a_48gb_rtx_4090_at_the_low_window_edge_is_listed_as_48gb() -> None:
     [
         ("NVIDIA GeForce RTX 4080", 32607, "NVIDIA GeForce RTX 4080 32GB"),
         ("NVIDIA GeForce RTX 4080 SUPER", 32607, "NVIDIA GeForce RTX 4080 SUPER 32GB"),
+        ("NVIDIA GeForce RTX 4090 D", 49140, "NVIDIA GeForce RTX 4090 D 48GB"),
+        ("NVIDIA GeForce RTX 3080", 20470, "NVIDIA GeForce RTX 3080 20GB"),
+        ("NVIDIA GeForce RTX 3080", 12288, "NVIDIA GeForce RTX 3080"),  # factory 12 GB card
+        ("NVIDIA GeForce RTX 2080 Ti", 22528, "NVIDIA GeForce RTX 2080 Ti 22GB"),
+        ("NVIDIA GeForce RTX 2080 Ti", 11264, "NVIDIA GeForce RTX 2080 Ti"),  # factory 11 GB card
         (
             "NVIDIA GeForce RTX 4080",
             16376,
