@@ -929,8 +929,9 @@ def test_a_used_nonce_alone_never_drops_the_record(monkeypatch, chain):
 @CHAINS
 @pytest.mark.parametrize(
     "final_nonce, finalized",
-    [(8, 110), (7, 100 + gamma_module.ERA_PERIOD + 1), (0, 100 + gamma_module.ERA_PERIOD + 1)],
-    ids=["nonce-used", "expired-nonce-unused", "account-emptied-and-refilled"],
+    [(8, 100 + gamma_module.ERA_PERIOD + 1), (7, 100 + gamma_module.ERA_PERIOD + 1),
+     (0, 100 + gamma_module.ERA_PERIOD + 1)],
+    ids=["expired-nonce-used", "expired-nonce-unused", "account-emptied-and-refilled"],
 )
 def test_an_older_record_without_a_hash_is_always_kept(monkeypatch, chain, final_nonce, finalized):
     # the released CLI recorded only the nonce and the era's end: which transaction used the nonce cannot be read,
@@ -945,6 +946,29 @@ def test_an_older_record_without_a_hash_is_always_kept(monkeypatch, chain, final
     result, events, _ = _run(monkeypatch, ARGS, substrate)
 
     assert result.exit_code != 0 and "delete the file to pay again" in result.output, result.output
+    assert _record() == legacy and substrate.nonces == [] and "unlock" not in events
+
+
+@CHAINS
+def test_an_older_record_is_never_advised_for_deletion_while_its_payment_can_still_land(monkeypatch, chain):
+    # the released CLI recorded {nonce, dies} before broadcasting and the answer was lost; at block 101 neither the
+    # wallet history nor the balance shows the payment yet, but it can still finalize until its era ends
+    legacy = {"nonce": 7, "dies": 100 + gamma_module.ERA_PERIOD}
+    gamma_module.UNRESOLVED.mkdir(parents=True)
+    (gamma_module.UNRESOLVED / "5Cold.json").write_text(json.dumps(legacy))
+    substrate = chain()
+    substrate.final_nonce = 7
+    _finalize(substrate, 101)
+
+    result, events, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code != 0 and f"until block {legacy['dies']}" in result.output, result.output
+    assert "delete" not in result.output and _record() == legacy and substrate.nonces == [] and "unlock" not in events
+
+    # it finalizes at block 104: the record is still there, so the next run signs nothing
+    substrate.final_nonce = 8
+    _finalize(substrate, 104)
+    result, events, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code != 0 and "delete" not in result.output, result.output
     assert _record() == legacy and substrate.nonces == [] and "unlock" not in events
 
 

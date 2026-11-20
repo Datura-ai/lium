@@ -411,10 +411,18 @@ def _settled_nonce(subtensor, address: str) -> int:
     # the account nonce proves nothing about a recorded payment (an emptied and refilled account restarts it at 0):
     # only the chain's blocks in its era do
     if "hash" not in recorded:
-        # an older lium's record names no transaction: whether the payment at its nonce paid cannot be read
+        # an older lium's record names no transaction: whether the payment at its nonce paid cannot be read, and
+        # until its era ends it can still land, so no check (wallet history, balance) is final before then
+        if number <= recorded["dies"]:
+            raise LiumError(
+                f"An earlier gamma payment from {address} (nonce {recorded['nonce']}) has not settled yet: it can "
+                f"still reach the chain until block {recorded['dies']} (finalized now: {number}). Run this again "
+                "after that block. Nothing new was signed."
+            )
         raise LiumError(
             f"An earlier gamma payment from {address} (nonce {recorded['nonce']}) may have reached the chain, and its "
-            f"record ({UNRESOLVED / (address + '.json')}) does not say which transaction it was. Check the wallet's "
+            f"record ({UNRESOLVED / (address + '.json')}) does not say which transaction it was. Its era has ended, so "
+            "it can no longer land. Check the wallet's "
             "recent transactions and 'lium balance', then delete the file to pay again. Nothing new was signed."
         )
     landed = _landed(subtensor, address, recorded, number)
