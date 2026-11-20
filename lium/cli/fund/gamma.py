@@ -397,6 +397,13 @@ def _settled_nonce(subtensor, address: str) -> int:
         )
     if recorded is None:
         return final
+    if "hash" not in recorded and final > recorded["nonce"]:
+        # an older lium's record names no transaction: whether the payment at its nonce paid cannot be read
+        raise LiumError(
+            f"An earlier gamma payment from {address} (nonce {recorded['nonce']}) may have reached the chain, and its "
+            f"record ({UNRESOLVED / (address + '.json')}) does not say which transaction it was. Check the wallet's "
+            "recent transactions and 'lium balance', then delete the file to pay again. Nothing new was signed."
+        )
     # its nonce is used, or its era has passed: what it did is read before anything new is signed
     landed = _landed(subtensor, recorded, number) if "hash" in recorded and final > recorded["nonce"] else None
     _forget(address, recorded)
@@ -531,15 +538,16 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
             except (Exception, KeyboardInterrupt) as e:  # Ctrl-C included: nothing is broadcast yet
                 raise NotSent(str(e) or type(e).__name__) from e
             resp = subtensor.submit_signature(unsigned, signature, wait_for_inclusion=True, wait_for_finalization=True)
-            # the record goes only on a dispatch result (success or failure, both in a block) or a proved refusal
-            if not resp.success and not getattr(resp, "block_hash", None):
-                refusal = _v11_refusal(resp, refused)
-                if refusal is None:  # e.g. the watch ended before finality: it may still land
+            # the record goes only on success or a proved refusal: in a block, success=False is also what bittensor
+            # 11.3.0 answers when it read no dispatch events, so a failure is left to the next run's read of the block
+            if not resp.success:
+                refusal = None if getattr(resp, "block_hash", None) else _v11_refusal(resp, refused)
+                if refusal is None:  # e.g. the watch ended before finality, or the result was unreadable: it may have paid
                     raise OutcomeUnknown(resp.message or "submission outcome unknown")
                 _forget(coldkey_ss58, entry)
                 raise Refused(refusal)
             _forget(coldkey_ss58, entry)
-            return resp.success, None if resp.success else resp.message
+            return True, None
         try:
             # the era starts at this finalized block, not the best head; the calls compose with its metadata
             block, born, spec_version, pinned_493 = _pinned_runtime(subtensor)

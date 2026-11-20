@@ -7,3 +7,4 @@
 - `lium fund --gamma` checks the deposit and its daily spend cap again after linking the wallet and sizes the payment from that read.
 - The `provider` extra no longer installs bittensor 11.0 to 11.2, which lack the finalized-block read `lium fund --gamma` uses on bittensor 11; 9.10.1 to 10.x and 11.3 or later are allowed.
 - `lium fund --gamma` keeps a payment's record until the chain gives its result or the node refuses it outright, on bittensor 10 and 11, and finds an earlier payment in a block by the hash the chain reports for it.
+- `lium fund --gamma` keeps a payment record written by an older lium, which names no transaction, once its nonce is used, and tells you how to check and clear it instead of paying again. On bittensor 11, a result in a block whose events could not be read stays recorded until a later run reads them.

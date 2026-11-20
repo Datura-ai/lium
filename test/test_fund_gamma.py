@@ -850,6 +850,63 @@ def test_a_used_nonce_alone_never_drops_the_record(monkeypatch, chain):
     assert _record() == recorded and substrate.nonces == [7] and "unlock" not in events
 
 
+@CHAINS
+@pytest.mark.parametrize(
+    "final_nonce, finalized, kept",
+    [(8, 110, True), (7, 100 + gamma_module.ERA_PERIOD + 1, False)],
+    ids=["nonce-used", "expired-nonce-unused"],
+)
+def test_an_older_record_without_a_hash_is_kept_once_its_nonce_is_used(monkeypatch, chain, final_nonce, finalized, kept):
+    # the released CLI recorded only the nonce and the era's end: which transaction used the nonce cannot be read
+    legacy = {"nonce": 7, "dies": 100 + gamma_module.ERA_PERIOD}
+    gamma_module.UNRESOLVED.mkdir(parents=True)
+    (gamma_module.UNRESOLVED / "5Cold.json").write_text(json.dumps(legacy))
+    substrate = chain()
+    substrate.final_nonce = final_nonce
+    _finalize(substrate, finalized)
+
+    result, events, _ = _run(monkeypatch, ARGS, substrate)
+
+    if kept:
+        assert result.exit_code != 0 and "delete the file to pay again" in result.output, result.output
+        assert _record() == legacy and substrate.nonces == [] and "unlock" not in events
+    else:  # past its era with its nonce never used: it can no longer land
+        assert result.exit_code == 0, result.output
+        assert _record() is None and substrate.nonces == [7]
+
+
+@pytest.mark.parametrize("outcome", ["ExtrinsicSuccess", "ExtrinsicFailed"], ids=["paid", "failed"])
+def test_a_bittensor_11_result_in_a_block_without_readable_events_keeps_the_record(monkeypatch, outcome):
+    # bittensor 11.3.0 answers success=False with the block when it found the payment but read no dispatch events
+    substrate = FakeV11Subtensor()
+
+    def unreadable(unsigned, signature, **kwargs):
+        substrate.nonces.append(unsigned.nonce)
+        return types.SimpleNamespace(success=False, message="", data={}, block_hash="0xfinal104",
+                                     error=types.SimpleNamespace(name=None), events=[])
+
+    substrate.submit_signature = unreadable
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code != 0 and "Do not re-send yet" in result.output, result.output
+    recorded = _record()
+    assert recorded["nonce"] == 7
+
+    # its events are readable once the next run looks: they decide, before anything new is signed
+    del substrate.submit_signature
+    substrate.final_nonce = 8
+    _finalize(substrate, 110)
+    substrate.blocks = {104: [(recorded["hash"], outcome)]}
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert _record() is None
+    if outcome == "ExtrinsicSuccess":
+        assert result.exit_code != 0 and "gamma_payment_landed" in result.output, result.output
+        assert substrate.nonces == [7]
+    else:
+        assert result.exit_code == 0 and "failed in block 104" in result.output, result.output
+        assert substrate.nonces == [7, 8]
+
+
 class _TimedOutReceipt:
     @property
     def is_success(self):
