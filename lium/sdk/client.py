@@ -1073,6 +1073,11 @@ class Lium:
             # the key's daily or total budget is reached (error.code
             # API_KEY_BUDGET_EXCEEDED). A 402 for a Stripe card decline is not this.
             raise budget_error(_response_error_message(resp), key=key, data=_error_data(resp), **context)
+        if resp.status_code == 402 and context.get("code") == "account_unfunded":
+            # an API key on an account with no balance tried a write: the same funding refusal as a 403, its code and hint kept
+            raise LiumInsufficientBalanceError(
+                f"Insufficient balance: {_response_error_message(resp)}" + (f" ({key})" if key else ""), **context
+            )
         if resp.status_code == 403:
             raise permission_error(_response_error_message(resp), key=key, **context)
         if resp.status_code == 404:

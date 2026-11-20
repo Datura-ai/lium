@@ -27,6 +27,7 @@ from lium.sdk import (
     LiumCardTopUpError,
     LiumChargeOutcomeUnknownError,
     LiumError,
+    LiumInsufficientBalanceError,
     LiumPermissionError,
     LiumScopeError,
     LiumServerError,
@@ -263,6 +264,24 @@ def test_a_402_of_another_code_stays_a_plain_lium_error(client):
 
     assert type(raised.value) is LiumError
     assert raised.value.code == "spend_cap_reached"
+
+
+@responses.activate
+def test_a_write_by_a_key_on_an_account_with_no_balance_is_the_funding_refusal(client):
+    """402 `account_unfunded`: the typed funding error, so callers and MCP agents get the top-up instruction."""
+    body = _error_body(
+        402,
+        {"code": "account_unfunded", "message": "This account has no balance, so its API keys can read ..."},
+        hint="Top up on the Billing page, then retry",
+    )
+    responses.post(TOPUP, status=402, json=body)
+
+    with pytest.raises(LiumInsufficientBalanceError) as raised:
+        client.topup_card(50)
+
+    assert raised.value.code == "account_unfunded"
+    assert raised.value.hint == "Top up on the Billing page, then retry"
+    assert "Insufficient balance: This account has no balance" in str(raised.value)
 
 
 @responses.activate
