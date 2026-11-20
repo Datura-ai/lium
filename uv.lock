@@ -1279,7 +1279,7 @@ requires-dist = [
     { name = "async-property", specifier = "==0.2.2" },
     { name = "asyncssh", specifier = ">=2.14" },
     { name = "backoff", specifier = "~=2.2.1" },
-    { name = "bittensor", marker = "python_full_version < '3.14' and extra == 'provider'", specifier = ">=9.10.1" },
+    { name = "bittensor", marker = "python_full_version < '3.14' and extra == 'provider'", specifier = ">=9.10.1,!=11.0.*,!=11.1.*,!=11.2.*" },
     { name = "bittensor-cli", marker = "python_full_version < '3.14' and extra == 'provider'", specifier = ">=9.1.0" },
     { name = "black", marker = "extra == 'dev'" },
     { name = "click", specifier = ">=8.4.2" },

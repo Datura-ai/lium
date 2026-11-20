@@ -5,3 +5,4 @@
 - `lium fund --gamma` stops before signing if the chain's runtime changes while the command runs; run it again.
 - `lium fund --gamma` records each payment's extrinsic hash and era before sending it. When its answer was lost, the next run reads the payment's result from the chain before signing a new one: it reports a payment that succeeded and signs nothing, and goes on after one that failed or expired.
 - `lium fund --gamma` checks the deposit and its daily spend cap again after linking the wallet and sizes the payment from that read.
+- The `provider` extra no longer installs bittensor 11.0 to 11.2, which lack the finalized-block read `lium fund --gamma` uses on bittensor 11; 9.10.1 to 10.x and 11.3 or later are allowed.
