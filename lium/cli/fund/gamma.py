@@ -452,7 +452,10 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
     from .actions import UnlockColdkeyAction
 
     lium = Lium()  # before the unlock: a missing API key never costs a password prompt
-    subtensor = validation.subtensor_class(bt)()
+    # bittensor 11 reads no network from the environment: the CLI passes BT_SUBTENSOR_NETWORK itself, so the
+    # archive endpoint named in the unresolved-payment message works on every supported bittensor
+    network = os.environ.get("BT_SUBTENSOR_NETWORK")
+    subtensor = validation.subtensor_class(bt)(network=network) if network else validation.subtensor_class(bt)()
     gamma_per_tao = ui.load("Quoting gamma", lambda: _sim_gamma(subtensor, _UNITS))
     tao_rao = tao_rao_for_usd(usd, gamma_per_tao)
     expected = ui.load("Quoting gamma", lambda: _sim_gamma(subtensor, tao_rao))

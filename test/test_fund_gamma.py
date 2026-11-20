@@ -276,6 +276,21 @@ def _run(monkeypatch, args, substrate, calls=None, on_link=None, error_map=ERROR
     return CliRunner().invoke(cli, args), events, coldkey
 
 
+@pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
+def test_bt_subtensor_network_reaches_the_subtensor_on_every_bittensor(monkeypatch, chain):
+    # the unresolved-payment message names BT_SUBTENSOR_NETWORK=archive; bittensor 11 reads no network from the env
+    substrate = chain()
+    networks = []
+    real = substrate.subtensor
+    substrate.subtensor = lambda network=None: (networks.append(network), real())[1]
+    monkeypatch.setenv("BT_SUBTENSOR_NETWORK", "archive")
+
+    result, _, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
+
+    assert result.exit_code == 0, result.output
+    assert networks == ["archive"]
+
+
 @pytest.mark.parametrize(
     "chain, sdk_493",
     [(FakeSubstrate, False), (FakeV11Subtensor, False), (FakeV11Subtensor, True)],
