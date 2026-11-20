@@ -5725,11 +5725,14 @@ class Lium:
         return resp["wallet_hash"]
 
     def link_gamma_hotkey(self, hotkey: str, sign) -> dict:
-        """Link ``hotkey`` so SN51 gamma minted into it becomes this account's USD credit.
+        """Link ``hotkey`` so SN51 gamma it pays Lium with becomes this account's USD credit.
 
         ``sign(message) -> str`` signs the server's challenge with the hotkey's key
         (0x-hex sr25519). Linking an already-linked hotkey is a no-op. Returns
         ``{"hotkey", "netuid", "spender"}``; a ``mint_gamma`` must name ``spender``.
+        Servers that accept gamma spent at a service (subtensor runtime 493, which
+        removes deposit spenders) also return ``service``: the hotkey then spends its
+        gamma with ``spend_gamma(service, netuid, amount)``.
         """
         message = self._request(
             "GET", "/gamma/hotkeys/challenge", params={"hotkey": hotkey}
