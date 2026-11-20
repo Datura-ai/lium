@@ -17,6 +17,7 @@ from lium.cli.utils import (
     EXIT_POD_NOT_FOUND,
     CliFailure,
     TargetMatch,
+    batch_refusal_failure,
     handle_errors,
     resolve_output_format,
 )
@@ -336,14 +337,11 @@ def rm_command(
 
     if refusals:
         # A 402 (the key's budget, or an account with no balance) is not a generic failed huid. Print scheduled/failed
-        # first so `rm a b --in 2h` still shows that b was rescheduled, then exit 6 with the first refusal; in a mixed
-        # batch the other kind is named too, since its fix differs. The refused pod is not retried.
-        if output_format != "json":
-            if failed_huids:
-                ui.error(f"Failed to schedule removal for pods: {', '.join(failed_huids)}")
-            if budget_errors and funding_errors:
-                ui.error(f"No balance on the account for pods: {', '.join(funding_huids)} ({funding_errors[0].hint})")
-        raise refusals[0]
+        # first so `rm a b --in 2h` still shows that b was rescheduled, then exit 6 naming every refused pod by kind,
+        # since their fixes differ. The refused pod is not retried.
+        if output_format != "json" and failed_huids:
+            ui.error(f"Failed to schedule removal for pods: {', '.join(failed_huids)}")
+        raise batch_refusal_failure(list(zip(budget_huids, budget_errors)), list(zip(funding_huids, funding_errors)))
     if failed_huids:
         if output_format == "json":
             # The payload already names the failures; a second message on stdout

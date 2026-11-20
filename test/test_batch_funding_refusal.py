@@ -111,17 +111,49 @@ def test_a_mixed_rm_in_batch_reports_budget_and_funding_refusals_apart(monkeypat
     assert payload["funding_refused"] == [{"huid": "pod-b", "code": "account_unfunded", "hint": HINT}]
 
 
-@pytest.mark.parametrize("refused", [
+REFUSAL_TABLE = [
+    {"pod-a": _funding, "pod-b": _funding},  # funding only
+    {"pod-a": _budget, "pod-b": _budget},  # budget only
     {"pod-a": _budget, "pod-b": _funding},  # budget -> funding
     {"pod-a": _funding, "pod-b": _budget},  # funding -> budget
-])
-def test_a_mixed_schedules_rm_batch_names_the_no_balance_pods_with_their_hint(monkeypatch, refused):
-    monkeypatch.setattr(schedules_rm_module, "Lium", _fake(refused))
+]
 
-    result = CliRunner().invoke(cli, ["schedules", "rm", "1,2"])
 
-    funding_huid = next(h for h, kind in refused.items() if kind is _funding)
+def _groups(refused):
+    return {kind: [h for h, f in refused.items() if f is factory] for kind, factory in (("budget", _budget), ("funding", _funding))}
+
+
+@pytest.mark.parametrize("name", ["rm --in", "schedules rm"])
+@pytest.mark.parametrize("refused", REFUSAL_TABLE)
+def test_a_refused_batch_names_every_refused_pod_by_kind_with_its_hint(monkeypatch, name, refused):
+    module, args = COMMANDS[name]
+    monkeypatch.setattr(module, "Lium", _fake(refused))
+
+    result = CliRunner().invoke(cli, args)
+
+    groups, text = _groups(refused), " ".join(result.output.split())  # the console wraps long lines
     assert result.exit_code == EXIT_PERMISSION_DENIED, result.output
-    assert f"No balance on the account for pods: {funding_huid}" in result.output
-    assert "lium topup" in result.output
-    assert "budget on the key" in result.output
+    if groups["funding"]:
+        assert f"No balance on the account for pods: {', '.join(groups['funding'])} (Add funds" in text
+    if groups["budget"]:
+        assert f"Refused by the API key's budget for pods: {', '.join(groups['budget'])} (Raise or clear" in text
+
+
+@pytest.mark.parametrize("name", ["rm --in", "schedules rm"])
+@pytest.mark.parametrize("refused", REFUSAL_TABLE)
+def test_a_refused_batch_carries_both_groups_in_the_json_error_envelope(monkeypatch, name, refused):
+    module, args = COMMANDS[name]
+    monkeypatch.setattr(module, "Lium", _fake(refused))
+    monkeypatch.setenv("LIUM_OUTPUT", "json")
+
+    result = CliRunner().invoke(cli, args)
+
+    envelope = json.loads(result.stderr.strip().splitlines()[-1])
+    groups = _groups(refused)
+    assert result.exit_code == EXIT_PERMISSION_DENIED, result.output
+    assert [r["huid"] for r in envelope["data"].get("funding_refused", [])] == groups["funding"]
+    assert [r["huid"] for r in envelope["data"].get("budget_refused", [])] == groups["budget"]
+    for row in envelope["data"].get("funding_refused", []):
+        assert (row["code"], row["hint"]) == ("account_unfunded", HINT)
+    for row in envelope["data"].get("budget_refused", []):
+        assert (row["code"], row["hint"]) == ("API_KEY_BUDGET_EXCEEDED", BUDGET_HINT)
