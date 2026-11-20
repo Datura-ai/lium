@@ -310,7 +310,22 @@ def _hash_of(extrinsic) -> str | None:
     return "0x" + bytes(found).hex() if isinstance(found, (bytes, bytearray)) else found
 
 
-def _v11_refusal(resp) -> str | None:
+def _v11_refused_names() -> set[str]:
+    """The pool-rejection names that prove a bittensor 11 payment never entered the pool, read from the SDK's own map.
+    Read before anything is signed: an SDK without the map refuses here, not after a payment is sent."""
+    try:
+        from bittensor.error_map import CUSTOM_TRANSACTION_ERRORS, INVALID_TRANSACTION_ERRORS
+    except ImportError as e:
+        raise LiumError(
+            f"This bittensor ({e.name or 'bittensor.error_map'} missing) cannot tell a refused payment from a pending "
+            "one, so lium fund --gamma does not pay with it. Install bittensor 10, or 11.3 or later. Nothing was signed."
+        ) from e
+    # 1013/1014 are the pool's (it may hold the payment); Stale also answers a resend of a payment already accepted
+    unproved = {"AlreadyImported", "PriorityTooLow", "Stale"}
+    return {name for _, name in INVALID_TRANSACTION_ERRORS} - unproved | set(CUSTOM_TRANSACTION_ERRORS.values())
+
+
+def _v11_refusal(resp, refused: set[str]) -> str | None:
     """bittensor 11's failed result that proves the payment can never land, or None when its outcome is not proved.
 
     A dispatch result (``block_hash`` set) is the chain's answer, not a refusal. Before inclusion, bittensor 11.3.0
@@ -319,11 +334,6 @@ def _v11_refusal(resp) -> str | None:
     ``_node_refusal`` reads bittensor 10's) proves it never entered the pool."""
     if getattr(resp, "block_hash", None) or (getattr(resp, "data", None) or {}).get("submission_outcome_unknown"):
         return None
-    from bittensor.error_map import CUSTOM_TRANSACTION_ERRORS, INVALID_TRANSACTION_ERRORS
-
-    # 1013/1014 are the pool's (it may hold the payment); Stale also answers a resend of a payment already accepted
-    unproved = {"AlreadyImported", "PriorityTooLow", "Stale"}
-    refused = {name for _, name in INVALID_TRANSACTION_ERRORS} - unproved | set(CUSTOM_TRANSACTION_ERRORS.values())
     return (resp.message or "refused") if getattr(getattr(resp, "error", None), "name", None) in refused else None
 
 
@@ -458,6 +468,7 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
                 )
         return held
 
+    refused = _v11_refused_names() if getattr(subtensor, "substrate", None) is None else set()
     spendable()  # refuses before the password prompt; checked again after linking
 
     if json_output and not yes:
@@ -522,7 +533,7 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
             resp = subtensor.submit_signature(unsigned, signature, wait_for_inclusion=True, wait_for_finalization=True)
             # the record goes only on a dispatch result (success or failure, both in a block) or a proved refusal
             if not resp.success and not getattr(resp, "block_hash", None):
-                refusal = _v11_refusal(resp)
+                refusal = _v11_refusal(resp, refused)
                 if refusal is None:  # e.g. the watch ended before finality: it may still land
                     raise OutcomeUnknown(resp.message or "submission outcome unknown")
                 _forget(coldkey_ss58, entry)

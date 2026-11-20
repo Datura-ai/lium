@@ -245,12 +245,12 @@ ERROR_MAP = types.SimpleNamespace(
 )
 
 
-def _run(monkeypatch, args, substrate, calls=None, on_link=None):
+def _run(monkeypatch, args, substrate, calls=None, on_link=None, error_map=ERROR_MAP):
     events = []
     coldkey = types.SimpleNamespace(sign=lambda m: (events.append(("sign", m)), b"\x01\x02")[1])
     wallet = types.SimpleNamespace(coldkey=coldkey, unlock_coldkey=lambda: events.append("unlock"))
     monkeypatch.setitem(sys.modules, "bittensor", types.SimpleNamespace(Subtensor=substrate.subtensor, calls=calls or _calls()))
-    monkeypatch.setitem(sys.modules, "bittensor.error_map", ERROR_MAP)
+    monkeypatch.setitem(sys.modules, "bittensor.error_map", error_map)  # None: the import fails
 
     class FakeLoadWalletAction:
         def execute(self, ctx):
@@ -668,6 +668,15 @@ def test_an_unreadable_record_refuses_before_anything_is_signed(monkeypatch, con
 
     assert result.exit_code != 0 and "Cannot read" in result.output, result.output
     assert substrate.submissions == [] and "unlock" not in events
+
+
+def test_a_bittensor_11_without_the_error_map_refuses_before_anything_is_signed(monkeypatch):
+    substrate = FakeV11Subtensor()
+
+    result, events, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate, error_map=None)
+
+    assert result.exit_code != 0 and "Nothing was signed" in result.output, result.output
+    assert substrate.submissions == [] and "unlock" not in events and _record() is None
 
 
 G = 10**9
