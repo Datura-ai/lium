@@ -1,7 +1,7 @@
 from typing import List
 
 from lium.cli.actions import ActionResult
-from lium.sdk import Lium, LiumInsufficientBalanceError, PodInfo
+from lium.sdk import Lium, LiumBudgetExceededError, LiumInsufficientBalanceError, PodInfo
 
 
 class CancelSchedulesAction:
@@ -13,15 +13,15 @@ class CancelSchedulesAction:
         lium: Lium = ctx["lium"]
 
         failures = []
-        refusals: List[LiumInsufficientBalanceError] = []
+        refusals: List[LiumBudgetExceededError | LiumInsufficientBalanceError] = []
         cancelled = []
 
         for pod in pods:
             try:
                 lium.cancel_scheduled_termination(pod)
                 cancelled.append(pod.huid)
-            except LiumInsufficientBalanceError as e:
-                # a funding refusal keeps its type (exit 6, code, hint); the command raises it after the batch
+            except (LiumBudgetExceededError, LiumInsufficientBalanceError) as e:
+                # a 402 (the key's budget, or no balance) keeps its type (exit 6, code, hint); raised after the batch
                 refusals.append(e)
             except Exception as e:
                 failures.append(f"{pod.huid} ({e})")

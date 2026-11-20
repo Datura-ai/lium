@@ -11,12 +11,23 @@ from lium.cli.reboot import command as reboot_module
 from lium.cli.rm import command as rm_module
 from lium.cli.schedules.rm import command as schedules_rm_module
 from lium.cli.utils import EXIT_PERMISSION_DENIED
-from lium.sdk import LiumInsufficientBalanceError
+import json
+
+from lium.sdk import LiumBudgetExceededError, LiumInsufficientBalanceError
 from test_workspaces_cli import home  # noqa: F401 - the `home` fixture
 
 pytestmark = pytest.mark.usefixtures("home")
 
 HINT = "Add funds with 'lium topup' or 'lium fund', or on the Billing page, then retry."
+BUDGET_HINT = "Raise or clear the budget on the key."
+
+
+def _funding():
+    return LiumInsufficientBalanceError("Insufficient balance: no balance", code="account_unfunded", hint=HINT)
+
+
+def _budget():
+    return LiumBudgetExceededError("API key is at its budget", code="API_KEY_BUDGET_EXCEEDED", hint=BUDGET_HINT)
 
 
 def _pods():
@@ -29,10 +40,11 @@ def _pods():
     ]
 
 
-def _fake(refused):
+def _fake(refused, error=_funding):
+    # refused: a set of huids refused with `error`, or a dict huid -> error factory for a mixed batch
     def refuse(pod, **_):
         if pod.huid in refused:
-            raise LiumInsufficientBalanceError("Insufficient balance: no balance", code="account_unfunded", hint=HINT)
+            raise (refused[pod.huid] if isinstance(refused, dict) else error)()
 
     class FakeLium:
         workspaces = SimpleNamespace(current=lambda: None)
@@ -72,3 +84,28 @@ def test_a_funding_refusal_in_a_batch_exits_6_with_its_hint_after_reporting_the_
     assert "lium topup" in result.output
     if done:
         assert done in result.output
+
+
+@pytest.mark.parametrize("name", ["rm --in", "schedules rm"])
+@pytest.mark.parametrize("refused, done", [({"pod-a", "pod-b"}, None), ({"pod-a"}, "pod-b")])
+def test_a_key_budget_refusal_on_extension_or_cancellation_exits_6_with_its_hint(monkeypatch, name, refused, done):
+    module, args = COMMANDS[name]
+    monkeypatch.setattr(module, "Lium", _fake(refused, _budget))
+
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == EXIT_PERMISSION_DENIED, result.output
+    assert "budget on the key" in result.output
+    if done:
+        assert done in result.output
+
+
+def test_a_mixed_rm_in_batch_reports_budget_and_funding_refusals_apart(monkeypatch):
+    monkeypatch.setattr(rm_module, "Lium", _fake({"pod-a": _budget, "pod-b": _funding}))
+
+    result = CliRunner().invoke(cli, ["rm", "pod-a,pod-b", "--in", "2h", "--yes", "--format", "json"])
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == EXIT_PERMISSION_DENIED, result.output
+    assert payload["budget_refused"] == ["pod-a"]
+    assert payload["funding_refused"] == [{"huid": "pod-b", "code": "account_unfunded", "hint": HINT}]

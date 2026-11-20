@@ -298,7 +298,10 @@ def rm_command(
     failed_huids = list(result.data.get("failed_huids") or [])
     budget_errors = list(result.data.get("budget_errors") or [])
     budget_huids = list(result.data.get("budget_huids") or [])
-    not_done = set(failed_huids) | set(budget_huids)
+    funding_errors = list(result.data.get("funding_errors") or [])
+    funding_huids = list(result.data.get("funding_huids") or [])
+    refusals = budget_errors + funding_errors
+    not_done = set(failed_huids) | set(budget_huids) | set(funding_huids)
     done_pods = [pod for pod in plan.pods if pod.huid not in not_done]
     removed_huids = [pod.huid for pod in done_pods]
 
@@ -318,6 +321,11 @@ def rm_command(
         if plan.termination_time:
             payload["termination_time"] = context["termination_time"]
             payload["budget_refused"] = budget_huids
+            if funding_huids:
+                # each funding refusal with its own code and hint: raising the key's budget does not fund the account
+                payload["funding_refused"] = [
+                    {"huid": huid, "code": e.code, "hint": e.hint} for huid, e in zip(funding_huids, funding_errors)
+                ]
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
     elif removed_huids:
         # Say what happened: silence is indistinguishable from having done nothing.
@@ -326,13 +334,16 @@ def rm_command(
             for pod in done_pods:
                 ui.info(display.format_removed_line(pod, spends[pod.huid]))
 
-    if budget_errors:
-        # A 402 is the key's budget, not a generic failed huid. Print scheduled/failed
-        # first so `rm a b --in 2h` still shows that b was rescheduled, then exit 6.
-        # The refused pod is not retried — one refusal, no second charge.
-        if failed_huids and output_format != "json":
-            ui.error(f"Failed to schedule removal for pods: {', '.join(failed_huids)}")
-        raise budget_errors[0]
+    if refusals:
+        # A 402 (the key's budget, or an account with no balance) is not a generic failed huid. Print scheduled/failed
+        # first so `rm a b --in 2h` still shows that b was rescheduled, then exit 6 with the first refusal; in a mixed
+        # batch the other kind is named too, since its fix differs. The refused pod is not retried.
+        if output_format != "json":
+            if failed_huids:
+                ui.error(f"Failed to schedule removal for pods: {', '.join(failed_huids)}")
+            if budget_errors and funding_errors:
+                ui.error(f"No balance on the account for pods: {', '.join(funding_huids)} ({funding_errors[0].hint})")
+        raise refusals[0]
     if failed_huids:
         if output_format == "json":
             # The payload already names the failures; a second message on stdout
