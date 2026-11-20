@@ -11,8 +11,9 @@ there. The coldkey is that hotkey, so one ``batch_all`` mints and spends with on
 signature, and a failed spend reverts the mint (DAH-6771).
 """
 
-import contextlib
 import json
+import os
+import tempfile
 from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 
@@ -93,10 +94,11 @@ def _held(subtensor, hotkey: str) -> int:
     return int((deposit or {}).get("balance") or 0)
 
 
-# {coldkey: {"nonce": highest nonce it signed whose outcome is unknown, "dies": finalized block after which none of
-# those can land}}: kept across runs until finalized state resolves it (its nonce, or its mortal era having passed by
-# finalized block number, never by wall time: a stalled chain keeps it unresolved)
-UNRESOLVED = Path.home() / ".lium" / "gamma_unresolved.json"
+# one file per coldkey, {"nonce": highest nonce it signed whose outcome is not known yet, "dies": finalized block after
+# which none of those can land}: written before broadcasting and kept across runs until finalized state resolves it (its
+# nonce, or finalized blocks passing its mortal era; never wall time, so a stalled chain keeps it unresolved). One file
+# per coldkey, replaced atomically, needs no lock: concurrent runs for other wallets never share a file.
+UNRESOLVED = Path.home() / ".lium" / "gamma_unresolved"
 ERA_PERIOD = 128  # blocks a signed payment stays valid (bittensor 11's default; ~26 min at 12 s)
 
 
@@ -108,35 +110,38 @@ class NotSent(Exception):
     """Failed before anything was signed and broadcast (composing or signing): nothing can land."""
 
 
-def _unresolved() -> dict:
+def _recorded(address: str) -> dict | None:
+    """The coldkey's unresolved payment, or None. An unreadable record refuses: it may hide a payment that can land."""
+    path = UNRESOLVED / f"{address}.json"
     try:
-        return json.loads(UNRESOLVED.read_text())
-    except (OSError, ValueError):
-        return {}
+        entry = json.loads(path.read_text())
+        return {"nonce": int(entry["nonce"]), "dies": int(entry["dies"])}
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise LiumError(
+            f"Cannot read {path} ({e}), the record of a gamma payment from {address} whose outcome is unknown. "
+            "Check the wallet's recent transactions, then delete the file to pay again."
+        ) from e
 
 
-@contextlib.contextmanager
-def _locked_unresolved():
-    """The entries, written back on exit, under an exclusive lock: runs for other wallets update them at once."""
-    UNRESOLVED.parent.mkdir(parents=True, exist_ok=True)
-    with open(UNRESOLVED.with_suffix(".lock"), "a") as lock:
-        try:
-            import fcntl
-        except ImportError:  # shortcut: Windows has no fcntl, so concurrent runs there are unlocked; add msvcrt if needed
-            fcntl = None
-        if fcntl:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-        entries = _unresolved()
-        yield entries
-        tmp = UNRESOLVED.with_suffix(".tmp")
-        tmp.write_text(json.dumps(entries))
-        tmp.replace(UNRESOLVED)
+def _record(address: str, nonce: int, dies: int) -> dict:
+    known = _recorded(address) or {}
+    entry = {"nonce": max(nonce, known.get("nonce", -1)), "dies": max(dies, known.get("dies", -1))}
+    UNRESOLVED.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=UNRESOLVED, prefix=f".{address}.")
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(entry))
+        f.flush()
+        os.fsync(f.fileno())  # on disk before the broadcast it describes
+    os.replace(tmp, UNRESOLVED / f"{address}.json")
+    return entry
 
 
-def _remember_unresolved(address: str, nonce: int, dies: int) -> None:
-    with _locked_unresolved() as entries:
-        known = entries.get(address) or {}
-        entries[address] = {"nonce": max(nonce, known.get("nonce", -1)), "dies": max(dies, known.get("dies", -1))}
+def _forget(address: str, entry: dict) -> None:
+    """Drops the record if it is still ``entry`` (another run may have recorded a newer payment meanwhile)."""
+    if _recorded(address) == entry:
+        (UNRESOLVED / f"{address}.json").unlink(missing_ok=True)
 
 
 def _finalized(subtensor) -> tuple[object, int]:
@@ -167,18 +172,16 @@ def _settled_nonce(subtensor, address: str) -> int:
     else:
         final = subtensor.query(("System", "Account"), [address], block=head)
     final = int((getattr(final, "value", final) or {}).get("nonce") or 0)
-    recorded = _unresolved().get(address)
+    recorded = _recorded(address)
     # settled once finalized state counts its nonce, or finalized blocks are past its mortal era: it can never land
-    unsettled = recorded is not None and final <= recorded["nonce"] and number <= recorded.get("dies", float("inf"))
+    unsettled = recorded is not None and final <= recorded["nonce"] and number <= recorded["dies"]
     if int(pool) > final or unsettled:
         raise LiumError(
             f"An earlier transaction from {address} has not settled yet (its outcome was unknown or it is "
             "still in the pool). Run this again once it is finalized, usually within a minute."
         )
     if recorded is not None:
-        with _locked_unresolved() as entries:
-            if entries.get(address) == recorded:  # a concurrent run may have recorded a newer one meanwhile
-                del entries[address]
+        _forget(address, recorded)
     return final
 
 
@@ -228,12 +231,10 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
     params["daily_spend_cap"] = None
     spend = {"service": payee, "netuid": NETUID, "amount": min_out + _held(subtensor, coldkey_ss58)}
 
-    dies = [0]
-
     def submit(calls: list[tuple[str, dict]], nonce: int) -> tuple[bool, str | None]:
         """Sign ``calls`` (SubtensorModule functions) with the coldkey at ``nonce``, as one ``batch_all`` when
-        several. False only when the chain answered; OutcomeUnknown when the answer was lost. Sets ``dies[0]``,
-        before broadcasting, to a finalized block number after which this transaction can no longer land."""
+        several. False only when the chain answered; OutcomeUnknown when the answer was lost. Records the payment
+        before broadcasting (so a crash or kill after it still leaves the record) and drops it once the chain answers."""
         substrate = getattr(subtensor, "substrate", None)
         if substrate is None:  # bittensor 11: (module, function, params) calls, composed against the
             # connected runtime, not the SDK's generated builders (which follow the runtime it was built for);
@@ -246,12 +247,13 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
                 unsigned = subtensor.prepare_call(call, address=coldkey_ss58, nonce=nonce, period=ERA_PERIOD)
                 signature = coldkey.sign(unsigned.payload)
                 # bittensor 11 anchors the era to a finalized block, so at or below the one read after it
-                dies[0] = _finalized(subtensor)[1] + ERA_PERIOD
+                entry = _record(coldkey_ss58, nonce, _finalized(subtensor)[1] + ERA_PERIOD)
             except (Exception, KeyboardInterrupt) as e:  # Ctrl-C included: nothing is broadcast yet
                 raise NotSent(str(e) or type(e).__name__) from e
             resp = subtensor.submit_signature(unsigned, signature, wait_for_inclusion=True, wait_for_finalization=True)
             if not resp.success and (getattr(resp, "data", None) or {}).get("submission_outcome_unknown"):
                 raise OutcomeUnknown(resp.message or "submission outcome unknown")
+            _forget(coldkey_ss58, entry)
             return resp.success, None if resp.success else resp.message
         try:
             built = [
@@ -265,10 +267,11 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
             extrinsic = substrate.create_signed_extrinsic(
                 call=call, keypair=coldkey, nonce=nonce, era={"period": ERA_PERIOD, "current": born}
             )
-            dies[0] = born + ERA_PERIOD
+            entry = _record(coldkey_ss58, nonce, born + ERA_PERIOD)
         except (Exception, KeyboardInterrupt) as e:  # Ctrl-C included: nothing is broadcast yet
             raise NotSent(str(e) or type(e).__name__) from e
         receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=True)
+        _forget(coldkey_ss58, entry)
         return receipt.is_success, None if receipt.is_success else receipt.error_message
 
     def mint() -> tuple[bool, str | None]:
@@ -278,8 +281,7 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
         ok, error = ui.load("Minting gamma", mint)
     except NotSent as e:  # failed before signing: nothing was broadcast, nothing to wait for
         raise CliFailure("transfer_failed", f"Gamma mint failed: {e}", EXIT_GENERAL_ERROR, hint=NOT_SENT_HINT) from e
-    except (Exception, KeyboardInterrupt) as e:  # noqa: BLE001 - a submit that raised or was interrupted may still land
-        _remember_unresolved(coldkey_ss58, nonce, dies[0])  # the next run waits until finalized state resolves it
+    except (Exception, KeyboardInterrupt) as e:  # noqa: BLE001 - may still land: its record (written before) stays
         ok, error = False, str(e) or type(e).__name__
     if not ok:
         raise CliFailure("transfer_failed", f"Gamma mint failed: {error}", EXIT_GENERAL_ERROR, hint=FAILED_HINT)
@@ -299,8 +301,7 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
                 except NotSent:  # failed before signing: nothing was broadcast, so nothing is pending
                     raise
                 except (Exception, KeyboardInterrupt):  # sent, but the answer was lost
-                    rest_pending = rest
-                    _remember_unresolved(coldkey_ss58, nonce + 1, dies[0])
+                    rest_pending = rest  # recorded before broadcast: the next run waits until it settles
                     raise
                 if not rest_ok:  # the chain answered: refused, nothing spent
                     raise LiumError(rest_error or "spend failed")

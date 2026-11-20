@@ -18,7 +18,7 @@ GAMMA_PER_TAO = 210_561_193_201  # sim_mint_gamma(51, 1 TAO) on finney, 13 Nov 2
 
 @pytest.fixture(autouse=True)
 def _unresolved_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(gamma_module, "UNRESOLVED", tmp_path / "unresolved.json")
+    monkeypatch.setattr(gamma_module, "UNRESOLVED", tmp_path / "unresolved")
 
 
 def test_usd_is_sized_to_tao_rounded_up_and_floored_two_percent():
@@ -352,7 +352,7 @@ def test_an_unknown_rest_spend_blocks_the_next_payment_until_finalized_state_set
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.output.strip().splitlines()[-1])["tx"]["gamma_rest_pending"] == 0.3
-    assert substrate.nonces[-1] == 8 and json.loads(gamma_module.UNRESOLVED.read_text())["5Cold"]["nonce"] == 8
+    assert substrate.nonces[-1] == 8 and _record()["nonce"] == 8
 
     # the pool no longer shows it (dropped, or not yet propagated), but finalized state has not passed it
     substrate.final_nonce, done = 8, len(substrate.nonces)
@@ -365,7 +365,7 @@ def test_an_unknown_rest_spend_blocks_the_next_payment_until_finalized_state_set
     substrate.held, substrate.submit = [None, None], None
     result, _, _ = _run(monkeypatch, args, substrate)
     assert result.exit_code == 0, result.output
-    assert substrate.nonces[done] == 9 and "5Cold" not in json.loads(gamma_module.UNRESOLVED.read_text())
+    assert substrate.nonces[done] == 9 and _record() is None
 
 
 def test_an_unknown_mint_blocks_until_its_era_has_passed(monkeypatch):
@@ -373,12 +373,12 @@ def test_an_unknown_mint_blocks_until_its_era_has_passed(monkeypatch):
     args = ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"]
 
     result, _, _ = _run(monkeypatch, args, substrate)
-    assert result.exit_code != 0 and json.loads(gamma_module.UNRESOLVED.read_text())["5Cold"]["nonce"] == 7
+    assert result.exit_code != 0 and _record()["nonce"] == 7
 
     result, _, _ = _run(monkeypatch, args, substrate)
     assert result.exit_code != 0 and "has not settled yet" in result.output
 
-    assert json.loads(gamma_module.UNRESOLVED.read_text())["5Cold"]["dies"] == 100 + gamma_module.ERA_PERIOD
+    assert _record()["dies"] == 100 + gamma_module.ERA_PERIOD
 
     # a stalled chain: finalized blocks reach its last valid block, however long that takes, and it may still land
     substrate.finalized_number = 100 + gamma_module.ERA_PERIOD
@@ -412,7 +412,7 @@ def test_a_mint_that_fails_before_signing_records_nothing_and_the_next_run_proce
     result, _, _ = _run(monkeypatch, args, substrate)
 
     assert result.exit_code == 1 and "Nothing was signed or sent" in result.output, result.output
-    assert not gamma_module.UNRESOLVED.exists() and substrate.submissions == []
+    assert _record() is None and substrate.submissions == []
     if chain is FakeSubstrate:
         substrate.create_signed_extrinsic = original
     else:
@@ -420,14 +420,38 @@ def test_a_mint_that_fails_before_signing_records_nothing_and_the_next_run_proce
     assert _run(monkeypatch, args, substrate)[0].exit_code == 0
 
 
-def test_concurrent_runs_for_different_wallets_keep_each_others_unknown_payments():
-    import threading
 
-    addresses = [f"5Wallet{i}" for i in range(16)]
-    threads = [threading.Thread(target=gamma_module._remember_unresolved, args=(a, 7, 228)) for a in addresses]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+def _record():
+    path = gamma_module.UNRESOLVED / "5Cold.json"
+    return json.loads(path.read_text()) if path.exists() else None
 
-    assert set(json.loads(gamma_module.UNRESOLVED.read_text())) == set(addresses)
+
+@pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
+def test_the_payment_is_on_disk_before_it_is_broadcast_and_dropped_once_the_chain_answers(monkeypatch, chain):
+    substrate = chain()
+    at_broadcast = []
+    if chain is FakeSubstrate:
+        substrate.submit = lambda extrinsic: (at_broadcast.append(_record()), substrate.submissions.append(extrinsic),
+                                              types.SimpleNamespace(is_success=True, error_message=None))[-1]
+    else:
+        original = substrate.submit_signature
+        substrate.submit_signature = lambda *a, **k: (at_broadcast.append(_record()), original(*a, **k))[-1]
+
+    result, _, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
+
+    assert result.exit_code == 0, result.output
+    # a process killed during the broadcast leaves this record, and the next run waits for it to settle
+    assert at_broadcast == [{"nonce": 7, "dies": 100 + gamma_module.ERA_PERIOD}]
+    assert _record() is None
+
+
+@pytest.mark.parametrize("content", ["", "{\"nonce\": 7", "[]"], ids=["empty", "truncated", "wrong-shape"])
+def test_an_unreadable_record_refuses_before_anything_is_signed(monkeypatch, content):
+    gamma_module.UNRESOLVED.mkdir(parents=True)
+    (gamma_module.UNRESOLVED / "5Cold.json").write_text(content)
+    substrate = FakeSubstrate()
+
+    result, events, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
+
+    assert result.exit_code != 0 and "Cannot read" in result.output, result.output
+    assert substrate.submissions == [] and "unlock" not in events
