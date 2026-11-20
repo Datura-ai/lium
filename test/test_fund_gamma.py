@@ -167,7 +167,7 @@ def _calls(spec_493=False):
     )
 
 
-def _run(monkeypatch, args, substrate, calls=None):
+def _run(monkeypatch, args, substrate, calls=None, on_link=None):
     events = []
     coldkey = types.SimpleNamespace(sign=lambda m: (events.append(("sign", m)), b"\x01\x02")[1])
     wallet = types.SimpleNamespace(coldkey=coldkey, unlock_coldkey=lambda: events.append("unlock"))
@@ -180,6 +180,8 @@ def _run(monkeypatch, args, substrate, calls=None):
     class FakeLium:
         def link_gamma_hotkey(self, hotkey, sign):
             events.append(("link", hotkey, sign("challenge")))
+            if on_link:
+                on_link()
             return {"hotkey": hotkey, "netuid": 51, "spender": "5Spender", "service": "5Service"}
 
     monkeypatch.setattr(fund_module, "LoadWalletAction", FakeLoadWalletAction)
@@ -478,6 +480,22 @@ def test_a_mint_that_fails_before_signing_records_nothing_and_the_next_run_proce
         substrate.prepare_call = original
     assert _run(monkeypatch, args, substrate)[0].exit_code == 0
 
+
+
+@pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
+def test_a_runtime_upgrade_while_linking_refuses_the_payment_before_signing(monkeypatch, chain):
+    substrate = chain()  # runtime 492 when the payment is chosen
+
+    def upgrade():
+        substrate.spec_493 = True  # runtime 493 when the calls are composed
+
+    result, events, _ = _run(
+        monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate, on_link=upgrade
+    )
+
+    assert result.exit_code == 1 and "runtime changed" in result.output and "Nothing was signed or sent" in result.output
+    assert substrate.submissions == [] and _record() is None
+    assert [e for e in events if e[0] == "sign" and e[1] != "challenge"] == []  # only the link was signed
 
 
 def _record():

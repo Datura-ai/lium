@@ -85,6 +85,14 @@ def _spec_493(subtensor) -> bool:
     return True
 
 
+def _same_runtime(subtensor, spec_493: bool) -> None:
+    """The payment's calls were chosen for the runtime read before confirming and linking; signed against another
+    (a runtime upgrade in between) they would pay differently, so it is refused before signing. The signature
+    commits to the runtime version it was made for, so an upgrade after this read invalidates it on chain."""
+    if _spec_493(subtensor) != spec_493:
+        raise NotSent("the chain's runtime changed while this command ran; run the command again")
+
+
 def _deposit(subtensor, hotkey: str) -> dict:
     """The deposit at ``hotkey`` as stored (``{}`` without one)."""
     substrate = getattr(subtensor, "substrate", None)
@@ -384,6 +392,7 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
             try:
                 call = built[0] if len(built) == 1 else ("Utility", "batch_all", {"calls": [subtensor.compose(c) for c in built]})
                 unsigned = subtensor.prepare_call(call, address=coldkey_ss58, nonce=nonce, period=ERA_PERIOD)
+                _same_runtime(subtensor, spec_493)
                 signature = coldkey.sign(unsigned.payload)
                 # bittensor 11 anchors the era to a finalized block, so at or below the one read after it
                 entry = _record(coldkey_ss58, nonce, _finalized(subtensor)[1] + ERA_PERIOD)
@@ -402,6 +411,7 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
             call = built[0] if len(built) == 1 else substrate.compose_call(
                 call_module="Utility", call_function="batch_all", call_params={"calls": built}
             )
+            _same_runtime(subtensor, spec_493)  # the runtime just composed against, read before signing
             _, born = _finalized(subtensor)  # the era starts at this finalized block, not the best head
             extrinsic = substrate.create_signed_extrinsic(
                 call=call, keypair=coldkey, nonce=nonce, era={"period": ERA_PERIOD, "current": born}
