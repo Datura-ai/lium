@@ -394,6 +394,41 @@ def test_an_unknown_mint_blocks_until_its_era_has_passed(monkeypatch):
     assert result.exit_code == 0, result.output
 
 
+SubstrateRequestException = type("SubstrateRequestException", (Exception,), {})  # as bittensor <= 10 raises it
+
+
+def _pool_answer(code):
+    def submit(extrinsic):
+        raise SubstrateRequestException({"code": code, "message": "Invalid Transaction",
+                                         "data": "Inability to pay some fees (e.g. account balance too low)"})
+    return submit
+
+
+def test_a_mint_the_node_refuses_clears_its_record_and_the_next_run_proceeds(monkeypatch):
+    substrate = FakeSubstrate(submit=_pool_answer(1010))  # bittensor <= 10: the pool refuses, e.g. fees unpaid
+    args = ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"]
+
+    result, _, _ = _run(monkeypatch, args, substrate)
+    assert result.exit_code != 0 and "1010 Invalid Transaction" in result.output, result.output
+    assert _record() is None
+
+    substrate.submit = None  # funded meanwhile: the rerun is not held for a payment that never entered the pool
+    result, _, _ = _run(monkeypatch, args, substrate)
+    assert result.exit_code == 0, result.output
+    assert substrate.nonces == [7, 7]
+
+
+def test_a_mint_the_pool_already_holds_keeps_its_record(monkeypatch):
+    substrate = FakeSubstrate(submit=_pool_answer(1013))  # already imported: the same transaction may still land
+    args = ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"]
+
+    result, _, _ = _run(monkeypatch, args, substrate)
+    assert result.exit_code != 0 and _record()["nonce"] == 7
+
+    result, _, _ = _run(monkeypatch, args, substrate)
+    assert result.exit_code != 0 and "has not settled yet" in result.output
+
+
 @pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
 @pytest.mark.parametrize("error", [ValueError("metadata encoding failed"), KeyboardInterrupt()], ids=["error", "ctrl-c"])
 def test_a_mint_that_fails_before_signing_records_nothing_and_the_next_run_proceeds(monkeypatch, chain, error):

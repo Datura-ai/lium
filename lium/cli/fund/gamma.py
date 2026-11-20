@@ -165,6 +165,19 @@ def _forget(address: str, entry: dict) -> None:
         (UNRESOLVED / f"{address}.json").unlink(missing_ok=True)
 
 
+def _node_refusal(error: Exception) -> str | None:
+    """The node's refusal of a submitted transaction, or None when the node did not answer.
+
+    bittensor <= 10 raises the node's JSON-RPC error object (``SubstrateRequestException({"code": 1010, ...})``) when
+    the pool refuses a transaction (1010 invalid, e.g. fees it cannot pay): it was never pooled, so it cannot land.
+    1013 (already imported) means the same transaction is in the pool, so it may still land.
+    """
+    answer = error.args[0] if error.args else None
+    if not isinstance(answer, dict) or not isinstance(answer.get("code"), int) or answer["code"] == 1013:
+        return None
+    return f"{answer['code']} {answer.get('message', '')}: {answer.get('data', '')}".rstrip(": ")
+
+
 def _finalized(subtensor) -> tuple[object, int]:
     """The finalized head (as the stack's reads take it) and its block number."""
     substrate = getattr(subtensor, "substrate", None)
@@ -318,7 +331,14 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
             entry = _record(coldkey_ss58, nonce, born + ERA_PERIOD)
         except (Exception, KeyboardInterrupt) as e:  # Ctrl-C included: nothing is broadcast yet
             raise NotSent(str(e) or type(e).__name__) from e
-        receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=True)
+        try:
+            receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=True)
+        except Exception as e:
+            refusal = _node_refusal(e)
+            if refusal is None:  # no answer from the node: it may still land, its record stays
+                raise
+            _forget(coldkey_ss58, entry)  # the node refused it: nothing is in its pool, nothing can land
+            return False, refusal
         _forget(coldkey_ss58, entry)
         return receipt.is_success, None if receipt.is_success else receipt.error_message
 
