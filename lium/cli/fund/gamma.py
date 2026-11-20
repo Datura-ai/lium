@@ -82,16 +82,37 @@ def _spec_493(subtensor) -> bool:
     return True
 
 
-def _held(subtensor, hotkey: str) -> int:
-    """Gamma units already in the deposit at ``hotkey`` (minted before runtime 493 and not yet
-    spent, or an earlier mint's slippage margin), so this payment spends them too."""
+def _deposit(subtensor, hotkey: str) -> dict:
+    """The deposit at ``hotkey`` as stored (``{}`` without one)."""
     substrate = getattr(subtensor, "substrate", None)
     if substrate is not None:
         result = substrate.query("SubtensorModule", "GammaDeposits", [NETUID, hotkey])
     else:  # bittensor 11 reads storage by a (pallet, item) pair
         result = subtensor.query(("SubtensorModule", "GammaDeposits"), [NETUID, hotkey])
-    deposit = getattr(result, "value", result)
-    return int((deposit or {}).get("balance") or 0)
+    return getattr(result, "value", result) or {}
+
+
+def _held(subtensor, hotkey: str) -> int:
+    """Gamma units already in the deposit at ``hotkey`` (minted before runtime 493 and not yet
+    spent, or an earlier mint's slippage margin), so this payment spends them too."""
+    return int(_deposit(subtensor, hotkey).get("balance") or 0)
+
+
+CAP_REFILL_BLOCKS = 7200  # a daily spend cap's bucket refills its whole cap over a day of 12 s blocks
+
+
+def _cap_allows(deposit: dict, block: int) -> tuple[int, int] | None:
+    """(cap, units the deposit's daily spend cap lets it spend at ``block``), None without a cap.
+
+    shortcut: replays the bucket's linear refill (cap per CAP_REFILL_BLOCKS) at the finalized block, which is at or
+    below the block the payment lands in, so it never overstates; read the runtime's own figure once a runtime API
+    returns the cap's allowance without the balance bound."""
+    cap = deposit.get("daily_spend_cap")
+    if not cap:
+        return None
+    limit = int(cap["cap"])
+    tokens, last = cap["bucket"]
+    return limit, min(limit, int(tokens) + limit * max(0, block - int(last)) // CAP_REFILL_BLOCKS)
 
 
 # one file per coldkey, {"nonce": highest nonce it signed whose outcome is not known yet, "dies": finalized block after
@@ -198,6 +219,34 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
     # an earlier mint or spend whose outcome was unknown must settle first: until then the deposit read
     # below may still count gamma it spends, and a payment built on it would fail or be paid twice
     nonce = ui.load("Checking for unsettled transactions", lambda: _settled_nonce(subtensor, coldkey_ss58))
+    spec_493 = _spec_493(subtensor)
+    deposit = _deposit(subtensor, coldkey_ss58)
+    held = int(deposit.get("balance") or 0)
+    if spec_493:
+        # the batch spends the mint's minimum plus what the deposit holds; a daily spend cap below that refuses the
+        # spend and batch_all reverts the mint (the fee is lost), so it is refused here, before anything is signed
+        need = min_out + held
+        capped = _cap_allows(deposit, _finalized(subtensor)[1])
+        if capped is not None and capped[1] < need:
+            cap, allows = capped
+            if need > cap:
+                wait = "Waiting does not help: the payment is above the whole cap."
+            else:
+                hours = -(-(need - allows) * CAP_REFILL_BLOCKS // cap) * 12 / 3600
+                wait = f"Or wait about {hours:.1f} h for the cap to refill to {need / _UNITS:.2f} gamma."
+            raise CliFailure(
+                "gamma_spend_cap",
+                f"The gamma deposit at {coldkey_ss58} has a daily spend cap of {cap / _UNITS:.2f} gamma and can spend "
+                f"{allows / _UNITS:.2f} gamma now; this payment spends {need / _UNITS:.2f} gamma (at least "
+                f"{min_out / _UNITS:.2f} minted plus {held / _UNITS:.2f} already in the deposit), so the chain would "
+                "refuse it.",
+                EXIT_GENERAL_ERROR,
+                hint=(
+                    f"Raise or remove the cap with set_gamma_deposit_daily_spend_cap (SN51, hotkey {coldkey_ss58}, "
+                    f"signed by this coldkey) to at least {need / _UNITS:.2f} gamma, then run this again. {wait} "
+                    "Nothing was signed or sent."
+                ),
+            )
 
     if json_output and not yes:
         raise LiumError("confirmation required: pass --yes")
@@ -217,7 +266,6 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
         "Linking wallet to your Lium account",
         lambda: lium.link_gamma_hotkey(coldkey_ss58, lambda m: "0x" + coldkey.sign(m).hex()),
     )
-    spec_493 = _spec_493(subtensor)
     payee = link.get("service") if spec_493 else link.get("spender")
     if not payee:
         raise LiumError(
@@ -229,7 +277,7 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
     if not spec_493:
         params["spender"] = payee
     params["daily_spend_cap"] = None
-    spend = {"service": payee, "netuid": NETUID, "amount": min_out + _held(subtensor, coldkey_ss58)}
+    spend = {"service": payee, "netuid": NETUID, "amount": min_out + held}
 
     def submit(calls: list[tuple[str, dict]], nonce: int) -> tuple[bool, str | None]:
         """Sign ``calls`` (SubtensorModule functions) with the coldkey at ``nonce``, as one ``batch_all`` when

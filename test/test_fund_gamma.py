@@ -38,6 +38,7 @@ class FakeSubstrate:
         self.nonces, self.final_nonce, self.finalized_number = [], 7, 100
 
     pending = False  # a transaction from the coldkey still in the pool
+    cap = {}  # {"daily_spend_cap": {"cap", "bucket": (units, block)}} for a capped deposit
 
     def get_account_next_index(self, address):
         assert address == "5Cold"
@@ -55,7 +56,7 @@ class FakeSubstrate:
             return types.SimpleNamespace(value={"nonce": self.final_nonce})
         assert (module, storage, params) == ("SubtensorModule", "GammaDeposits", [51, "5Cold"])
         held = self.held.pop(0)
-        return types.SimpleNamespace(value=None if held is None else {"coldkey": "5Cold", "balance": held})
+        return types.SimpleNamespace(value=None if held is None else {"coldkey": "5Cold", "balance": held, **self.cap})
 
     def runtime_call(self, api, method, params):
         assert (api, method, params[0]) == ("GammaRuntimeApi", "sim_mint_gamma", 51)
@@ -101,6 +102,7 @@ class FakeV11Subtensor:
         self.nonces, self.final_nonce, self.finalized_block, self.unknown = [], 7, 100, False
 
     pending = False
+    cap = {}
 
     def compose(self, call):
         _, function, params = call
@@ -126,7 +128,7 @@ class FakeV11Subtensor:
             return 0
         assert (item, params) == (("SubtensorModule", "GammaDeposits"), [51, "5Cold"])
         held = self.held.pop(0)
-        return None if held is None else {"coldkey": "5Cold", "balance": held}
+        return None if held is None else {"coldkey": "5Cold", "balance": held, **self.cap}
 
     def runtime(self, method, params):
         assert method == ("GammaRuntimeApi", "sim_mint_gamma") and params[0] == 51
@@ -455,3 +457,34 @@ def test_an_unreadable_record_refuses_before_anything_is_signed(monkeypatch, con
 
     assert result.exit_code != 0 and "Cannot read" in result.output, result.output
     assert substrate.submissions == [] and "unlock" not in events
+
+
+G = 10**9
+
+
+@pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
+@pytest.mark.parametrize(
+    "cap, bucket, refused, says",
+    [
+        (10 * G, (10 * G, 100), True, "Waiting does not help"),  # 3 held + ~24.5 minted is above the whole cap
+        (40 * G, (5 * G, 100), True, "wait about"),  # under the cap, but only 5 gamma has refilled
+        (40 * G, (5 * G, 100 - 7200), False, None),  # a day of blocks since: the bucket is full again
+    ],
+    ids=["above-the-cap", "not-refilled", "refilled"],
+)
+def test_a_capped_deposit_holding_gamma_refuses_a_payment_the_cap_cannot_spend_before_signing(
+    monkeypatch, chain, cap, bucket, refused, says
+):
+    substrate = chain(spec_493=True, held=[3 * G, 0])
+    substrate.cap = {"daily_spend_cap": {"cap": cap, "bucket": bucket}}
+
+    result, events, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
+
+    if not refused:
+        assert result.exit_code == 0, result.output
+        return
+    envelope = json.loads(result.output.strip().splitlines()[-1])
+    assert result.exit_code != 0 and envelope["error"]["code"] == "gamma_spend_cap", result.output
+    assert says in json.dumps(envelope) and "set_gamma_deposit_daily_spend_cap" in json.dumps(envelope)
+    # nothing unlocked, signed or sent: the batch would have been refused and the mint reverted
+    assert events == [] and substrate.submissions == [] and substrate.nonces == []
