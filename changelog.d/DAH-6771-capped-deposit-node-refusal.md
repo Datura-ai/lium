@@ -3,3 +3,5 @@
 - `lium fund --gamma` on bittensor 10: a payment the node refuses (for example `1010 Invalid Transaction: Inability to pay some fees`) no longer holds the next run for about 26 minutes. A definitive node refusal clears the pending payment record. If the outcome is uncertain, the CLI waits for the payment to settle.
 - `lium fund --gamma` runs one payment per wallet at a time; a second run from the same wallet stops until the first has finished.
 - `lium fund --gamma` stops before signing if the chain's runtime changes while the command runs; run it again.
+- `lium fund --gamma` records each payment's extrinsic hash and era before sending it. When its answer was lost, the next run reads the payment's result from the chain before signing a new one: it reports a payment that succeeded and signs nothing, and goes on after one that failed or expired.
+- `lium fund --gamma` checks the deposit and its daily spend cap again after linking the wallet and sizes the payment from that read.

@@ -30,14 +30,31 @@ def test_usd_is_sized_to_tao_rounded_up_and_floored_two_percent():
     assert gamma_module.min_gamma_out(25 * 10**9) == 24_500_000_000
 
 
-class FakeSubstrate:
+class FinalizedBlocks:
+    """Finalized blocks that carry a payment: ``blocks[number] = [(extrinsic hash, System event or None)]``."""
+
+    def _block(self, number):
+        assert number <= getattr(self, "finalized_number", getattr(self, "finalized_block", None))  # finalized only
+        return self.blocks.get(number, [])
+
+    def _events(self, number):
+        return [{"extrinsic_idx": i, "module_id": "System", "event_id": event,
+                 "attributes": {"dispatch_error": {"Module": "Slippage"}} if event == "ExtrinsicFailed" else {}}
+                for i, (_, event) in enumerate(self._block(number)) if event]
+
+
+class Signed(tuple):
+    """A signed extrinsic: (call, keypair), with the hash the chain knows it by."""
+
+
+class FakeSubstrate(FinalizedBlocks):
     """bittensor <= 10: ``Subtensor().substrate`` composes, signs and submits."""
 
     def __init__(self, success=True, submit=None, spec_493=False, held=None):
         self.success, self.calls, self.submitted, self.submit = success, [], None, submit
         # held: the deposit balance at each read (before the batch, then after it), None for no deposit
         self.spec_493, self.held, self.submissions = spec_493, list(held or [None, None]), []
-        self.nonces, self.final_nonce, self.finalized_number = [], 7, 100
+        self.nonces, self.final_nonce, self.finalized_number, self.blocks = [], 7, 100, {}
 
     pending = False  # a transaction from the coldkey still in the pool
     cap = {}  # {"daily_spend_cap": {"cap", "bucket": (units, block)}} for a capped deposit
@@ -68,7 +85,7 @@ class FakeSubstrate:
             assert block_hash == "0xfinal"  # settled means finalized
             return types.SimpleNamespace(value={"nonce": self.final_nonce})
         assert (module, storage, params) == ("SubtensorModule", "GammaDeposits", [51, "5Cold"])
-        held = self.held.pop(0)
+        held = self.held[1 if self.submissions else 0]
         return types.SimpleNamespace(value=None if held is None else {"coldkey": "5Cold", "balance": held, **self.cap})
 
     def runtime_call(self, api, method, params):
@@ -87,7 +104,18 @@ class FakeSubstrate:
         signed = self.spec_493 if self.signed_493 is None else self.signed_493
         self.runtime = types.SimpleNamespace(runtime_version=493 if signed else 492)  # the driver loads the head's
         self.nonces.append(nonce)
-        return (call, keypair)
+        signed = Signed((call, keypair))
+        signed.extrinsic_hash = bytes([nonce]) * 32
+        return signed
+
+    def get_block_hash(self, number):
+        return f"0xblock{number}"
+
+    def get_extrinsics(self, block_hash):
+        return [types.SimpleNamespace(value={"extrinsic_hash": h}) for h, _ in self._block(int(block_hash[7:]))]
+
+    def get_events(self, block_hash):
+        return self._events(int(block_hash[7:]))
 
     def get_chain_finalised_head(self):
         return "0xfinal"
@@ -111,13 +139,14 @@ class FakeSubstrate:
 SIGNED = "signed by the coldkey"
 
 
-class FakeV11Subtensor:
+class FakeV11Subtensor(FinalizedBlocks):
     """bittensor 11: no ``.substrate``; ``runtime`` reads and ``submit_call`` sends a ``bt.calls`` builder."""
 
     def __init__(self, success=True, held=None, spec_493=False):
         self.success, self.submitted, self.held, self.submissions = success, None, list(held or [None, None]), []
         self.spec_493 = spec_493  # the connected runtime, whatever the installed SDK was generated for
         self.nonces, self.final_nonce, self.finalized_block, self.unknown = [], 7, 100, False
+        self.blocks = {}
 
     pending = False
     cap = {}
@@ -139,12 +168,18 @@ class FakeV11Subtensor:
             return types.SimpleNamespace(nonce=self.final_nonce + (1 if self.pending else 0))
         assert period == gamma_module.ERA_PERIOD
         signed = self.spec_493 if self.signed_493 is None else self.signed_493
-        return types.SimpleNamespace(nonce=nonce, payload=b"payload", call=call, spec_version=493 if signed else 492)
+        return types.SimpleNamespace(
+            nonce=nonce, payload=b"payload", call=call, spec_version=493 if signed else 492,
+            era={"period": period, "current": self.finalized_block}, public_key=b"\x05" * 32, crypto_type=1,
+            included_in_extrinsic=bytes([nonce]), call_data=repr(call).encode(),
+        )
 
     def query(self, item, params, block=None):
         if item == ("System", "Account"):
             assert block == self.finalized_block  # settled means finalized
             return {"nonce": self.final_nonce}
+        if item == ("System", "Events"):
+            return self._events(block)
         if item == ("System", "LastRuntimeUpgrade"):
             assert block == self.finalized_block
             return {"spec_version": 493 if self._at(block) else 492, "spec_name": "node-subtensor"}
@@ -153,8 +188,11 @@ class FakeV11Subtensor:
                 raise type("StorageFunctionNotFound", (ValueError,), {})("SubtensorModule.GammaSpent")
             return 0
         assert (item, params) == (("SubtensorModule", "GammaDeposits"), [51, "5Cold"])
-        held = self.held.pop(0)
+        held = self.held[1 if self.submissions else 0]
         return None if held is None else {"coldkey": "5Cold", "balance": held, **self.cap}
+
+    def block_info(self, number):
+        return types.SimpleNamespace(extrinsics=[{"extrinsic_hash": h} for h, _ in self._block(number)])
 
     def runtime(self, method, params):
         assert method == ("GammaRuntimeApi", "sim_mint_gamma") and params[0] == 51
@@ -561,7 +599,10 @@ def test_the_payment_is_on_disk_before_it_is_broadcast_and_dropped_once_the_chai
 
     assert result.exit_code == 0, result.output
     # a process killed during the broadcast leaves this record, and the next run waits for it to settle
-    assert at_broadcast == [{"nonce": 7, "dies": 100 + gamma_module.ERA_PERIOD}]
+    assert [{k: v for k, v in r.items() if k != "hash"} for r in at_broadcast] == [
+        {"nonce": 7, "born": 100, "dies": 100 + gamma_module.ERA_PERIOD}
+    ]
+    assert at_broadcast[0]["hash"].startswith("0x") and len(at_broadcast[0]["hash"]) == 66
     assert _record() is None
 
 
@@ -666,3 +707,125 @@ def test_a_run_waits_for_another_paying_from_the_same_coldkey_and_keeps_its_reco
 
     assert result.exit_code != 0 and "Another 'lium fund --gamma'" in result.output, result.output
     assert _record() == pending and substrate.submissions == [] and events == []
+
+
+ARGS = ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"]
+CHAINS = pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
+
+
+def _lose_answers(substrate, lost=True):
+    """The chain takes the payment but its answer never arrives (lost=False: answers arrive again)."""
+    if isinstance(substrate, FakeSubstrate):
+        substrate.submit = _lost_reply if lost else None
+    elif lost:
+        def unknown(unsigned, signature, **kwargs):
+            substrate.nonces.append(unsigned.nonce)
+            return types.SimpleNamespace(success=False, message="disconnected", data={"submission_outcome_unknown": True})
+
+        substrate.submit_signature = unknown
+    else:
+        del substrate.submit_signature
+
+
+def _finalize(substrate, number):
+    setattr(substrate, "finalized_number" if isinstance(substrate, FakeSubstrate) else "finalized_block", number)
+
+
+@CHAINS
+@pytest.mark.parametrize("outcome", ["ExtrinsicSuccess", "ExtrinsicFailed"], ids=["finalized-success", "finalized-failure"])
+def test_a_payment_whose_answer_was_lost_is_resolved_by_its_hash_before_another_is_signed(monkeypatch, chain, outcome):
+    substrate = chain()
+    _lose_answers(substrate)
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code != 0 and _record()["nonce"] == 7
+
+    # it was included and finalized (its nonce is used) while Lium had not credited it yet
+    _lose_answers(substrate, lost=False)
+    substrate.final_nonce, hash_ = 8, _record()["hash"]
+    _finalize(substrate, 110)
+    substrate.blocks = {104: [("0xother", "ExtrinsicSuccess"), (hash_, outcome)]}
+    result, events, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert _record() is None
+    if outcome == "ExtrinsicSuccess":  # reported, and nothing new signed
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        assert result.exit_code != 0 and envelope["error"]["code"] == "gamma_payment_landed", result.output
+        assert "block 104" in json.dumps(envelope) and substrate.nonces == [7] and "unlock" not in events
+        result, _, _ = _run(monkeypatch, ARGS, substrate)  # asked again: a new payment
+    else:
+        assert "failed in block 104" in result.output, result.output
+    assert result.exit_code == 0, result.output
+    assert substrate.nonces == [7, 8]
+
+
+@CHAINS
+def test_a_payment_that_expired_without_inclusion_is_dropped_and_the_next_one_signs(monkeypatch, chain):
+    substrate = chain()
+    _lose_answers(substrate)
+    _run(monkeypatch, ARGS, substrate)
+
+    _lose_answers(substrate, lost=False)
+    _finalize(substrate, 100 + gamma_module.ERA_PERIOD + 1)  # past its era, its nonce never used
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert result.exit_code == 0, result.output
+    assert "never reached the chain" in result.output and substrate.nonces == [7, 7] and _record() is None
+
+
+@CHAINS
+def test_a_used_nonce_alone_never_drops_the_record(monkeypatch, chain):
+    substrate = chain()
+    _lose_answers(substrate)
+    _run(monkeypatch, ARGS, substrate)
+    recorded = _record()
+
+    # included, but its block's result cannot be read (yet)
+    _lose_answers(substrate, lost=False)
+    substrate.final_nonce = 8
+    substrate.blocks = {100: [(recorded["hash"], None)]}
+    result, events, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert result.exit_code != 0 and "could not be read" in result.output, result.output
+    assert _record() == recorded and substrate.nonces == [7] and "unlock" not in events
+
+
+def test_a_lazy_receipt_whose_result_read_fails_keeps_the_record(monkeypatch):
+    class Receipt:
+        @property
+        def is_success(self):
+            raise TimeoutError("receipt read timed out")
+
+    substrate = FakeSubstrate(submit=lambda extrinsic: Receipt())
+
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert result.exit_code != 0 and "Do not re-send yet" in result.output
+    assert _record()["nonce"] == 7
+
+
+@CHAINS
+@pytest.mark.parametrize("capped", [False, True], ids=["uncapped", "cap-used-too"])
+def test_a_proxy_spend_while_linking_sizes_and_checks_the_payment_from_the_deposit_after_linking(
+    monkeypatch, chain, capped
+):
+    substrate = chain(spec_493=True, held=[3 * G, 0])
+    if capped:
+        substrate.cap = {"daily_spend_cap": {"cap": 40 * G, "bucket": (40 * G, 100)}}
+
+    def proxy_spends():  # an Any proxy spends the deposit (and the cap's bucket) with its own nonce
+        substrate.held[0] = 0
+        if capped:
+            substrate.cap = {"daily_spend_cap": {"cap": 40 * G, "bucket": (5 * G, 100)}}
+
+    result, _, _ = _run(monkeypatch, ARGS, substrate, on_link=proxy_spends)
+
+    if capped:
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        assert result.exit_code != 0 and envelope["error"]["code"] == "gamma_spend_cap", result.output
+        assert substrate.submissions == [] and substrate.nonces == []
+        return
+    assert result.exit_code == 0, result.output
+    (_, _, params), _ = substrate.submitted
+    calls = params["calls"]
+    mint, spend = (c[1][2] for c in calls) if chain is FakeV11Subtensor else (c[2] for c in calls)
+    assert spend["amount"] == mint["min_amount_out"]  # nothing left in the deposit to add

@@ -17,6 +17,7 @@ import os
 import tempfile
 from contextlib import contextmanager
 from decimal import ROUND_CEILING, Decimal
+from hashlib import blake2b
 from pathlib import Path
 
 import click
@@ -133,11 +134,12 @@ def _cap_allows(deposit: dict, block: int) -> tuple[int, int] | None:
     return limit, min(limit, int(tokens) + limit * max(0, block - int(last)) // CAP_REFILL_BLOCKS)
 
 
-# one file per coldkey, {"nonce": highest nonce it signed whose outcome is not known yet, "dies": finalized block after
-# which none of those can land}: written before broadcasting and kept across runs until finalized state resolves it (its
-# nonce, or finalized blocks passing its mortal era; never wall time, so a stalled chain keeps it unresolved). Replaced
-# atomically; a payment holds the coldkey's lock file (_paying) from its nonce check to its outcome, so no other run reads,
-# records or clears the record meanwhile.
+# one file per coldkey, {"nonce", "hash", "born", "dies"}: the signed payment whose outcome is not known yet, its
+# extrinsic hash and the finalized blocks of its mortal era (it can land from "born" to "dies"). Written before
+# broadcasting and kept across runs until finalized state resolves it: its nonce used (then its dispatch result is read
+# from the block that carries it) or finalized blocks passing its era; never wall time, so a stalled chain keeps it
+# unresolved. Replaced atomically; a payment holds the coldkey's lock file (_paying) from its nonce check to its outcome,
+# so no other run reads, records or clears the record meanwhile. Older records carry only nonce and dies.
 UNRESOLVED = Path.home() / ".lium" / "gamma_unresolved"
 ERA_PERIOD = 128  # blocks a signed payment stays valid (bittensor 11's default; ~26 min at 12 s)
 
@@ -215,7 +217,10 @@ def _recorded(address: str) -> dict | None:
     path = UNRESOLVED / f"{address}.json"
     try:
         entry = json.loads(path.read_text())
-        return {"nonce": int(entry["nonce"]), "dies": int(entry["dies"])}
+        known = {"nonce": int(entry["nonce"]), "dies": int(entry["dies"])}
+        if "hash" in entry:
+            known.update(hash=str(entry["hash"]), born=int(entry["born"]))
+        return known
     except FileNotFoundError:
         return None
     except (OSError, ValueError, KeyError, TypeError) as e:
@@ -225,9 +230,9 @@ def _recorded(address: str) -> dict | None:
         ) from e
 
 
-def _record(address: str, nonce: int, dies: int) -> dict:
-    known = _recorded(address) or {}
-    entry = {"nonce": max(nonce, known.get("nonce", -1)), "dies": max(dies, known.get("dies", -1))}
+def _record(address: str, nonce: int, tx_hash: str, born: int) -> dict:
+    """Records the one payment in flight (_settled_nonce resolves any earlier one before a run signs)."""
+    entry = {"nonce": nonce, "dies": born + ERA_PERIOD, "hash": tx_hash, "born": born}
     UNRESOLVED.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=UNRESOLVED, prefix=f".{address}.")
     with os.fdopen(fd, "w") as f:
@@ -276,6 +281,58 @@ def _finalized(subtensor) -> tuple[object, int]:
     return number, number
 
 
+def _compact(n: int) -> bytes:
+    """SCALE compact encoding of a length (a payment is far below 2**30 bytes)."""
+    if n < 1 << 6:
+        return bytes([n << 2])
+    return (n << 2 | 1).to_bytes(2, "little") if n < 1 << 14 else (n << 2 | 2).to_bytes(4, "little")
+
+
+def _signed_hash(unsigned, signature: bytes) -> str:
+    """The extrinsic hash of ``unsigned`` (bittensor 11) once signed with ``signature``, as the chain reports it: blake2b-256
+    of the length-prefixed v4 extrinsic (signer as MultiAddress::Id, MultiSignature, extensions, call).
+
+    shortcut: assembles the v4 layout bittensor 11 sends (checked against its encoder); read the hash from bittensor
+    once a public API returns it before broadcasting."""
+    crypto_type = unsigned.crypto_type
+    if len(signature) == 65:  # carries its signature version first
+        crypto_type, signature = signature[0], signature[1:]
+    body = b"\x84\x00" + bytes(unsigned.public_key) + bytes([crypto_type]) + bytes(signature)
+    body += bytes(unsigned.included_in_extrinsic) + bytes(unsigned.call_data)
+    return "0x" + blake2b(_compact(len(body)) + body, digest_size=32).hexdigest()
+
+
+def _landed(subtensor, recorded: dict, number: int) -> tuple[int, bool, str | None] | None:
+    """(block, succeeded, error) of the recorded payment in finalized blocks ``born`` to ``number`` (within its era),
+    None when none of them carries it. A carried payment whose dispatch result cannot be read raises: it stays recorded."""
+    substrate = getattr(subtensor, "substrate", None)
+    for block in range(recorded["born"], min(recorded["dies"], number) + 1):
+        if substrate is not None:
+            block_hash = substrate.get_block_hash(block)
+            extrinsics = substrate.get_extrinsics(block_hash=block_hash) or []
+        else:
+            extrinsics = subtensor.block_info(block).extrinsics
+        hashes = [(getattr(e, "value", e) or {}).get("extrinsic_hash") for e in extrinsics]
+        if recorded["hash"] not in hashes:
+            continue
+        index = hashes.index(recorded["hash"])
+        if substrate is not None:
+            events = substrate.get_events(block_hash)
+        else:
+            events = subtensor.query(("System", "Events"), [], block=block)
+        for event in events or []:
+            if event.get("extrinsic_idx") == index and event.get("module_id") == "System":
+                if event.get("event_id") == "ExtrinsicSuccess":
+                    return block, True, None
+                if event.get("event_id") == "ExtrinsicFailed":
+                    return block, False, str((event.get("attributes") or {}).get("dispatch_error"))
+        raise LiumError(
+            f"The earlier gamma payment {recorded['hash']} is in block {block}, but its result could not be read. "
+            "Run this again in a minute."
+        )
+    return None
+
+
 def _settled_nonce(subtensor, address: str) -> int:
     """The nonce this run signs with: the finalized chain's, once nothing from ``address`` is unsettled.
 
@@ -302,8 +359,25 @@ def _settled_nonce(subtensor, address: str) -> int:
             f"An earlier transaction from {address} has not settled yet (its outcome was unknown or it is "
             "still in the pool). Run this again once it is finalized, usually within a minute."
         )
-    if recorded is not None:
-        _forget(address, recorded)
+    if recorded is None:
+        return final
+    # its nonce is used, or its era has passed: what it did is read before anything new is signed
+    landed = _landed(subtensor, recorded, number) if "hash" in recorded and final > recorded["nonce"] else None
+    _forget(address, recorded)
+    if landed is None:
+        if "hash" in recorded:
+            ui.warning(f"An earlier gamma payment from {address} never reached the chain; it paid nothing.")
+        return final
+    block, ok, error = landed
+    if ok:
+        raise CliFailure(
+            "gamma_payment_landed",
+            f"An earlier gamma payment from {address} whose answer was lost succeeded in block {block}. "
+            "Nothing new was signed.",
+            EXIT_GENERAL_ERROR,
+            hint="Lium credits it within a few minutes: check 'lium balance', then run this again only to add more.",
+        )
+    ui.warning(f"An earlier gamma payment from {address} failed in block {block} ({error}); it paid nothing.")
     return final
 
 
@@ -326,33 +400,39 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
     # below may still count gamma it spends, and a payment built on it would fail or be paid twice
     nonce = ui.load("Checking for unsettled transactions", lambda: _settled_nonce(subtensor, coldkey_ss58))
     spec_493 = _spec_493(subtensor)
-    deposit = _deposit(subtensor, coldkey_ss58)
-    held = int(deposit.get("balance") or 0)
-    if spec_493:
-        # the batch spends the mint's minimum plus what the deposit holds; a daily spend cap below that refuses the
-        # spend and batch_all reverts the mint (the fee is lost), so it is refused here, before anything is signed
-        need = min_out + held
-        capped = _cap_allows(deposit, _finalized(subtensor)[1])
-        if capped is not None and capped[1] < need:
-            cap, allows = capped
-            if need > cap:
-                wait = "Waiting does not help: the payment is above the whole cap."
-            else:
-                hours = -(-(need - allows) * CAP_REFILL_BLOCKS // cap) * 12 / 3600
-                wait = f"Or wait about {hours:.1f} h for the cap to refill to {_gamma(need)} gamma."
-            raise CliFailure(
-                "gamma_spend_cap",
-                f"The gamma deposit at {coldkey_ss58} has a daily spend cap of {_gamma(cap)} gamma and can spend "
-                f"{_gamma(allows)} gamma now; this payment spends {_gamma(need)} gamma (at least "
-                f"{_gamma(min_out)} minted plus {_gamma(held)} already in the deposit), so the chain would refuse it.",
-                EXIT_GENERAL_ERROR,
-                hint=(
-                    f"Remove the cap with set_gamma_deposit_daily_spend_cap (SN51, hotkey {coldkey_ss58}, signed by "
-                    "this coldkey), then run this again at once. Raising the cap instead (to at least "
-                    f"{_gamma(need)} gamma) does not add to what the deposit can spend now: wait for it to refill "
-                    f"before running this again. {wait} Nothing was signed or sent."
-                ),
-            )
+    def spendable() -> int:
+        """Gamma units the deposit holds now; refused before anything is signed when its daily spend cap cannot
+        spend them with the mint's minimum."""
+        deposit = _deposit(subtensor, coldkey_ss58)
+        held = int(deposit.get("balance") or 0)
+        if spec_493:
+            # the batch spends the mint's minimum plus what the deposit holds; a daily spend cap below that refuses the
+            # spend and batch_all reverts the mint (the fee is lost), so it is refused here, before anything is signed
+            need = min_out + held
+            capped = _cap_allows(deposit, _finalized(subtensor)[1])
+            if capped is not None and capped[1] < need:
+                cap, allows = capped
+                if need > cap:
+                    wait = "Waiting does not help: the payment is above the whole cap."
+                else:
+                    hours = -(-(need - allows) * CAP_REFILL_BLOCKS // cap) * 12 / 3600
+                    wait = f"Or wait about {hours:.1f} h for the cap to refill to {_gamma(need)} gamma."
+                raise CliFailure(
+                    "gamma_spend_cap",
+                    f"The gamma deposit at {coldkey_ss58} has a daily spend cap of {_gamma(cap)} gamma and can spend "
+                    f"{_gamma(allows)} gamma now; this payment spends {_gamma(need)} gamma (at least "
+                    f"{_gamma(min_out)} minted plus {_gamma(held)} already in the deposit), so the chain would refuse it.",
+                    EXIT_GENERAL_ERROR,
+                    hint=(
+                        f"Remove the cap with set_gamma_deposit_daily_spend_cap (SN51, hotkey {coldkey_ss58}, signed by "
+                        "this coldkey), then run this again at once. Raising the cap instead (to at least "
+                        f"{_gamma(need)} gamma) does not add to what the deposit can spend now: wait for it to refill "
+                        f"before running this again. {wait} Nothing was signed or sent."
+                    ),
+                )
+        return held
+
+    spendable()  # refuses before the password prompt; checked again after linking
 
     if json_output and not yes:
         raise LiumError("confirmation required: pass --yes")
@@ -372,6 +452,9 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
         "Linking wallet to your Lium account",
         lambda: lium.link_gamma_hotkey(coldkey_ss58, lambda m: "0x" + coldkey.sign(m).hex()),
     )
+    # an Any proxy of the coldkey can spend the deposit meanwhile, with its own nonce: the payment is checked and
+    # sized from what the deposit holds now
+    held = spendable()
     payee = link.get("service") if spec_493 else link.get("spender")
     if not payee:
         raise LiumError(
@@ -407,8 +490,7 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
                 if unsigned.spec_version != spec_version:  # the signature commits to the spec version it is made for
                     raise NotSent(RUNTIME_CHANGED)
                 signature = coldkey.sign(unsigned.payload)
-                # bittensor 11 anchors the era to a finalized block, so at or below the one read after it
-                entry = _record(coldkey_ss58, nonce, _finalized(subtensor)[1] + ERA_PERIOD)
+                entry = _record(coldkey_ss58, nonce, _signed_hash(unsigned, signature), int(unsigned.era["current"]))
             except (Exception, KeyboardInterrupt) as e:  # Ctrl-C included: nothing is broadcast yet
                 raise NotSent(str(e) or type(e).__name__) from e
             resp = subtensor.submit_signature(unsigned, signature, wait_for_inclusion=True, wait_for_finalization=True)
@@ -437,7 +519,7 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
             # chain refuses it under any other, so the composed bytes are only ever executed by the pinned runtime
             if substrate.runtime.runtime_version != spec_version:
                 raise NotSent(RUNTIME_CHANGED)
-            entry = _record(coldkey_ss58, nonce, born + ERA_PERIOD)
+            entry = _record(coldkey_ss58, nonce, "0x" + bytes(extrinsic.extrinsic_hash).hex(), born)
         except (Exception, KeyboardInterrupt) as e:  # Ctrl-C included: nothing is broadcast yet
             raise NotSent(str(e) or type(e).__name__) from e
         try:
@@ -449,8 +531,11 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
                 raise
             _forget(coldkey_ss58, entry)  # the node refused it: nothing is in its pool, nothing can land
             raise Refused(refusal) from e
+        # bittensor <= 10 reads the result lazily: the record stays until it is read
+        ok = receipt.is_success
+        error = None if ok else receipt.error_message
         _forget(coldkey_ss58, entry)
-        return receipt.is_success, None if receipt.is_success else receipt.error_message
+        return ok, error
 
     def mint() -> tuple[bool, str | None]:
         return submit([("mint_gamma", params)] + ([("spend_gamma", spend)] if spec_493 else []), nonce)
