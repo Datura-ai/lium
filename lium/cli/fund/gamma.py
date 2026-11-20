@@ -302,6 +302,31 @@ def _signed_hash(unsigned, signature: bytes) -> str:
     return "0x" + blake2b(_compact(len(body)) + body, digest_size=32).hexdigest()
 
 
+def _hash_of(extrinsic) -> str | None:
+    """A block extrinsic's hash as recorded (``0x`` hex): bittensor <= 10 decodes each into an object whose
+    ``extrinsic_hash`` property holds the bytes (None for inherents), the way its receipts find a transaction;
+    bittensor 11 gives the plain decoded value (None when undecodable) with the hash in it."""
+    found = extrinsic.get("extrinsic_hash") if isinstance(extrinsic, dict) else getattr(extrinsic, "extrinsic_hash", None)
+    return "0x" + bytes(found).hex() if isinstance(found, (bytes, bytearray)) else found
+
+
+def _v11_refusal(resp) -> str | None:
+    """bittensor 11's failed result that proves the payment can never land, or None when its outcome is not proved.
+
+    A dispatch result (``block_hash`` set) is the chain's answer, not a refusal. Before inclusion, bittensor 11.3.0
+    returns the same ``success=False`` for the node refusing the transaction and for a watch that ended without
+    finality, so only an invalid-transaction refusal (1010, named by the SDK's own pool-rejection map, as
+    ``_node_refusal`` reads bittensor 10's) proves it never entered the pool."""
+    if getattr(resp, "block_hash", None) or (getattr(resp, "data", None) or {}).get("submission_outcome_unknown"):
+        return None
+    from bittensor.error_map import CUSTOM_TRANSACTION_ERRORS, INVALID_TRANSACTION_ERRORS
+
+    # 1013/1014 are the pool's (it may hold the payment); Stale also answers a resend of a payment already accepted
+    unproved = {"AlreadyImported", "PriorityTooLow", "Stale"}
+    refused = {name for _, name in INVALID_TRANSACTION_ERRORS} - unproved | set(CUSTOM_TRANSACTION_ERRORS.values())
+    return (resp.message or "refused") if getattr(getattr(resp, "error", None), "name", None) in refused else None
+
+
 def _landed(subtensor, recorded: dict, number: int) -> tuple[int, bool, str | None] | None:
     """(block, succeeded, error) of the recorded payment in finalized blocks ``born`` to ``number`` (within its era),
     None when none of them carries it. A carried payment whose dispatch result cannot be read raises: it stays recorded."""
@@ -312,7 +337,7 @@ def _landed(subtensor, recorded: dict, number: int) -> tuple[int, bool, str | No
             extrinsics = substrate.get_extrinsics(block_hash=block_hash) or []
         else:
             extrinsics = subtensor.block_info(block).extrinsics
-        hashes = [(getattr(e, "value", e) or {}).get("extrinsic_hash") for e in extrinsics]
+        hashes = [_hash_of(e) for e in extrinsics]
         if recorded["hash"] not in hashes:
             continue
         index = hashes.index(recorded["hash"])
@@ -320,8 +345,9 @@ def _landed(subtensor, recorded: dict, number: int) -> tuple[int, bool, str | No
             events = substrate.get_events(block_hash)
         else:
             events = subtensor.query(("System", "Events"), [], block=block)
-        for event in events or []:
-            if event.get("extrinsic_idx") == index and event.get("module_id") == "System":
+        for record in events or []:
+            event = record.get("event") or record  # bittensor <= 10 nests the event in its record
+            if record.get("extrinsic_idx") == index and event.get("module_id") == "System":
                 if event.get("event_id") == "ExtrinsicSuccess":
                     return block, True, None
                 if event.get("event_id") == "ExtrinsicFailed":
@@ -494,8 +520,13 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
             except (Exception, KeyboardInterrupt) as e:  # Ctrl-C included: nothing is broadcast yet
                 raise NotSent(str(e) or type(e).__name__) from e
             resp = subtensor.submit_signature(unsigned, signature, wait_for_inclusion=True, wait_for_finalization=True)
-            if not resp.success and (getattr(resp, "data", None) or {}).get("submission_outcome_unknown"):
-                raise OutcomeUnknown(resp.message or "submission outcome unknown")
+            # the record goes only on a dispatch result (success or failure, both in a block) or a proved refusal
+            if not resp.success and not getattr(resp, "block_hash", None):
+                refusal = _v11_refusal(resp)
+                if refusal is None:  # e.g. the watch ended before finality: it may still land
+                    raise OutcomeUnknown(resp.message or "submission outcome unknown")
+                _forget(coldkey_ss58, entry)
+                raise Refused(refusal)
             _forget(coldkey_ss58, entry)
             return resp.success, None if resp.success else resp.message
         try:
@@ -533,6 +564,8 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
             raise Refused(refusal) from e
         # bittensor <= 10 reads the result lazily: the record stays until it is read
         ok = receipt.is_success
+        if ok is None:  # finalized, but its dispatch events were not readable: it may have paid
+            raise OutcomeUnknown("the payment's result could not be read")
         error = None if ok else receipt.error_message
         _forget(coldkey_ss58, entry)
         return ok, error

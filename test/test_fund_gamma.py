@@ -42,6 +42,11 @@ class FinalizedBlocks:
                  "attributes": {"dispatch_error": {"Module": "Slippage"}} if event == "ExtrinsicFailed" else {}}
                 for i, (_, event) in enumerate(self._block(number)) if event]
 
+    def _event_records(self, number):
+        """bittensor <= 10's locked async-substrate-interface 2.0.3: each record nests its event (its receipts read
+        ``event["event"]["module_id"]``)."""
+        return [{"extrinsic_idx": e.pop("extrinsic_idx"), "event": e} for e in self._events(number)]
+
 
 class Signed(tuple):
     """A signed extrinsic: (call, keypair), with the hash the chain knows it by."""
@@ -112,10 +117,12 @@ class FakeSubstrate(FinalizedBlocks):
         return f"0xblock{number}"
 
     def get_extrinsics(self, block_hash):
-        return [types.SimpleNamespace(value={"extrinsic_hash": h}) for h, _ in self._block(int(block_hash[7:]))]
+        # async-substrate-interface 2.0.3: the hash is the decoded extrinsic's property (bytes), not in its value
+        return [types.SimpleNamespace(extrinsic_hash=bytes.fromhex(h[2:]), value={"call": {}})
+                for h, _ in self._block(int(block_hash[7:]))]
 
     def get_events(self, block_hash):
-        return self._events(int(block_hash[7:]))
+        return self._event_records(int(block_hash[7:]))
 
     def get_chain_finalised_head(self):
         return "0xfinal"
@@ -206,7 +213,8 @@ class FakeV11Subtensor(FinalizedBlocks):
             return types.SimpleNamespace(success=False, message="disconnected", data={"submission_outcome_unknown": True})
         self.submissions.append((tuple(unsigned.call), SIGNED))
         self.submitted = self.submitted or self.submissions[-1]
-        return types.SimpleNamespace(success=self.success, message="" if self.success else "Slippage", data={})
+        return types.SimpleNamespace(success=self.success, message="" if self.success else "Slippage", data={},
+                                     block_hash="0xincluded", error=None)
 
     def subtensor(self):
         return self
@@ -229,11 +237,20 @@ def _calls(spec_493=False):
     )
 
 
+# bittensor 11.3's pool-rejection names (bittensor/error_map.py), the part the CLI reads
+ERROR_MAP = types.SimpleNamespace(
+    INVALID_TRANSACTION_ERRORS=(("inability to pay some fees", "Payment"), ("transaction is outdated", "Stale"),
+                                ("already imported", "AlreadyImported"), ("priority is too low", "PriorityTooLow")),
+    CUSTOM_TRANSACTION_ERRORS={1: "ColdKeyInSwapSchedule"},
+)
+
+
 def _run(monkeypatch, args, substrate, calls=None, on_link=None):
     events = []
     coldkey = types.SimpleNamespace(sign=lambda m: (events.append(("sign", m)), b"\x01\x02")[1])
     wallet = types.SimpleNamespace(coldkey=coldkey, unlock_coldkey=lambda: events.append("unlock"))
     monkeypatch.setitem(sys.modules, "bittensor", types.SimpleNamespace(Subtensor=substrate.subtensor, calls=calls or _calls()))
+    monkeypatch.setitem(sys.modules, "bittensor.error_map", ERROR_MAP)
 
     class FakeLoadWalletAction:
         def execute(self, ctx):
@@ -515,6 +532,41 @@ def test_only_a_definite_initial_refusal_clears_the_record(monkeypatch, replies,
     assert substrate.nonces == ([7, 7] if definite_initial_refusal else [7])
 
 
+@pytest.mark.parametrize(
+    "name, message, definite_initial_refusal",
+    [
+        ("Payment", "Inability to pay some fees", True),  # the node refused it: it never entered the pool
+        ("ColdKeyInSwapSchedule", "Custom error: 1", True),  # a runtime's 1010 refusal, by its custom code
+        (None, "Subscription ended before the extrinsic was finalized", False),  # the watch ended: it may land
+        ("Dropped", "Extrinsic dropped", False),  # a watch status after the pool took it
+        ("Stale", "Transaction is outdated", False),  # may answer a resend of an accepted payment
+        ("AlreadyImported", "Transaction Already Imported", False),  # the pool holds it
+    ],
+    ids=["fee-rejection", "custom-1010", "ended-watch", "dropped", "stale", "already-imported"],
+)
+def test_bittensor_11_clears_the_record_only_on_a_definite_initial_refusal(
+    monkeypatch, name, message, definite_initial_refusal
+):
+    # bittensor 11.3.0 answers both cases alike: success=False, no block, no submission_outcome_unknown
+    substrate = FakeV11Subtensor()
+
+    def failed(unsigned, signature, **kwargs):
+        substrate.nonces.append(unsigned.nonce)
+        return types.SimpleNamespace(success=False, message=message, data={}, block_hash=None,
+                                     error=types.SimpleNamespace(name=name))
+
+    substrate.submit_signature = failed
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code != 0
+    assert (_record() is None) == definite_initial_refusal
+    assert ("The node rejected this payment" in result.output) == definite_initial_refusal, result.output
+
+    del substrate.submit_signature  # funded meanwhile: only a proved refusal lets the rerun sign again
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+    assert (result.exit_code == 0) == definite_initial_refusal, result.output
+    assert substrate.nonces == ([7, 7] if definite_initial_refusal else [7])
+
+
 @pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
 @pytest.mark.parametrize("error", [ValueError("metadata encoding failed"), KeyboardInterrupt()], ids=["error", "ctrl-c"])
 def test_a_mint_that_fails_before_signing_records_nothing_and_the_next_run_proceeds(monkeypatch, chain, error):
@@ -743,7 +795,7 @@ def test_a_payment_whose_answer_was_lost_is_resolved_by_its_hash_before_another_
     _lose_answers(substrate, lost=False)
     substrate.final_nonce, hash_ = 8, _record()["hash"]
     _finalize(substrate, 110)
-    substrate.blocks = {104: [("0xother", "ExtrinsicSuccess"), (hash_, outcome)]}
+    substrate.blocks = {104: [("0x" + "ab" * 32, "ExtrinsicSuccess"), (hash_, outcome)]}
     result, events, _ = _run(monkeypatch, ARGS, substrate)
 
     assert _record() is None
@@ -789,13 +841,28 @@ def test_a_used_nonce_alone_never_drops_the_record(monkeypatch, chain):
     assert _record() == recorded and substrate.nonces == [7] and "unlock" not in events
 
 
-def test_a_lazy_receipt_whose_result_read_fails_keeps_the_record(monkeypatch):
-    class Receipt:
-        @property
-        def is_success(self):
-            raise TimeoutError("receipt read timed out")
+class _TimedOutReceipt:
+    @property
+    def is_success(self):
+        raise TimeoutError("receipt read timed out")
 
-    substrate = FakeSubstrate(submit=lambda extrinsic: Receipt())
+
+def _receipt_without_events():
+    """async-substrate-interface 2.0.3's own ExtrinsicReceipt for a finalized payment whose block's events read
+    empty: ``is_success`` and ``error_message`` are both None."""
+    from async_substrate_interface.sync_substrate import ExtrinsicReceipt
+
+    substrate = types.SimpleNamespace(get_events=lambda block_hash: [],
+                                      get_block=lambda block_hash: {"extrinsics": [types.SimpleNamespace(
+                                          extrinsic_hash=bytes([7]) * 32)]})
+    receipt = ExtrinsicReceipt(substrate=substrate, extrinsic_hash="0x" + "07" * 32, block_hash="0xblock104")
+    assert receipt.is_success is None and receipt.error_message is None
+    return receipt
+
+
+@pytest.mark.parametrize("receipt", [_TimedOutReceipt, _receipt_without_events], ids=["read-timed-out", "events-empty"])
+def test_a_lazy_receipt_whose_result_read_fails_keeps_the_record(monkeypatch, receipt):
+    substrate = FakeSubstrate(submit=lambda extrinsic: receipt())
 
     result, _, _ = _run(monkeypatch, ARGS, substrate)
 
