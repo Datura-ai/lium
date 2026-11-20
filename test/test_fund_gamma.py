@@ -397,15 +397,23 @@ def test_an_unknown_mint_blocks_until_its_era_has_passed(monkeypatch):
 SubstrateRequestException = type("SubstrateRequestException", (Exception,), {})  # as bittensor <= 10 raises it
 
 
-def _pool_answer(code):
+def _pool_answer(code, shape="str"):
+    """The node's refusal as bittensor 10's substrate library raises it: async-substrate-interface 2.0.3's
+    author_submitAndWatchExtrinsic path raises ``SubstrateRequestException(str(response))`` with the whole answer;
+    its other path raises the answer dict itself; older stacks raised the error object alone."""
+    error = {"code": code, "message": "Invalid Transaction",
+             "data": "Inability to pay some fees (e.g. account balance too low)"}
+    answer = {"jsonrpc": "2.0", "id": 1, "error": error}
+    raised = {"str": str(answer), "dict": answer, "error": error}[shape]
+
     def submit(extrinsic):
-        raise SubstrateRequestException({"code": code, "message": "Invalid Transaction",
-                                         "data": "Inability to pay some fees (e.g. account balance too low)"})
+        raise SubstrateRequestException(raised)
     return submit
 
 
-def test_a_mint_the_node_refuses_clears_its_record_and_the_next_run_proceeds(monkeypatch):
-    substrate = FakeSubstrate(submit=_pool_answer(1010))  # bittensor <= 10: the pool refuses, e.g. fees unpaid
+@pytest.mark.parametrize("shape", ["str", "dict", "error"])
+def test_a_mint_the_node_refuses_clears_its_record_and_the_next_run_proceeds(monkeypatch, shape):
+    substrate = FakeSubstrate(submit=_pool_answer(1010, shape))  # bittensor <= 10: the pool refuses, e.g. fees unpaid
     args = ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"]
 
     result, _, _ = _run(monkeypatch, args, substrate)

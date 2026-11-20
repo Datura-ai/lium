@@ -11,6 +11,7 @@ there. The coldkey is that hotkey, so one ``batch_all`` mints and spends with on
 signature, and a failed spend reverts the mint (DAH-6771).
 """
 
+import ast
 import json
 import os
 import tempfile
@@ -168,11 +169,19 @@ def _forget(address: str, entry: dict) -> None:
 def _node_refusal(error: Exception) -> str | None:
     """The node's refusal of a submitted transaction, or None when the node did not answer.
 
-    bittensor <= 10 raises the node's JSON-RPC error object (``SubstrateRequestException({"code": 1010, ...})``) when
-    the pool refuses a transaction (1010 invalid, e.g. fees it cannot pay): it was never pooled, so it cannot land.
+    bittensor <= 10 raises the node's JSON-RPC answer when the pool refuses a transaction (1010 invalid, e.g. fees it
+    cannot pay): it was never pooled, so it cannot land. Its substrate library raises the whole answer, as a dict or as
+    the ``str()`` of one (``"{'jsonrpc': '2.0', 'id': 1, 'error': {'code': 1010, ...}}"``), or the error object alone.
     1013 (already imported) means the same transaction is in the pool, so it may still land.
     """
     answer = error.args[0] if error.args else None
+    if isinstance(answer, str):
+        try:
+            answer = ast.literal_eval(answer)  # the str() of a dict; literal_eval only reads literals
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            return None
+    if isinstance(answer, dict) and isinstance(answer.get("error"), dict):
+        answer = answer["error"]
     if not isinstance(answer, dict) or not isinstance(answer.get("code"), int) or answer["code"] == 1013:
         return None
     return f"{answer['code']} {answer.get('message', '')}: {answer.get('data', '')}".rstrip(": ")
