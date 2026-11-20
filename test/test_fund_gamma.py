@@ -113,8 +113,10 @@ class FakeSubstrate(FinalizedBlocks):
         signed.extrinsic_hash = bytes([nonce]) * 32
         return signed
 
+    missing = frozenset()  # heights a lite node holds no history for: it answers no hash
+
     def get_block_hash(self, number):
-        return f"0xblock{number}"
+        return None if number in self.missing else f"0xblock{number}"
 
     def get_extrinsics(self, block_hash):
         # async-substrate-interface 2.0.3: the hash is the decoded extrinsic's property (bytes), not in its value
@@ -198,7 +200,11 @@ class FakeV11Subtensor(FinalizedBlocks):
         held = self.held[1 if self.submissions else 0]
         return None if held is None else {"coldkey": "5Cold", "balance": held, **self.cap}
 
+    missing = frozenset()
+
     def block_info(self, number):
+        if number in self.missing:
+            raise ValueError(f"block {number} not found")
         return types.SimpleNamespace(extrinsics=[{"extrinsic_hash": h} for h, _ in self._block(number)])
 
     def runtime(self, method, params):
@@ -832,6 +838,36 @@ def test_a_payment_that_expired_without_inclusion_is_dropped_and_the_next_one_si
 
     assert result.exit_code == 0, result.output
     assert "never reached the chain" in result.output and substrate.nonces == [7, 7] and _record() is None
+
+
+@CHAINS
+@pytest.mark.parametrize("landed", [True, False], ids=["paid", "never-landed"])
+def test_an_endpoint_without_the_block_history_keeps_the_record_until_an_archive_reads_it(monkeypatch, chain, landed):
+    substrate = chain()
+    _lose_answers(substrate)
+    _run(monkeypatch, ARGS, substrate)
+    recorded = _record()
+
+    # past its era on a lite node that lacks block 104: the SDK would read the tip for a missing hash
+    _lose_answers(substrate, lost=False)
+    substrate.final_nonce = 8 if landed else 7
+    _finalize(substrate, 100 + gamma_module.ERA_PERIOD + 1)
+    substrate.blocks = {104: [(recorded["hash"], "ExtrinsicSuccess")]} if landed else {}
+    substrate.missing = frozenset({104})
+    result, events, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert result.exit_code != 0 and "no history for block 104" in result.output, result.output
+    assert "BT_SUBTENSOR_NETWORK=archive" in result.output
+    assert _record() == recorded and substrate.nonces == [7] and "unlock" not in events
+
+    substrate.missing = frozenset()  # an archive endpoint
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert _record() is None
+    if landed:
+        assert result.exit_code != 0 and "gamma_payment_landed" in result.output and substrate.nonces == [7]
+    else:
+        assert result.exit_code == 0 and substrate.nonces == [7, 7], result.output
 
 
 @CHAINS

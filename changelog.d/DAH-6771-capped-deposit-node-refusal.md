@@ -9,3 +9,4 @@
 - `lium fund --gamma` keeps a payment's record until the chain gives its result or the node refuses it outright, on bittensor 10 and 11, and finds an earlier payment in a block by the hash the chain reports for it.
 - `lium fund --gamma` keeps a payment record written by an older lium, which names no transaction, and tells you how to check and clear it instead of paying again. On bittensor 11, a result in a block whose events could not be read stays recorded until a later run reads them.
 - `lium fund --gamma` resolves a recorded payment only from the chain's blocks in its validity window, never from the account's nonce: it is cleared once found (and reported) or once its window has ended without it.
+- `lium fund --gamma` keeps a recorded payment when the chain endpoint has no history for a block in its validity window, and names the archive endpoint (`BT_SUBTENSOR_NETWORK=archive`) that settles it.

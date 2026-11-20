@@ -337,16 +337,30 @@ def _v11_refusal(resp, refused: set[str]) -> str | None:
     return (resp.message or "refused") if getattr(getattr(resp, "error", None), "name", None) in refused else None
 
 
-def _landed(subtensor, recorded: dict, number: int) -> tuple[int, bool, str | None] | None:
+def _landed(subtensor, address: str, recorded: dict, number: int) -> tuple[int, bool, str | None] | None:
     """(block, succeeded, error) of the recorded payment in finalized blocks ``born`` to ``number`` (within its era),
     None when none of them carries it. A carried payment whose dispatch result cannot be read raises: it stays recorded."""
     substrate = getattr(subtensor, "substrate", None)
     for block in range(recorded["born"], min(recorded["dies"], number) + 1):
-        if substrate is not None:
-            block_hash = substrate.get_block_hash(block)
-            extrinsics = substrate.get_extrinsics(block_hash=block_hash) or []
-        else:
-            extrinsics = subtensor.block_info(block).extrinsics
+        # a node without this block's history answers no hash (the SDK would then read the tip) or fails the read:
+        # the scan is incomplete, so nothing about the payment is proved
+        try:
+            if substrate is not None:
+                block_hash = substrate.get_block_hash(block)
+                extrinsics = substrate.get_extrinsics(block_hash=block_hash) if block_hash else None
+            else:
+                info = subtensor.block_info(block)
+                extrinsics = info.extrinsics if info is not None else None
+        except Exception:
+            extrinsics = None
+        if extrinsics is None:
+            raise LiumError(
+                f"The chain endpoint has no history for block {block}, so whether the earlier gamma payment "
+                f"{recorded['hash']} reached the chain cannot be read. Run this again with an archive endpoint "
+                "(BT_SUBTENSOR_NETWORK=archive), which settles it automatically; otherwise check the wallet's recent "
+                f"transactions and 'lium balance', then delete {UNRESOLVED / (address + '.json')} to pay "
+                "again. Nothing new was signed."
+            )
         hashes = [_hash_of(e) for e in extrinsics]
         if recorded["hash"] not in hashes:
             continue
@@ -404,7 +418,7 @@ def _settled_nonce(subtensor, address: str) -> int:
             f"record ({UNRESOLVED / (address + '.json')}) does not say which transaction it was. Check the wallet's "
             "recent transactions and 'lium balance', then delete the file to pay again. Nothing new was signed."
         )
-    landed = _landed(subtensor, recorded, number)
+    landed = _landed(subtensor, address, recorded, number)
     if landed is None:
         if number <= recorded["dies"]:  # it can still land until its era ends
             raise LiumError(
