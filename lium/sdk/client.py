@@ -2722,7 +2722,7 @@ class Lium:
     ) -> Dict[str, Any]:
         """Leave feedback on a pod's node (``POST /pods/{id}/feedback``): ``rating`` 1-5, ``text``, ``reason``.
 
-        The feedback reaches Lium support and the node's provider rating. The pod must still exist; to
+        The feedback and its optional rating are recorded and reach Lium support. The pod must still exist; to
         rate a pod you are removing, pass the feedback to :meth:`down` instead.
         """
         if rating is not None and not 1 <= rating <= 5:

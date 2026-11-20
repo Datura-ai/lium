@@ -188,7 +188,7 @@ Do this in a trap so it runs on any exit path:
 trap 'lium rm "$POD" --yes >/dev/null 2>&1 || true' EXIT
 ```
 
-Tell us how the node went in the same call, when it was bad or good — it reaches Lium support and the provider's rating, and never blocks the removal:
+Tell us how the node went in the same call, when it was bad or good — it is recorded and reaches Lium support, and never blocks the removal:
 
 ```bash
 lium rm "$POD" --yes --rating 2 --feedback "disk throughput ~50 MB/s, training stalled"
