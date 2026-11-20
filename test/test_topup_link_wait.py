@@ -545,6 +545,18 @@ def _fingerprint_server(monkeypatch, signup_response, keys_list=None, keys_post=
 FP = "a" * 28 + "WXYZ"
 
 
+@pytest.mark.parametrize("credit_granted", [True, False])
+def test_no_email_signup_never_mentions_a_signup_credit(monkeypatch, signup_env, credit_granted):
+    _fingerprint_server(monkeypatch, _Response(200, {"user_id": "u1", "username": "lium_1", "fingerprint": FP,
+                                                     "api_key": "sk_rent_fp", "signup_credit_granted": credit_granted}))
+
+    result = CliRunner().invoke(cli, ["signup", "--no-email"])
+
+    assert result.exit_code == 0, result.output
+    assert "signup credit" not in result.output.lower()
+    assert "fund the account before renting" in result.output
+
+
 def test_no_email_signup_is_one_call_and_keeps_the_fingerprint_and_key(monkeypatch, signup_env):
     calls = _fingerprint_server(monkeypatch, _Response(200, {"user_id": "u1", "username": "lium_1", "fingerprint": FP,
                                                              "api_key": "sk_rent_fp", "signup_credit_granted": False}))

@@ -11,7 +11,6 @@ from lium.cli.actions import ActionResult
 from lium.cli.cli import cli
 from lium.cli.init.actions import SetupSshKeyAction
 from lium.cli.signup import actions as signup_actions
-from lium.cli.signup import command as signup_command
 
 
 class FakeResponse:
