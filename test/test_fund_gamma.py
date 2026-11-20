@@ -445,8 +445,9 @@ def test_an_unknown_rest_spend_blocks_the_next_payment_until_finalized_state_set
     assert result.exit_code != 0 and "has not settled yet" in result.output
     assert len(substrate.nonces) == done and "unlock" not in events
 
-    # finalized past it: settled either way, the entry is cleared and the next payment signs above it
+    # finalized past it and past its era, never included: the entry is cleared and the next payment signs above it
     substrate.final_nonce, substrate.unknown = 9, False
+    _finalize(substrate, _record()["dies"] + 1)
     substrate.held, substrate.submit = [None, None], None
     result, _, _ = _run(monkeypatch, args, substrate)
     assert result.exit_code == 0, result.output
@@ -852,12 +853,13 @@ def test_a_used_nonce_alone_never_drops_the_record(monkeypatch, chain):
 
 @CHAINS
 @pytest.mark.parametrize(
-    "final_nonce, finalized, kept",
-    [(8, 110, True), (7, 100 + gamma_module.ERA_PERIOD + 1, False)],
-    ids=["nonce-used", "expired-nonce-unused"],
+    "final_nonce, finalized",
+    [(8, 110), (7, 100 + gamma_module.ERA_PERIOD + 1), (0, 100 + gamma_module.ERA_PERIOD + 1)],
+    ids=["nonce-used", "expired-nonce-unused", "account-emptied-and-refilled"],
 )
-def test_an_older_record_without_a_hash_is_kept_once_its_nonce_is_used(monkeypatch, chain, final_nonce, finalized, kept):
-    # the released CLI recorded only the nonce and the era's end: which transaction used the nonce cannot be read
+def test_an_older_record_without_a_hash_is_always_kept(monkeypatch, chain, final_nonce, finalized):
+    # the released CLI recorded only the nonce and the era's end: which transaction used the nonce cannot be read,
+    # and the account nonce proves nothing (an emptied and refilled account restarts it)
     legacy = {"nonce": 7, "dies": 100 + gamma_module.ERA_PERIOD}
     gamma_module.UNRESOLVED.mkdir(parents=True)
     (gamma_module.UNRESOLVED / "5Cold.json").write_text(json.dumps(legacy))
@@ -867,12 +869,48 @@ def test_an_older_record_without_a_hash_is_kept_once_its_nonce_is_used(monkeypat
 
     result, events, _ = _run(monkeypatch, ARGS, substrate)
 
-    if kept:
-        assert result.exit_code != 0 and "delete the file to pay again" in result.output, result.output
-        assert _record() == legacy and substrate.nonces == [] and "unlock" not in events
-    else:  # past its era with its nonce never used: it can no longer land
-        assert result.exit_code == 0, result.output
-        assert _record() is None and substrate.nonces == [7]
+    assert result.exit_code != 0 and "delete the file to pay again" in result.output, result.output
+    assert _record() == legacy and substrate.nonces == [] and "unlock" not in events
+
+
+@CHAINS
+def test_a_paid_payment_is_found_after_the_account_was_emptied_and_refilled(monkeypatch, chain):
+    substrate = chain()
+    _lose_answers(substrate)
+    _run(monkeypatch, ARGS, substrate)
+    hash_ = _record()["hash"]
+
+    # it paid in block 104; the account was then emptied (its nonce removed) and refilled, and its era has passed
+    _lose_answers(substrate, lost=False)
+    substrate.final_nonce = 0
+    _finalize(substrate, 100 + gamma_module.ERA_PERIOD + 2)
+    substrate.blocks = {104: [(hash_, "ExtrinsicSuccess")]}
+    result, events, _ = _run(monkeypatch, ARGS, substrate)
+
+    envelope = json.loads(result.output.strip().splitlines()[-1])
+    assert result.exit_code != 0 and envelope["error"]["code"] == "gamma_payment_landed", result.output
+    assert substrate.nonces == [7] and "unlock" not in events and _record() is None
+
+
+@CHAINS
+def test_a_used_nonce_without_the_payment_keeps_the_record_until_its_era_ends(monkeypatch, chain):
+    substrate = chain()
+    _lose_answers(substrate)
+    _run(monkeypatch, ARGS, substrate)
+    recorded = _record()
+
+    # another transaction used the nonce: the payment could still land on a refilled account until its era ends
+    _lose_answers(substrate, lost=False)
+    substrate.final_nonce = 8
+    _finalize(substrate, 110)
+    result, events, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code != 0 and "until block" in result.output, result.output
+    assert _record() == recorded and substrate.nonces == [7] and "unlock" not in events
+
+    _finalize(substrate, recorded["dies"] + 1)
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code == 0 and "never reached the chain" in result.output, result.output
+    assert substrate.nonces == [7, 8] and _record() is None
 
 
 @pytest.mark.parametrize("outcome", ["ExtrinsicSuccess", "ExtrinsicFailed"], ids=["paid", "failed"])

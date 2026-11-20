@@ -388,29 +388,34 @@ def _settled_nonce(subtensor, address: str) -> int:
         final = subtensor.query(("System", "Account"), [address], block=head)
     final = int((getattr(final, "value", final) or {}).get("nonce") or 0)
     recorded = _recorded(address)
-    # settled once finalized state counts its nonce, or finalized blocks are past its mortal era: it can never land
-    unsettled = recorded is not None and final <= recorded["nonce"] and number <= recorded["dies"]
-    if int(pool) > final or unsettled:
+    if int(pool) > final:
         raise LiumError(
             f"An earlier transaction from {address} has not settled yet (its outcome was unknown or it is "
             "still in the pool). Run this again once it is finalized, usually within a minute."
         )
     if recorded is None:
         return final
-    if "hash" not in recorded and final > recorded["nonce"]:
+    # the account nonce proves nothing about a recorded payment (an emptied and refilled account restarts it at 0):
+    # only the chain's blocks in its era do
+    if "hash" not in recorded:
         # an older lium's record names no transaction: whether the payment at its nonce paid cannot be read
         raise LiumError(
             f"An earlier gamma payment from {address} (nonce {recorded['nonce']}) may have reached the chain, and its "
             f"record ({UNRESOLVED / (address + '.json')}) does not say which transaction it was. Check the wallet's "
             "recent transactions and 'lium balance', then delete the file to pay again. Nothing new was signed."
         )
-    # its nonce is used, or its era has passed: what it did is read before anything new is signed
-    landed = _landed(subtensor, recorded, number) if "hash" in recorded and final > recorded["nonce"] else None
-    _forget(address, recorded)
+    landed = _landed(subtensor, recorded, number)
     if landed is None:
-        if "hash" in recorded:
-            ui.warning(f"An earlier gamma payment from {address} never reached the chain; it paid nothing.")
+        if number <= recorded["dies"]:  # it can still land until its era ends
+            raise LiumError(
+                f"An earlier gamma payment from {address} has not settled yet: it can still reach the chain until "
+                f"block {recorded['dies']} (finalized now: {number}). Run this again after that block. Nothing new "
+                "was signed."
+            )
+        _forget(address, recorded)
+        ui.warning(f"An earlier gamma payment from {address} never reached the chain; it paid nothing.")
         return final
+    _forget(address, recorded)
     block, ok, error = landed
     if ok:
         raise CliFailure(
