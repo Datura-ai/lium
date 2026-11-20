@@ -759,6 +759,12 @@ def _pod_api_key_id(row: Dict[str, Any]) -> Optional[str]:
     return None if key_id is None else str(key_id)
 
 
+# 402 codes that mean "this account has no balance": account_unfunded (an unfunded key's write) and
+# BALANCE_REQUIRED (GET /pods with an API key on a $0 account, which sends no hint of its own)
+FUNDING_REQUIRED_CODES = ("account_unfunded", "BALANCE_REQUIRED")
+FUNDING_HINT = "Add funds with 'lium topup' or 'lium fund', or on the Billing page, then retry."
+
+
 def _error_context(response: requests.Response) -> dict:
     """code/hint/request_id from the API's error envelope (``error: {...}``) and the
     ``X-Request-Id`` header, for the exception's attributes. Empty when absent (older servers)."""
@@ -1073,8 +1079,10 @@ class Lium:
             # the key's daily or total budget is reached (error.code
             # API_KEY_BUDGET_EXCEEDED). A 402 for a Stripe card decline is not this.
             raise budget_error(_response_error_message(resp), key=key, data=_error_data(resp), **context)
-        if resp.status_code == 402 and context.get("code") == "account_unfunded":
-            # an API key on an account with no balance tried a write: the same funding refusal as a 403, its code and hint kept
+        if resp.status_code == 402 and context.get("code") in FUNDING_REQUIRED_CODES:
+            # an API key on an account with no balance: a write (account_unfunded) or the pod list (BALANCE_REQUIRED,
+            # the first call of a first rental) — the same funding refusal as a 403, its code kept, a hint always given
+            context["hint"] = context.get("hint") or FUNDING_HINT
             raise LiumInsufficientBalanceError(
                 f"Insufficient balance: {_response_error_message(resp)}" + (f" ({key})" if key else ""), **context
             )

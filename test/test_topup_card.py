@@ -285,6 +285,20 @@ def test_a_write_by_a_key_on_an_account_with_no_balance_is_the_funding_refusal(c
 
 
 @responses.activate
+def test_the_first_rentals_pod_list_on_a_zero_balance_account_is_the_funding_refusal(client):
+    """402 `BALANCE_REQUIRED` from GET /pods (an API key on a $0 account; the server sends no hint): the typed
+    funding error with its code kept and a top-up hint supplied, so an agent's first rental knows what to do."""
+    body = _error_body(402, {"code": "BALANCE_REQUIRED", "message": "Add balance to use pods with an API key: lium topup."})
+    responses.get(f"{BASE}/pods", status=402, json=body)
+
+    with pytest.raises(LiumInsufficientBalanceError) as raised:
+        client.ps()
+
+    assert raised.value.code == "BALANCE_REQUIRED"
+    assert "lium topup" in raised.value.hint
+
+
+@responses.activate
 def test_a_key_at_its_budget_is_not_a_card_topup_error(client):
     """A shared 402 `API_KEY_BUDGET_EXCEEDED` is the key's budget refusal, never a card top-up error."""
     body = _error_body(
