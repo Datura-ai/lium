@@ -46,13 +46,19 @@ def schedules_rm_command(indices: str):
     action = CancelSchedulesAction()
     result = action.execute(ctx)
 
-    refusals = result.data.get("refusals") or []
+    budget_errors = result.data.get("budget_errors") or []
+    funding_errors = result.data.get("funding_errors") or []
+    refusals = budget_errors + funding_errors
     if refusals:
-        # report what went through first, then the funding refusal itself (exit 6 with its hint)
+        # report what went through first, then exit 6 with the first refusal; in a mixed batch the no-balance pods are
+        # named with their hint too, since raising the key's budget does not fund the account (as in `rm --in`)
         if result.data.get("cancelled"):
             ui.success(f"Cancelled schedules for {', '.join(result.data['cancelled'])}")
         if result.data.get("failures"):
             ui.error(f"Failed to cancel schedules: {', '.join(result.data['failures'])}")
+        if budget_errors and funding_errors:
+            funding_huids = ", ".join(result.data["funding_huids"])
+            ui.error(f"No balance on the account for pods: {funding_huids} ({funding_errors[0].hint})")
         raise refusals[0]
     # Only error if anything failed
     if not result.ok:

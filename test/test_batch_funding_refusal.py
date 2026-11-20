@@ -109,3 +109,19 @@ def test_a_mixed_rm_in_batch_reports_budget_and_funding_refusals_apart(monkeypat
     assert result.exit_code == EXIT_PERMISSION_DENIED, result.output
     assert payload["budget_refused"] == ["pod-a"]
     assert payload["funding_refused"] == [{"huid": "pod-b", "code": "account_unfunded", "hint": HINT}]
+
+
+@pytest.mark.parametrize("refused", [
+    {"pod-a": _budget, "pod-b": _funding},  # budget -> funding
+    {"pod-a": _funding, "pod-b": _budget},  # funding -> budget
+])
+def test_a_mixed_schedules_rm_batch_names_the_no_balance_pods_with_their_hint(monkeypatch, refused):
+    monkeypatch.setattr(schedules_rm_module, "Lium", _fake(refused))
+
+    result = CliRunner().invoke(cli, ["schedules", "rm", "1,2"])
+
+    funding_huid = next(h for h, kind in refused.items() if kind is _funding)
+    assert result.exit_code == EXIT_PERMISSION_DENIED, result.output
+    assert f"No balance on the account for pods: {funding_huid}" in result.output
+    assert "lium topup" in result.output
+    assert "budget on the key" in result.output
