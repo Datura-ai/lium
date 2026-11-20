@@ -1,12 +1,12 @@
 name: Pinned actions
 
 # no path filter: an action manifest can live anywhere in the repo, and a required check must report on every PR
-# the check that judges a PR or a merge-queue candidate must come from the protected main branch, never from the candidate:
-# the organization ruleset in .github/rulesets/pinned-actions-required-workflow.json requires this file at refs/heads/main
-# on pull_request and merge_group in this repository, so GitHub runs main's copy whatever a PR or queued group changes here.
-# The candidate's tree is checked out as data only (nothing from it runs, and the token is read-only)
+# the check that judges a PR must come from the protected main branch, never from the candidate. pull_request_target runs
+# this file as it is on the base branch, so a PR cannot change the check that judges it; it stays until the organization
+# ruleset in .github/rulesets/pinned-actions-required-workflow.json is active with lium-io main carrying this file
+# (.github/rulesets/README.md). The candidate's tree is checked out as data only (nothing from it runs, the token is read-only)
 on:
-  pull_request:
+  pull_request_target:
     # edited: a retarget to main (a stacked PR) with no new push still gets this check on the new merge ref
     types: [opened, synchronize, reopened, edited]
   merge_group:
@@ -24,9 +24,9 @@ jobs:
     runs-on: ubuntu-24.04  # its /usr/bin/python3 ships the distro PyYAML the check imports below
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        # the event's own commit: a PR's merge tree (a fork's too: checkout refuses a fork's ref only under pull_request_target),
-        # the queued group's commit, or main
         with:
+          # a PR run scans the PR's merge tree; main and the merge queue scan the commit they run on
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || '' }}
           persist-credentials: false
       # every workflow and action this run can execute pins third-party code to a commit and images to a digest, never to a
       # movable tag: the tracked files at this commit, then every pinned action or reusable workflow they call, fetched at

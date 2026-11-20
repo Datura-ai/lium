@@ -107,3 +107,7 @@ gh api "orgs/Datura-ai/rulesets" --method POST --input .github/rulesets/pinned-a
 ```
 
 Check: `gh api "orgs/Datura-ai/rulesets" --jq '.[]|.name+" "+.enforcement'` → `pinned-actions-required-workflow active`.
+
+Until that check passes and `.github/workflows/pinned-actions.yml` is on `lium-io` main, the ruleset protects nothing:
+a PR's own `pull_request` copy would judge it. So `pinned-actions.yml` here stays on `pull_request_target` (main's copy
+judges every PR) until both are true; only then can a later PR move it to `pull_request`.
