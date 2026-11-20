@@ -395,46 +395,57 @@ def test_an_unknown_mint_blocks_until_its_era_has_passed(monkeypatch):
 
 
 SubstrateRequestException = type("SubstrateRequestException", (Exception,), {})  # as bittensor <= 10 raises it
+MaxRetriesExceeded = type("MaxRetriesExceeded", (SubstrateRequestException,), {})
 
 
-def _pool_answer(code, shape="str"):
-    """The node's refusal as bittensor 10's substrate library raises it: async-substrate-interface 2.0.3's
-    author_submitAndWatchExtrinsic path raises ``SubstrateRequestException(str(response))`` with the whole answer;
-    its other path raises the answer dict itself; older stacks raised the error object alone."""
-    error = {"code": code, "message": "Invalid Transaction",
-             "data": "Inability to pay some fees (e.g. account balance too low)"}
-    answer = {"jsonrpc": "2.0", "id": 1, "error": error}
-    raised = {"str": str(answer), "dict": answer, "error": error}[shape]
+def _watch(substrate, *replies):
+    """author_submitAndWatchExtrinsic on bittensor 10's locked driver (async-substrate-interface 2.0.3
+    ``_make_rpc_request``): every send gets the next scripted reply; an error answer is raised as
+    ``SubstrateRequestException(str(response))``; a reply timeout resends the same bytes until ``max_retries`` sends,
+    then raises MaxRetriesExceeded. ``"timeout"`` scripts a send whose reply never comes."""
 
     def submit(extrinsic):
-        raise SubstrateRequestException(raised)
+        for attempt in range(1, len(replies) + 1):
+            substrate.watch_send_count += 1
+            reply = replies[attempt - 1]
+            if reply != "timeout":
+                raise SubstrateRequestException(str({"jsonrpc": "2.0", "id": attempt, "error": reply}))
+            if attempt >= substrate.max_retries:
+                raise MaxRetriesExceeded("Max retries reached.")
+        raise AssertionError("ran out of scripted replies")
     return submit
 
 
-@pytest.mark.parametrize("shape", ["str", "dict", "error"])
-def test_a_mint_the_node_refuses_clears_its_record_and_the_next_run_proceeds(monkeypatch, shape):
-    substrate = FakeSubstrate(submit=_pool_answer(1010, shape))  # bittensor <= 10: the pool refuses, e.g. fees unpaid
+FEES = {"code": 1010, "message": "Invalid Transaction", "data": "Inability to pay some fees (e.g. account balance too low)"}
+STALE = {"code": 1010, "message": "Invalid Transaction", "data": "Transaction is outdated"}
+
+
+@pytest.mark.parametrize(
+    "replies, definite_initial_refusal",
+    [
+        ((FEES,), True),  # the pool refused the only send: it never entered the pool
+        (({"code": 1013, "message": "Transaction Already Imported"},), False),  # the pool holds it: it may land
+        (({"code": -32603, "message": "Internal error"},), False),  # an unrecognized answer proves nothing
+        (("timeout", STALE), False),  # accepted, reply lost: a resend would get a stale 1010 after acceptance
+    ],
+    ids=["initial-1010", "initial-1013", "unrecognized-32603", "accepted-then-timeout"],
+)
+def test_only_a_definite_initial_refusal_clears_the_record(monkeypatch, replies, definite_initial_refusal):
+    substrate = FakeSubstrate()
+    substrate.max_retries, substrate.watch_send_count = 5, 0  # the driver's default
+    substrate.submit = _watch(substrate, *replies)
     args = ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"]
 
     result, _, _ = _run(monkeypatch, args, substrate)
-    assert result.exit_code != 0 and "1010 Invalid Transaction" in result.output, result.output
-    assert _record() is None
+    assert result.exit_code != 0
+    assert (_record() is None) == definite_initial_refusal
+    assert ("The node rejected this payment" in result.output) == definite_initial_refusal, result.output
+    assert substrate.watch_send_count == 1 and substrate.max_retries == 5
 
-    substrate.submit = None  # funded meanwhile: the rerun is not held for a payment that never entered the pool
+    substrate.submit = None  # funded meanwhile: only a proved refusal lets the rerun sign again
     result, _, _ = _run(monkeypatch, args, substrate)
-    assert result.exit_code == 0, result.output
-    assert substrate.nonces == [7, 7]
-
-
-def test_a_mint_the_pool_already_holds_keeps_its_record(monkeypatch):
-    substrate = FakeSubstrate(submit=_pool_answer(1013))  # already imported: the same transaction may still land
-    args = ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"]
-
-    result, _, _ = _run(monkeypatch, args, substrate)
-    assert result.exit_code != 0 and _record()["nonce"] == 7
-
-    result, _, _ = _run(monkeypatch, args, substrate)
-    assert result.exit_code != 0 and "has not settled yet" in result.output
+    assert (result.exit_code == 0) == definite_initial_refusal, result.output
+    assert substrate.nonces == ([7, 7] if definite_initial_refusal else [7])
 
 
 @pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])

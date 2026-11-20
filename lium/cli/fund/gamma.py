@@ -35,6 +35,7 @@ FAILED_HINT = (
     "(gamma credits can take a few minutes) before funding again"
 )
 NOT_SENT_HINT = "Nothing was signed or sent, so nothing can land: fix the error above and run the command again"
+REFUSED_HINT = "The node rejected this payment. Fix the error above and run the command again."
 
 
 def _sim_gamma(subtensor, rao: int) -> int:
@@ -132,6 +133,10 @@ class NotSent(Exception):
     """Failed before anything was signed and broadcast (composing or signing): nothing can land."""
 
 
+class Refused(NotSent):
+    """The node refused the transaction on its only send: it never entered the pool, so it cannot land."""
+
+
 def _recorded(address: str) -> dict | None:
     """The coldkey's unresolved payment, or None. An unreadable record refuses: it may hide a payment that can land."""
     path = UNRESOLVED / f"{address}.json"
@@ -167,12 +172,13 @@ def _forget(address: str, entry: dict) -> None:
 
 
 def _node_refusal(error: Exception) -> str | None:
-    """The node's refusal of a submitted transaction, or None when the node did not answer.
+    """The node's definitive refusal of a transaction it was sent once, or None when the outcome is not proved.
 
-    bittensor <= 10 raises the node's JSON-RPC answer when the pool refuses a transaction (1010 invalid, e.g. fees it
-    cannot pay): it was never pooled, so it cannot land. Its substrate library raises the whole answer, as a dict or as
-    the ``str()`` of one (``"{'jsonrpc': '2.0', 'id': 1, 'error': {'code': 1010, ...}}"``), or the error object alone.
-    1013 (already imported) means the same transaction is in the pool, so it may still land.
+    bittensor <= 10's substrate library raises the node's JSON-RPC answer to author_submitAndWatchExtrinsic as the
+    ``str()`` of the whole answer (``"{'jsonrpc': '2.0', 'id': 1, 'error': {'code': 1010, ...}}"``); the answer as a
+    dict and the error object alone are read too. Only 1010 (invalid, e.g. fees it cannot pay) proves the transaction
+    never entered the pool, and only on the first send (the caller sends once). 1013 (already imported), -32603 and
+    any other answer leave the outcome unknown, as bittensor 11 treats them.
     """
     answer = error.args[0] if error.args else None
     if isinstance(answer, str):
@@ -182,7 +188,7 @@ def _node_refusal(error: Exception) -> str | None:
             return None
     if isinstance(answer, dict) and isinstance(answer.get("error"), dict):
         answer = answer["error"]
-    if not isinstance(answer, dict) or not isinstance(answer.get("code"), int) or answer["code"] == 1013:
+    if not isinstance(answer, dict) or answer.get("code") != 1010:
         return None
     return f"{answer['code']} {answer.get('message', '')}: {answer.get('data', '')}".rstrip(": ")
 
@@ -340,14 +346,22 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
             entry = _record(coldkey_ss58, nonce, born + ERA_PERIOD)
         except (Exception, KeyboardInterrupt) as e:  # Ctrl-C included: nothing is broadcast yet
             raise NotSent(str(e) or type(e).__name__) from e
+        # the driver resends the same bytes after a reply timeout, and a 1010 (stale) to that resend can follow the
+        # first send's acceptance: one send for this watch, so a 1010 always answers the only send
+        retries = getattr(substrate, "max_retries", None)
+        if retries is not None:
+            substrate.max_retries = 1
         try:
             receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=True)
         except Exception as e:
             refusal = _node_refusal(e)
-            if refusal is None:  # no answer from the node: it may still land, its record stays
+            if refusal is None:  # the outcome is not proved: it may still land, its record stays
                 raise
             _forget(coldkey_ss58, entry)  # the node refused it: nothing is in its pool, nothing can land
-            return False, refusal
+            raise Refused(refusal) from e
+        finally:
+            if retries is not None:
+                substrate.max_retries = retries
         _forget(coldkey_ss58, entry)
         return receipt.is_success, None if receipt.is_success else receipt.error_message
 
@@ -356,6 +370,8 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
 
     try:
         ok, error = ui.load("Minting gamma", mint)
+    except Refused as e:
+        raise CliFailure("transfer_failed", f"Gamma mint failed: {e}", EXIT_GENERAL_ERROR, hint=REFUSED_HINT) from e
     except NotSent as e:  # failed before signing: nothing was broadcast, nothing to wait for
         raise CliFailure("transfer_failed", f"Gamma mint failed: {e}", EXIT_GENERAL_ERROR, hint=NOT_SENT_HINT) from e
     except (Exception, KeyboardInterrupt) as e:  # noqa: BLE001 - may still land: its record (written before) stays
@@ -375,7 +391,7 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
                         "Spending the rest at Lium",
                         lambda: submit([("spend_gamma", {"service": payee, "netuid": NETUID, "amount": rest})], nonce + 1),
                     )
-                except NotSent:  # failed before signing: nothing was broadcast, so nothing is pending
+                except NotSent:  # not broadcast, or refused by the node: nothing is pending
                     raise
                 except (Exception, KeyboardInterrupt):  # sent, but the answer was lost
                     rest_pending = rest  # recorded before broadcast: the next run waits until it settles

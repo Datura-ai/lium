@@ -171,7 +171,8 @@ and use the exit code of their family from the table above. Where re-running
 the command would not be safe the hint says so: `jupyter_install_failed` from
 `up` points at `lium update <pod> --jupyter` (the pod exists and bills), and
 `transfer_failed` says to check the wallet and `lium balance` before funding
-again (the transfer may have reached the chain).
+again (the transfer may have reached the chain), except after a definitive node refusal of `lium fund --gamma`,
+whose hint says to fix the error and run the command again.
 
 With `LIUM_DEBUG=1` every handled failure also prints its Python traceback to
 stderr before the error (or the envelope), so "re-run with `LIUM_DEBUG=1`" gives
