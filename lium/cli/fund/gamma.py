@@ -67,17 +67,17 @@ def min_gamma_out(expected: int) -> int:
 ZERO_ACCOUNT = "5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM"  # any well-formed key: the read is a probe
 
 
-def _spec_493(subtensor) -> bool:
-    """Deposits have no spender, read from the connected runtime, never the installed SDK: bittensor
-    <= 10 reads ``mint_gamma``'s fields from the call metadata; bittensor 11, which exposes no call
-    metadata, reads ``GammaSpent``, the storage runtime 493 adds with it (its codec raises
+def _spec_493(subtensor, block=None) -> bool:
+    """Deposits have no spender, read from the connected runtime (at ``block``, the head when None), never the
+    installed SDK: bittensor <= 10 reads ``mint_gamma``'s fields from the call metadata; bittensor 11, which exposes
+    no call metadata, reads ``GammaSpent``, the storage runtime 493 adds with it (its codec raises
     ``StorageFunctionNotFound`` for an item the runtime lacks)."""
     substrate = getattr(subtensor, "substrate", None)
     if substrate is not None:
-        call = substrate.get_metadata_call_function("SubtensorModule", "mint_gamma")
+        call = substrate.get_metadata_call_function("SubtensorModule", "mint_gamma", block_hash=block)
         return "spender" not in {field["name"] for field in getattr(call, "value", call)["fields"]}
     try:
-        subtensor.query(("SubtensorModule", "GammaSpent"), [NETUID, ZERO_ACCOUNT, ZERO_ACCOUNT])
+        subtensor.query(("SubtensorModule", "GammaSpent"), [NETUID, ZERO_ACCOUNT, ZERO_ACCOUNT], block=block)
     except Exception as e:  # only the runtime lacking the item means "before 493"
         if any(cls.__name__ == "StorageFunctionNotFound" for cls in type(e).__mro__):
             return False
@@ -85,12 +85,19 @@ def _spec_493(subtensor) -> bool:
     return True
 
 
-def _same_runtime(subtensor, spec_493: bool) -> None:
-    """The payment's calls were chosen for the runtime read before confirming and linking; signed against another
-    (a runtime upgrade in between) they would pay differently, so it is refused before signing. The signature
-    commits to the runtime version it was made for, so an upgrade after this read invalidates it on chain."""
-    if _spec_493(subtensor) != spec_493:
-        raise NotSent("the chain's runtime changed while this command ran; run the command again")
+RUNTIME_CHANGED = "the chain's runtime changed while this command ran; run the command again"
+
+
+def _pinned_runtime(subtensor) -> tuple[object, int, int, bool]:
+    """One finalized block (as _finalized gives it), its runtime's spec version and whether that runtime is 493, all
+    read at that block: a payment is decided, composed and signed against this one runtime."""
+    block, number = _finalized(subtensor)
+    substrate = getattr(subtensor, "substrate", None)
+    if substrate is not None:
+        spec_version = substrate.init_runtime(block_hash=block).runtime_version
+    else:
+        spec_version = subtensor.query(("System", "LastRuntimeUpgrade"), [], block=number)["spec_version"]
+    return block, number, int(spec_version), _spec_493(subtensor, block if substrate is not None else number)
 
 
 def _deposit(subtensor, hotkey: str) -> dict:
@@ -390,9 +397,15 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
             # signed here with the unlocked keypair at the checked nonce (submit_call takes no nonce, and given a
             # wallet bittensor 11 unlocks it again, its password prompt unseen under the spinner)
             try:
+                _, number, spec_version, pinned_493 = _pinned_runtime(subtensor)
+                if pinned_493 != spec_493:  # the calls were chosen for another runtime
+                    raise NotSent(RUNTIME_CHANGED)
+                # the nested calls compose at the head: under another runtime than the pinned one they do not encode
+                # (a 493 batch has no spend_gamma, nor a spender-less mint_gamma, before 493), so nothing is signed
                 call = built[0] if len(built) == 1 else ("Utility", "batch_all", {"calls": [subtensor.compose(c) for c in built]})
                 unsigned = subtensor.prepare_call(call, address=coldkey_ss58, nonce=nonce, period=ERA_PERIOD)
-                _same_runtime(subtensor, spec_493)
+                if unsigned.spec_version != spec_version:  # the signature commits to the spec version it is made for
+                    raise NotSent(RUNTIME_CHANGED)
                 signature = coldkey.sign(unsigned.payload)
                 # bittensor 11 anchors the era to a finalized block, so at or below the one read after it
                 entry = _record(coldkey_ss58, nonce, _finalized(subtensor)[1] + ERA_PERIOD)
@@ -404,18 +417,26 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
             _forget(coldkey_ss58, entry)
             return resp.success, None if resp.success else resp.message
         try:
+            # the era starts at this finalized block, not the best head; the calls compose with its metadata
+            block, born, spec_version, pinned_493 = _pinned_runtime(subtensor)
+            if pinned_493 != spec_493:  # the calls were chosen for another runtime
+                raise NotSent(RUNTIME_CHANGED)
             built = [
-                substrate.compose_call(call_module="SubtensorModule", call_function=function, call_params=args)
+                substrate.compose_call(
+                    call_module="SubtensorModule", call_function=function, call_params=args, block_hash=block
+                )
                 for function, args in calls
             ]
             call = built[0] if len(built) == 1 else substrate.compose_call(
-                call_module="Utility", call_function="batch_all", call_params={"calls": built}
+                call_module="Utility", call_function="batch_all", call_params={"calls": built}, block_hash=block
             )
-            _same_runtime(subtensor, spec_493)  # the runtime just composed against, read before signing
-            _, born = _finalized(subtensor)  # the era starts at this finalized block, not the best head
             extrinsic = substrate.create_signed_extrinsic(
                 call=call, keypair=coldkey, nonce=nonce, era={"period": ERA_PERIOD, "current": born}
             )
+            # signed with the runtime the driver loaded for it, whose spec version the signature commits to: the
+            # chain refuses it under any other, so the composed bytes are only ever executed by the pinned runtime
+            if substrate.runtime.runtime_version != spec_version:
+                raise NotSent(RUNTIME_CHANGED)
             entry = _record(coldkey_ss58, nonce, born + ERA_PERIOD)
         except (Exception, KeyboardInterrupt) as e:  # Ctrl-C included: nothing is broadcast yet
             raise NotSent(str(e) or type(e).__name__) from e

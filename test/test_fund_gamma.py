@@ -41,15 +41,26 @@ class FakeSubstrate:
 
     pending = False  # a transaction from the coldkey still in the pool
     cap = {}  # {"daily_spend_cap": {"cap", "bucket": (units, block)}} for a capped deposit
+    # the runtime at the finalized block the payment is pinned to, and the one the driver signs with (the head's);
+    # None: the same as spec_493
+    pinned_493 = signed_493 = None
+
+    def _at(self, block_hash):
+        return self.spec_493 if block_hash is None or self.pinned_493 is None else self.pinned_493
+
+    def init_runtime(self, block_hash):
+        assert block_hash == "0xfinal"
+        self.runtime = types.SimpleNamespace(runtime_version=493 if self._at(block_hash) else 492)
+        return self.runtime
 
     def get_account_next_index(self, address):
         assert address == "5Cold"
         return self.final_nonce + (1 if self.pending else 0)
 
-    def get_metadata_call_function(self, module, function):
+    def get_metadata_call_function(self, module, function, block_hash=None):
         # the shape finney's metadata returns: a Variant whose value lists the call's fields
         assert (module, function) == ("SubtensorModule", "mint_gamma")
-        names = ["hotkey", "netuid", "amount", "min_amount_out"] + ([] if self.spec_493 else ["spender"])
+        names = ["hotkey", "netuid", "amount", "min_amount_out"] + ([] if self._at(block_hash) else ["spender"])
         return types.SimpleNamespace(value={"name": "mint_gamma", "fields": [{"name": n} for n in names + ["daily_spend_cap"]]})
 
     def query(self, module, storage, params, block_hash=None):
@@ -65,11 +76,16 @@ class FakeSubstrate:
         self.calls.append(params[1])
         return types.SimpleNamespace(value={"Ok": (1, 1, params[1] * GAMMA_PER_TAO // 10**9)})
 
-    def compose_call(self, call_module, call_function, call_params):
+    def compose_call(self, call_module, call_function, call_params, block_hash=None):
+        assert block_hash == "0xfinal"  # composed with the pinned block's metadata, never the head's
+        if call_function == "mint_gamma":  # the metadata decides the encoding: an obsolete field is dropped
+            assert ("spender" in call_params) != self._at(block_hash)
         return (call_module, call_function, call_params)
 
     def create_signed_extrinsic(self, call, keypair, nonce, era):
         assert era == {"period": gamma_module.ERA_PERIOD, "current": self.finalized_number}
+        signed = self.spec_493 if self.signed_493 is None else self.signed_493
+        self.runtime = types.SimpleNamespace(runtime_version=493 if signed else 492)  # the driver loads the head's
         self.nonces.append(nonce)
         return (call, keypair)
 
@@ -105,6 +121,10 @@ class FakeV11Subtensor:
 
     pending = False
     cap = {}
+    pinned_493 = signed_493 = None  # as FakeSubstrate's
+
+    def _at(self, block):
+        return self.spec_493 if block is None or self.pinned_493 is None else self.pinned_493
 
     def compose(self, call):
         _, function, params = call
@@ -118,14 +138,18 @@ class FakeV11Subtensor:
             assert call == ("Utility", "batch_all", {"calls": []})
             return types.SimpleNamespace(nonce=self.final_nonce + (1 if self.pending else 0))
         assert period == gamma_module.ERA_PERIOD
-        return types.SimpleNamespace(nonce=nonce, payload=b"payload", call=call)
+        signed = self.spec_493 if self.signed_493 is None else self.signed_493
+        return types.SimpleNamespace(nonce=nonce, payload=b"payload", call=call, spec_version=493 if signed else 492)
 
     def query(self, item, params, block=None):
         if item == ("System", "Account"):
             assert block == self.finalized_block  # settled means finalized
             return {"nonce": self.final_nonce}
+        if item == ("System", "LastRuntimeUpgrade"):
+            assert block == self.finalized_block
+            return {"spec_version": 493 if self._at(block) else 492, "spec_name": "node-subtensor"}
         if item == ("SubtensorModule", "GammaSpent"):
-            if not self.spec_493:
+            if not self._at(block):
                 raise type("StorageFunctionNotFound", (ValueError,), {})("SubtensorModule.GammaSpent")
             return 0
         assert (item, params) == (("SubtensorModule", "GammaDeposits"), [51, "5Cold"])
@@ -496,6 +520,25 @@ def test_a_runtime_upgrade_while_linking_refuses_the_payment_before_signing(monk
     assert result.exit_code == 1 and "runtime changed" in result.output and "Nothing was signed or sent" in result.output
     assert substrate.submissions == [] and _record() is None
     assert [e for e in events if e[0] == "sign" and e[1] != "challenge"] == []  # only the link was signed
+
+
+@pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
+@pytest.mark.parametrize(
+    "pinned_493, signed_493", [(True, None), (False, True)], ids=["pinned-block-is-493", "head-signs-as-493"]
+)
+def test_a_payment_is_decided_composed_and_signed_against_one_runtime(monkeypatch, chain, pinned_493, signed_493):
+    substrate = chain()  # the head reads 492 when the payment is chosen
+
+    def flip():  # then the runtime differs between the pinned block and the head the driver signs with
+        substrate.pinned_493, substrate.signed_493 = pinned_493, signed_493
+
+    result, events, _ = _run(
+        monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate, on_link=flip
+    )
+
+    assert result.exit_code == 1 and "runtime changed" in result.output and "Nothing was signed or sent" in result.output
+    # nothing reaches the chain, so no mint can land without its payment
+    assert substrate.submissions == [] and _record() is None
 
 
 def _record():
