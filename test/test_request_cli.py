@@ -56,3 +56,45 @@ def test_request_command_prints_the_answer_as_json(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["provider_notified_count"] == 4
+
+
+def test_request_machine_auto_rent_sends_the_resolved_template_and_configured_keys(monkeypatch):
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    sent = []
+    _lium(monkeypatch, sent)
+    monkeypatch.setattr(Lium, "get_template", lambda self, ref: SimpleNamespace(id="tpl-1") if ref == "pytorch" else None)
+    monkeypatch.setattr(Lium, "config", SimpleNamespace(ssh_public_keys=["ssh-ed25519 AAAA me"]), raising=False)
+
+    Lium().request_machine(
+        "B300", 8, auto_rent=True, max_price_per_gpu_hour=6.5, hours=24, template_id="pytorch",
+        start_before=datetime(2026, 11, 10, 12, 0),
+    )
+
+    assert sent == [("POST", "/machine-requests", {
+        "machine_name": "NVIDIA B300 SXM6 AC", "gpu_count": 8, "auto_rent": True, "max_price_per_gpu_hour": 6.5,
+        "hours": 24, "template_id": "tpl-1", "ssh_public_keys": ["ssh-ed25519 AAAA me"],
+        "start_before": "2026-11-10T12:00:00",
+    })]
+
+
+def test_request_machine_auto_rent_refuses_an_unknown_template_before_sending(monkeypatch):
+    sent = []
+    _lium(monkeypatch, sent)
+    monkeypatch.setattr(Lium, "get_template", lambda self, ref: None)
+
+    with pytest.raises(ValueError, match="No template matches 'nope'"):
+        Lium().request_machine("B300", 8, auto_rent=True, max_price_per_gpu_hour=6.5, hours=24, template_id="nope")
+    assert sent == []
+
+
+def test_request_command_auto_rent_names_the_missing_flags(monkeypatch):
+    sent = []
+    _lium(monkeypatch, sent)
+
+    result = CliRunner().invoke(cli, ["request", "B300", "-n", "8", "--auto-rent", "--hours", "24"])
+
+    assert result.exit_code == 2
+    assert "--auto-rent needs --max-price, --template" in result.output
+    assert sent == []
