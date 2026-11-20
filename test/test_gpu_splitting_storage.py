@@ -25,6 +25,7 @@ from lium.cli.mine.storage import (
     NoSafeTargetError,
     _source_disk_is_local,
     auto_select_target,
+    inspect_free_regions,
     load_mounted_filesystems,
     plan_loop_file_target,
     resolve_explicit_target,
@@ -416,7 +417,10 @@ def _dev(name, type_, children=(), mount=None, pkname=None, path=None):
 
 
 def _verdicts(runner, root_source):
-    devices = storage.load_block_devices(runner)
+    from unittest import mock
+
+    with mock.patch.object(storage, "_device_node_exists", lambda device: True):  # the test host has no such disks
+        devices = storage.load_block_devices(runner)
     root = MountInfo(target="/", source=root_source, fstype="ext4", options=["rw"])
     return {c.path: c.classification for c in storage.evaluate_candidates(runner, devices, root, root)}
 
@@ -762,3 +766,22 @@ def test_load_mount_info_asks_findmnt_for_canonical_sources():
 
     assert seen == [["findmnt", "--json", "--canonicalize", "--evaluate", "--target", "/var/lib/docker"]]
     assert mount == MountInfo(target="/var/lib/docker", source="/dev/sdc1", fstype="ext4", options=["rw", "relatime"])
+
+
+def test_free_region_read_runs_parted_in_script_mode():
+    # ticket-1262: without -s parted stopped to ask on a provider's VM disk and the check hung 20+ min
+    seen = []
+
+    def runner(args, check=True, capture=True):
+        seen.append(args)
+        return CommandResult(args, "BYT;\n", "", 0)
+
+    inspect_free_regions(runner, "/dev/nvme3n1")
+    assert seen == [["parted", "-s", "-m", "/dev/nvme3n1", "unit", "B", "print", "free"]]
+
+
+def test_a_disk_without_a_dev_node_is_left_out(monkeypatch):
+    # a container's lsblk lists the host's disks, but their /dev nodes are not there
+    runner = _lsblk([_dev("nvme0n1", "disk", [_dev("nvme0n1p1", "part", pkname="nvme0n1")]), _dev("sda", "disk")])
+    monkeypatch.setattr(storage.os.path, "exists", lambda path: path == "/dev/sda")
+    assert [d.path for d in storage.load_block_devices(runner)] == ["/dev/sda"]

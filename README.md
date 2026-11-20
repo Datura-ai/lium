@@ -340,7 +340,7 @@ Full reference with every flag and runnable examples: <https://docs.lium.io/deve
 
 - `lium mcp` - Serve Lium as an MCP server over stdio for agent hosts (`pip install "lium.io[mcp]"`; see [MCP server for agent hosts](#mcp-server-for-agent-hosts))
 - `lium theme dark|light` - Set the CLI colour theme (the argument is required; there is no `auto`; the value is stored as `[ui] theme` — `lium config get ui.theme` reads it back)
-- `lium mine` - Set up this host as a provider node
+- `lium mine` - Set up this host as a provider node (the host must be a full VM or bare metal, not a container: `lium mine` and `lium gpu-splitting` stop with that message inside one)
 - `lium mine --register <TOKEN>` - Same, then add the node to your portal account from what the host reports and wait until it is listed (token from the portal's Add Node page; the account, and what the node reports under, come from the token — no `-k`)
 - `sudo lium gpu-splitting setup [--device /dev/...] [--yes]` - Prepare Docker storage for LIUM GPU splitting
 - `lium gpu-splitting check [--device /dev/...]` - Inspect the host and print the GPU-splitting plan
@@ -412,7 +412,7 @@ lium provider machine estimate --gpu-type "NVIDIA H200 NVL" --gpu-count 8
 lium provider --json status                        # JSON envelope for scripts/agents
 
 # Inspect or configure Docker storage for GPU splitting (Ubuntu/Debian + systemd, run setup as root)
-lium gpu-splitting check
+lium gpu-splitting check                 # step [2/2] names the command it runs; one that hangs is stopped and named
 sudo lium gpu-splitting setup --yes
 lium gpu-splitting verify
 

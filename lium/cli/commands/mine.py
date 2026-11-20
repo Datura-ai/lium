@@ -332,7 +332,14 @@ def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None, c
 
     from rich.prompt import Prompt
 
-    from ..mine.gpu_splitting import _build_setup_plan, _execute_setup, _preflight, run_command
+    from ..mine.gpu_splitting import (
+        ContainerHostError,
+        _build_setup_plan,
+        _execute_setup,
+        _preflight,
+        _refuse_container_host,
+        run_command,
+    )
     from ..mine.storage import evaluate_candidates, get_device_by_path
 
     reason = "Docker cannot limit a container's disk on this host (needs xfs with pquota)."
@@ -341,6 +348,11 @@ def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None, c
         "image file on a single-disk host\n"
         f"Guide: {_STORAGE_GUIDE}"
     )
+    try:
+        _refuse_container_host()
+    except ContainerHostError as exc:
+        console.warning(str(exc))
+        return
     # --storage file|<disk> is the consent given up front, so it also works without a terminal (--register)
     if not choice and (auto or not sys.stdin.isatty()):
         console.warning(f"{reason}\n{manual}")
@@ -380,7 +392,7 @@ def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None, c
             console.warning("\n".join(lines) + f"\n\n--storage {typed} is not one of the disks listed; nothing was changed.\n{manual}")
             return
         try:
-            _execute_setup(_build_setup_plan(preflight, typed, mine_dir=mine_dir))
+            _execute_setup(_build_setup_plan(preflight, typed, mine_dir=mine_dir, progress=console.dim))
         except RuntimeError as exc:
             console.warning(f"Docker storage was not set up: {exc}\n{manual}")
         return
@@ -398,7 +410,7 @@ def _setup_docker_storage(auto: bool = False, mine_dir: Optional[Path] = None, c
         console.warning(f"{typed} is not one of the disks listed above; nothing was changed.\n{manual}")
         return
     try:
-        _execute_setup(_build_setup_plan(preflight, typed, mine_dir=mine_dir))
+        _execute_setup(_build_setup_plan(preflight, typed, mine_dir=mine_dir, progress=console.dim))
     except RuntimeError as exc:
         # a refusal (containers running, Docker down, no backup space, target checks) stops only the storage setup
         console.warning(f"Docker storage was not set up: {exc}\n{manual}")
@@ -416,7 +428,9 @@ def _offer_and_run_image_file_setup(preflight: "PreflightResult", lines: list[st
 
     try:
         # --storage file means the image file even when a spare disk would be auto-selected
-        plan = _build_setup_plan(preflight, None, mine_dir=mine_dir, force_image_file=consent)
+        plan = _build_setup_plan(
+            preflight, None, mine_dir=mine_dir, force_image_file=consent, progress=console.dim
+        )
     except RuntimeError as exc:
         console.warning("\n".join(lines) + f"\n\n{exc}\n{manual}")
         return
@@ -482,19 +496,22 @@ GIB = 1024**3
 
 
 def _node_images_present(executor_dir: Path) -> bool:
-    """Every image this run would pull is already local. The runner image carries the compose file with the executor
+    """Every image this run would pull is already local (each probe is time-bounded: a stuck daemon reads as no). The runner image carries the compose file with the executor
     digest the runner injects at build, so that file, not the unrendered docker-compose.app.yml, names the images."""
     try:
-        images = set(_run(f"docker compose {_RUNNER_FILE_OPT}config --images", cwd=str(executor_dir))[0].split())
+        images = set(
+            _run(f"docker compose {_RUNNER_FILE_OPT}config --images", cwd=str(executor_dir), timeout=_QUICK_CHECK_SECS)[0].split()
+        )
         runner = next(i for i in images if "executor-runner" in i)
         # inspect first: docker run pulls a missing image, which is the download this check exists to precede
         # (not --pull=never, which Docker before 20.10 rejects)
-        _run(f"docker image inspect {shlex.quote(runner)}")
-        baked = _run(f"docker run --rm --entrypoint cat {shlex.quote(runner)} /root/executor/docker-compose.yml")[0]
+        _run(f"docker image inspect {shlex.quote(runner)}", timeout=_QUICK_CHECK_SECS)
+        baked = _run(f"docker run --rm --entrypoint cat {shlex.quote(runner)} /root/executor/docker-compose.yml",
+                     timeout=_QUICK_CHECK_SECS)[0]
         images.update(re.findall(r"^\s*image:\s*(\S+)", baked, re.MULTILINE))
         images.add(PREFLIGHT_IMAGE)
         for image in images:
-            _run(f"docker image inspect {shlex.quote(image)}")
+            _run(f"docker image inspect {shlex.quote(image)}", timeout=_QUICK_CHECK_SECS)
     except (RuntimeError, StopIteration):
         return False
     return True

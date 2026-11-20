@@ -100,6 +100,22 @@ class _SetupExecutionState:
     loop_file_removed: bool = False
 
 
+# Planning (step 2) runs only read-only commands; each gets this long before it counts as hung.
+PLAN_COMMAND_TIMEOUT_SECONDS = 120
+# du walks the whole Docker root: minutes on a large one, so it waits longer.
+DU_TIMEOUT_SECONDS = 3600
+
+
+@dataclass
+class _CommandWatch:
+    show: Optional[Callable[[str], None]]
+    timeout: float
+
+
+# set by `_build_setup_plan` for the duration of planning; None while setup mutates the host (no deadline there)
+_command_watch: Optional[_CommandWatch] = None
+
+
 def run_command(args: list[str], check: bool = True, capture: bool = True) -> CommandResult:
     """Run one host command and normalize its output.
 
@@ -118,7 +134,21 @@ def run_command(args: list[str], check: bool = True, capture: bool = True) -> Co
     - stub host interactions in tests
     - avoid `shell=True` for the new storage-migration code
     """
-    result = subprocess.run(args, text=True, capture_output=capture)
+    command = " ".join(args)
+    watch = _command_watch
+    timeout = None
+    if watch is not None:
+        timeout = DU_TIMEOUT_SECONDS if args[0] == "du" else watch.timeout
+        if watch.show:
+            watch.show(f"running {command}")
+    try:
+        # stdin is never a terminal: a tool that stops to ask (parted without -s) gets EOF instead of waiting forever
+        result = subprocess.run(args, text=True, capture_output=capture, stdin=subprocess.DEVNULL, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"`{command}` did not finish within {int(exc.timeout)} s and was stopped. Nothing on the host was "
+            "changed. Run that command by hand to see where it waits (a disk or driver that does not answer)."
+        ) from exc
     command_result = CommandResult(
         args=args,
         stdout=result.stdout or "",
@@ -156,6 +186,33 @@ def _require_binary(name: str):
         raise RuntimeError(f"Required tool not found: {name}")
 
 
+class ContainerHostError(RuntimeError):
+    """The CLI runs inside a container, which cannot be a Lium node."""
+
+
+def _container_kind() -> Optional[str]:
+    """Name the container this process runs in (`systemd-detect-virt -c`, then the runtime marker files), or None."""
+    if shutil.which("systemd-detect-virt"):
+        result = run_command(["systemd-detect-virt", "-c"], False, True)
+        kind = result.stdout.strip()
+        if result.returncode == 0 and kind and kind != "none":
+            return kind
+    for marker, kind in (("/.dockerenv", "docker"), ("/run/.containerenv", "podman")):
+        if os.path.exists(marker):
+            return kind
+    return None
+
+
+def _refuse_container_host() -> None:
+    kind = _container_kind()
+    if kind:
+        raise ContainerHostError(
+            f"This host is a container ({kind}). A Lium node must be a full VM or bare metal: a container "
+            "cannot see or format the real disks or give renters their own containers. Run lium mine on the VM "
+            "or machine itself."
+        )
+
+
 def _detect_distro() -> Optional[str]:
     release = Path("/etc/os-release")
     if not release.exists():
@@ -174,6 +231,7 @@ def _preflight() -> PreflightResult:
 
     Commands run directly here:
 
+    - `systemd-detect-virt -c` via `_container_kind()`: a container is refused before anything else
     - `systemctl --version` to prove `systemd` tooling is available
 
     Commands delegated through helpers:
@@ -191,6 +249,7 @@ def _preflight() -> PreflightResult:
         raise RuntimeError("gpu-splitting requires root privileges")
     if platform.system() != "Linux":
         raise RuntimeError("gpu-splitting is only supported on Linux")
+    _refuse_container_host()
 
     distro_id = _detect_distro()
     if distro_id not in {"ubuntu", "debian"}:
@@ -239,6 +298,28 @@ def _preflight() -> PreflightResult:
 
 
 def _build_setup_plan(
+    preflight: PreflightResult,
+    device: Optional[str],
+    image_file: Optional[str] = None,
+    image_size_gib: Optional[int] = None,
+    mine_dir: Optional[Path] = None,
+    force_image_file: bool = False,
+    progress: Optional[Callable[[str], None]] = None,
+) -> SetupPlan:
+    """`_plan_setup` with every command it runs under a deadline and named through `progress` (the step line).
+
+    Planning is read-only, so a command that does not answer is a hang, not work: on a provider's VM `parted`
+    sat 20+ minutes on one disk with only a spinner showing. With no `progress` (`lium mine`) the deadlines still apply.
+    """
+    global _command_watch
+    previous, _command_watch = _command_watch, _CommandWatch(progress, PLAN_COMMAND_TIMEOUT_SECONDS)
+    try:
+        return _plan_setup(preflight, device, image_file, image_size_gib, mine_dir, force_image_file)
+    finally:
+        _command_watch = previous
+
+
+def _plan_setup(
     preflight: PreflightResult,
     device: Optional[str],
     image_file: Optional[str] = None,
@@ -320,7 +401,10 @@ def _build_setup_plan(
     elif not target.needs_partition_creation:
         try:
             fstab_entry = _fstab_entry(f"UUID={_get_uuid(target_path)}", "defaults,pquota")
-        except RuntimeError:
+        except RuntimeError as exc:
+            # a hung blkid would hang again after Docker is stopped, with no deadline there
+            if isinstance(exc.__cause__, subprocess.TimeoutExpired):
+                raise
             fstab_entry = ""
 
     destructive_actions = _destructive_actions(preflight, target, loop_file)
@@ -1427,9 +1511,14 @@ def gpu_splitting_check_command(
     _print_gpu_splitting_requirements()
     with timed_step_status(1, 2, "Running preflight inspection"):
         preflight = _preflight()
-    with timed_step_status(2, 2, "Resolving target"):
+    with timed_step_status(2, 2, "Resolving target") as show:
         plan = _build_setup_plan(
-            preflight, str(device) if device else None, str(image_file) if image_file else None, image_size_gib, mine_dir
+            preflight,
+            str(device) if device else None,
+            str(image_file) if image_file else None,
+            image_size_gib,
+            mine_dir,
+            show,
         )
 
     console.print(_docker_state_table(preflight))
@@ -1479,9 +1568,14 @@ def gpu_splitting_setup_command(
     _print_gpu_splitting_requirements()
     with timed_step_status(1, 2, "Running preflight inspection"):
         preflight = _preflight()
-    with timed_step_status(2, 2, "Resolving target"):
+    with timed_step_status(2, 2, "Resolving target") as show:
         plan = _build_setup_plan(
-            preflight, str(device) if device else None, str(image_file) if image_file else None, image_size_gib, mine_dir
+            preflight,
+            str(device) if device else None,
+            str(image_file) if image_file else None,
+            image_size_gib,
+            mine_dir,
+            show,
         )
 
     try:

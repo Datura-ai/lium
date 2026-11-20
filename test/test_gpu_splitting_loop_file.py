@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import subprocess
+
 import pytest
 from test_gpu_splitting_storage import (
     _patch_execute_setup_dependencies,
@@ -210,6 +212,26 @@ def test_node_images_present_is_lium_mine_s_own_check_on_its_checkout(monkeypatc
     assert ("No `lium mine` checkout" in capsys.readouterr().out) is not checkout_exists
 
 
+def test_node_images_present_bounds_every_docker_probe(monkeypatch, tmp_path):
+    # a stuck daemon must read as "not present", not hang the planning step
+    from lium.cli.commands import mine
+
+    calls = []
+
+    def fake_run(cmd, check=True, capture=True, cwd=None, timeout=None):
+        calls.append((cmd, timeout))
+        if "config --images" in cmd:
+            return "repo/executor-runner:1 repo/other:2", ""
+        if "docker run" in cmd:
+            return "  image: repo/baked:3\n", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+
+    assert mine._node_images_present(tmp_path) is True
+    assert len(calls) > 3 and all(t == mine._QUICK_CHECK_SECS for _, t in calls)
+
+
 def test_loop_file_target_warns_and_plans_without_vram_when_nvidia_smi_is_missing(monkeypatch, capsys):
     preflight = _sample_preflight()
     monkeypatch.setattr(gpu_splitting, "load_mounted_filesystems", lambda *a: [])
@@ -221,6 +243,74 @@ def test_loop_file_target_warns_and_plans_without_vram_when_nvidia_smi_is_missin
 
     assert planned["args"][4] is None
     assert "GPU VRAM could not be read" in capsys.readouterr().out
+
+
+def test_planning_commands_get_a_deadline_no_stdin_and_are_named(monkeypatch):
+    # ticket-1262: `parted` without -s sat 20+ min in step [2/2] under a bare spinner on a provider's VM
+    calls, shown = [], []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, "1\t/var/lib/docker\n", "")
+
+    monkeypatch.setattr(gpu_splitting.subprocess, "run", fake_run)
+
+    def plan(*_args):
+        gpu_splitting.run_command(["lsblk", "--json"])
+        return gpu_splitting._docker_data_bytes("/var/lib/docker")
+
+    monkeypatch.setattr(gpu_splitting, "_plan_setup", plan)
+    assert gpu_splitting._build_setup_plan(_sample_preflight(), None, progress=shown.append) == 1
+
+    assert shown == ["running lsblk --json", "running du -sxb /var/lib/docker"]
+    assert [kw["timeout"] for _, kw in calls] == [
+        gpu_splitting.PLAN_COMMAND_TIMEOUT_SECONDS,
+        gpu_splitting.DU_TIMEOUT_SECONDS,
+    ]
+    assert all(kw["stdin"] is subprocess.DEVNULL for _, kw in calls)
+    # outside planning (setup mutating the host) there is no deadline
+    gpu_splitting.run_command(["systemctl", "stop", "docker"])
+    assert calls[-1][1]["timeout"] is None
+
+
+def test_a_planning_command_that_hangs_fails_naming_it(monkeypatch):
+    def hang(args, **kwargs):
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    monkeypatch.setattr(gpu_splitting.subprocess, "run", hang)
+    monkeypatch.setattr(
+        gpu_splitting,
+        "_plan_setup",
+        lambda *_a: gpu_splitting.run_command(["parted", "-s", "-m", "/dev/nvme3n1", "unit", "B", "print", "free"]),
+    )
+
+    with pytest.raises(RuntimeError, match=r"`parted -s -m /dev/nvme3n1 unit B print free` did not finish within 120 s"):
+        gpu_splitting._build_setup_plan(_sample_preflight(), None)
+    assert gpu_splitting._command_watch is None
+
+
+def test_a_blkid_that_hangs_while_planning_stops_setup_before_docker_is_stopped(monkeypatch):
+    partition = TargetPlan(
+        selection_mode="auto",
+        requested_device=None,
+        resolved_target="/dev/nvme1n1p1",
+        parent_disk="/dev/nvme1n1",
+        classification="partition",
+        needs_partition_creation=False,
+        needs_format=True,
+        existing_fs_type=None,
+        selection_reason="spare partition",
+    )
+
+    def hang(args, **kwargs):
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    monkeypatch.setattr(gpu_splitting.subprocess, "run", hang)
+    monkeypatch.setattr(gpu_splitting, "auto_select_target", lambda *a: partition)
+    monkeypatch.setattr(gpu_splitting, "_check_target_device", lambda *a: None)
+
+    with pytest.raises(RuntimeError, match=r"`blkid -s UUID -o value /dev/nvme1n1p1` did not finish within 120 s"):
+        gpu_splitting._build_setup_plan(_sample_preflight(), None)
 
 
 def test_plan_refuses_device_together_with_file(monkeypatch):
@@ -1056,3 +1146,27 @@ def test_execute_setup_image_file_rollback_after_restore_failure_unmounts_first(
     assert commands.index(["umount", docker_root]) < commands.index(["rmdir", docker_root])
     assert ["mv", plan.backup_dir, docker_root] in commands
     assert (Path(docker_root) / "image-layers").exists()
+
+
+@pytest.mark.parametrize("detect_virt, markers, kind", [
+    (("container-other\n", 0), set(), "container-other"),
+    (("none\n", 1), {"/.dockerenv"}, "docker"),
+    (("none\n", 1), {"/run/.containerenv"}, "podman"),
+    (("none\n", 1), set(), None),
+    (None, set(), None),
+])
+def test_container_kind(monkeypatch, detect_virt, markers, kind):
+    monkeypatch.setattr(gpu_splitting.shutil, "which", lambda name: "/usr/bin/x" if detect_virt else None)
+    monkeypatch.setattr(gpu_splitting, "run_command",
+                        lambda args, check=True, capture=True: CommandResult(args, detect_virt[0], "", detect_virt[1]))
+    monkeypatch.setattr(gpu_splitting.os.path, "exists", lambda path: path in markers)
+    assert gpu_splitting._container_kind() == kind
+
+
+def test_preflight_refuses_a_container_before_reading_any_disk(monkeypatch):
+    monkeypatch.setattr(gpu_splitting.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(gpu_splitting.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(gpu_splitting, "_container_kind", lambda: "container-other")
+    monkeypatch.setattr(gpu_splitting, "_detect_distro", lambda: pytest.fail("read the host after finding a container"))
+    with pytest.raises(gpu_splitting.ContainerHostError, match="full VM or bare metal"):
+        gpu_splitting._preflight()
