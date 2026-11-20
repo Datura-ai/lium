@@ -11,8 +11,8 @@ there. The coldkey is that hotkey, so one ``batch_all`` mints and spends with on
 signature, and a failed spend reverts the mint (DAH-6771).
 """
 
+import contextlib
 import json
-import time
 from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 
@@ -93,11 +93,11 @@ def _held(subtensor, hotkey: str) -> int:
     return int((deposit or {}).get("balance") or 0)
 
 
-# {coldkey: {"nonce": highest nonce it signed whose outcome is unknown, "at": unix time}}: kept across runs until
-# finalized state resolves it, or until its mortal era has passed and it can no longer land
+# {coldkey: {"nonce": highest nonce it signed whose outcome is unknown, "dies": finalized block after which none of
+# those can land}}: kept across runs until finalized state resolves it (its nonce, or its mortal era having passed by
+# finalized block number, never by wall time: a stalled chain keeps it unresolved)
 UNRESOLVED = Path.home() / ".lium" / "gamma_unresolved.json"
 ERA_PERIOD = 128  # blocks a signed payment stays valid (bittensor 11's default; ~26 min at 12 s)
-UNRESOLVED_EXPIRES = ERA_PERIOD * 12 + 600  # seconds, with a margin
 
 
 class OutcomeUnknown(Exception):
@@ -115,15 +115,38 @@ def _unresolved() -> dict:
         return {}
 
 
-def _write_unresolved(entries: dict) -> None:
+@contextlib.contextmanager
+def _locked_unresolved():
+    """The entries, written back on exit, under an exclusive lock: runs for other wallets update them at once."""
     UNRESOLVED.parent.mkdir(parents=True, exist_ok=True)
-    UNRESOLVED.write_text(json.dumps(entries))
+    with open(UNRESOLVED.with_suffix(".lock"), "a") as lock:
+        try:
+            import fcntl
+        except ImportError:  # shortcut: Windows has no fcntl, so concurrent runs there are unlocked; add msvcrt if needed
+            fcntl = None
+        if fcntl:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        entries = _unresolved()
+        yield entries
+        tmp = UNRESOLVED.with_suffix(".tmp")
+        tmp.write_text(json.dumps(entries))
+        tmp.replace(UNRESOLVED)
 
 
-def _remember_unresolved(address: str, nonce: int) -> None:
-    entries = _unresolved()
-    entries[address] = {"nonce": max(nonce, entries.get(address, {}).get("nonce", -1)), "at": time.time()}
-    _write_unresolved(entries)
+def _remember_unresolved(address: str, nonce: int, dies: int) -> None:
+    with _locked_unresolved() as entries:
+        known = entries.get(address) or {}
+        entries[address] = {"nonce": max(nonce, known.get("nonce", -1)), "dies": max(dies, known.get("dies", -1))}
+
+
+def _finalized(subtensor) -> tuple[object, int]:
+    """The finalized head (as the stack's reads take it) and its block number."""
+    substrate = getattr(subtensor, "substrate", None)
+    if substrate is not None:
+        head = substrate.get_chain_finalised_head()
+        return head, int(substrate.get_block_number(head))
+    number = int(subtensor.finalized_block)
+    return number, number
 
 
 def _settled_nonce(subtensor, address: str) -> int:
@@ -136,23 +159,26 @@ def _settled_nonce(subtensor, address: str) -> int:
     substrate = getattr(subtensor, "substrate", None)
     if substrate is not None:
         pool = substrate.get_account_next_index(address)
-        final = substrate.query("System", "Account", [address], block_hash=substrate.get_chain_finalised_head())
     else:  # bittensor 11: prepare_call takes the pool's next nonce
         pool = subtensor.prepare_call(("Utility", "batch_all", {"calls": []}), address=address).nonce
-        final = subtensor.query(("System", "Account"), [address], block=subtensor.finalized_block)
+    head, number = _finalized(subtensor)
+    if substrate is not None:
+        final = substrate.query("System", "Account", [address], block_hash=head)
+    else:
+        final = subtensor.query(("System", "Account"), [address], block=head)
     final = int((getattr(final, "value", final) or {}).get("nonce") or 0)
     recorded = _unresolved().get(address)
-    if recorded is not None and time.time() - recorded["at"] > UNRESOLVED_EXPIRES:
-        recorded = None  # its era has passed: it landed (final counts it) or can never land
-    if int(pool) > final or (recorded is not None and final <= recorded["nonce"]):
+    # settled once finalized state counts its nonce, or finalized blocks are past its mortal era: it can never land
+    unsettled = recorded is not None and final <= recorded["nonce"] and number <= recorded.get("dies", float("inf"))
+    if int(pool) > final or unsettled:
         raise LiumError(
             f"An earlier transaction from {address} has not settled yet (its outcome was unknown or it is "
             "still in the pool). Run this again once it is finalized, usually within a minute."
         )
-    if address in _unresolved():
-        entries = _unresolved()
-        entries.pop(address, None)
-        _write_unresolved(entries)
+    if recorded is not None:
+        with _locked_unresolved() as entries:
+            if entries.get(address) == recorded:  # a concurrent run may have recorded a newer one meanwhile
+                del entries[address]
     return final
 
 
@@ -202,9 +228,12 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
     params["daily_spend_cap"] = None
     spend = {"service": payee, "netuid": NETUID, "amount": min_out + _held(subtensor, coldkey_ss58)}
 
+    dies = [0]
+
     def submit(calls: list[tuple[str, dict]], nonce: int) -> tuple[bool, str | None]:
         """Sign ``calls`` (SubtensorModule functions) with the coldkey at ``nonce``, as one ``batch_all`` when
-        several. False only when the chain answered; OutcomeUnknown when the answer was lost."""
+        several. False only when the chain answered; OutcomeUnknown when the answer was lost. Sets ``dies[0]``,
+        before broadcasting, to a finalized block number after which this transaction can no longer land."""
         substrate = getattr(subtensor, "substrate", None)
         if substrate is None:  # bittensor 11: (module, function, params) calls, composed against the
             # connected runtime, not the SDK's generated builders (which follow the runtime it was built for);
@@ -216,7 +245,9 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
                 call = built[0] if len(built) == 1 else ("Utility", "batch_all", {"calls": [subtensor.compose(c) for c in built]})
                 unsigned = subtensor.prepare_call(call, address=coldkey_ss58, nonce=nonce, period=ERA_PERIOD)
                 signature = coldkey.sign(unsigned.payload)
-            except Exception as e:
+                # bittensor 11 anchors the era to a finalized block, so at or below the one read after it
+                dies[0] = _finalized(subtensor)[1] + ERA_PERIOD
+            except (Exception, KeyboardInterrupt) as e:  # Ctrl-C included: nothing is broadcast yet
                 raise NotSent(str(e) or type(e).__name__) from e
             resp = subtensor.submit_signature(unsigned, signature, wait_for_inclusion=True, wait_for_finalization=True)
             if not resp.success and (getattr(resp, "data", None) or {}).get("submission_outcome_unknown"):
@@ -230,10 +261,12 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
             call = built[0] if len(built) == 1 else substrate.compose_call(
                 call_module="Utility", call_function="batch_all", call_params={"calls": built}
             )
+            _, born = _finalized(subtensor)  # the era starts at this finalized block, not the best head
             extrinsic = substrate.create_signed_extrinsic(
-                call=call, keypair=coldkey, nonce=nonce, era={"period": ERA_PERIOD}  # mortal: see UNRESOLVED_EXPIRES
+                call=call, keypair=coldkey, nonce=nonce, era={"period": ERA_PERIOD, "current": born}
             )
-        except Exception as e:
+            dies[0] = born + ERA_PERIOD
+        except (Exception, KeyboardInterrupt) as e:  # Ctrl-C included: nothing is broadcast yet
             raise NotSent(str(e) or type(e).__name__) from e
         receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=True)
         return receipt.is_success, None if receipt.is_success else receipt.error_message
@@ -246,7 +279,7 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
     except NotSent as e:  # failed before signing: nothing was broadcast, nothing to wait for
         raise CliFailure("transfer_failed", f"Gamma mint failed: {e}", EXIT_GENERAL_ERROR, hint=NOT_SENT_HINT) from e
     except (Exception, KeyboardInterrupt) as e:  # noqa: BLE001 - a submit that raised or was interrupted may still land
-        _remember_unresolved(coldkey_ss58, nonce)  # the next run waits until finalized state resolves it
+        _remember_unresolved(coldkey_ss58, nonce, dies[0])  # the next run waits until finalized state resolves it
         ok, error = False, str(e) or type(e).__name__
     if not ok:
         raise CliFailure("transfer_failed", f"Gamma mint failed: {error}", EXIT_GENERAL_ERROR, hint=FAILED_HINT)
@@ -267,7 +300,7 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
                     raise
                 except (Exception, KeyboardInterrupt):  # sent, but the answer was lost
                     rest_pending = rest
-                    _remember_unresolved(coldkey_ss58, nonce + 1)
+                    _remember_unresolved(coldkey_ss58, nonce + 1, dies[0])
                     raise
                 if not rest_ok:  # the chain answered: refused, nothing spent
                     raise LiumError(rest_error or "spend failed")

@@ -35,7 +35,7 @@ class FakeSubstrate:
         self.success, self.calls, self.submitted, self.submit = success, [], None, submit
         # held: the deposit balance at each read (before the batch, then after it), None for no deposit
         self.spec_493, self.held, self.submissions = spec_493, list(held or [None, None]), []
-        self.nonces, self.final_nonce = [], 7
+        self.nonces, self.final_nonce, self.finalized_number = [], 7, 100
 
     pending = False  # a transaction from the coldkey still in the pool
 
@@ -66,12 +66,16 @@ class FakeSubstrate:
         return (call_module, call_function, call_params)
 
     def create_signed_extrinsic(self, call, keypair, nonce, era):
-        assert era == {"period": gamma_module.ERA_PERIOD}
+        assert era == {"period": gamma_module.ERA_PERIOD, "current": self.finalized_number}
         self.nonces.append(nonce)
         return (call, keypair)
 
     def get_chain_finalised_head(self):
         return "0xfinal"
+
+    def get_block_number(self, block_hash):
+        assert block_hash == "0xfinal"
+        return self.finalized_number
 
     def submit_extrinsic(self, extrinsic, wait_for_inclusion, wait_for_finalization):
         assert wait_for_inclusion and wait_for_finalization
@@ -374,20 +378,27 @@ def test_an_unknown_mint_blocks_until_its_era_has_passed(monkeypatch):
     result, _, _ = _run(monkeypatch, args, substrate)
     assert result.exit_code != 0 and "has not settled yet" in result.output
 
-    # past its mortal era it can no longer land: the finalized nonce is authoritative again
-    now = gamma_module.time.time()
-    monkeypatch.setattr(gamma_module.time, "time", lambda: now + gamma_module.UNRESOLVED_EXPIRES + 1)
+    assert json.loads(gamma_module.UNRESOLVED.read_text())["5Cold"]["dies"] == 100 + gamma_module.ERA_PERIOD
+
+    # a stalled chain: finalized blocks reach its last valid block, however long that takes, and it may still land
+    substrate.finalized_number = 100 + gamma_module.ERA_PERIOD
+    result, _, _ = _run(monkeypatch, args, substrate)
+    assert result.exit_code != 0 and "has not settled yet" in result.output
+
+    # finalized past its mortal era it can no longer land: the finalized nonce is authoritative again
+    substrate.finalized_number += 1
     substrate.submit = None
     result, _, _ = _run(monkeypatch, args, substrate)
     assert result.exit_code == 0, result.output
 
 
 @pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
-def test_a_mint_that_fails_before_signing_records_nothing_and_the_next_run_proceeds(monkeypatch, chain):
+@pytest.mark.parametrize("error", [ValueError("metadata encoding failed"), KeyboardInterrupt()], ids=["error", "ctrl-c"])
+def test_a_mint_that_fails_before_signing_records_nothing_and_the_next_run_proceeds(monkeypatch, chain, error):
     substrate = chain()
 
     def broken(*args, **kwargs):
-        raise ValueError("metadata encoding failed")
+        raise error
 
     original = substrate.create_signed_extrinsic if chain is FakeSubstrate else substrate.prepare_call
     if chain is FakeSubstrate:
@@ -400,10 +411,23 @@ def test_a_mint_that_fails_before_signing_records_nothing_and_the_next_run_proce
 
     result, _, _ = _run(monkeypatch, args, substrate)
 
-    assert result.exit_code != 0 and "Nothing was signed or sent" in result.output, result.output
+    assert result.exit_code == 1 and "Nothing was signed or sent" in result.output, result.output
     assert not gamma_module.UNRESOLVED.exists() and substrate.submissions == []
     if chain is FakeSubstrate:
         substrate.create_signed_extrinsic = original
     else:
         substrate.prepare_call = original
     assert _run(monkeypatch, args, substrate)[0].exit_code == 0
+
+
+def test_concurrent_runs_for_different_wallets_keep_each_others_unknown_payments():
+    import threading
+
+    addresses = [f"5Wallet{i}" for i in range(16)]
+    threads = [threading.Thread(target=gamma_module._remember_unresolved, args=(a, 7, 228)) for a in addresses]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert set(json.loads(gamma_module.UNRESOLVED.read_text())) == set(addresses)
