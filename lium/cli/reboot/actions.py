@@ -1,7 +1,7 @@
 from typing import List
 
 from lium.cli.actions import ActionResult
-from lium.sdk import Lium, PodInfo
+from lium.sdk import Lium, LiumInsufficientBalanceError, PodInfo
 
 
 class RebootPodsAction:
@@ -15,15 +15,19 @@ class RebootPodsAction:
 
         rebooted = []
         failures = []
+        refusals: List[LiumInsufficientBalanceError] = []
 
         for pod in pods:
             try:
                 lium.reboot(pod, volume_id=volume_id)
                 rebooted.append(pod.huid)
+            except LiumInsufficientBalanceError as e:
+                # a funding refusal keeps its type (exit 6, code, hint); the command raises it after the batch
+                refusals.append(e)
             except Exception as e:
                 failures.append(f"{pod.huid} ({e})")
 
         return ActionResult(
-            ok=(len(failures) == 0),
-            data={"rebooted": rebooted, "failures": failures}
+            ok=(len(failures) == 0 and not refusals),
+            data={"rebooted": rebooted, "failures": failures, "refusals": refusals}
         )

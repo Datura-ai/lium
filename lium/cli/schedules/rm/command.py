@@ -46,6 +46,14 @@ def schedules_rm_command(indices: str):
     action = CancelSchedulesAction()
     result = action.execute(ctx)
 
+    refusals = result.data.get("refusals") or []
+    if refusals:
+        # report what went through first, then the funding refusal itself (exit 6 with its hint)
+        if result.data.get("cancelled"):
+            ui.success(f"Cancelled schedules for {', '.join(result.data['cancelled'])}")
+        if result.data.get("failures"):
+            ui.error(f"Failed to cancel schedules: {', '.join(result.data['failures'])}")
+        raise refusals[0]
     # Only error if anything failed
     if not result.ok:
         failures = result.data.get("failures", [])

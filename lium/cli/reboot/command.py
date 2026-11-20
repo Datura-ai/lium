@@ -57,6 +57,14 @@ def reboot_command(targets: Optional[str], all: bool, volume_id: Optional[str]):
     result = action.execute(ctx)
 
     rebooted = result.data.get("rebooted", [])
+    refusals = result.data.get("refusals") or []
+    if refusals:
+        # report what went through first, then the funding refusal itself (exit 6 with its hint)
+        if rebooted:
+            ui.success(f"Reboot requested for {', '.join(rebooted)}")
+        if result.data.get("failures"):
+            ui.error(f"Failed to reboot pods: {', '.join(result.data['failures'])}")
+        raise refusals[0]
     if not result.ok:
         # a batch that partly failed still names what was rebooted, so a retry targets only the failures
         done = f"Reboot requested for {', '.join(rebooted)}. " if rebooted else ""

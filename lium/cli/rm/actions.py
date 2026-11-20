@@ -1,7 +1,7 @@
 from typing import List
 
 from lium.cli.actions import ActionResult
-from lium.sdk import Lium, LiumBudgetExceededError, PodInfo
+from lium.sdk import Lium, LiumBudgetExceededError, LiumInsufficientBalanceError, PodInfo
 from lium.cli import ui
 
 
@@ -44,8 +44,8 @@ class ScheduleRemovalAction:
         for pod in pods:
             try:
                 lium.schedule_termination(pod, termination_time=termination_time)
-            except LiumBudgetExceededError as e:
-                # The server refuses only this pod's extension. Collect the 402 and keep
+            except (LiumBudgetExceededError, LiumInsufficientBalanceError) as e:
+                # The server refuses only this pod's extension (the key's budget, or an account with no balance). Collect the 402 and keep
                 # scheduling the rest so `rm a b --in 2h` still sets b when a is refused.
                 # The command prints scheduled/failed first, then raises (exit 6).
                 budget_errors.append(e)
