@@ -15,13 +15,14 @@ import ast
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 
 import click
 
 from lium.cli import ui
-from lium.cli.utils import EXIT_GENERAL_ERROR, CliFailure
+from lium.cli.utils import EXIT_GENERAL_ERROR, CliFailure, try_lock
 from lium.sdk import Lium, LiumError
 
 from . import validation
@@ -119,8 +120,9 @@ def _cap_allows(deposit: dict, block: int) -> tuple[int, int] | None:
 
 # one file per coldkey, {"nonce": highest nonce it signed whose outcome is not known yet, "dies": finalized block after
 # which none of those can land}: written before broadcasting and kept across runs until finalized state resolves it (its
-# nonce, or finalized blocks passing its mortal era; never wall time, so a stalled chain keeps it unresolved). One file
-# per coldkey, replaced atomically, needs no lock: concurrent runs for other wallets never share a file.
+# nonce, or finalized blocks passing its mortal era; never wall time, so a stalled chain keeps it unresolved). Replaced
+# atomically; a payment holds the coldkey's lock file (_paying) from its nonce check to its outcome, so no other run reads,
+# records or clears the record meanwhile.
 UNRESOLVED = Path.home() / ".lium" / "gamma_unresolved"
 ERA_PERIOD = 128  # blocks a signed payment stays valid (bittensor 11's default; ~26 min at 12 s)
 
@@ -135,6 +137,62 @@ class NotSent(Exception):
 
 class Refused(NotSent):
     """The node refused the transaction on its only send: it never entered the pool, so it cannot land."""
+
+
+@contextmanager
+def _paying(address: str):
+    """One payment per coldkey at a time, across processes: held from the nonce check until the outcome is handled, so a
+    run can only clear the record of the payment it sent."""
+    UNRESOLVED.mkdir(parents=True, exist_ok=True)
+    fd = os.open(UNRESOLVED / f"{address}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if not try_lock(fd):
+            raise LiumError(
+                f"Another 'lium fund --gamma' from {address} is running. Run this again once it has finished."
+            )
+        yield
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _one_send(substrate):
+    """bittensor <= 10's driver resends a watched extrinsic after a reply timeout, and a 1010 (stale) to that resend can
+    follow the first send's acceptance: the watch is sent once, so a 1010 always answers the only send. The driver's
+    author_unwatchExtrinsic cleanup, made inside the watch once the outcome arrived, keeps the driver's own retries, and
+    its failure never replaces that outcome."""
+    retries = getattr(substrate, "max_retries", None)
+    rpc_request = getattr(substrate, "rpc_request", None)
+    if retries is None or rpc_request is None:  # not the retrying driver
+        yield
+        return
+    shadowed = vars(substrate).get("rpc_request")
+
+    def cleanup_tolerant(method, params, *args, **kwargs):
+        if method != "author_unwatchExtrinsic":
+            return rpc_request(method, params, *args, **kwargs)
+        substrate.max_retries = retries
+        try:
+            return rpc_request(method, params, *args, **kwargs)
+        except Exception:  # noqa: BLE001 - cleanup only: the watched outcome already arrived
+            return {}
+        finally:
+            substrate.max_retries = 1
+
+    substrate.max_retries, substrate.rpc_request = 1, cleanup_tolerant
+    try:
+        yield
+    finally:
+        substrate.max_retries = retries
+        if shadowed is None:
+            del substrate.rpc_request
+        else:
+            substrate.rpc_request = shadowed
+
+
+def _gamma(units: int) -> str:
+    """``units`` as gamma, exact: never rounded below what a payment needs."""
+    return f"{Decimal(units) / _UNITS:f}"
 
 
 def _recorded(address: str) -> dict | None:
@@ -235,6 +293,11 @@ def _settled_nonce(subtensor, address: str) -> int:
 
 
 def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, json_output: bool) -> None:
+    with _paying(coldkey_ss58):
+        _fund(bt, bt_wallet, coldkey_ss58, wallet, usd, yes, json_output)
+
+
+def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, json_output: bool) -> None:
     from .actions import UnlockColdkeyAction
 
     lium = Lium()  # before the unlock: a missing API key never costs a password prompt
@@ -261,18 +324,18 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
                 wait = "Waiting does not help: the payment is above the whole cap."
             else:
                 hours = -(-(need - allows) * CAP_REFILL_BLOCKS // cap) * 12 / 3600
-                wait = f"Or wait about {hours:.1f} h for the cap to refill to {need / _UNITS:.2f} gamma."
+                wait = f"Or wait about {hours:.1f} h for the cap to refill to {_gamma(need)} gamma."
             raise CliFailure(
                 "gamma_spend_cap",
-                f"The gamma deposit at {coldkey_ss58} has a daily spend cap of {cap / _UNITS:.2f} gamma and can spend "
-                f"{allows / _UNITS:.2f} gamma now; this payment spends {need / _UNITS:.2f} gamma (at least "
-                f"{min_out / _UNITS:.2f} minted plus {held / _UNITS:.2f} already in the deposit), so the chain would "
-                "refuse it.",
+                f"The gamma deposit at {coldkey_ss58} has a daily spend cap of {_gamma(cap)} gamma and can spend "
+                f"{_gamma(allows)} gamma now; this payment spends {_gamma(need)} gamma (at least "
+                f"{_gamma(min_out)} minted plus {_gamma(held)} already in the deposit), so the chain would refuse it.",
                 EXIT_GENERAL_ERROR,
                 hint=(
-                    f"Raise or remove the cap with set_gamma_deposit_daily_spend_cap (SN51, hotkey {coldkey_ss58}, "
-                    f"signed by this coldkey) to at least {need / _UNITS:.2f} gamma, then run this again. {wait} "
-                    "Nothing was signed or sent."
+                    f"Remove the cap with set_gamma_deposit_daily_spend_cap (SN51, hotkey {coldkey_ss58}, signed by "
+                    "this coldkey), then run this again at once. Raising the cap instead (to at least "
+                    f"{_gamma(need)} gamma) does not add to what the deposit can spend now: wait for it to refill "
+                    f"before running this again. {wait} Nothing was signed or sent."
                 ),
             )
 
@@ -346,22 +409,15 @@ def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: b
             entry = _record(coldkey_ss58, nonce, born + ERA_PERIOD)
         except (Exception, KeyboardInterrupt) as e:  # Ctrl-C included: nothing is broadcast yet
             raise NotSent(str(e) or type(e).__name__) from e
-        # the driver resends the same bytes after a reply timeout, and a 1010 (stale) to that resend can follow the
-        # first send's acceptance: one send for this watch, so a 1010 always answers the only send
-        retries = getattr(substrate, "max_retries", None)
-        if retries is not None:
-            substrate.max_retries = 1
         try:
-            receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=True)
+            with _one_send(substrate):
+                receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True, wait_for_finalization=True)
         except Exception as e:
             refusal = _node_refusal(e)
             if refusal is None:  # the outcome is not proved: it may still land, its record stays
                 raise
             _forget(coldkey_ss58, entry)  # the node refused it: nothing is in its pool, nothing can land
             raise Refused(refusal) from e
-        finally:
-            if retries is not None:
-                substrate.max_retries = retries
         _forget(coldkey_ss58, entry)
         return receipt.is_success, None if receipt.is_success else receipt.error_message
 

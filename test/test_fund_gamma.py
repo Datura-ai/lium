@@ -1,6 +1,7 @@
 """DAH-6385: ``lium fund --gamma`` mints SN51 gamma into a linked deposit Lium credits as USD."""
 
 import json
+import os
 import sys
 import types
 
@@ -12,6 +13,7 @@ from lium.cli.cli import cli
 from lium.cli.fund import actions as actions_module
 from lium.cli.fund import command as fund_module
 from lium.cli.fund import gamma as gamma_module
+from lium.cli.utils import try_lock
 
 GAMMA_PER_TAO = 210_561_193_201  # sim_mint_gamma(51, 1 TAO) on finney, 13 Nov 2026
 
@@ -433,6 +435,7 @@ STALE = {"code": 1010, "message": "Invalid Transaction", "data": "Transaction is
 def test_only_a_definite_initial_refusal_clears_the_record(monkeypatch, replies, definite_initial_refusal):
     substrate = FakeSubstrate()
     substrate.max_retries, substrate.watch_send_count = 5, 0  # the driver's default
+    substrate.rpc_request = lambda method, params: {"result": True}
     substrate.submit = _watch(substrate, *replies)
     args = ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"]
 
@@ -540,5 +543,65 @@ def test_a_capped_deposit_holding_gamma_refuses_a_payment_the_cap_cannot_spend_b
     envelope = json.loads(result.output.strip().splitlines()[-1])
     assert result.exit_code != 0 and envelope["error"]["code"] == "gamma_spend_cap", result.output
     assert says in json.dumps(envelope) and "set_gamma_deposit_daily_spend_cap" in json.dumps(envelope)
+    # the exact minimum, never rounded below it; raising the cap adds nothing to what can be spent at once
+    expected = gamma_module.tao_rao_for_usd(25, GAMMA_PER_TAO) * GAMMA_PER_TAO // 10**9
+    need = 3 * G + gamma_module.min_gamma_out(expected)
+    assert f"at least {gamma_module._gamma(need)} gamma" in envelope["error"]["hint"]
+    assert "Remove the cap" in envelope["error"]["hint"] and "wait for it to refill" in envelope["error"]["hint"]
     # nothing unlocked, signed or sent: the batch would have been refused and the mint reverted
     assert events == [] and substrate.submissions == [] and substrate.nonces == []
+
+
+def _watch_finalized(substrate, *unwatch_replies):
+    """author_submitAndWatchExtrinsic on bittensor 10's locked driver (async-substrate-interface 2.0.3
+    ``submit_extrinsic``): the watch is answered with ``finalized``, then the driver's result handler makes the
+    author_unwatchExtrinsic cleanup as its own ``rpc_request``, which resends after a reply timeout until
+    ``max_retries`` sends and then raises MaxRetriesExceeded out of the watch."""
+
+    def rpc_request(method, params):
+        assert method == "author_unwatchExtrinsic"
+        for attempt in range(1, substrate.max_retries + 1):
+            if unwatch_replies[min(attempt, len(unwatch_replies)) - 1] != "timeout":
+                return {"result": True}
+        raise MaxRetriesExceeded("Max retries reached.")
+
+    def submit(extrinsic):
+        substrate.watch_send_count += 1
+        substrate.rpc_request("author_unwatchExtrinsic", ["0xsub"])  # inside the watch, after "finalized"
+        substrate.submissions.append(extrinsic)
+        return types.SimpleNamespace(is_success=True, error_message=None)
+
+    substrate.rpc_request = rpc_request
+    return submit
+
+
+@pytest.mark.parametrize("unwatch_replies", [("timeout", "ok"), ("timeout",)], ids=["retried", "lost"])
+def test_a_finalized_payment_stands_when_the_unwatch_cleanup_reply_is_lost(monkeypatch, unwatch_replies):
+    substrate = FakeSubstrate()
+    substrate.max_retries, substrate.watch_send_count = 5, 0
+    substrate.submit = _watch_finalized(substrate, *unwatch_replies)
+    driver_rpc = substrate.rpc_request
+
+    result, _, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
+
+    assert result.exit_code == 0 and "transfer_failed" not in result.output, result.output
+    assert _record() is None and substrate.watch_send_count == 1
+    assert substrate.max_retries == 5 and substrate.rpc_request is driver_rpc
+
+
+def test_a_run_waits_for_another_paying_from_the_same_coldkey_and_keeps_its_record(monkeypatch):
+    # one run checked nonce 7 and paid; it then sent nonce 8 and lost the reply, and still holds the coldkey's lock
+    gamma_module.UNRESOLVED.mkdir(parents=True)
+    pending = {"nonce": 8, "dies": 300}
+    (gamma_module.UNRESOLVED / "5Cold.json").write_text(json.dumps(pending))
+    fd = os.open(gamma_module.UNRESOLVED / "5Cold.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    assert try_lock(fd)
+    substrate = FakeSubstrate()
+    substrate.final_nonce = 7  # a stale view: the paused run checked before nonce 7 finalized
+    try:
+        result, events, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
+    finally:
+        os.close(fd)
+
+    assert result.exit_code != 0 and "Another 'lium fund --gamma'" in result.output, result.output
+    assert _record() == pending and substrate.submissions == [] and events == []

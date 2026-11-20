@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
+from lium.cli.utils import try_lock
 from lium.sdk import Lium
 from lium.sdk.exceptions import (
     LiumError,
@@ -185,22 +186,6 @@ class _Rental:
             }
 
 
-def _try_lock(fd: int) -> bool:
-    """A non-blocking exclusive lock on ``fd``, held until it is closed; False while another holds it."""
-    try:
-        try:
-            import fcntl
-        except ImportError:  # Windows: a non-blocking lock on the file's first byte, held as long
-            import msvcrt
-
-            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-        else:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        return False
-    return True
-
-
 class _RentalStore:
     """Rentals whose outcome the host has not received, on disk, one file per idempotency key. A request is
     written before it is sent, so a server that stops mid-request replays the same key after a restart instead
@@ -220,7 +205,7 @@ class _RentalStore:
             return True
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = os.open(self.directory / f"{key}.lock", os.O_CREAT | os.O_RDWR, 0o600)
-        if not _try_lock(fd):
+        if not try_lock(fd):
             os.close(fd)
             return False
         self._held[key] = fd
@@ -279,7 +264,7 @@ class _RentalStore:
         tag = hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()[:16]
         fd = os.open(self.directory / f"admit-{tag}.lock", os.O_CREAT | os.O_RDWR, 0o600)
         stop = time.monotonic() + max(0.0, timeout)
-        while not _try_lock(fd):
+        while not try_lock(fd):
             if time.monotonic() >= stop:
                 os.close(fd)
                 return None
