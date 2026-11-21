@@ -1,6 +1,7 @@
 """DAH-6385: ``lium fund --gamma`` mints SN51 gamma into a linked deposit Lium credits as USD."""
 
 import json
+import os
 import sys
 import types
 
@@ -12,6 +13,7 @@ from lium.cli.cli import cli
 from lium.cli.fund import actions as actions_module
 from lium.cli.fund import command as fund_module
 from lium.cli.fund import gamma as gamma_module
+from lium.cli.utils import try_lock
 
 GAMMA_PER_TAO = 210_561_193_201  # sim_mint_gamma(51, 1 TAO) on finney, 13 Nov 2026
 
@@ -28,25 +30,64 @@ def test_usd_is_sized_to_tao_rounded_up_and_floored_two_percent():
     assert gamma_module.min_gamma_out(25 * 10**9) == 24_500_000_000
 
 
-class FakeSubstrate:
+class FinalizedBlocks:
+    """Finalized blocks that carry a payment: ``blocks[number] = [(extrinsic hash, System event or None[, (signer,
+    nonce)])]``; an entry without a signer is unsigned."""
+
+    def _block(self, number):
+        assert number <= getattr(self, "finalized_number", getattr(self, "finalized_block", None))  # finalized only
+        return [entry[:2] for entry in self.blocks.get(number, [])]
+
+    def _signed(self, number):
+        """The decoded value's signer fields of each extrinsic in ``number``, as the SDKs decode them."""
+        return [{"address": e[2][0], "nonce": e[2][1]} if len(e) > 2 else {} for e in self.blocks.get(number, [])]
+
+    def _events(self, number):
+        return [{"extrinsic_idx": i, "module_id": "System", "event_id": event,
+                 "attributes": {"dispatch_error": {"Module": "Slippage"}} if event == "ExtrinsicFailed" else {}}
+                for i, (_, event) in enumerate(self._block(number)) if event]
+
+    def _event_records(self, number):
+        """bittensor <= 10's locked async-substrate-interface 2.0.3: each record nests its event (its receipts read
+        ``event["event"]["module_id"]``)."""
+        return [{"extrinsic_idx": e.pop("extrinsic_idx"), "event": e} for e in self._events(number)]
+
+
+class Signed(tuple):
+    """A signed extrinsic: (call, keypair), with the hash the chain knows it by."""
+
+
+class FakeSubstrate(FinalizedBlocks):
     """bittensor <= 10: ``Subtensor().substrate`` composes, signs and submits."""
 
     def __init__(self, success=True, submit=None, spec_493=False, held=None):
         self.success, self.calls, self.submitted, self.submit = success, [], None, submit
         # held: the deposit balance at each read (before the batch, then after it), None for no deposit
         self.spec_493, self.held, self.submissions = spec_493, list(held or [None, None]), []
-        self.nonces, self.final_nonce, self.finalized_number = [], 7, 100
+        self.nonces, self.final_nonce, self.finalized_number, self.blocks = [], 7, 100, {}
 
     pending = False  # a transaction from the coldkey still in the pool
+    cap = {}  # {"daily_spend_cap": {"cap", "bucket": (units, block)}} for a capped deposit
+    # the runtime at the finalized block the payment is pinned to, and the one the driver signs with (the head's);
+    # None: the same as spec_493
+    pinned_493 = signed_493 = None
+
+    def _at(self, block_hash):
+        return self.spec_493 if block_hash is None or self.pinned_493 is None else self.pinned_493
+
+    def init_runtime(self, block_hash):
+        assert block_hash == "0xfinal"
+        self.runtime = types.SimpleNamespace(runtime_version=493 if self._at(block_hash) else 492)
+        return self.runtime
 
     def get_account_next_index(self, address):
         assert address == "5Cold"
         return self.final_nonce + (1 if self.pending else 0)
 
-    def get_metadata_call_function(self, module, function):
+    def get_metadata_call_function(self, module, function, block_hash=None):
         # the shape finney's metadata returns: a Variant whose value lists the call's fields
         assert (module, function) == ("SubtensorModule", "mint_gamma")
-        names = ["hotkey", "netuid", "amount", "min_amount_out"] + ([] if self.spec_493 else ["spender"])
+        names = ["hotkey", "netuid", "amount", "min_amount_out"] + ([] if self._at(block_hash) else ["spender"])
         return types.SimpleNamespace(value={"name": "mint_gamma", "fields": [{"name": n} for n in names + ["daily_spend_cap"]]})
 
     def query(self, module, storage, params, block_hash=None):
@@ -54,21 +95,42 @@ class FakeSubstrate:
             assert block_hash == "0xfinal"  # settled means finalized
             return types.SimpleNamespace(value={"nonce": self.final_nonce})
         assert (module, storage, params) == ("SubtensorModule", "GammaDeposits", [51, "5Cold"])
-        held = self.held.pop(0)
-        return types.SimpleNamespace(value=None if held is None else {"coldkey": "5Cold", "balance": held})
+        held = self.held[1 if self.submissions else 0]
+        return types.SimpleNamespace(value=None if held is None else {"coldkey": "5Cold", "balance": held, **self.cap})
 
     def runtime_call(self, api, method, params):
         assert (api, method, params[0]) == ("GammaRuntimeApi", "sim_mint_gamma", 51)
         self.calls.append(params[1])
         return types.SimpleNamespace(value={"Ok": (1, 1, params[1] * GAMMA_PER_TAO // 10**9)})
 
-    def compose_call(self, call_module, call_function, call_params):
+    def compose_call(self, call_module, call_function, call_params, block_hash=None):
+        assert block_hash == "0xfinal"  # composed with the pinned block's metadata, never the head's
+        if call_function == "mint_gamma":  # the metadata decides the encoding: an obsolete field is dropped
+            assert ("spender" in call_params) != self._at(block_hash)
         return (call_module, call_function, call_params)
 
     def create_signed_extrinsic(self, call, keypair, nonce, era):
         assert era == {"period": gamma_module.ERA_PERIOD, "current": self.finalized_number}
+        signed = self.spec_493 if self.signed_493 is None else self.signed_493
+        self.runtime = types.SimpleNamespace(runtime_version=493 if signed else 492)  # the driver loads the head's
         self.nonces.append(nonce)
-        return (call, keypair)
+        signed = Signed((call, keypair))
+        signed.extrinsic_hash = bytes([nonce]) * 32
+        return signed
+
+    missing = frozenset()  # heights a lite node holds no history for: it answers no hash
+
+    def get_block_hash(self, number):
+        return None if number in self.missing else f"0xblock{number}"
+
+    def get_extrinsics(self, block_hash):
+        # async-substrate-interface 2.0.3: the hash is the decoded extrinsic's property (bytes), not in its value
+        number = int(block_hash[7:])
+        return [types.SimpleNamespace(extrinsic_hash=bytes.fromhex(h[2:]), value={"call": {}, **signed})
+                for (h, _), signed in zip(self._block(number), self._signed(number))]
+
+    def get_events(self, block_hash):
+        return self._event_records(int(block_hash[7:]))
 
     def get_chain_finalised_head(self):
         return "0xfinal"
@@ -92,15 +154,21 @@ class FakeSubstrate:
 SIGNED = "signed by the coldkey"
 
 
-class FakeV11Subtensor:
+class FakeV11Subtensor(FinalizedBlocks):
     """bittensor 11: no ``.substrate``; ``runtime`` reads and ``submit_call`` sends a ``bt.calls`` builder."""
 
     def __init__(self, success=True, held=None, spec_493=False):
         self.success, self.submitted, self.held, self.submissions = success, None, list(held or [None, None]), []
         self.spec_493 = spec_493  # the connected runtime, whatever the installed SDK was generated for
         self.nonces, self.final_nonce, self.finalized_block, self.unknown = [], 7, 100, False
+        self.blocks = {}
 
     pending = False
+    cap = {}
+    pinned_493 = signed_493 = None  # as FakeSubstrate's
+
+    def _at(self, block):
+        return self.spec_493 if block is None or self.pinned_493 is None else self.pinned_493
 
     def compose(self, call):
         _, function, params = call
@@ -114,19 +182,38 @@ class FakeV11Subtensor:
             assert call == ("Utility", "batch_all", {"calls": []})
             return types.SimpleNamespace(nonce=self.final_nonce + (1 if self.pending else 0))
         assert period == gamma_module.ERA_PERIOD
-        return types.SimpleNamespace(nonce=nonce, payload=b"payload", call=call)
+        signed = self.spec_493 if self.signed_493 is None else self.signed_493
+        return types.SimpleNamespace(
+            nonce=nonce, payload=b"payload", call=call, spec_version=493 if signed else 492,
+            era={"period": period, "current": self.finalized_block}, public_key=b"\x05" * 32, crypto_type=1,
+            included_in_extrinsic=bytes([nonce]), call_data=repr(call).encode(),
+        )
 
     def query(self, item, params, block=None):
         if item == ("System", "Account"):
             assert block == self.finalized_block  # settled means finalized
             return {"nonce": self.final_nonce}
+        if item == ("System", "Events"):
+            return self._events(block)
+        if item == ("System", "LastRuntimeUpgrade"):
+            assert block == self.finalized_block
+            return {"spec_version": 493 if self._at(block) else 492, "spec_name": "node-subtensor"}
         if item == ("SubtensorModule", "GammaSpent"):
-            if not self.spec_493:
+            if not self._at(block):
                 raise type("StorageFunctionNotFound", (ValueError,), {})("SubtensorModule.GammaSpent")
             return 0
         assert (item, params) == (("SubtensorModule", "GammaDeposits"), [51, "5Cold"])
-        held = self.held.pop(0)
-        return None if held is None else {"coldkey": "5Cold", "balance": held}
+        held = self.held[1 if self.submissions else 0]
+        return None if held is None else {"coldkey": "5Cold", "balance": held, **self.cap}
+
+    missing = frozenset()
+
+    def block_info(self, number):
+        if number in self.missing:
+            raise ValueError(f"block {number} not found")
+        return types.SimpleNamespace(
+            extrinsics=[{"extrinsic_hash": h, **signed} for (h, _), signed in zip(self._block(number), self._signed(number))]
+        )
 
     def runtime(self, method, params):
         assert method == ("GammaRuntimeApi", "sim_mint_gamma") and params[0] == 51
@@ -140,7 +227,8 @@ class FakeV11Subtensor:
             return types.SimpleNamespace(success=False, message="disconnected", data={"submission_outcome_unknown": True})
         self.submissions.append((tuple(unsigned.call), SIGNED))
         self.submitted = self.submitted or self.submissions[-1]
-        return types.SimpleNamespace(success=self.success, message="" if self.success else "Slippage", data={})
+        return types.SimpleNamespace(success=self.success, message="" if self.success else "Slippage", data={},
+                                     block_hash="0xincluded", error=None)
 
     def subtensor(self):
         return self
@@ -163,11 +251,20 @@ def _calls(spec_493=False):
     )
 
 
-def _run(monkeypatch, args, substrate, calls=None):
+# bittensor 11.3's pool-rejection names (bittensor/error_map.py), the part the CLI reads
+ERROR_MAP = types.SimpleNamespace(
+    INVALID_TRANSACTION_ERRORS=(("inability to pay some fees", "Payment"), ("transaction is outdated", "Stale"),
+                                ("already imported", "AlreadyImported"), ("priority is too low", "PriorityTooLow")),
+    CUSTOM_TRANSACTION_ERRORS={1: "ColdKeyInSwapSchedule"},
+)
+
+
+def _run(monkeypatch, args, substrate, calls=None, on_link=None, error_map=ERROR_MAP):
     events = []
     coldkey = types.SimpleNamespace(sign=lambda m: (events.append(("sign", m)), b"\x01\x02")[1])
     wallet = types.SimpleNamespace(coldkey=coldkey, unlock_coldkey=lambda: events.append("unlock"))
     monkeypatch.setitem(sys.modules, "bittensor", types.SimpleNamespace(Subtensor=substrate.subtensor, calls=calls or _calls()))
+    monkeypatch.setitem(sys.modules, "bittensor.error_map", error_map)  # None: the import fails
 
     class FakeLoadWalletAction:
         def execute(self, ctx):
@@ -176,6 +273,8 @@ def _run(monkeypatch, args, substrate, calls=None):
     class FakeLium:
         def link_gamma_hotkey(self, hotkey, sign):
             events.append(("link", hotkey, sign("challenge")))
+            if on_link:
+                on_link()
             return {"hotkey": hotkey, "netuid": 51, "spender": "5Spender", "service": "5Service"}
 
     monkeypatch.setattr(fund_module, "LoadWalletAction", FakeLoadWalletAction)
@@ -183,6 +282,21 @@ def _run(monkeypatch, args, substrate, calls=None):
     monkeypatch.setattr(actions_module.UnlockColdkeyAction, "execute",
                         lambda self, ctx: (ctx["bt_wallet"].unlock_coldkey(), ActionResult(ok=True, data={}))[1])
     return CliRunner().invoke(cli, args), events, coldkey
+
+
+@pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
+def test_bt_subtensor_network_reaches_the_subtensor_on_every_bittensor(monkeypatch, chain):
+    # the unresolved-payment message names BT_SUBTENSOR_NETWORK=archive; bittensor 11 reads no network from the env
+    substrate = chain()
+    networks = []
+    real = substrate.subtensor
+    substrate.subtensor = lambda network=None: (networks.append(network), real())[1]
+    monkeypatch.setenv("BT_SUBTENSOR_NETWORK", "archive")
+
+    result, _, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
+
+    assert result.exit_code == 0, result.output
+    assert networks == ["archive"]
 
 
 @pytest.mark.parametrize(
@@ -360,9 +474,17 @@ def test_an_unknown_rest_spend_blocks_the_next_payment_until_finalized_state_set
     assert result.exit_code != 0 and "has not settled yet" in result.output
     assert len(substrate.nonces) == done and "unlock" not in events
 
-    # finalized past it: settled either way, the entry is cleared and the next payment signs above it
+    # finalized past it and past its era, never included: the top-up before it paid, so the run reports that and
+    # signs nothing (review of lium#466: a remainder that did not land is not a payment that paid nothing)
+    assert _record()["rest"] is True
     substrate.final_nonce, substrate.unknown = 9, False
+    _finalize(substrate, _record()["dies"] + 1)
     substrate.held, substrate.submit = [None, None], None
+    result, _, _ = _run(monkeypatch, args, substrate)
+    assert result.exit_code != 0 and "gamma_rest_not_spent" in result.output, result.output
+    assert len(substrate.nonces) == done and _record() is None
+
+    # the record is settled: the next run is a new top-up and signs above it
     result, _, _ = _run(monkeypatch, args, substrate)
     assert result.exit_code == 0, result.output
     assert substrate.nonces[done] == 9 and _record() is None
@@ -390,6 +512,96 @@ def test_an_unknown_mint_blocks_until_its_era_has_passed(monkeypatch):
     substrate.submit = None
     result, _, _ = _run(monkeypatch, args, substrate)
     assert result.exit_code == 0, result.output
+
+
+SubstrateRequestException = type("SubstrateRequestException", (Exception,), {})  # as bittensor <= 10 raises it
+MaxRetriesExceeded = type("MaxRetriesExceeded", (SubstrateRequestException,), {})
+
+
+def _watch(substrate, *replies):
+    """author_submitAndWatchExtrinsic on bittensor 10's locked driver (async-substrate-interface 2.0.3
+    ``_make_rpc_request``): every send gets the next scripted reply; an error answer is raised as
+    ``SubstrateRequestException(str(response))``; a reply timeout resends the same bytes until ``max_retries`` sends,
+    then raises MaxRetriesExceeded. ``"timeout"`` scripts a send whose reply never comes."""
+
+    def submit(extrinsic):
+        for attempt in range(1, len(replies) + 1):
+            substrate.watch_send_count += 1
+            reply = replies[attempt - 1]
+            if reply != "timeout":
+                raise SubstrateRequestException(str({"jsonrpc": "2.0", "id": attempt, "error": reply}))
+            if attempt >= substrate.max_retries:
+                raise MaxRetriesExceeded("Max retries reached.")
+        raise AssertionError("ran out of scripted replies")
+    return submit
+
+
+FEES = {"code": 1010, "message": "Invalid Transaction", "data": "Inability to pay some fees (e.g. account balance too low)"}
+STALE = {"code": 1010, "message": "Invalid Transaction", "data": "Transaction is outdated"}
+
+
+@pytest.mark.parametrize(
+    "replies, definite_initial_refusal",
+    [
+        ((FEES,), True),  # the pool refused the only send: it never entered the pool
+        (({"code": 1013, "message": "Transaction Already Imported"},), False),  # the pool holds it: it may land
+        (({"code": -32603, "message": "Internal error"},), False),  # an unrecognized answer proves nothing
+        (("timeout", STALE), False),  # accepted, reply lost: a resend would get a stale 1010 after acceptance
+    ],
+    ids=["initial-1010", "initial-1013", "unrecognized-32603", "accepted-then-timeout"],
+)
+def test_only_a_definite_initial_refusal_clears_the_record(monkeypatch, replies, definite_initial_refusal):
+    substrate = FakeSubstrate()
+    substrate.max_retries, substrate.watch_send_count = 5, 0  # the driver's default
+    substrate.rpc_request = lambda method, params: {"result": True}
+    substrate.submit = _watch(substrate, *replies)
+    args = ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"]
+
+    result, _, _ = _run(monkeypatch, args, substrate)
+    assert result.exit_code != 0
+    assert (_record() is None) == definite_initial_refusal
+    assert ("The node rejected this payment" in result.output) == definite_initial_refusal, result.output
+    assert substrate.watch_send_count == 1 and substrate.max_retries == 5
+
+    substrate.submit = None  # funded meanwhile: only a proved refusal lets the rerun sign again
+    result, _, _ = _run(monkeypatch, args, substrate)
+    assert (result.exit_code == 0) == definite_initial_refusal, result.output
+    assert substrate.nonces == ([7, 7] if definite_initial_refusal else [7])
+
+
+@pytest.mark.parametrize(
+    "name, message, definite_initial_refusal",
+    [
+        ("Payment", "Inability to pay some fees", True),  # the node refused it: it never entered the pool
+        ("ColdKeyInSwapSchedule", "Custom error: 1", True),  # a runtime's 1010 refusal, by its custom code
+        (None, "Subscription ended before the extrinsic was finalized", False),  # the watch ended: it may land
+        ("Dropped", "Extrinsic dropped", False),  # a watch status after the pool took it
+        ("Stale", "Transaction is outdated", False),  # may answer a resend of an accepted payment
+        ("AlreadyImported", "Transaction Already Imported", False),  # the pool holds it
+    ],
+    ids=["fee-rejection", "custom-1010", "ended-watch", "dropped", "stale", "already-imported"],
+)
+def test_bittensor_11_clears_the_record_only_on_a_definite_initial_refusal(
+    monkeypatch, name, message, definite_initial_refusal
+):
+    # bittensor 11.3.0 answers both cases alike: success=False, no block, no submission_outcome_unknown
+    substrate = FakeV11Subtensor()
+
+    def failed(unsigned, signature, **kwargs):
+        substrate.nonces.append(unsigned.nonce)
+        return types.SimpleNamespace(success=False, message=message, data={}, block_hash=None,
+                                     error=types.SimpleNamespace(name=name))
+
+    substrate.submit_signature = failed
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code != 0
+    assert (_record() is None) == definite_initial_refusal
+    assert ("The node rejected this payment" in result.output) == definite_initial_refusal, result.output
+
+    del substrate.submit_signature  # funded meanwhile: only a proved refusal lets the rerun sign again
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+    assert (result.exit_code == 0) == definite_initial_refusal, result.output
+    assert substrate.nonces == ([7, 7] if definite_initial_refusal else [7])
 
 
 @pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
@@ -421,6 +633,41 @@ def test_a_mint_that_fails_before_signing_records_nothing_and_the_next_run_proce
 
 
 
+@pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
+def test_a_runtime_upgrade_while_linking_refuses_the_payment_before_signing(monkeypatch, chain):
+    substrate = chain()  # runtime 492 when the payment is chosen
+
+    def upgrade():
+        substrate.spec_493 = True  # runtime 493 when the calls are composed
+
+    result, events, _ = _run(
+        monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate, on_link=upgrade
+    )
+
+    assert result.exit_code == 1 and "runtime changed" in result.output and "Nothing was signed or sent" in result.output
+    assert substrate.submissions == [] and _record() is None
+    assert [e for e in events if e[0] == "sign" and e[1] != "challenge"] == []  # only the link was signed
+
+
+@pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
+@pytest.mark.parametrize(
+    "pinned_493, signed_493", [(True, None), (False, True)], ids=["pinned-block-is-493", "head-signs-as-493"]
+)
+def test_a_payment_is_decided_composed_and_signed_against_one_runtime(monkeypatch, chain, pinned_493, signed_493):
+    substrate = chain()  # the head reads 492 when the payment is chosen
+
+    def flip():  # then the runtime differs between the pinned block and the head the driver signs with
+        substrate.pinned_493, substrate.signed_493 = pinned_493, signed_493
+
+    result, events, _ = _run(
+        monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate, on_link=flip
+    )
+
+    assert result.exit_code == 1 and "runtime changed" in result.output and "Nothing was signed or sent" in result.output
+    # nothing reaches the chain, so no mint can land without its payment
+    assert substrate.submissions == [] and _record() is None
+
+
 def _record():
     path = gamma_module.UNRESOLVED / "5Cold.json"
     return json.loads(path.read_text()) if path.exists() else None
@@ -441,7 +688,10 @@ def test_the_payment_is_on_disk_before_it_is_broadcast_and_dropped_once_the_chai
 
     assert result.exit_code == 0, result.output
     # a process killed during the broadcast leaves this record, and the next run waits for it to settle
-    assert at_broadcast == [{"nonce": 7, "dies": 100 + gamma_module.ERA_PERIOD}]
+    assert [{k: v for k, v in r.items() if k != "hash"} for r in at_broadcast] == [
+        {"nonce": 7, "born": 100, "dies": 100 + gamma_module.ERA_PERIOD, "rest": False}
+    ]
+    assert at_broadcast[0]["hash"].startswith("0x") and len(at_broadcast[0]["hash"]) == 66
     assert _record() is None
 
 
@@ -455,3 +705,492 @@ def test_an_unreadable_record_refuses_before_anything_is_signed(monkeypatch, con
 
     assert result.exit_code != 0 and "Cannot read" in result.output, result.output
     assert substrate.submissions == [] and "unlock" not in events
+
+
+def test_a_bittensor_11_without_the_error_map_refuses_before_anything_is_signed(monkeypatch):
+    substrate = FakeV11Subtensor()
+
+    result, events, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate, error_map=None)
+
+    assert result.exit_code != 0 and "Nothing was signed" in result.output, result.output
+    assert substrate.submissions == [] and "unlock" not in events and _record() is None
+
+
+G = 10**9
+
+
+@pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
+@pytest.mark.parametrize(
+    "cap, bucket, refused, says",
+    [
+        (10 * G, (10 * G, 100), True, "Waiting does not help"),  # 3 held + ~24.5 minted is above the whole cap
+        (40 * G, (5 * G, 100), True, "wait about"),  # under the cap, but only 5 gamma has refilled
+        (40 * G, (5 * G, 100 - 7200), False, None),  # a day of blocks since: the bucket is full again
+    ],
+    ids=["above-the-cap", "not-refilled", "refilled"],
+)
+def test_a_capped_deposit_holding_gamma_refuses_a_payment_the_cap_cannot_spend_before_signing(
+    monkeypatch, chain, cap, bucket, refused, says
+):
+    substrate = chain(spec_493=True, held=[3 * G, 0])
+    substrate.cap = {"daily_spend_cap": {"cap": cap, "bucket": bucket}}
+
+    result, events, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
+
+    if not refused:
+        assert result.exit_code == 0, result.output
+        return
+    envelope = json.loads(result.output.strip().splitlines()[-1])
+    assert result.exit_code != 0 and envelope["error"]["code"] == "gamma_spend_cap", result.output
+    assert says in json.dumps(envelope) and "set_gamma_deposit_daily_spend_cap" in json.dumps(envelope)
+    # the exact minimum, never rounded below it; raising the cap adds nothing to what can be spent at once
+    expected = gamma_module.tao_rao_for_usd(25, GAMMA_PER_TAO) * GAMMA_PER_TAO // 10**9
+    need = 3 * G + gamma_module.min_gamma_out(expected)
+    assert f"at least {gamma_module._gamma(need)} gamma" in envelope["error"]["hint"]
+    assert "Remove the cap" in envelope["error"]["hint"] and "wait for it to refill" in envelope["error"]["hint"]
+    # nothing unlocked, signed or sent: the batch would have been refused and the mint reverted
+    assert events == [] and substrate.submissions == [] and substrate.nonces == []
+
+
+def _watch_finalized(substrate, *unwatch_replies):
+    """author_submitAndWatchExtrinsic on bittensor 10's locked driver (async-substrate-interface 2.0.3
+    ``submit_extrinsic``): the watch is answered with ``finalized``, then the driver's result handler makes the
+    author_unwatchExtrinsic cleanup as its own ``rpc_request``, which resends after a reply timeout until
+    ``max_retries`` sends and then raises MaxRetriesExceeded out of the watch."""
+
+    def rpc_request(method, params):
+        assert method == "author_unwatchExtrinsic"
+        for attempt in range(1, substrate.max_retries + 1):
+            if unwatch_replies[min(attempt, len(unwatch_replies)) - 1] != "timeout":
+                return {"result": True}
+        raise MaxRetriesExceeded("Max retries reached.")
+
+    def submit(extrinsic):
+        substrate.watch_send_count += 1
+        substrate.rpc_request("author_unwatchExtrinsic", ["0xsub"])  # inside the watch, after "finalized"
+        substrate.submissions.append(extrinsic)
+        return types.SimpleNamespace(is_success=True, error_message=None)
+
+    substrate.rpc_request = rpc_request
+    return submit
+
+
+@pytest.mark.parametrize("unwatch_replies", [("timeout", "ok"), ("timeout",)], ids=["retried", "lost"])
+def test_a_finalized_payment_stands_when_the_unwatch_cleanup_reply_is_lost(monkeypatch, unwatch_replies):
+    substrate = FakeSubstrate()
+    substrate.max_retries, substrate.watch_send_count = 5, 0
+    substrate.submit = _watch_finalized(substrate, *unwatch_replies)
+    driver_rpc = substrate.rpc_request
+
+    result, _, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
+
+    assert result.exit_code == 0 and "transfer_failed" not in result.output, result.output
+    assert _record() is None and substrate.watch_send_count == 1
+    assert substrate.max_retries == 5 and substrate.rpc_request is driver_rpc
+
+
+def test_a_run_waits_for_another_paying_from_the_same_coldkey_and_keeps_its_record(monkeypatch):
+    # one run checked nonce 7 and paid; it then sent nonce 8 and lost the reply, and still holds the coldkey's lock
+    gamma_module.UNRESOLVED.mkdir(parents=True)
+    pending = {"nonce": 8, "dies": 300}
+    (gamma_module.UNRESOLVED / "5Cold.json").write_text(json.dumps(pending))
+    fd = os.open(gamma_module.UNRESOLVED / "5Cold.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    assert try_lock(fd)
+    substrate = FakeSubstrate()
+    substrate.final_nonce = 7  # a stale view: the paused run checked before nonce 7 finalized
+    try:
+        result, events, _ = _run(monkeypatch, ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"], substrate)
+    finally:
+        os.close(fd)
+
+    assert result.exit_code != 0 and "Another 'lium fund --gamma'" in result.output, result.output
+    assert _record() == pending and substrate.submissions == [] and events == []
+
+
+ARGS = ["fund", "--gamma", "-w", "w", "-a", "25", "-y", "--json"]
+CHAINS = pytest.mark.parametrize("chain", [FakeSubstrate, FakeV11Subtensor], ids=["bittensor<=10", "bittensor11"])
+
+
+def _lose_answers(substrate, lost=True):
+    """The chain takes the payment but its answer never arrives (lost=False: answers arrive again)."""
+    if isinstance(substrate, FakeSubstrate):
+        substrate.submit = _lost_reply if lost else None
+    elif lost:
+        def unknown(unsigned, signature, **kwargs):
+            substrate.nonces.append(unsigned.nonce)
+            return types.SimpleNamespace(success=False, message="disconnected", data={"submission_outcome_unknown": True})
+
+        substrate.submit_signature = unknown
+    else:
+        del substrate.submit_signature
+
+
+def _finalize(substrate, number):
+    setattr(substrate, "finalized_number" if isinstance(substrate, FakeSubstrate) else "finalized_block", number)
+
+
+@CHAINS
+@pytest.mark.parametrize("outcome", ["ExtrinsicSuccess", "ExtrinsicFailed"], ids=["finalized-success", "finalized-failure"])
+def test_a_payment_whose_answer_was_lost_is_resolved_by_its_hash_before_another_is_signed(monkeypatch, chain, outcome):
+    substrate = chain()
+    _lose_answers(substrate)
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code != 0 and _record()["nonce"] == 7
+
+    # it was included and finalized (its nonce is used) while Lium had not credited it yet
+    _lose_answers(substrate, lost=False)
+    substrate.final_nonce, hash_ = 8, _record()["hash"]
+    _finalize(substrate, 110)
+    substrate.blocks = {104: [("0x" + "ab" * 32, "ExtrinsicSuccess"), (hash_, outcome)]}
+    result, events, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert _record() is None
+    if outcome == "ExtrinsicSuccess":  # reported, and nothing new signed
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        assert result.exit_code != 0 and envelope["error"]["code"] == "gamma_payment_landed", result.output
+        assert "block 104" in json.dumps(envelope) and substrate.nonces == [7] and "unlock" not in events
+        result, _, _ = _run(monkeypatch, ARGS, substrate)  # asked again: a new payment
+    else:
+        assert "failed in block 104" in result.output, result.output
+    assert result.exit_code == 0, result.output
+    assert substrate.nonces == [7, 8]
+
+
+@CHAINS
+def test_a_payment_that_expired_without_inclusion_is_dropped_and_the_next_one_signs(monkeypatch, chain):
+    substrate = chain()
+    _lose_answers(substrate)
+    _run(monkeypatch, ARGS, substrate)
+
+    _lose_answers(substrate, lost=False)
+    _finalize(substrate, 100 + gamma_module.ERA_PERIOD + 1)  # past its era, its nonce never used
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert result.exit_code == 0, result.output
+    assert "never reached the chain" in result.output and substrate.nonces == [7, 7] and _record() is None
+
+
+@CHAINS
+@pytest.mark.parametrize("landed", [True, False], ids=["paid", "never-landed"])
+def test_an_endpoint_without_the_block_history_keeps_the_record_until_an_archive_reads_it(monkeypatch, chain, landed):
+    substrate = chain()
+    _lose_answers(substrate)
+    _run(monkeypatch, ARGS, substrate)
+    recorded = _record()
+
+    # past its era on a lite node that lacks block 104: the SDK would read the tip for a missing hash
+    _lose_answers(substrate, lost=False)
+    substrate.final_nonce = 8 if landed else 7
+    _finalize(substrate, 100 + gamma_module.ERA_PERIOD + 1)
+    substrate.blocks = {104: [(recorded["hash"], "ExtrinsicSuccess")]} if landed else {}
+    substrate.missing = frozenset({104})
+    result, events, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert result.exit_code != 0 and "no history for block 104" in result.output, result.output
+    assert "BT_SUBTENSOR_NETWORK=archive" in result.output and "delete" not in result.output
+    assert _record() == recorded and substrate.nonces == [7] and "unlock" not in events
+
+    substrate.missing = frozenset()  # an archive endpoint
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert _record() is None
+    if landed:
+        assert result.exit_code != 0 and "gamma_payment_landed" in result.output and substrate.nonces == [7]
+    else:
+        assert result.exit_code == 0 and substrate.nonces == [7, 7], result.output
+
+
+@CHAINS
+def test_a_payment_that_finalizes_after_a_history_gap_inside_its_era_is_never_paid_twice(monkeypatch, chain):
+    substrate = chain()
+    _lose_answers(substrate)
+    _run(monkeypatch, ARGS, substrate)
+    recorded = _record()
+
+    # inside its era the endpoint lacks block 101: nothing is proved, so the record is kept with no delete advice
+    _lose_answers(substrate, lost=False)
+    _finalize(substrate, 101)
+    substrate.missing = frozenset({101})
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code != 0 and "no history for block 101" in result.output, result.output
+    assert "delete" not in result.output and _record() == recorded and substrate.nonces == [7]
+
+    # the payment then finalizes in block 104 and the history is readable again: it is reported, never re-signed
+    substrate.missing, substrate.final_nonce = frozenset(), 8
+    _finalize(substrate, 104)
+    substrate.blocks = {104: [(recorded["hash"], "ExtrinsicSuccess")]}
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code != 0 and "gamma_payment_landed" in result.output, result.output
+    assert substrate.nonces == [7] and _record() is None
+
+
+@CHAINS
+def test_a_used_nonce_alone_never_drops_the_record(monkeypatch, chain):
+    substrate = chain()
+    _lose_answers(substrate)
+    _run(monkeypatch, ARGS, substrate)
+    recorded = _record()
+
+    # included, but its block's result cannot be read (yet)
+    _lose_answers(substrate, lost=False)
+    substrate.final_nonce = 8
+    substrate.blocks = {100: [(recorded["hash"], None)]}
+    result, events, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert result.exit_code != 0 and "could not be read" in result.output, result.output
+    assert _record() == recorded and substrate.nonces == [7] and "unlock" not in events
+
+
+OTHER = "0x" + "cd" * 32  # another transaction in the era
+
+
+@CHAINS
+@pytest.mark.parametrize(
+    "carried, outcome",
+    [
+        ([(OTHER, "ExtrinsicSuccess", ("5Cold", 7))], "landed"),
+        ([(OTHER, "ExtrinsicSuccess", ("5Other", 7)), (OTHER, "ExtrinsicFailed", ("5Cold", 7))], "failed"),
+        ([(OTHER, "ExtrinsicSuccess", ("5Cold", 6)), (OTHER, "ExtrinsicSuccess", ("5Other", 7))], "absent"),
+    ],
+    ids=["paid", "failed", "only-other-nonces-and-signers"],
+)
+def test_an_older_record_is_settled_from_the_chain_by_its_signer_and_nonce(monkeypatch, chain, carried, outcome):
+    """Review of lium#466: the released CLI recorded {nonce, dies} before broadcasting. Wallet history and the Lium
+    balance cannot prove a lost answer's outcome (both lag the chain), so the era's blocks are read for the account's
+    transaction at that nonce: a success is reported and nothing is signed. That record does not say whether it was a
+    top-up or the later spend of what a top-up left in the deposit, so a failure or absence does not prove nothing was
+    paid: the record is dropped and the run stops once, signing nothing (a second review of lium#466)."""
+    legacy = {"nonce": 7, "dies": 100 + gamma_module.ERA_PERIOD}
+    gamma_module.UNRESOLVED.mkdir(parents=True)
+    (gamma_module.UNRESOLVED / "5Cold.json").write_text(json.dumps(legacy))
+    substrate = chain()
+    substrate.final_nonce = 0  # emptied and refilled: the account nonce proves nothing
+    _finalize(substrate, legacy["dies"] + 1)
+    substrate.blocks = {105: carried}
+
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert "delete" not in result.output and _record() != legacy, result.output
+    if outcome == "landed":
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "gamma_payment_landed" and substrate.nonces == [], result.output
+    else:
+        assert ("failed in block 105" if outcome == "failed" else "never reached the chain") in result.output
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "gamma_payment_unclear" and substrate.nonces == [], result.output
+        assert _record() is None
+
+
+@CHAINS
+@pytest.mark.parametrize("carried", [True, False], ids=["failed-in-a-block", "never-included"])
+def test_a_remainder_spend_that_did_not_land_never_leads_to_a_second_top_up(monkeypatch, chain, carried):
+    """Review of lium#466: the spend of what a top-up left in the deposit can fail (another spender emptied it) after
+    the top-up paid. Its failure is no proof the top-up paid nothing, so the run stops and signs no new mint."""
+    recorded = {"nonce": 8, "dies": 100 + gamma_module.ERA_PERIOD, "hash": OTHER, "born": 100, "rest": True}
+    gamma_module.UNRESOLVED.mkdir(parents=True)
+    (gamma_module.UNRESOLVED / "5Cold.json").write_text(json.dumps(recorded))
+    substrate = chain()
+    substrate.final_nonce = 9
+    _finalize(substrate, recorded["dies"] + 1)
+    substrate.blocks = {101: [(OTHER, "ExtrinsicFailed")]} if carried else {}
+
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+
+    envelope = json.loads(result.output.strip().splitlines()[-1])
+    assert envelope["error"]["code"] == "gamma_rest_not_spent" and substrate.nonces == [], result.output
+    assert ("failed in block 101" if carried else "never reached the chain") in result.output
+    assert _record() is None
+
+
+def _alice() -> tuple[str, str]:
+    """Substrate's dev account //Alice: its SS58 address and its account id, from the keypair's definition."""
+    from bittensor_wallet import Keypair
+
+    alice = Keypair.create_from_uri("//Alice")
+    return alice.ss58_address, "0x" + bytes(alice.public_key).hex()
+
+
+ALICE, ALICE_KEY = _alice()
+
+
+@pytest.mark.parametrize(
+    "value, carried",
+    [
+        ({"address": ALICE, "nonce": 7}, True),
+        ({"address": ALICE_KEY, "nonce": 7}, True),  # decoded without an SS58 format: the account id
+        ({"address": {"Id": ALICE}, "nonce": 7}, True),  # MultiAddress
+        ({"address": ALICE, "nonce": 8}, False),
+        ({"address": "0x" + "11" * 32, "nonce": 7}, False),
+        ({"call": {}}, False),  # unsigned
+    ],
+)
+def test_an_older_records_payment_is_matched_by_its_signer_and_nonce(value, carried):
+    assert gamma_module._signed_with(value, ALICE, 7) is carried
+    assert gamma_module._signed_with(types.SimpleNamespace(value=value), ALICE, 7) is carried
+
+
+@CHAINS
+def test_an_older_record_is_kept_when_a_transaction_in_its_era_cannot_be_read(monkeypatch, chain):
+    legacy = {"nonce": 7, "dies": 100 + gamma_module.ERA_PERIOD}
+    gamma_module.UNRESOLVED.mkdir(parents=True)
+    (gamma_module.UNRESOLVED / "5Cold.json").write_text(json.dumps(legacy))
+    substrate = chain()
+    _finalize(substrate, legacy["dies"] + 1)
+    substrate.blocks = {105: [(OTHER, "ExtrinsicSuccess", ("5Cold", None))]}
+
+    result, events, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert result.exit_code != 0 and "cannot be read" in result.output and "delete" not in result.output, result.output
+    assert _record() == legacy and substrate.nonces == [] and "unlock" not in events
+
+
+@CHAINS
+def test_an_older_record_is_never_advised_for_deletion_while_its_payment_can_still_land(monkeypatch, chain):
+    # the released CLI recorded {nonce, dies} before broadcasting and the answer was lost; at block 101 neither the
+    # wallet history nor the balance shows the payment yet, but it can still finalize until its era ends
+    legacy = {"nonce": 7, "dies": 100 + gamma_module.ERA_PERIOD}
+    gamma_module.UNRESOLVED.mkdir(parents=True)
+    (gamma_module.UNRESOLVED / "5Cold.json").write_text(json.dumps(legacy))
+    substrate = chain()
+    substrate.final_nonce = 7
+    _finalize(substrate, 101)
+
+    result, events, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code != 0 and f"until block {legacy['dies']}" in result.output, result.output
+    assert "delete" not in result.output and _record() == legacy and substrate.nonces == [] and "unlock" not in events
+
+    # it finalizes at block 104: the record is still there, so the next run signs nothing
+    substrate.final_nonce = 8
+    _finalize(substrate, 104)
+    result, events, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code != 0 and "delete" not in result.output, result.output
+    assert _record() == legacy and substrate.nonces == [] and "unlock" not in events
+
+
+@CHAINS
+def test_a_paid_payment_is_found_after_the_account_was_emptied_and_refilled(monkeypatch, chain):
+    substrate = chain()
+    _lose_answers(substrate)
+    _run(monkeypatch, ARGS, substrate)
+    hash_ = _record()["hash"]
+
+    # it paid in block 104; the account was then emptied (its nonce removed) and refilled, and its era has passed
+    _lose_answers(substrate, lost=False)
+    substrate.final_nonce = 0
+    _finalize(substrate, 100 + gamma_module.ERA_PERIOD + 2)
+    substrate.blocks = {104: [(hash_, "ExtrinsicSuccess")]}
+    result, events, _ = _run(monkeypatch, ARGS, substrate)
+
+    envelope = json.loads(result.output.strip().splitlines()[-1])
+    assert result.exit_code != 0 and envelope["error"]["code"] == "gamma_payment_landed", result.output
+    assert substrate.nonces == [7] and "unlock" not in events and _record() is None
+
+
+@CHAINS
+def test_a_used_nonce_without_the_payment_keeps_the_record_until_its_era_ends(monkeypatch, chain):
+    substrate = chain()
+    _lose_answers(substrate)
+    _run(monkeypatch, ARGS, substrate)
+    recorded = _record()
+
+    # another transaction used the nonce: the payment could still land on a refilled account until its era ends
+    _lose_answers(substrate, lost=False)
+    substrate.final_nonce = 8
+    _finalize(substrate, 110)
+    result, events, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code != 0 and "until block" in result.output, result.output
+    assert _record() == recorded and substrate.nonces == [7] and "unlock" not in events
+
+    _finalize(substrate, recorded["dies"] + 1)
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code == 0 and "never reached the chain" in result.output, result.output
+    assert substrate.nonces == [7, 8] and _record() is None
+
+
+@pytest.mark.parametrize("outcome", ["ExtrinsicSuccess", "ExtrinsicFailed"], ids=["paid", "failed"])
+def test_a_bittensor_11_result_in_a_block_without_readable_events_keeps_the_record(monkeypatch, outcome):
+    # bittensor 11.3.0 answers success=False with the block when it found the payment but read no dispatch events
+    substrate = FakeV11Subtensor()
+
+    def unreadable(unsigned, signature, **kwargs):
+        substrate.nonces.append(unsigned.nonce)
+        return types.SimpleNamespace(success=False, message="", data={}, block_hash="0xfinal104",
+                                     error=types.SimpleNamespace(name=None), events=[])
+
+    substrate.submit_signature = unreadable
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+    assert result.exit_code != 0 and "Do not re-send yet" in result.output, result.output
+    recorded = _record()
+    assert recorded["nonce"] == 7
+
+    # its events are readable once the next run looks: they decide, before anything new is signed
+    del substrate.submit_signature
+    substrate.final_nonce = 8
+    _finalize(substrate, 110)
+    substrate.blocks = {104: [(recorded["hash"], outcome)]}
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert _record() is None
+    if outcome == "ExtrinsicSuccess":
+        assert result.exit_code != 0 and "gamma_payment_landed" in result.output, result.output
+        assert substrate.nonces == [7]
+    else:
+        assert result.exit_code == 0 and "failed in block 104" in result.output, result.output
+        assert substrate.nonces == [7, 8]
+
+
+class _TimedOutReceipt:
+    @property
+    def is_success(self):
+        raise TimeoutError("receipt read timed out")
+
+
+def _receipt_without_events():
+    """async-substrate-interface 2.0.3's own ExtrinsicReceipt for a finalized payment whose block's events read
+    empty: ``is_success`` and ``error_message`` are both None."""
+    from async_substrate_interface.sync_substrate import ExtrinsicReceipt
+
+    substrate = types.SimpleNamespace(get_events=lambda block_hash: [],
+                                      get_block=lambda block_hash: {"extrinsics": [types.SimpleNamespace(
+                                          extrinsic_hash=bytes([7]) * 32)]})
+    receipt = ExtrinsicReceipt(substrate=substrate, extrinsic_hash="0x" + "07" * 32, block_hash="0xblock104")
+    assert receipt.is_success is None and receipt.error_message is None
+    return receipt
+
+
+@pytest.mark.parametrize("receipt", [_TimedOutReceipt, _receipt_without_events], ids=["read-timed-out", "events-empty"])
+def test_a_lazy_receipt_whose_result_read_fails_keeps_the_record(monkeypatch, receipt):
+    substrate = FakeSubstrate(submit=lambda extrinsic: receipt())
+
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert result.exit_code != 0 and "Do not re-send yet" in result.output
+    assert _record()["nonce"] == 7
+
+
+@CHAINS
+@pytest.mark.parametrize("capped", [False, True], ids=["uncapped", "cap-used-too"])
+def test_a_proxy_spend_while_linking_sizes_and_checks_the_payment_from_the_deposit_after_linking(
+    monkeypatch, chain, capped
+):
+    substrate = chain(spec_493=True, held=[3 * G, 0])
+    if capped:
+        substrate.cap = {"daily_spend_cap": {"cap": 40 * G, "bucket": (40 * G, 100)}}
+
+    def proxy_spends():  # an Any proxy spends the deposit (and the cap's bucket) with its own nonce
+        substrate.held[0] = 0
+        if capped:
+            substrate.cap = {"daily_spend_cap": {"cap": 40 * G, "bucket": (5 * G, 100)}}
+
+    result, _, _ = _run(monkeypatch, ARGS, substrate, on_link=proxy_spends)
+
+    if capped:
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        assert result.exit_code != 0 and envelope["error"]["code"] == "gamma_spend_cap", result.output
+        assert substrate.submissions == [] and substrate.nonces == []
+        return
+    assert result.exit_code == 0, result.output
+    (_, _, params), _ = substrate.submitted
+    calls = params["calls"]
+    mint, spend = (c[1][2] for c in calls) if chain is FakeV11Subtensor else (c[2] for c in calls)
+    assert spend["amount"] == mint["min_amount_out"]  # nothing left in the deposit to add

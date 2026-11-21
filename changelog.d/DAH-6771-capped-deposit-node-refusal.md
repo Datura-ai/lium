@@ -1,0 +1,12 @@
+### Fixed
+- `lium fund --gamma` stops before signing when the deposit's daily spend cap allows less than the payment needs, and names the exact amount it needs. Removing the cap lets the payment run at once; a raised cap first has to refill; before, the chain refused the spend and reverted the whole payment.
+- `lium fund --gamma` on bittensor 10: a payment the node refuses (for example `1010 Invalid Transaction: Inability to pay some fees`) no longer holds the next run for about 26 minutes. A definitive node refusal clears the pending payment record. If the outcome is uncertain, the CLI waits for the payment to settle.
+- `lium fund --gamma` runs one payment per wallet at a time; a second run from the same wallet stops until the first has finished.
+- `lium fund --gamma` stops before signing if the chain's runtime changes while the command runs; run it again.
+- `lium fund --gamma` records each payment's extrinsic hash and era before sending it. When its answer was lost, the next run reads the payment's result from the chain before signing a new one: it reports a payment that succeeded and signs nothing, and goes on after one that failed or expired.
+- `lium fund --gamma` checks the deposit and its daily spend cap again after linking the wallet and sizes the payment from that read.
+- The `provider` extra no longer installs bittensor 11.0 to 11.2, which lack the finalized-block read `lium fund --gamma` uses on bittensor 11; 9.10.1 to 10.x and 11.3 or later are allowed.
+- `lium fund --gamma` keeps a payment's record until the chain gives its result or the node refuses it outright, on bittensor 10 and 11, and finds an earlier payment in a block by the hash the chain reports for it.
+- `lium fund --gamma` keeps a payment record written by an older lium, which names no transaction, and tells you how to check and clear it instead of paying again. On bittensor 11, a result in a block whose events could not be read stays recorded until a later run reads them.
+- `lium fund --gamma` resolves a recorded payment only from the chain's blocks in its validity window, never from the account's nonce: it is cleared once found (and reported) or once its window has ended without it.
+- `lium fund --gamma` keeps a recorded payment when the chain endpoint has no history for a block in its validity window, and names the archive endpoint (`BT_SUBTENSOR_NETWORK=archive`) that settles it.
