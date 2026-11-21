@@ -176,10 +176,13 @@ whose hint says to fix the error and run the command again. `lium fund --gamma` 
 payment whose answer was lost has since succeeded: nothing new is signed, and running it again pays again. It raises
 `gamma_rest_not_spent` (1) when that earlier transaction was the separate spend of
 the gamma a top-up left in the deposit and it failed or never landed: the top-up
-paid, that gamma stays in the deposit, and nothing new is signed. It raises
-`gamma_payment_unclear` (1) for such a record written by an older lium, which does
-not say whether it was a top-up or that spend: check `lium balance` before paying
-again. Each of the three is reported once; the next run pays a new amount.
+paid and nothing new is signed; to credit any gamma still in the deposit, use Credit
+the rest of my deposit in the gamma payment panel. Each of these two is reported
+once; the next run pays a new amount. It raises `gamma_payment_unclear` (1) for a
+record written by an older lium, which names no transaction and does not say whether
+it was a top-up or that spend: the record is kept and every run stops, signing
+nothing, until you have checked `lium balance` and deleted the record file the hint
+names.
 
 With `LIUM_DEBUG=1` every handled failure also prints its Python traceback to
 stderr before the error (or the envelope), so "re-run with `LIUM_DEBUG=1`" gives
