@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -84,3 +85,19 @@ def test_load_hotkey_keypair_encrypted_keyfile_hints_the_password() -> None:
     with pytest.raises(ProviderError) as exc:
         load_hotkey_keypair("default", "default", wallet_factory=EncryptedWallet)
     assert exc.value.code == WALLET_NOT_FOUND and exc.value.hint == DECRYPT_FAILED_HINT
+
+
+def test_bundled_bittensor_wallet_decrypts_a_key_encrypted_by_4_1_1() -> None:
+    """bittensor-wallet 4.0.1 could not decrypt a key file encrypted by 4.1.1 (btcli's current
+    release), even with the right password, and lium said it could not find the wallet. The fixture is a throwaway
+    test key encrypted by 4.1.1 with the password below."""
+    bw = pytest.importorskip("bittensor_wallet")
+    path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "hotkey_encrypted_by_bittensor_wallet_4_1_1"
+    )
+
+    keypair = bw.Keyfile(str(path)).get_keypair(password="lium-test-password")
+
+    assert keypair.ss58_address == "5HWBZM8pGgbNwq1zwfyHAg5NRwzq5YbvRuqzNBmKJSZh3YA2"

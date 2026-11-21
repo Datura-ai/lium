@@ -65,6 +65,8 @@ provider = [
     # gap in its own words when a provider command is actually run.
     "bittensor>=9.10.1; python_version < '3.14'",
     "bittensor-cli>=9.1.0; python_version < '3.14'",
+    # 4.0.x cannot decrypt a key file encrypted by 4.1+ (btcli's current one); 4.1+ reads both
+    "bittensor-wallet>=4.1.0; python_version < '3.14'",
 ]
 dev = [
     "pytest",
