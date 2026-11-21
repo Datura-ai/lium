@@ -31,11 +31,16 @@ def test_usd_is_sized_to_tao_rounded_up_and_floored_two_percent():
 
 
 class FinalizedBlocks:
-    """Finalized blocks that carry a payment: ``blocks[number] = [(extrinsic hash, System event or None)]``."""
+    """Finalized blocks that carry a payment: ``blocks[number] = [(extrinsic hash, System event or None[, (signer,
+    nonce)])]``; an entry without a signer is unsigned."""
 
     def _block(self, number):
         assert number <= getattr(self, "finalized_number", getattr(self, "finalized_block", None))  # finalized only
-        return self.blocks.get(number, [])
+        return [entry[:2] for entry in self.blocks.get(number, [])]
+
+    def _signed(self, number):
+        """The decoded value's signer fields of each extrinsic in ``number``, as the SDKs decode them."""
+        return [{"address": e[2][0], "nonce": e[2][1]} if len(e) > 2 else {} for e in self.blocks.get(number, [])]
 
     def _events(self, number):
         return [{"extrinsic_idx": i, "module_id": "System", "event_id": event,
@@ -120,8 +125,9 @@ class FakeSubstrate(FinalizedBlocks):
 
     def get_extrinsics(self, block_hash):
         # async-substrate-interface 2.0.3: the hash is the decoded extrinsic's property (bytes), not in its value
-        return [types.SimpleNamespace(extrinsic_hash=bytes.fromhex(h[2:]), value={"call": {}})
-                for h, _ in self._block(int(block_hash[7:]))]
+        number = int(block_hash[7:])
+        return [types.SimpleNamespace(extrinsic_hash=bytes.fromhex(h[2:]), value={"call": {}, **signed})
+                for (h, _), signed in zip(self._block(number), self._signed(number))]
 
     def get_events(self, block_hash):
         return self._event_records(int(block_hash[7:]))
@@ -205,7 +211,9 @@ class FakeV11Subtensor(FinalizedBlocks):
     def block_info(self, number):
         if number in self.missing:
             raise ValueError(f"block {number} not found")
-        return types.SimpleNamespace(extrinsics=[{"extrinsic_hash": h} for h, _ in self._block(number)])
+        return types.SimpleNamespace(
+            extrinsics=[{"extrinsic_hash": h, **signed} for (h, _), signed in zip(self._block(number), self._signed(number))]
+        )
 
     def runtime(self, method, params):
         assert method == ("GammaRuntimeApi", "sim_mint_gamma") and params[0] == 51
@@ -926,26 +934,81 @@ def test_a_used_nonce_alone_never_drops_the_record(monkeypatch, chain):
     assert _record() == recorded and substrate.nonces == [7] and "unlock" not in events
 
 
+OTHER = "0x" + "cd" * 32  # another transaction in the era
+
+
 @CHAINS
 @pytest.mark.parametrize(
-    "final_nonce, finalized",
-    [(8, 100 + gamma_module.ERA_PERIOD + 1), (7, 100 + gamma_module.ERA_PERIOD + 1),
-     (0, 100 + gamma_module.ERA_PERIOD + 1)],
-    ids=["expired-nonce-used", "expired-nonce-unused", "account-emptied-and-refilled"],
+    "carried, outcome",
+    [
+        ([(OTHER, "ExtrinsicSuccess", ("5Cold", 7))], "landed"),
+        ([(OTHER, "ExtrinsicSuccess", ("5Other", 7)), (OTHER, "ExtrinsicFailed", ("5Cold", 7))], "failed"),
+        ([(OTHER, "ExtrinsicSuccess", ("5Cold", 6)), (OTHER, "ExtrinsicSuccess", ("5Other", 7))], "absent"),
+    ],
+    ids=["paid", "failed", "only-other-nonces-and-signers"],
 )
-def test_an_older_record_without_a_hash_is_always_kept(monkeypatch, chain, final_nonce, finalized):
-    # the released CLI recorded only the nonce and the era's end: which transaction used the nonce cannot be read,
-    # and the account nonce proves nothing (an emptied and refilled account restarts it)
+def test_an_older_record_is_settled_from_the_chain_by_its_signer_and_nonce(monkeypatch, chain, carried, outcome):
+    """Review of lium#466: the released CLI recorded {nonce, dies} before broadcasting. Wallet history and the Lium
+    balance cannot prove a lost answer's outcome (both lag the chain), so the era's blocks are read for the account's
+    transaction at that nonce: a success is reported and nothing is signed, a failure or absence frees the record."""
     legacy = {"nonce": 7, "dies": 100 + gamma_module.ERA_PERIOD}
     gamma_module.UNRESOLVED.mkdir(parents=True)
     (gamma_module.UNRESOLVED / "5Cold.json").write_text(json.dumps(legacy))
     substrate = chain()
-    substrate.final_nonce = final_nonce
-    _finalize(substrate, finalized)
+    substrate.final_nonce = 0  # emptied and refilled: the account nonce proves nothing
+    _finalize(substrate, legacy["dies"] + 1)
+    substrate.blocks = {105: carried}
+
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+
+    assert "delete" not in result.output and _record() != legacy, result.output
+    if outcome == "landed":
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "gamma_payment_landed" and substrate.nonces == [], result.output
+    else:
+        assert ("failed in block 105" if outcome == "failed" else "never reached the chain") in result.output
+        assert substrate.nonces == [0], result.output
+
+
+def _alice() -> tuple[str, str]:
+    """Substrate's dev account //Alice: its SS58 address and its account id, from the keypair's definition."""
+    from bittensor_wallet import Keypair
+
+    alice = Keypair.create_from_uri("//Alice")
+    return alice.ss58_address, "0x" + bytes(alice.public_key).hex()
+
+
+ALICE, ALICE_KEY = _alice()
+
+
+@pytest.mark.parametrize(
+    "value, carried",
+    [
+        ({"address": ALICE, "nonce": 7}, True),
+        ({"address": ALICE_KEY, "nonce": 7}, True),  # decoded without an SS58 format: the account id
+        ({"address": {"Id": ALICE}, "nonce": 7}, True),  # MultiAddress
+        ({"address": ALICE, "nonce": 8}, False),
+        ({"address": "0x" + "11" * 32, "nonce": 7}, False),
+        ({"call": {}}, False),  # unsigned
+    ],
+)
+def test_an_older_records_payment_is_matched_by_its_signer_and_nonce(value, carried):
+    assert gamma_module._signed_with(value, ALICE, 7) is carried
+    assert gamma_module._signed_with(types.SimpleNamespace(value=value), ALICE, 7) is carried
+
+
+@CHAINS
+def test_an_older_record_is_kept_when_a_transaction_in_its_era_cannot_be_read(monkeypatch, chain):
+    legacy = {"nonce": 7, "dies": 100 + gamma_module.ERA_PERIOD}
+    gamma_module.UNRESOLVED.mkdir(parents=True)
+    (gamma_module.UNRESOLVED / "5Cold.json").write_text(json.dumps(legacy))
+    substrate = chain()
+    _finalize(substrate, legacy["dies"] + 1)
+    substrate.blocks = {105: [(OTHER, "ExtrinsicSuccess", ("5Cold", None))]}
 
     result, events, _ = _run(monkeypatch, ARGS, substrate)
 
-    assert result.exit_code != 0 and "delete the file to pay again" in result.output, result.output
+    assert result.exit_code != 0 and "cannot be read" in result.output and "delete" not in result.output, result.output
     assert _record() == legacy and substrate.nonces == [] and "unlock" not in events
 
 

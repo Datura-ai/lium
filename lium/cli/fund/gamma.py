@@ -220,6 +220,10 @@ def _recorded(address: str) -> dict | None:
         known = {"nonce": int(entry["nonce"]), "dies": int(entry["dies"])}
         if "hash" in entry:
             known.update(hash=str(entry["hash"]), born=int(entry["born"]))
+        else:
+            # an older lium's record names no transaction: it was written right after reading finalized block
+            # dies - ERA_PERIOD and before broadcasting, so the payment can only be in a later block (found by nonce)
+            known["born"] = known["dies"] - ERA_PERIOD
         return known
     except FileNotFoundError:
         return None
@@ -337,9 +341,42 @@ def _v11_refusal(resp, refused: set[str]) -> str | None:
     return (resp.message or "refused") if getattr(getattr(resp, "error", None), "name", None) in refused else None
 
 
+def _public_key(ss58: str) -> str:
+    """The ``0x`` hex account id of a one-byte-prefix SS58 address (Bittensor's 42): prefix, 32 bytes, checksum."""
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    number = 0
+    for char in ss58:
+        number = number * 58 + alphabet.index(char)
+    raw = number.to_bytes(35, "big")
+    return "0x" + raw[1:33].hex()
+
+
+def _signed_with(extrinsic, address: str, nonce: int) -> bool:
+    """Whether a block extrinsic is ``address``'s signed transaction at ``nonce`` (an older record's payment: at most
+    one transaction of an account carries a nonce). Unsigned ones are not; one whose signer or nonce cannot be read
+    raises, so a payment is never taken for absent."""
+    value = extrinsic if isinstance(extrinsic, dict) or extrinsic is None else getattr(extrinsic, "value", None)
+    if isinstance(value, dict) and not value.get("address"):
+        return False  # an inherent or other unsigned extrinsic
+    signer = value.get("address") if isinstance(value, dict) else None
+    if isinstance(signer, dict):  # MultiAddress decoded as {"Id": ...}
+        signer = signer.get("Id")
+    if not isinstance(signer, str) or value.get("nonce") is None:
+        raise LiumError(
+            f"A transaction in the era of the earlier gamma payment from {address} (nonce {nonce}) cannot be read, so "
+            "whether that payment reached the chain is not known. Its record is kept. Run this again with an archive "
+            "endpoint (BT_SUBTENSOR_NETWORK=archive). Nothing new was signed."
+        )
+    if int(value["nonce"]) != nonce:
+        return False
+    return signer == address or signer.startswith("0x") and signer.lower() == _public_key(address)
+
+
 def _landed(subtensor, address: str, recorded: dict, number: int) -> tuple[int, bool, str | None] | None:
     """(block, succeeded, error) of the recorded payment in finalized blocks ``born`` to ``number`` (within its era),
-    None when none of them carries it. A carried payment whose dispatch result cannot be read raises: it stays recorded."""
+    None when none of them carries it. A carried payment whose dispatch result cannot be read raises: it stays recorded.
+    A record with a hash is found by it; an older one by its signer and nonce."""
+    label = recorded.get("hash") or f"(nonce {recorded['nonce']})"
     substrate = getattr(subtensor, "substrate", None)
     for block in range(recorded["born"], min(recorded["dies"], number) + 1):
         # a node without this block's history answers no hash (the SDK would then read the tip) or fails the read:
@@ -356,14 +393,18 @@ def _landed(subtensor, address: str, recorded: dict, number: int) -> tuple[int, 
         if extrinsics is None:
             raise LiumError(
                 f"The chain endpoint has no history for block {block}, so whether the earlier gamma payment "
-                f"{recorded['hash']} reached the chain cannot be read. It can still land until block "
+                f"{label} reached the chain cannot be read. It can still land until block "
                 f"{recorded['dies']}, so its record is kept. Run this again with an archive endpoint "
                 "(BT_SUBTENSOR_NETWORK=archive), which reads the chain and settles it. Nothing new was signed."
             )
-        hashes = [_hash_of(e) for e in extrinsics]
-        if recorded["hash"] not in hashes:
+        if "hash" in recorded:
+            hashes = [_hash_of(e) for e in extrinsics]
+            index = hashes.index(recorded["hash"]) if recorded["hash"] in hashes else None
+        else:
+            found = [i for i, e in enumerate(extrinsics) if _signed_with(e, address, recorded["nonce"])]
+            index = found[0] if found else None
+        if index is None:
             continue
-        index = hashes.index(recorded["hash"])
         if substrate is not None:
             events = substrate.get_events(block_hash)
         else:
@@ -376,7 +417,7 @@ def _landed(subtensor, address: str, recorded: dict, number: int) -> tuple[int, 
                 if event.get("event_id") == "ExtrinsicFailed":
                     return block, False, str((event.get("attributes") or {}).get("dispatch_error"))
         raise LiumError(
-            f"The earlier gamma payment {recorded['hash']} is in block {block}, but its result could not be read. "
+            f"The earlier gamma payment {label} is in block {block}, but its result could not be read. "
             "Run this again in a minute."
         )
     return None
@@ -410,21 +451,6 @@ def _settled_nonce(subtensor, address: str) -> int:
         return final
     # the account nonce proves nothing about a recorded payment (an emptied and refilled account restarts it at 0):
     # only the chain's blocks in its era do
-    if "hash" not in recorded:
-        # an older lium's record names no transaction: whether the payment at its nonce paid cannot be read, and
-        # until its era ends it can still land, so no check (wallet history, balance) is final before then
-        if number <= recorded["dies"]:
-            raise LiumError(
-                f"An earlier gamma payment from {address} (nonce {recorded['nonce']}) has not settled yet: it can "
-                f"still reach the chain until block {recorded['dies']} (finalized now: {number}). Run this again "
-                "after that block. Nothing new was signed."
-            )
-        raise LiumError(
-            f"An earlier gamma payment from {address} (nonce {recorded['nonce']}) may have reached the chain, and its "
-            f"record ({UNRESOLVED / (address + '.json')}) does not say which transaction it was. Its era has ended, so "
-            "it can no longer land. Check the wallet's "
-            "recent transactions and 'lium balance', then delete the file to pay again. Nothing new was signed."
-        )
     landed = _landed(subtensor, address, recorded, number)
     if landed is None:
         if number <= recorded["dies"]:  # it can still land until its era ends
