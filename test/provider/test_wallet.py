@@ -32,6 +32,30 @@ def test_load_hotkey_keypair_factory_failure_wrapped() -> None:
     with pytest.raises(ProviderError) as exc:
         load_hotkey_keypair("default", "hk", wallet_factory=boom)
     assert exc.value.code == WALLET_NOT_FOUND
+    # the underlying error is shown, not only kept as the chained cause (the CLI printed none of it)
+    assert (
+        "RuntimeError: disk gone" in exc.value.message
+        and "RuntimeError: disk gone" in str(exc.value)
+    )
+
+
+def test_load_hotkey_keypair_names_the_missing_keyfile() -> None:
+    """A wallet whose private hotkey file is absent (its public file alone still lists it) says which path it read."""
+    path = "/home/u/.bittensor/wallets/default/hotkeys/default"
+
+    class LazyWallet:
+        def __init__(self, **_k: Any) -> None:
+            pass
+
+        @property
+        def hotkey(self) -> Any:
+            raise OSError(
+                f'Failed to get hotkey: FileNotFound("Keyfile at: {path} does not exist.")'
+            )
+
+    with pytest.raises(ProviderError) as exc:
+        load_hotkey_keypair("default", "default", wallet_factory=LazyWallet)
+    assert exc.value.code == WALLET_NOT_FOUND and path in str(exc.value)
 
 
 def test_load_hotkey_keypair_no_signable_hotkey() -> None:

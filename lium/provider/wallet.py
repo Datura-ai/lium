@@ -58,8 +58,10 @@ def load_hotkey_keypair(
         # FileNotFound surfaces here, not in the constructor above.
         keypair = wallet.hotkey
     except Exception as e:
+        # the cause goes into the message: it names the keyfile read and why it failed
+        # (missing, unreadable, encrypted), which is what differs when btcli lists the wallet
         raise ProviderError(
-            f"could not open wallet name={coldkey!r} hotkey={hotkey!r}",
+            f"could not open wallet name={coldkey!r} hotkey={hotkey!r}: {type(e).__name__}: {e}",
             code=WALLET_NOT_FOUND,
             cause=e,
             context={"coldkey": coldkey, "hotkey": hotkey},
