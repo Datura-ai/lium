@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -101,3 +102,21 @@ def test_bundled_bittensor_wallet_decrypts_a_key_encrypted_by_4_1_1() -> None:
     keypair = bw.Keyfile(str(path)).get_keypair(password="lium-test-password")
 
     assert keypair.ss58_address == "5HWBZM8pGgbNwq1zwfyHAg5NRwzq5YbvRuqzNBmKJSZh3YA2"
+
+
+def test_bundled_bittensor_wallet_reads_an_unencrypted_key_file_in_the_4_1_format(
+    tmp_path: Path,
+) -> None:
+    """bittensor-wallet 4.1 writes unencrypted key files with a ``cryptoType`` field, which 4.0.1 refuses to read: lium
+    reported such a wallet as not found. The key is the public dev account //Alice."""
+    bw = pytest.importorskip("bittensor_wallet")
+    alice = bw.Keypair.create_from_uri("//Alice")
+    path = tmp_path / "default"
+    bw.Keyfile(str(path)).set_keypair(alice, encrypt=False, overwrite=True)
+    data = json.loads(path.read_text())
+    data["cryptoType"] = 1  # the 4.1 format's sr25519 marker
+    path.write_text(json.dumps(data))
+
+    keypair = bw.Keyfile(str(path)).get_keypair()
+
+    assert keypair.ss58_address == alice.ss58_address
