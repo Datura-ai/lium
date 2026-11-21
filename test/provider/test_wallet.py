@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from lium.provider.errors import WALLET_NOT_FOUND, ProviderError
-from lium.provider.wallet import load_hotkey_keypair
+from lium.provider.wallet import DECRYPT_FAILED_HINT, load_hotkey_keypair
 
 
 def test_load_hotkey_keypair_with_factory() -> None:
@@ -66,3 +66,21 @@ def test_load_hotkey_keypair_no_signable_hotkey() -> None:
     with pytest.raises(ProviderError) as exc:
         load_hotkey_keypair("default", "hk", wallet_factory=WalletWithoutHotkey)
     assert exc.value.code == WALLET_NOT_FOUND
+
+
+def test_load_hotkey_keypair_encrypted_keyfile_hints_the_password() -> None:
+    """An encrypted hotkey file that does not decrypt points at the password, not at creating a wallet."""
+
+    class EncryptedWallet:
+        def __init__(self, **_k: Any) -> None:
+            pass
+
+        @property
+        def hotkey(self) -> Any:
+            raise OSError(
+                'Generic error: Failed to get hotkey: DecryptionError("Wrong password for decryption.")'
+            )
+
+    with pytest.raises(ProviderError) as exc:
+        load_hotkey_keypair("default", "default", wallet_factory=EncryptedWallet)
+    assert exc.value.code == WALLET_NOT_FOUND and exc.value.hint == DECRYPT_FAILED_HINT

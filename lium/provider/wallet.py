@@ -23,6 +23,12 @@ from lium.provider.errors import (
 )
 
 
+DECRYPT_FAILED_HINT = (
+    "The hotkey file is password-encrypted and did not decrypt: check the password. A file encrypted by a newer "
+    "bittensor-wallet than this lium build bundles fails the same way."
+)
+
+
 def load_hotkey_keypair(
     coldkey: str,
     hotkey: str,
@@ -63,6 +69,9 @@ def load_hotkey_keypair(
         raise ProviderError(
             f"could not open wallet name={coldkey!r} hotkey={hotkey!r}: {type(e).__name__}: {e}",
             code=WALLET_NOT_FOUND,
+            # the keyfile is there but password-encrypted: "create a wallet" is the wrong next step. The bundled
+            # bittensor-wallet raises this both for a wrong password and for a file encrypted by a newer release
+            hint=DECRYPT_FAILED_HINT if "DecryptionError" in str(e) else None,
             cause=e,
             context={"coldkey": coldkey, "hotkey": hotkey},
         ) from e
