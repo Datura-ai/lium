@@ -38,6 +38,10 @@ FAILED_HINT = (
 )
 NOT_SENT_HINT = "Nothing was signed or sent, so nothing can land: fix the error above and run the command again"
 REFUSED_HINT = "The node rejected this payment. Fix the error above and run the command again."
+REST_HINT = (
+    "Gamma left in the deposit is spent with your next top-up, or credited without minting under Credit the rest of "
+    "my deposit in Billing, Add funds. Run this again only to add more."
+)
 
 
 def _sim_gamma(subtensor, rao: int) -> int:
@@ -219,7 +223,7 @@ def _recorded(address: str) -> dict | None:
         entry = json.loads(path.read_text())
         known = {"nonce": int(entry["nonce"]), "dies": int(entry["dies"])}
         if "hash" in entry:
-            known.update(hash=str(entry["hash"]), born=int(entry["born"]))
+            known.update(hash=str(entry["hash"]), born=int(entry["born"]), rest=bool(entry.get("rest")))
         else:
             # an older lium's record names no transaction: it was written right after reading finalized block
             # dies - ERA_PERIOD and before broadcasting, so the payment can only be in a later block (found by nonce)
@@ -234,9 +238,10 @@ def _recorded(address: str) -> dict | None:
         ) from e
 
 
-def _record(address: str, nonce: int, tx_hash: str, born: int) -> dict:
-    """Records the one payment in flight (_settled_nonce resolves any earlier one before a run signs)."""
-    entry = {"nonce": nonce, "dies": born + ERA_PERIOD, "hash": tx_hash, "born": born}
+def _record(address: str, nonce: int, tx_hash: str, born: int, rest: bool = False) -> dict:
+    """Records the one payment in flight (_settled_nonce resolves any earlier one before a run signs). ``rest`` marks
+    the separate spend of what a top-up left in the deposit: that top-up has paid, whatever becomes of the spend."""
+    entry = {"nonce": nonce, "dies": born + ERA_PERIOD, "hash": tx_hash, "born": born, "rest": rest}
     UNRESOLVED.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=UNRESOLVED, prefix=f".{address}.")
     with os.fdopen(fd, "w") as f:
@@ -460,6 +465,7 @@ def _settled_nonce(subtensor, address: str) -> int:
                 "was signed."
             )
         _forget(address, recorded)
+        _stop_unless_a_topup(address, recorded, "never reached the chain")
         ui.warning(f"An earlier gamma payment from {address} never reached the chain; it paid nothing.")
         return final
     _forget(address, recorded)
@@ -472,8 +478,33 @@ def _settled_nonce(subtensor, address: str) -> int:
             EXIT_GENERAL_ERROR,
             hint="Lium credits it within a few minutes: check 'lium balance', then run this again only to add more.",
         )
+    _stop_unless_a_topup(address, recorded, f"failed in block {block} ({error})")
     ui.warning(f"An earlier gamma payment from {address} failed in block {block} ({error}); it paid nothing.")
     return final
+
+
+def _stop_unless_a_topup(address: str, recorded: dict, outcome: str) -> None:
+    """A spend of what a top-up left in the deposit that did not land says the top-up itself paid, so it is not a
+    payment that paid nothing: the run stops, signing nothing, rather than mint a whole new amount. An older lium's
+    record does not say which of the two it was, so it stops the same way, once (its record is already dropped)."""
+    if recorded.get("rest"):
+        raise CliFailure(
+            "gamma_rest_not_spent",
+            f"An earlier top-up from {address} paid. The later spend of the gamma it left in the deposit {outcome}, "
+            "so that gamma stays in the deposit. Nothing new was signed.",
+            EXIT_GENERAL_ERROR,
+            hint=REST_HINT,
+        )
+    if "hash" not in recorded:
+        raise CliFailure(
+            "gamma_payment_unclear",
+            f"An earlier gamma payment from {address} (nonce {recorded['nonce']}) {outcome}. It was recorded by an "
+            "older lium, which did not note whether it was a top-up or the later spend of the gamma a top-up left in "
+            "the deposit. If it was a top-up, it paid nothing. If it was that later spend, the top-up before it paid "
+            "and the gamma stays in the deposit. Nothing new was signed.",
+            EXIT_GENERAL_ERROR,
+            hint="Check 'lium balance' for that top-up before paying again. " + REST_HINT,
+        )
 
 
 def gamma_fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, json_output: bool) -> None:
@@ -567,7 +598,7 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
     params["daily_spend_cap"] = None
     spend = {"service": payee, "netuid": NETUID, "amount": min_out + held}
 
-    def submit(calls: list[tuple[str, dict]], nonce: int) -> tuple[bool, str | None]:
+    def submit(calls: list[tuple[str, dict]], nonce: int, rest: bool = False) -> tuple[bool, str | None]:
         """Sign ``calls`` (SubtensorModule functions) with the coldkey at ``nonce``, as one ``batch_all`` when
         several. False only when the chain answered; OutcomeUnknown when the answer was lost. Records the payment
         before broadcasting (so a crash or kill after it still leaves the record) and drops it once the chain answers."""
@@ -589,7 +620,7 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
                 if unsigned.spec_version != spec_version:  # the signature commits to the spec version it is made for
                     raise NotSent(RUNTIME_CHANGED)
                 signature = coldkey.sign(unsigned.payload)
-                entry = _record(coldkey_ss58, nonce, _signed_hash(unsigned, signature), int(unsigned.era["current"]))
+                entry = _record(coldkey_ss58, nonce, _signed_hash(unsigned, signature), int(unsigned.era["current"]), rest)
             except (Exception, KeyboardInterrupt) as e:  # Ctrl-C included: nothing is broadcast yet
                 raise NotSent(str(e) or type(e).__name__) from e
             resp = subtensor.submit_signature(unsigned, signature, wait_for_inclusion=True, wait_for_finalization=True)
@@ -624,7 +655,7 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
             # chain refuses it under any other, so the composed bytes are only ever executed by the pinned runtime
             if substrate.runtime.runtime_version != spec_version:
                 raise NotSent(RUNTIME_CHANGED)
-            entry = _record(coldkey_ss58, nonce, "0x" + bytes(extrinsic.extrinsic_hash).hex(), born)
+            entry = _record(coldkey_ss58, nonce, "0x" + bytes(extrinsic.extrinsic_hash).hex(), born, rest)
         except (Exception, KeyboardInterrupt) as e:  # Ctrl-C included: nothing is broadcast yet
             raise NotSent(str(e) or type(e).__name__) from e
         try:
@@ -668,7 +699,9 @@ def _fund(bt, bt_wallet, coldkey_ss58: str, wallet: str, usd: float, yes: bool, 
                 try:
                     rest_ok, rest_error = ui.load(
                         "Spending the rest at Lium",
-                        lambda: submit([("spend_gamma", {"service": payee, "netuid": NETUID, "amount": rest})], nonce + 1),
+                        lambda: submit(
+                            [("spend_gamma", {"service": payee, "netuid": NETUID, "amount": rest})], nonce + 1, rest=True
+                        ),
                     )
                 except NotSent:  # not broadcast, or refused by the node: nothing is pending
                     raise

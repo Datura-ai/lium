@@ -474,10 +474,17 @@ def test_an_unknown_rest_spend_blocks_the_next_payment_until_finalized_state_set
     assert result.exit_code != 0 and "has not settled yet" in result.output
     assert len(substrate.nonces) == done and "unlock" not in events
 
-    # finalized past it and past its era, never included: the entry is cleared and the next payment signs above it
+    # finalized past it and past its era, never included: the top-up before it paid, so the run reports that and
+    # signs nothing (review of lium#466: a remainder that did not land is not a payment that paid nothing)
+    assert _record()["rest"] is True
     substrate.final_nonce, substrate.unknown = 9, False
     _finalize(substrate, _record()["dies"] + 1)
     substrate.held, substrate.submit = [None, None], None
+    result, _, _ = _run(monkeypatch, args, substrate)
+    assert result.exit_code != 0 and "gamma_rest_not_spent" in result.output, result.output
+    assert len(substrate.nonces) == done and _record() is None
+
+    # the record is settled: the next run is a new top-up and signs above it
     result, _, _ = _run(monkeypatch, args, substrate)
     assert result.exit_code == 0, result.output
     assert substrate.nonces[done] == 9 and _record() is None
@@ -682,7 +689,7 @@ def test_the_payment_is_on_disk_before_it_is_broadcast_and_dropped_once_the_chai
     assert result.exit_code == 0, result.output
     # a process killed during the broadcast leaves this record, and the next run waits for it to settle
     assert [{k: v for k, v in r.items() if k != "hash"} for r in at_broadcast] == [
-        {"nonce": 7, "born": 100, "dies": 100 + gamma_module.ERA_PERIOD}
+        {"nonce": 7, "born": 100, "dies": 100 + gamma_module.ERA_PERIOD, "rest": False}
     ]
     assert at_broadcast[0]["hash"].startswith("0x") and len(at_broadcast[0]["hash"]) == 66
     assert _record() is None
@@ -950,7 +957,9 @@ OTHER = "0x" + "cd" * 32  # another transaction in the era
 def test_an_older_record_is_settled_from_the_chain_by_its_signer_and_nonce(monkeypatch, chain, carried, outcome):
     """Review of lium#466: the released CLI recorded {nonce, dies} before broadcasting. Wallet history and the Lium
     balance cannot prove a lost answer's outcome (both lag the chain), so the era's blocks are read for the account's
-    transaction at that nonce: a success is reported and nothing is signed, a failure or absence frees the record."""
+    transaction at that nonce: a success is reported and nothing is signed. That record does not say whether it was a
+    top-up or the later spend of what a top-up left in the deposit, so a failure or absence does not prove nothing was
+    paid: the record is dropped and the run stops once, signing nothing (a second review of lium#466)."""
     legacy = {"nonce": 7, "dies": 100 + gamma_module.ERA_PERIOD}
     gamma_module.UNRESOLVED.mkdir(parents=True)
     (gamma_module.UNRESOLVED / "5Cold.json").write_text(json.dumps(legacy))
@@ -967,7 +976,30 @@ def test_an_older_record_is_settled_from_the_chain_by_its_signer_and_nonce(monke
         assert envelope["error"]["code"] == "gamma_payment_landed" and substrate.nonces == [], result.output
     else:
         assert ("failed in block 105" if outcome == "failed" else "never reached the chain") in result.output
-        assert substrate.nonces == [0], result.output
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "gamma_payment_unclear" and substrate.nonces == [], result.output
+        assert _record() is None
+
+
+@CHAINS
+@pytest.mark.parametrize("carried", [True, False], ids=["failed-in-a-block", "never-included"])
+def test_a_remainder_spend_that_did_not_land_never_leads_to_a_second_top_up(monkeypatch, chain, carried):
+    """Review of lium#466: the spend of what a top-up left in the deposit can fail (another spender emptied it) after
+    the top-up paid. Its failure is no proof the top-up paid nothing, so the run stops and signs no new mint."""
+    recorded = {"nonce": 8, "dies": 100 + gamma_module.ERA_PERIOD, "hash": OTHER, "born": 100, "rest": True}
+    gamma_module.UNRESOLVED.mkdir(parents=True)
+    (gamma_module.UNRESOLVED / "5Cold.json").write_text(json.dumps(recorded))
+    substrate = chain()
+    substrate.final_nonce = 9
+    _finalize(substrate, recorded["dies"] + 1)
+    substrate.blocks = {101: [(OTHER, "ExtrinsicFailed")]} if carried else {}
+
+    result, _, _ = _run(monkeypatch, ARGS, substrate)
+
+    envelope = json.loads(result.output.strip().splitlines()[-1])
+    assert envelope["error"]["code"] == "gamma_rest_not_spent" and substrate.nonces == [], result.output
+    assert ("failed in block 101" if carried else "never reached the chain") in result.output
+    assert _record() is None
 
 
 def _alice() -> tuple[str, str]:
