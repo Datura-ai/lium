@@ -95,3 +95,24 @@ def test_billing_history_reads_the_signed_in_providers_daily_ledger(client) -> N
 # --- node listing scope ------------------------------------------------------
 
 
+
+
+def test_a_wallet_that_does_not_load_is_reported_before_any_portal_request(monkeypatch, tmp_token_store):
+    """A lium that cannot read the hotkey file sent its request without a token, and the portal's 401 then said
+    "token rejected, re-login", although a login from another lium had just worked."""
+    from lium.provider import wallet
+    from lium.provider.errors import WALLET_NOT_FOUND, ProviderError
+
+    def unreadable(coldkey, hotkey):
+        raise ProviderError("could not open wallet", code=WALLET_NOT_FOUND)
+
+    monkeypatch.setattr(wallet, "load_hotkey_keypair", unreadable)
+    sent = []
+    client = ProviderClient("default", "default", token_store=tmp_token_store)
+    monkeypatch.setattr(client._http._session, "request", lambda **kw: sent.append(kw))
+
+    with pytest.raises(ProviderError) as e:
+        client.create_discord_oauth_authorization_url()
+
+    assert e.value.code == WALLET_NOT_FOUND
+    assert sent == []

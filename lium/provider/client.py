@@ -836,11 +836,13 @@ class ProviderClient:
         # Try a cache load without a network round-trip. We need the signer's
         # ss58 to key the cache; materialise it lazily via the property so a
         # fresh ``ProviderClient`` (e.g. for ``whoami``) can pick up a cached
-        # token from a previous ``login`` invocation. If the wallet isn't on
-        # disk we can't derive ss58 -- return None and let the caller see a
-        # clean 401.
+        # token from a previous ``login`` invocation.
         try:
             ss58 = self.account or self.signer.ss58_address
+        except ProviderError:
+            # the wallet did not load (missing, unreadable format, wrong password): say that. Sending the request
+            # without a token made the portal's 401 read "token rejected, re-login" though the login had worked
+            raise
         except Exception:
             return None
         try:
