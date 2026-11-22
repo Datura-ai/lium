@@ -766,6 +766,17 @@ def up_command(
         # the pod up by name before raising, so the hint is only conservative there.)
         # The server's code, hint and request_id ride along (DAH-3057): the code replaces the
         # generic rent_rejected, the hint replaces the default one, the id is printed under it.
+        if (exc.code or "").startswith("image_"):
+            # The rent pre-flight checks the image against its registry before any node is used,
+            # so no pod exists and every other node refuses the same image: name the image, not the node.
+            raise CliFailure(
+                exc.code,
+                f"The image was refused before any node was used: {exc}. No pod was created, "
+                f"and renting another node will not help.{kept}",
+                EXIT_API_ERROR,
+                data={**(_api_error_data(exc) or {}), **created_volume} or None,
+                hint=exc.hint,
+            )
         raise CliFailure(
             exc.code or "rent_rejected",
             f"Node {executor.huid} {'may or may not be rented' if exc.code == 'rent_outcome_unknown' else 'could not be rented'}: "

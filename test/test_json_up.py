@@ -406,6 +406,32 @@ def test_up_json_refusal_at_the_rent_keeps_the_servers_request_id_next_to_the_vo
         assert envelope["error"]["hint"] == "Run 'lium fund'."
 
 
+@pytest.mark.parametrize("with_volume", [False, True])
+def test_up_json_image_refusal_names_the_image_not_the_node(monkeypatch, with_volume):
+    """The rent pre-flight refuses an image (image_not_found, ...) before any node is used: every node
+    refuses it the same way, so the message must not say the node could not be rented nor point at
+    'lium ls' for other nodes (alert efa69: ten tries on ten nodes in a minute)."""
+    hint = "The image or tag does not exist in its registry."
+    rent_error = LiumError("API error 400: Image example/torch:9.9-missing not found in its registry",
+                           code="image_not_found", hint=hint, request_id="req-img")
+    args = ["--volume", "new:name=my-data"] if with_volume else []
+    result, _ = _run_up(monkeypatch, args, rent_error=rent_error)
+
+    assert result.exit_code == EXIT_API_ERROR
+    envelope = json.loads(result.stderr.strip().splitlines()[-1])
+    assert envelope["error"]["code"] == "image_not_found"
+    assert envelope["error"]["hint"] == hint
+    message = envelope["error"]["message"]
+    assert message.startswith("The image was refused before any node was used: API error 400: Image example/torch")
+    assert "No pod was created, and renting another node will not help." in message
+    assert "could not be rented" not in message and "lium ps" not in message and "lium ls" not in message
+    expected = {"request_id": "req-img"}
+    if with_volume:
+        assert message.endswith(" The volume my-data was created and is kept.")
+        expected.update(volume_id="vol-1", volume_huid="calm-lake-01")
+    assert envelope["data"] == expected
+
+
 def test_up_json_ttl_retry_refused_by_the_api_still_says_the_ttl_is_not_set(monkeypatch):
     """A 5xx at the `--ttl` retry took the `LiumError` branch of `_post_rent_failure`, which dropped the
     note: the text reader was told to 'Retry' and not that auto-termination is still to be scheduled."""
