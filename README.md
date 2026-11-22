@@ -390,6 +390,9 @@ lium mine --auto --hotkey <HOTKEY> --ip <VPS_IP> --external-port <FORWARDED_PORT
 lium mine --register <TOKEN> --external-port 8081 --ssh-port 2201 --renting-port-range 41000-41100
 # ...and give the first node its own range afterwards: a re-run keeps its saved hotkey and changes only the range
 lium mine --auto --renting-port-range 40000-40100
+# Move the node to another account: `lium provider node rm` it under the old one, re-run with the new hotkey
+# (restarts the executor so it reports that hotkey; waits while rentals run), then `lium provider node add` it
+lium mine --auto --hotkey <NEW_HOTKEY>
 
 # Opt-in host setup in the same run (off by default): Docker storage on xfs/pquota in an image file
 # (or --storage /dev/<spare disk> to FORMAT that disk), NTP on and the driver/Docker/containerd packages held

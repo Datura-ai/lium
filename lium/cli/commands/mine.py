@@ -822,9 +822,10 @@ def _executor_env_value(executor_dir: Path, key: str) -> Optional[str]:
     return next((line.split("=", 1)[1].strip() for line in env.splitlines() if line.startswith(f"{key}=")), "")
 
 
-# .env keys the executor reads only at container start (env_file); a rerun that changes one must recreate it
-_RESTART_KEYS = ("MINER_ACCOUNT_CLAIM", "INTERNAL_PORT", "EXTERNAL_PORT", "SSH_PORT", "SSH_PUBLIC_PORT", "RENTING_PORT_RANGE",
-                 "RENTING_PORT_MAPPINGS", "DEFAULT_MINER_HOTKEY")
+# .env keys the executor reads only at container start (env_file); a rerun that changes one must recreate it.
+# MINER_HOTKEY_SS58_ADDRESS: a node moved to another account re-runs with the new -k; a kept executor serves the old one
+_RESTART_KEYS = ("MINER_HOTKEY_SS58_ADDRESS", "MINER_ACCOUNT_CLAIM", "INTERNAL_PORT", "EXTERNAL_PORT", "SSH_PORT",
+                 "SSH_PUBLIC_PORT", "RENTING_PORT_RANGE", "RENTING_PORT_MAPPINGS", "DEFAULT_MINER_HOTKEY")
 
 
 def _restart_value(key: str, value: str):

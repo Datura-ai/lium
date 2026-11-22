@@ -486,8 +486,8 @@ def test_prompted_renting_range_gets_the_flag_checks(monkeypatch, flags, prompte
 def test_rerun_with_changed_ports_recreates_the_executor(
     monkeypatch, tmp_path: Path, running, rentals, up, rerun_without_flags, env_format
 ):
-    env = {"MINER_ACCOUNT_CLAIM": "", "INTERNAL_PORT": "8080", "EXTERNAL_PORT": "8081", "SSH_PORT": "2201",
-           "SSH_PUBLIC_PORT": "2201", "RENTING_PORT_RANGE": "41000-41100"}
+    env = {"MINER_HOTKEY_SS58_ADDRESS": _HK, "MINER_ACCOUNT_CLAIM": "", "INTERNAL_PORT": "8080", "EXTERNAL_PORT": "8081",
+           "SSH_PORT": "2201", "SSH_PUBLIC_PORT": "2201", "RENTING_PORT_RANGE": "41000-41100"}
     (tmp_path / ".env").write_text("".join(f"{k}={v}\n" for k, v in env.items()))
     container = None if running is None else "\n".join(f"{k}={v}" for k, v in {**env, **running}.items())
     calls, ids = [], iter(["old", "new"])
@@ -716,6 +716,24 @@ def test_changed_renting_port_mappings_recreate_the_executor(monkeypatch, tmp_pa
     monkeypatch.setattr(mine.console, "warning", lambda *a: None)
     mine._start_executor(tmp_path, wait_secs=5, recreate=mine._executor_env_stale(tmp_path))
     assert [c for c in calls if c.startswith("docker compose up")] == [up]
+
+
+@pytest.mark.parametrize("running_hotkey, stale", [(_HK, False), ("5G" + "y" * 46, True)])
+def test_a_new_hotkey_makes_the_running_executor_stale(monkeypatch, tmp_path: Path, running_hotkey, stale):
+    """A node moved to another account re-runs with the new -k; the executor reads the hotkey only at start."""
+    env = "INTERNAL_PORT=8080\nEXTERNAL_PORT=8081\nSSH_PORT=2201\nSSH_PUBLIC_PORT=2201\n"
+    (tmp_path / ".env").write_text(env + f"MINER_HOTKEY_SS58_ADDRESS={_HK}\n")
+    container = env + f"MINER_HOTKEY_SS58_ADDRESS={running_hotkey}\n"
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        if "ps -aq executor" in cmd:
+            return "cid", ""
+        if ".Config.Env" in cmd:
+            return container, ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    assert mine._executor_env_stale(tmp_path) is stale
 
 
 @pytest.mark.parametrize("saved, flags, ok", [
