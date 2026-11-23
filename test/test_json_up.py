@@ -20,6 +20,7 @@ from lium.cli import ui
 from lium.cli.actions import ActionResult
 from lium.cli.cli import cli
 from lium.cli.up import command as up_module
+from lium.cli.up.actions import ResolveExecutorAction
 from lium.cli.utils import EXIT_API_ERROR, EXIT_CONFIGURATION_ERROR, EXIT_GENERAL_ERROR
 from lium.sdk import LiumError, LiumRentOutcomeUnknownError, LiumServerError, PodInfo, PodStartError, VolumeInfo
 
@@ -46,7 +47,8 @@ def _one_document(stdout: str) -> dict:
 # --- lium up --json ---------------------------------------------------------------------------
 
 def _run_up(monkeypatch, args=(), *, wait="ready", rent_error=None, gpus="match", jupyter="ok", rm_error=None,
-            volume_takes=0, schedule_error=None, yes=True, input=None, backup_notice=None, notice=None, rented=None):
+            volume_takes=0, schedule_error=None, yes=True, input=None, backup_notice=None, notice=None, rented=None,
+            resolve_error=None):
     """`lium up brave-fox-3a --yes --json <args>` against fakes; returns (result, calls).
 
     ``wait``: ``"ready"`` | ``"timeout"`` (still starting) | ``"failed"`` (dead pod) | ``"api_error"`` (503 while
@@ -57,6 +59,7 @@ def _run_up(monkeypatch, args=(), *, wait="ready", rent_error=None, gpus="match"
     ``volume_takes``: seconds the ``--volume new:`` creation advances a fake clock by (``vol-1`` is created either way).
     ``schedule_error``: raised by every ``Lium.schedule_termination`` call (the one at the rent and the retry).
     ``yes=False`` drops ``--yes`` so the price prompt is asked; ``input`` is what the terminal answers.
+    ``resolve_error``: the node is picked by the real ``--gpu`` dry run, whose ``Lium.rent`` raises this.
     """
     calls: list = []
     clock = {"now": 1000.0}
@@ -83,8 +86,17 @@ def _run_up(monkeypatch, args=(), *, wait="ready", rent_error=None, gpus="match"
             if rm_error is not None:
                 raise rm_error
 
+    class _SpecLium:
+        def supports(self, feature):
+            return True
+
+        def rent(self, **kwargs):
+            raise resolve_error
+
     class _Resolve:
         def execute(self, ctx):
+            if resolve_error is not None:
+                return ResolveExecutorAction().execute({**ctx, "lium": _SpecLium(), "executor_id": None, "gpu": "A6000"})
             return ActionResult(ok=True, data={"executor": executor})
 
     class _Template:
@@ -430,6 +442,26 @@ def test_up_json_image_refusal_names_the_image_not_the_node(monkeypatch, with_vo
         assert message.endswith(" The volume my-data was created and is kept.")
         expected.update(volume_id="vol-1", volume_huid="calm-lake-01")
     assert envelope["data"] == expected
+
+
+def test_up_json_gpu_dry_run_image_refusal_names_the_image_not_gpu_supply(monkeypatch):
+    """`lium up --gpu X -t <template>` picks the node with a dry run that runs the same image pre-flight. Its
+    image refusal came back as node_selection_failed with "Ask providers for it: lium request X", sending the
+    renter after GPU supply for an image problem; it must read like the rent's image refusal above."""
+    hint = "The image or tag does not exist in its registry."
+    resolve_error = LiumError("API error 400: Image example/torch:9.9-missing not found in its registry",
+                              code="image_not_found", hint=hint, request_id="req-img")
+    result, calls = _run_up(monkeypatch, resolve_error=resolve_error)
+
+    assert result.exit_code == EXIT_API_ERROR
+    assert ("rent",) not in calls
+    envelope = json.loads(result.stderr.strip().splitlines()[-1])
+    assert envelope["error"]["code"] == "image_not_found"
+    assert envelope["error"]["hint"] == hint
+    message = envelope["error"]["message"]
+    assert message.startswith("The image was refused before any node was used: API error 400: Image example/torch")
+    assert "renting another node will not help" in message and "lium request" not in message
+    assert envelope["data"] == {"request_id": "req-img"}
 
 
 def test_up_json_ttl_retry_refused_by_the_api_still_says_the_ttl_is_not_set(monkeypatch):

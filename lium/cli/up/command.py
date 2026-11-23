@@ -136,6 +136,23 @@ def _post_rent_failure(exc: Exception, billing_pod: dict, doing: str, note: str 
     )
 
 
+def _is_image_refusal(exc: LiumError) -> bool:
+    return (exc.code or "").startswith("image_")
+
+
+def _image_refused(exc: LiumError, kept: str = "", created_volume: dict | None = None) -> CliFailure:
+    """The rent pre-flight checks the image against its registry before any node is used, so no pod
+    exists and every other node refuses the same image: name the image, not the node or GPU supply."""
+    return CliFailure(
+        exc.code,
+        f"The image was refused before any node was used: {exc}. No pod was created, "
+        f"and renting another node will not help.{kept}",
+        EXIT_API_ERROR,
+        data={**(_api_error_data(exc) or {}), **(created_volume or {})} or None,
+        hint=exc.hint,
+    )
+
+
 @click.command("up")
 @click.argument("executor_id", required=False, metavar="NODE_ID")
 @click.option("--name", "-n", help="Custom pod name")
@@ -430,20 +447,26 @@ def up_command(
         )
 
     action = ResolveExecutorAction()
-    result = ui.load(
-        "Finding node",
-        lambda: action.execute({
-            "lium": lium,
-            "executor_id": executor_id,
-            "gpu": gpu,
-            "count": count,
-            "country": country,
-            "min_cpus": min_cpus,
-            "ports": ports,
-            "template_id": template_id,
-            "dockerfile_content": dockerfile_content,
-        })
-    )
+    try:
+        result = ui.load(
+            "Finding node",
+            lambda: action.execute({
+                "lium": lium,
+                "executor_id": executor_id,
+                "gpu": gpu,
+                "count": count,
+                "country": country,
+                "min_cpus": min_cpus,
+                "ports": ports,
+                "template_id": template_id,
+                "dockerfile_content": dockerfile_content,
+            })
+        )
+    except LiumError as exc:
+        # the `--gpu` dry run runs the same rent pre-flight, so its image refusal reads as the rent's
+        if _is_image_refusal(exc):
+            raise _image_refused(exc)
+        raise
 
     if not result.ok:
         # the spec path's 409 carries the server's hint and request_id in data (DAH-3057): the
@@ -766,17 +789,8 @@ def up_command(
         # the pod up by name before raising, so the hint is only conservative there.)
         # The server's code, hint and request_id ride along (DAH-3057): the code replaces the
         # generic rent_rejected, the hint replaces the default one, the id is printed under it.
-        if (exc.code or "").startswith("image_"):
-            # The rent pre-flight checks the image against its registry before any node is used,
-            # so no pod exists and every other node refuses the same image: name the image, not the node.
-            raise CliFailure(
-                exc.code,
-                f"The image was refused before any node was used: {exc}. No pod was created, "
-                f"and renting another node will not help.{kept}",
-                EXIT_API_ERROR,
-                data={**(_api_error_data(exc) or {}), **created_volume} or None,
-                hint=exc.hint,
-            )
+        if _is_image_refusal(exc):
+            raise _image_refused(exc, kept, created_volume)
         raise CliFailure(
             exc.code or "rent_rejected",
             f"Node {executor.huid} {'may or may not be rented' if exc.code == 'rent_outcome_unknown' else 'could not be rented'}: "
