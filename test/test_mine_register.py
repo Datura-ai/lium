@@ -1058,6 +1058,12 @@ def test_a_48gb_rtx_4090_at_the_low_window_edge_is_listed_as_48gb() -> None:
     [
         ("NVIDIA GeForce RTX 4080", 32607, "NVIDIA GeForce RTX 4080 32GB"),
         ("NVIDIA GeForce RTX 4080 SUPER", 32607, "NVIDIA GeForce RTX 4080 SUPER 32GB"),
+        ("NVIDIA GeForce RTX 4090 D", 49140, "NVIDIA GeForce RTX 4090 D 48GB"),
+        ("NVIDIA GeForce RTX 4090 D", 24564, "NVIDIA GeForce RTX 4090 D"),  # factory 24 GB card
+        ("NVIDIA GeForce RTX 3080", 20470, "NVIDIA GeForce RTX 3080 20GB"),
+        ("NVIDIA GeForce RTX 3080", 12288, "NVIDIA GeForce RTX 3080"),  # factory 12 GB card
+        ("NVIDIA GeForce RTX 2080 Ti", 22528, "NVIDIA GeForce RTX 2080 Ti 22GB"),
+        ("NVIDIA GeForce RTX 2080 Ti", 11264, "NVIDIA GeForce RTX 2080 Ti"),  # factory 11 GB card
         (
             "NVIDIA GeForce RTX 4080",
             16376,
@@ -1070,7 +1076,7 @@ def test_a_48gb_rtx_4090_at_the_low_window_edge_is_listed_as_48gb() -> None:
         ),  # no reading: no relabel
     ],
 )
-def test_a_32gb_rtx_4080_is_listed_as_its_modded_model(raw, vram_mib, listed) -> None:
+def test_a_modded_card_is_listed_by_its_vram(raw, vram_mib, listed) -> None:
     assert reg._listed_gpu_model(raw, 1, None, vram_mib) == listed
 
 
