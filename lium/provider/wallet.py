@@ -23,6 +23,11 @@ from lium.provider.errors import (
 )
 
 
+DECRYPT_FAILED_HINT = (
+    "The hotkey file is password-encrypted and did not decrypt: check the password."
+)
+
+
 def load_hotkey_keypair(
     coldkey: str,
     hotkey: str,
@@ -58,9 +63,13 @@ def load_hotkey_keypair(
         # FileNotFound surfaces here, not in the constructor above.
         keypair = wallet.hotkey
     except Exception as e:
+        # the cause goes into the message: it names the keyfile read and why it failed
+        # (missing, unreadable, encrypted), which is what differs when btcli lists the wallet
         raise ProviderError(
-            f"could not open wallet name={coldkey!r} hotkey={hotkey!r}",
+            f"could not open wallet name={coldkey!r} hotkey={hotkey!r}: {type(e).__name__}: {e}",
             code=WALLET_NOT_FOUND,
+            # the keyfile is there but did not decrypt (a wrong password): "create a wallet" is the wrong next step
+            hint=DECRYPT_FAILED_HINT if "DecryptionError" in str(e) else None,
             cause=e,
             context={"coldkey": coldkey, "hotkey": hotkey},
         ) from e
