@@ -153,7 +153,8 @@ class RemoteExecutionError(LiumError):
 
 
 class LiumInsufficientBalanceError(LiumPermissionError):
-    """The account cannot pay for this (403 with a balance reason).
+    """The account cannot pay for this (403 with a balance reason, or 402 ``account_unfunded``: an API key on an
+    account with no balance tried a write).
 
     ``required`` and ``available`` are the USD amounts printed in the server's
     refusal, when present, else ``None``; ``available`` keeps the sign of a

@@ -27,6 +27,7 @@ from lium.sdk import (
     LiumCardTopUpError,
     LiumChargeOutcomeUnknownError,
     LiumError,
+    LiumInsufficientBalanceError,
     LiumPermissionError,
     LiumScopeError,
     LiumServerError,
@@ -263,6 +264,38 @@ def test_a_402_of_another_code_stays_a_plain_lium_error(client):
 
     assert type(raised.value) is LiumError
     assert raised.value.code == "spend_cap_reached"
+
+
+@responses.activate
+def test_a_write_by_a_key_on_an_account_with_no_balance_is_the_funding_refusal(client):
+    """402 `account_unfunded`: the typed funding error, so callers and MCP agents get the top-up instruction."""
+    body = _error_body(
+        402,
+        {"code": "account_unfunded", "message": "This account has no balance, so its API keys can read ..."},
+        hint="Top up on the Billing page, then retry",
+    )
+    responses.post(TOPUP, status=402, json=body)
+
+    with pytest.raises(LiumInsufficientBalanceError) as raised:
+        client.topup_card(50)
+
+    assert raised.value.code == "account_unfunded"
+    assert raised.value.hint == "Top up on the Billing page, then retry"
+    assert "Insufficient balance: This account has no balance" in str(raised.value)
+
+
+@responses.activate
+def test_the_first_rentals_pod_list_on_a_zero_balance_account_is_the_funding_refusal(client):
+    """402 `BALANCE_REQUIRED` from GET /pods (an API key on a $0 account; the server sends no hint): the typed
+    funding error with its code kept and a top-up hint supplied, so an agent's first rental knows what to do."""
+    body = _error_body(402, {"code": "BALANCE_REQUIRED", "message": "Add balance to use pods with an API key: lium topup."})
+    responses.get(f"{BASE}/pods", status=402, json=body)
+
+    with pytest.raises(LiumInsufficientBalanceError) as raised:
+        client.ps()
+
+    assert raised.value.code == "BALANCE_REQUIRED"
+    assert "lium topup" in raised.value.hint
 
 
 @responses.activate

@@ -620,6 +620,26 @@ def sdk_error_failure(error: LiumError, data: dict | None = None, *, note: str =
     return CliFailure(error.code or code, message + note, exit_code, data=merged, hint=error.hint)
 
 
+def batch_refusal_failure(budget: list, funding: list, *, done: tuple[str, list] | None = None,
+                          failed: list | None = None) -> CliFailure:
+    """The exit-6 failure of a pod batch with 402 refusals; ``budget``/``funding``: ``(huid, error)`` pairs.
+
+    The key's budget and an account with no balance have different fixes, so both groups are named with their hint
+    in the text and carried with their codes in ``data``; the first refusal gives the code, exit status and hint.
+    ``done`` (``(key, huids)``, e.g. ``("cancelled", [...])``) and ``failed`` go into ``data`` too: a JSON reader gets
+    the whole batch from the one envelope, since the command prints its progress lines only in text mode.
+    """
+    groups = {"budget_refused": budget, "funding_refused": funding}
+    data = {k: [{"huid": h, "code": e.code, "hint": e.hint} for h, e in v] for k, v in groups.items() if v}
+    if done is not None:
+        data[done[0]] = list(done[1])
+    if failed is not None:
+        data["failed"] = list(failed)
+    lines = [f"{label} for pods: {', '.join(h for h, _ in v)} ({(v[0][1].hint or '').rstrip('.')})"
+             for label, v in (("Refused by the API key's budget", budget), ("No balance on the account", funding)) if v]
+    return sdk_error_failure((budget or funding)[0][1], data, note=" " + ". ".join(lines) + ".")
+
+
 def _api_error_data(e: LiumError) -> dict | None:
     """The server's request_id, for the JSON envelope's ``data`` (the hint has its own
     field in the envelope; see :func:`error_envelope`)."""
