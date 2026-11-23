@@ -91,3 +91,23 @@ and marks the release `latest`, and `install.sh` and self-update download them. 
 (1) the environment and (3) the merge and review rules can be set at any time; the current `main` does not upload from `pypi`.
 Add the new pypi.org publisher from (2) before the merge. Merge. Right after the merge, delete the old publisher from
 (2): from the merge on, only `publish-pypi.yml` uploads `lium.io`, and the first release after it shows `publish-pypi.yml` works.
+
+## `pinned-actions-required-workflow`: the pinned-actions check always comes from main (organization owner, once)
+
+`pinned-actions.yml` judges whether a PR or a merge-queue group may land, so the copy that runs must be the one on
+`main`, not the one the candidate carries. A repository workflow cannot guarantee that on `pull_request` or
+`merge_group` (both run the candidate's copy), so an organization ruleset requires it instead:
+`pinned-actions-required-workflow.json` ("Require workflows to pass before merging" on the default branch of `lium-io`
+and `lium`, workflow `.github/workflows/pinned-actions.yml` from `Datura-ai/lium-io` at `refs/heads/main`). GitHub then
+runs main's copy on every PR and every queued group, whatever the candidate changes in its own workflow files. The rule
+exists at organization level only, so an organization owner applies it:
+
+```bash
+gh api "orgs/Datura-ai/rulesets" --method POST --input .github/rulesets/pinned-actions-required-workflow.json
+```
+
+Check: `gh api "orgs/Datura-ai/rulesets" --jq '.[]|.name+" "+.enforcement'` → `pinned-actions-required-workflow active`.
+
+Until that check passes and `.github/workflows/pinned-actions.yml` is on `lium-io` main, the ruleset protects nothing:
+a PR's own `pull_request` copy would judge it. So `pinned-actions.yml` here stays on `pull_request_target` (main's copy
+judges every PR) until both are true; only then can a later PR move it to `pull_request`.
