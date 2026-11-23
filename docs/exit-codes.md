@@ -171,7 +171,18 @@ and use the exit code of their family from the table above. Where re-running
 the command would not be safe the hint says so: `jupyter_install_failed` from
 `up` points at `lium update <pod> --jupyter` (the pod exists and bills), and
 `transfer_failed` says to check the wallet and `lium balance` before funding
-again (the transfer may have reached the chain).
+again (the transfer may have reached the chain), except after a definitive node refusal of `lium fund --gamma`,
+whose hint says to fix the error and run the command again. `lium fund --gamma` raises `gamma_payment_landed` (1) when an earlier
+payment whose answer was lost has since succeeded: nothing new is signed, and running it again pays again. It raises
+`gamma_rest_not_spent` (1) when that earlier transaction was the separate spend of
+the gamma a top-up left in the deposit and it failed or never landed: the top-up
+paid and nothing new is signed; to credit any gamma still in the deposit, use Credit
+the rest of my deposit in the gamma payment panel. Each of these two is reported
+once; the next run pays a new amount. It raises `gamma_payment_unclear` (1) for a
+record written by an older lium, which names no transaction and does not say whether
+it was a top-up or that spend: the record is kept and every run stops, signing
+nothing, until you have checked `lium balance` and deleted the record file the hint
+names.
 
 With `LIUM_DEBUG=1` every handled failure also prints its Python traceback to
 stderr before the error (or the envelope), so "re-run with `LIUM_DEBUG=1`" gives

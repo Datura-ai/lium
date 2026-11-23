@@ -1503,3 +1503,19 @@ def setup_backup(lium, pod: PodInfo, backup_params: BackupParams, replace_existi
 
         console.error(f"Failed to setup backup: {e}")
         raise
+
+
+def try_lock(fd: int) -> bool:
+    """A non-blocking exclusive lock on ``fd``, held until it is closed; False while another holds it."""
+    try:
+        try:
+            import fcntl
+        except ImportError:  # Windows: a non-blocking lock on the file's first byte, held as long
+            import msvcrt
+
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True

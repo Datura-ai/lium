@@ -523,6 +523,7 @@ lium fund -w mywal -a 0.5 -y       # Skip confirmation
 lium fund --alpha -k <hotkey> -a 25              # Lium's primary subnet
 lium fund --alpha -k <hotkey> -a 25 --netuid 64  # Any subnet Lium accepts
 lium fund --gamma -w default -a 25               # SN51 gamma: 25 USD, fails if the price moves >2%
+                                                 # refused before signing if the deposit's daily spend cap cannot spend it
 ```
 
 ### `lium ls --format json` fields
