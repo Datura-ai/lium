@@ -30,6 +30,7 @@ from typing import Any
 
 # Auth
 WALLET_NOT_FOUND = "WALLET_NOT_FOUND"
+WALLET_PASSWORD_WRONG = "WALLET_PASSWORD_WRONG"
 HOTKEY_NOT_REGISTERED = "HOTKEY_NOT_REGISTERED"
 PORTAL_AUTH_EXPIRED = "PORTAL_AUTH_EXPIRED"
 PORTAL_AUTH_INVALID = "PORTAL_AUTH_INVALID"
@@ -63,6 +64,7 @@ INPUT_INTERRUPTED = "input.interrupted"
 # Default hint table -- keep human and short. Empty string => no hint.
 _HINTS: dict[str, str] = {
     WALLET_NOT_FOUND: "Run `btcli wallet new_coldkey` then `btcli wallet new_hotkey`, or check --coldkey/--hotkey names.",
+    WALLET_PASSWORD_WRONG: "The wallet exists but its keyfile is password-encrypted and the password was wrong; run the command again with the right password.",
     HOTKEY_NOT_REGISTERED: "Run `btcli subnet register --netuid 51 --wallet.name <coldkey> --wallet.hotkey <hotkey>` first.",
     PORTAL_AUTH_EXPIRED: "Run `lium provider portal login` to refresh the JWT.",
     PORTAL_AUTH_INVALID: "Token rejected. Re-login with `lium provider portal login`.",
@@ -196,4 +198,5 @@ __all__ = [
     "SSH_UNREACHABLE",
     "UUID_NOT_FOUND",
     "WALLET_NOT_FOUND",
+    "WALLET_PASSWORD_WRONG",
 ]

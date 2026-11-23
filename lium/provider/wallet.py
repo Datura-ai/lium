@@ -18,14 +18,22 @@ from typing import Any
 from lium.provider.chain_stack import missing_chain_stack_message
 from lium.provider.errors import (
     WALLET_NOT_FOUND,
+    WALLET_PASSWORD_WRONG,
     ProviderConfigError,
     ProviderError,
 )
 
 
-DECRYPT_FAILED_HINT = (
-    "The hotkey file is password-encrypted and did not decrypt: check the password."
-)
+def _is_wrong_password(e: BaseException) -> bool:
+    """A keyfile that exists but did not decrypt, across the wallet stacks lium runs on.
+
+    bittensor 11.3+ raises ``WrongPasswordError``; bittensor-wallet 4.x (bittensor 9/10) has one
+    ``KeyFileError`` for every keyfile failure and names the variant, ``DecryptionError``, only in
+    its message.
+    """
+    return any(c.__name__ == "WrongPasswordError" for c in type(e).__mro__) or (
+        "DecryptionError" in str(e)
+    )
 
 
 def load_hotkey_keypair(
@@ -67,9 +75,8 @@ def load_hotkey_keypair(
         # (missing, unreadable, encrypted), which is what differs when btcli lists the wallet
         raise ProviderError(
             f"could not open wallet name={coldkey!r} hotkey={hotkey!r}: {type(e).__name__}: {e}",
-            code=WALLET_NOT_FOUND,
-            # the keyfile is there but did not decrypt (a wrong password): "create a wallet" is the wrong next step
-            hint=DECRYPT_FAILED_HINT if "DecryptionError" in str(e) else None,
+            # the keyfile is there but did not decrypt: "create a wallet" is the wrong next step
+            code=WALLET_PASSWORD_WRONG if _is_wrong_password(e) else WALLET_NOT_FOUND,
             cause=e,
             context={"coldkey": coldkey, "hotkey": hotkey},
         ) from e
