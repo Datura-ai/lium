@@ -68,8 +68,10 @@ class ResolveExecutorAction:
                     dry_run=True,
                 )
             except LiumError as exc:
-                if type(exc) is not LiumError:
-                    raise  # auth, permission, not-found, rate-limit and server errors keep their own codes
+                if type(exc) is not LiumError or (exc.code or "").startswith("image_"):
+                    # auth, permission, not-found, rate-limit and server errors keep their own codes; an
+                    # image refusal is the image's fault, not a node-selection outcome (the command names it)
+                    raise
                 # "No node matches …" (client-side) or the server's 409: the same outcome as the
                 # ls path's empty list below — node_selection_failed, not an API error. The
                 # server's hint and request_id ride along in data (DAH-3057); the command lifts
