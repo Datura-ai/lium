@@ -414,12 +414,17 @@ class ProviderClient:
         out.warnings = warnings
         return out
 
-    def _safe_hotkey(self) -> str | None:
+    def _token_account(self) -> str | None:
         if self.api_token and not self.account:
             try:
                 self.account = self.whoami().get("miner_hotkey") or None
             except ProviderError:
                 return None
+        return self.account or None
+
+    def _safe_hotkey(self) -> str | None:
+        if self.api_token and not self.account and self._token_account() is None:
+            return None
         if self.account:
             return self.account
         try:
@@ -428,18 +433,23 @@ class ProviderClient:
             return None
 
     def _own_hotkey_or_fail(self) -> str:
-        """The scope for a default listing. When the signer cannot be materialised
-        (no local wallet for ``--hotkey``), refuse instead of silently falling back
+        """The scope for a default listing. When the signer cannot be materialised, refuse
+        with the wallet's own error (or ARG_INVALID with no wallet named) instead of silently falling back
         to the portal's global view — that fallback is the very confusion DAH-2935
         removes (a zero-node account reading 1,538 rows as its own)."""
-        hotkey = self._safe_hotkey()
-        if hotkey is None:
+        account = self._token_account()
+        if account:
+            return account
+        try:
+            return self.signer.ss58_address
+        except ProviderError:
+            raise  # the wallet's own error names the cause: missing file, wrong password, newer file format
+        except Exception:
             raise ProviderError(
                 f"cannot resolve the ss58 address of hotkey {self.hotkey!r} (no local wallet)",
                 code=ARG_INVALID,
                 hint="Pass --miner-hotkey <ss58> for one provider, or --all for the portal's global listing.",
-            )
-        return hotkey
+            ) from None
 
     # ------------------------------------------------------------------
     # Profile / configuration
