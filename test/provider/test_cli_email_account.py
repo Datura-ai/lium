@@ -216,3 +216,12 @@ def test_signing_commands_after_an_email_login_say_why_the_config_hotkey_is_not_
     assert result.exit_code != 0
     assert "'cfghk'" in result.output and "portal login --email" in result.output
     assert "--hotkey cfghk" in result.output and "lium provider portal login" in result.output
+
+
+def test_email_login_wins_over_an_exported_token_for_a_mutating_command(keyed, monkeypatch) -> None:
+    monkeypatch.setenv("LIUM_PROVIDER_TOKEN", "lpk_abc")
+    _email_login()
+    removed = CliRunner().invoke(provider_command, ["--yes", "node", "rm", "ex-1"])
+    assert removed.exit_code == 0, removed.output
+    assert keyed[-1][0] == "DELETE" and keyed[-1][2] == SESSION
+    assert not any(call[2] == "lpk_abc" for call in keyed)

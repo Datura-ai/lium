@@ -23,8 +23,6 @@ them without re-prompting.
 
 from __future__ import annotations
 
-import os
-
 import click
 
 from lium.cli.provider._persona import confirm_persona
@@ -124,7 +122,7 @@ def provider_command(
     account, token = cfg.get("provider.account"), cfg.get("provider.token")
     # from config, the identity of the latest `portal login` is the one commands act on (`provider.active`)
     active = cfg.get("provider.active")
-    if active == "account" and account and "LIUM_PROVIDER_TOKEN" not in os.environ:
+    if active == "account" and account:  # an exported token too: the account signed in to last wins
         token = None
     elif active == "token" and token:
         account = None
