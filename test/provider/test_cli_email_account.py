@@ -196,3 +196,23 @@ def test_logout_of_the_email_account_falls_back_to_the_config_hotkey(keyed) -> N
     listed = CliRunner().invoke(provider_command, ["node", "list"])
     assert listed.exit_code == 0, listed.output
     assert keyed[-1][:2] == ("GET", "/executors") and keyed[-1][3] == "5cfghk"
+
+
+def test_status_after_an_email_login_reports_the_account(keyed, monkeypatch) -> None:
+    # status runs on the signed-in account; it does not ask for the hotkey that is already configured
+    monkeypatch.setattr("lium.provider.client._read_metagraph", lambda **kw: (False, []))
+    _email_login()
+    result = CliRunner().invoke(provider_command, ["status"])
+    assert result.exit_code == 0, result.output
+    assert f"hotkey={ACCOUNT}" in result.output and "portal=active" in result.output
+    assert keyed[-1] == ("GET", "/executors", SESSION, ACCOUNT)
+
+
+@pytest.mark.parametrize("args", [["config", "set-email", "b@example.com"], ["config", "set-password"]])
+def test_signing_commands_after_an_email_login_say_why_the_config_hotkey_is_not_used(keyed, args) -> None:
+    # they sign with a hotkey; the error names the configured one and how to use it, not "set a hotkey"
+    _email_login()
+    result = CliRunner().invoke(provider_command, args, input="x\nx\n")
+    assert result.exit_code != 0
+    assert "'cfghk'" in result.output and "portal login --email" in result.output
+    assert "--hotkey cfghk" in result.output and "lium provider portal login" in result.output

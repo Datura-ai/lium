@@ -36,6 +36,20 @@ def require_hotkey(ctx: click.Context, *, group: str | None = None, signer: bool
     opts = (ctx.obj or {}).get("provider_opts") or {}
     label = f"{group} commands" if group else "this command"
     if signer:
+        set_aside = opts.get("set_aside_hotkey")
+        if not opts.get("hotkey") and set_aside:
+            via = "--email" if opts.get("active") == "account" else "--token"
+            fatal(
+                ctx,
+                ProviderError(
+                    f"{label} sign with a hotkey, and the configured hotkey {set_aside!r} is not used while the "
+                    f"latest sign-in (`lium provider portal login {via}`) is active",
+                    code=ARG_INVALID,
+                    hint=f"Pass --hotkey {set_aside} to change that hotkey's account, or run "
+                    "`lium provider portal login` to act on the hotkey again. The signed-in account changes its "
+                    "e-mail and password in the portal (Account settings).",
+                ),
+            )
         if not opts.get("hotkey"):
             fatal(
                 ctx,

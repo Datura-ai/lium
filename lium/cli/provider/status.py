@@ -11,9 +11,10 @@ import click
 
 from lium.cli.provider import _blocking
 from lium.cli.provider._client import build_client
+from lium.cli.provider._guards import require_hotkey
 from lium.cli.provider._overrides import with_provider_overrides
 from lium.cli.provider._render import emit_error, render
-from lium.provider.errors import ARG_INVALID, PORTAL_AUTH_INVALID, ProviderError
+from lium.provider.errors import PORTAL_AUTH_INVALID, ProviderError
 from lium.provider.models import ExecutorInfo
 
 
@@ -29,18 +30,8 @@ from lium.provider.models import ExecutorInfo
 @click.pass_context
 def status_command(ctx: click.Context, netuid: int) -> None:
     """Show a snapshot of registration, portal session, and node count."""
-    opts = (ctx.obj or {}).get("provider_opts") or {}
-    if not opts.get("hotkey"):
-        ctx.exit(
-            emit_error(
-                ctx,
-                ProviderError(
-                    "status requires --hotkey (or LIUM_PROVIDER_HOTKEY, or `provider.hotkey` in ~/.lium/config.ini)",
-                    code=ARG_INVALID,
-                ),
-            )
-        )
-        return
+    # the shared guard: a hotkey, an API token or the signed-in e-mail account (the latest `portal login`)
+    require_hotkey(ctx, group="status")
 
     client = build_client(ctx)
     try:

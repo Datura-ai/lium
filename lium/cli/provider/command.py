@@ -129,9 +129,13 @@ def provider_command(
     elif active == "token" and token:
         account = None
     signed_in = (active == "account" and account) or (active == "token" and token)
+    config_hotkey = cfg.get("provider.hotkey")
     ctx.obj["provider_opts"] = {
         "coldkey": coldkey or cfg.get("provider.coldkey"),
-        "hotkey": hotkey or (None if signed_in else cfg.get("provider.hotkey")),
+        "hotkey": hotkey or (None if signed_in else config_hotkey),
+        # the configured hotkey a sign-in set aside, and which sign-in: guards name it instead of asking for one
+        "set_aside_hotkey": config_hotkey if signed_in and not hotkey else None,
+        "active": active if signed_in else None,
         "account": account,
         "token": token,
         "portal_url": portal_url or cfg.get("provider.portal_url"),
