@@ -106,3 +106,93 @@ def test_signing_config_commands_ask_for_the_hotkey_not_a_token(token_portal, mo
     assert result.exit_code != 0
     assert "--hotkey" in result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+class _NodeHTTP(_FakeHTTP):
+    """Records whose nodes `node list` asks for; `node rm` deletes by id."""
+
+    def get(self, path, *, params=None, auth=True):
+        self.calls.append(("GET", path, self._token(), (params or {}).get("miner_hotkey")))
+        if path == "/auth/me":
+            return {"provider_id": "p1", "miner_hotkey": ACCOUNT}
+        return {"data": []}
+
+    def delete(self, path, *, json_body=None, auth=True):
+        self.calls.append(("DELETE", path, self._token()))
+        return {}
+
+
+@pytest.fixture
+def keyed(portal, monkeypatch):
+    """A config hotkey that resolves to a local key, as for a provider who also mines with a hotkey."""
+    from lium.cli.settings import ConfigManager
+
+    from .conftest import FakeKeypair
+
+    monkeypatch.setattr("lium.provider.client.PortalHTTP", _NodeHTTP)
+    monkeypatch.setattr("lium.provider.wallet.load_hotkey_keypair", lambda coldkey, hotkey: FakeKeypair(f"5{hotkey}"))
+    monkeypatch.setenv("LIUM_PROVIDER_PASSWORD", "pw")
+    ConfigManager().set("provider.coldkey", "ck")
+    ConfigManager().set("provider.hotkey", "cfghk")
+    return portal
+
+
+def _email_login() -> None:
+    result = CliRunner().invoke(provider_command, ["portal", "login", "--email", "a@example.com"])
+    assert result.exit_code == 0, result.output
+
+
+def _lists_account(calls) -> None:
+    listed = CliRunner().invoke(provider_command, ["node", "list"])
+    assert listed.exit_code == 0, listed.output
+    assert calls[-1] == ("GET", "/executors", SESSION, ACCOUNT)
+
+
+def test_email_login_makes_node_list_and_rm_act_on_the_account_not_the_config_hotkey(keyed) -> None:
+    _email_login()
+    listed = CliRunner().invoke(provider_command, ["node", "list"])
+    assert listed.exit_code == 0, listed.output
+    assert keyed[-1] == ("GET", "/executors", SESSION, ACCOUNT)
+
+    removed = CliRunner().invoke(provider_command, ["--yes", "node", "rm", "ex-1"])
+    assert removed.exit_code == 0, removed.output
+    assert keyed[-1][0] == "DELETE" and keyed[-1][2] == SESSION
+    # the hotkey setting is kept for the hotkey account
+    from lium.cli.settings import ConfigManager
+
+    assert ConfigManager().get("provider.hotkey") == "cfghk"
+
+
+def test_explicit_hotkey_still_wins_after_an_email_login(keyed) -> None:
+    _email_login()
+    _lists_account(keyed)
+    listed = CliRunner().invoke(provider_command, ["--hotkey", "flaghk", "node", "list"])
+    assert listed.exit_code == 0, listed.output
+    assert keyed[-1][:2] == ("GET", "/executors") and keyed[-1][3] == "5flaghk"
+
+
+def test_a_later_hotkey_login_switches_back_to_the_hotkey(keyed) -> None:
+    _email_login()
+    _lists_account(keyed)
+    login = CliRunner().invoke(provider_command, ["portal", "login"])
+    assert login.exit_code == 0, login.output
+    listed = CliRunner().invoke(provider_command, ["node", "list"])
+    assert listed.exit_code == 0, listed.output
+    assert keyed[-1][:2] == ("GET", "/executors") and keyed[-1][3] == "5cfghk"
+
+
+def test_whoami_names_the_identity_commands_act_on(keyed) -> None:
+    _email_login()
+    who = CliRunner().invoke(provider_command, ["--json", "portal", "whoami"])
+    assert who.exit_code == 0, who.output
+    assert '"active_identity": "account"' in who.output
+
+
+def test_logout_of_the_email_account_falls_back_to_the_config_hotkey(keyed) -> None:
+    _email_login()
+    _lists_account(keyed)
+    out = CliRunner().invoke(provider_command, ["portal", "logout"])
+    assert out.exit_code == 0, out.output
+    listed = CliRunner().invoke(provider_command, ["node", "list"])
+    assert listed.exit_code == 0, listed.output
+    assert keyed[-1][:2] == ("GET", "/executors") and keyed[-1][3] == "5cfghk"

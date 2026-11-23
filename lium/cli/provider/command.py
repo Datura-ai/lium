@@ -23,6 +23,8 @@ them without re-prompting.
 
 from __future__ import annotations
 
+import os
+
 import click
 
 from lium.cli.provider._persona import confirm_persona
@@ -57,7 +59,8 @@ from lium.provider.errors import ProviderError
     "hotkey",
     envvar="LIUM_PROVIDER_HOTKEY",
     help="Bittensor hotkey name on the coldkey. Falls back to LIUM_PROVIDER_HOTKEY "
-    "and then `provider.hotkey` in ~/.lium/config.ini.",
+    "and then `provider.hotkey` in ~/.lium/config.ini, unless the latest `portal login` "
+    "was --email or --token: commands then act on that account.",
 )
 @click.option(
     "--portal-url",
@@ -116,13 +119,21 @@ def provider_command(
     # the config-file fallback.
     cfg = ConfigManager()
     ctx.ensure_object(dict)
+    # an e-mail account's id (`portal login --email`) and a portal API token (lpk_…: LIUM_PROVIDER_TOKEN or
+    # `portal login --token`); a hotkey given as --hotkey / LIUM_PROVIDER_HOTKEY always wins over both
+    account, token = cfg.get("provider.account"), cfg.get("provider.token")
+    # from config, the identity of the latest `portal login` is the one commands act on (`provider.active`)
+    active = cfg.get("provider.active")
+    if active == "account" and account and "LIUM_PROVIDER_TOKEN" not in os.environ:
+        token = None
+    elif active == "token" and token:
+        account = None
+    signed_in = (active == "account" and account) or (active == "token" and token)
     ctx.obj["provider_opts"] = {
         "coldkey": coldkey or cfg.get("provider.coldkey"),
-        "hotkey": hotkey or cfg.get("provider.hotkey"),
-        # an e-mail account's id, saved by `portal login --email`; used only when no hotkey is set
-        "account": cfg.get("provider.account"),
-        # a portal API token (lpk_…): LIUM_PROVIDER_TOKEN or `portal login --token`; also used only without a hotkey
-        "token": cfg.get("provider.token"),
+        "hotkey": hotkey or (None if signed_in else cfg.get("provider.hotkey")),
+        "account": account,
+        "token": token,
         "portal_url": portal_url or cfg.get("provider.portal_url"),
         "json": json_mode or json_output_requested(),
         "debug": debug,
