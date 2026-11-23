@@ -736,6 +736,41 @@ def test_a_new_hotkey_makes_the_running_executor_stale(monkeypatch, tmp_path: Pa
     assert mine._executor_env_stale(tmp_path) is stale
 
 
+@pytest.mark.parametrize("top, up", [
+    ("  PID COMMAND\n  42 sshd: root@notty\n", "docker compose up -d --no-recreate"),  # a rental being created
+    ("  PID COMMAND\n  42 sshd-session: root@notty\n", "docker compose up -d --no-recreate"),  # newer OpenSSH
+    ("  PID COMMAND\n  42 sshd: root [priv]\n", "docker compose up -d --force-recreate"),  # pre-auth, no session
+    ("  PID COMMAND\n  42 python executor.py\n", "docker compose up -d --force-recreate"),
+])
+def test_a_new_hotkey_does_not_recreate_the_executor_under_an_open_validator_session(monkeypatch, tmp_path: Path, top, up):
+    """A rental being created has no pod_* container yet, only the validator's SSH session in the executor."""
+    env = "INTERNAL_PORT=8080\nEXTERNAL_PORT=8081\nSSH_PORT=2201\nSSH_PUBLIC_PORT=2201\n"
+    (tmp_path / ".env").write_text(env + f"MINER_HOTKEY_SS58_ADDRESS={_HK}\n")
+    container = env + "MINER_HOTKEY_SS58_ADDRESS=5G" + "y" * 46 + "\n"
+    calls, ids, warnings = [], iter(["old", "new"]), []
+
+    def fake_run(cmd, check=True, capture=True, cwd=None):
+        calls.append(cmd)
+        if "ps -aq executor" in cmd:
+            return "cid", ""
+        if ".Config.Env" in cmd:
+            return container, ""
+        if cmd.startswith("docker top old "):
+            return top, ""
+        if "ps -q executor" in cmd:
+            return next(ids, "new"), ""
+        if cmd.startswith("docker inspect"):
+            return "healthy", ""
+        return "", ""
+
+    monkeypatch.setattr(mine, "_run", fake_run)
+    monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+    monkeypatch.setattr(mine.console, "warning", warnings.append)
+    mine._start_executor(tmp_path, wait_secs=5, recreate=mine._executor_env_stale(tmp_path))
+    assert [c for c in calls if c.startswith("docker compose up")] == [up]
+    assert bool(warnings) is up.endswith("--no-recreate")
+
+
 @pytest.mark.parametrize("saved, flags, ok", [
     ("RENTING_PORT_RANGE=41000-41100\n", ["--ssh-port", "41050"], False),                    # range vs local SSH
     ("RENTING_PORT_RANGE=41000-41100\nSSH_PUBLIC_PORT=41100\n", [], False),                  # range vs public SSH

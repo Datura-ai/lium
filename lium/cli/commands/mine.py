@@ -856,25 +856,41 @@ def _rental_pods() -> list[str]:
     return [n for n in names if n.startswith("pod_")]
 
 
+# a root sshd session in the executor: the validator creating a pod (or checking the node) before any pod_* container
+# exists; the executor's runner holds its own recreate on the same test (lium-io neurons/executor/entrypoint.sh).
+# docker top lists only the executor's processes, so a login on the host or in a pod does not count
+_VALIDATOR_SESSION = re.compile(r"^\s*\d+\s+sshd[^:]*: root@", re.MULTILINE)
+
+
+def _validator_session_open(executor_id: str) -> bool:
+    if not executor_id:
+        return False
+    return bool(_VALIDATOR_SESSION.search(_run(f"docker top {executor_id} -eo pid,args", check=False)[0]))
+
+
 def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = False):
     # Start using the default docker-compose.yml
     # recreate: an executor already running keeps its old .env, so a new MINER_ACCOUNT_CLAIM never reaches it;
     # a plain re-run leaves a running executor alone
     ps_cmd = "docker compose -f docker-compose.app.yml ps -q executor"
-    # a restart under running rentals interrupts them
+    executor_id = _run(ps_cmd, check=False, cwd=str(executor_dir))[0].strip()
+    # a restart interrupts running rentals, and cuts the validator's session of a rental still being created
     rentals = _rental_pods()
-    if rentals and recreate:
+    busy = bool(rentals) or _validator_session_open(executor_id)
+    if busy and recreate:
         console.warning(
-            f"{len(rentals)} rental(s) running on this node, so the executor was not restarted. "
-            "The new settings are in .env and apply on its next restart; rerun this command once the rentals end."
+            (f"{len(rentals)} rental(s) running on this node" if rentals
+             else "The validator is creating a rental on this node or checking it")
+            + ", so the executor was not restarted. The new settings are in .env and apply on its next restart; "
+            + ("rerun this command once the rentals end." if rentals else "rerun this command once it is done.")
         )
         recreate = False
     # after --force-recreate the old container can still report healthy; wait for one with a new ID
-    old_id = _run(ps_cmd, check=False, cwd=str(executor_dir))[0].strip() if recreate else ""
+    old_id = executor_id if recreate else ""
     command = f"docker compose {_RUNNER_FILE_OPT}up -d" + (" --force-recreate" if recreate else "")
-    if rentals:
+    if busy:
         # even a plain `up -d` recreates a runner whose config changed, and the runner force-recreates the executor;
-        # under rentals compose only starts what is missing
+        # under rentals or an open validator session compose only starts what is missing
         command = f"docker compose {_RUNNER_FILE_OPT}up -d --no-recreate"
     _run(command, capture=True, cwd=str(executor_dir))
 
