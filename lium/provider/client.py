@@ -56,6 +56,7 @@ from lium.provider.auth import LocalKeypairSigner, Signer, build_login_payload
 from lium.provider.chain_stack import missing_chain_stack_message
 from lium.provider.errors import (
     ARG_INVALID,
+    HOTKEY_NOT_REGISTERED,
     PORTAL_AUTH_EXPIRED,
     PORTAL_AUTH_INVALID,
     PORTAL_AUTH_TOTP_INVALID,
@@ -193,9 +194,7 @@ class ProviderClient:
                 with_refresh_retry(lambda: self._token_store.clear(signer.ss58_address))
 
         payload = build_login_payload(signer)
-        response = _login_response(
-            self._http.post(LOGIN_FLEXIBLE, json_body=payload, auth=False)
-        )
+        response = _login_response(self._signature_login(payload))
         self._totp_in_use = response.mfa_required
         if response.mfa_required:
             response = self._finish_totp_sign_in(response)
@@ -212,6 +211,19 @@ class ProviderClient:
             )
         )
         return response
+
+    def _signature_login(self, payload: dict) -> Any:
+        """``POST /auth/login-flexible`` with a signature. The portal answers a hotkey that has no account and is not
+        registered on the subnet with a 401 whose detail names ``miner``; every other 401 there names ``signature``.
+        That 401 is no token problem, so it is raised as HOTKEY_NOT_REGISTERED, not "re-login"."""
+        try:
+            return self._http.post(LOGIN_FLEXIBLE, json_body=payload, auth=False)
+        except ProviderAuthError as e:
+            body = (e.context or {}).get("body")
+            detail = body.get("detail") if isinstance(body, dict) else None
+            if e.code != PORTAL_AUTH_INVALID or not isinstance(detail, dict) or "miner" not in detail:
+                raise
+            raise ProviderAuthError(str(detail["miner"]), code=HOTKEY_NOT_REGISTERED, context=e.context) from e
 
     def _finish_totp_sign_in(self, response: LoginResponse) -> LoginResponse:
         """Send the authenticator code for a sign-in the portal answered with ``mfa_required``."""
