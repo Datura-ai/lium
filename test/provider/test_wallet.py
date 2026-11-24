@@ -75,7 +75,7 @@ class WrongPasswordError(ValueError):
 
 
 @pytest.mark.parametrize(
-    "raised",
+    "wrong_password_error",
     [
         # bittensor-wallet 4.x (bittensor 9/10): one KeyFileError type, the variant named in its text
         OSError('Failed to get hotkey: DecryptionError("Wrong password for decryption.")'),
@@ -83,7 +83,7 @@ class WrongPasswordError(ValueError):
         WrongPasswordError("wrong password for NaCl decryption"),
     ],
 )
-def test_load_hotkey_keypair_wrong_password_is_not_a_missing_wallet(raised: Exception) -> None:
+def test_load_hotkey_keypair_wrong_password_is_not_a_missing_wallet(wrong_password_error: Exception) -> None:
     """An encrypted hotkey file and a wrong password: the wallet exists, so the code and hint name the password,
     not creating a wallet."""
 
@@ -93,7 +93,7 @@ def test_load_hotkey_keypair_wrong_password_is_not_a_missing_wallet(raised: Exce
 
         @property
         def hotkey(self) -> Any:
-            raise raised
+            raise wrong_password_error
 
     with pytest.raises(ProviderError) as exc:
         load_hotkey_keypair("pwwallet", "enchot", wallet_factory=EncryptedWallet)
