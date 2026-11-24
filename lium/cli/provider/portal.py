@@ -59,6 +59,9 @@ def login(ctx: click.Context, force: bool, totp_code: str | None, email: str | N
         _login_email(ctx, email, totp_code)
         return
     if not opts.get("hotkey"):
+        # a plain login is a hotkey login, also while an e-mail account or token is the active identity
+        opts["hotkey"] = ConfigManager().get("provider.hotkey")
+    if not opts.get("hotkey"):
         ctx.exit(
             emit_error(
                 ctx,
@@ -82,6 +85,7 @@ def login(ctx: click.Context, force: bool, totp_code: str | None, email: str | N
     except ProviderError:
         if response.provider.discord_id is not None:
             discord_connected = bool(response.provider.discord_id)
+    ConfigManager().set("provider.active", "hotkey")  # later commands act on this hotkey again
 
     summary = f"logged in as provider_id={response.provider.id} (hotkey {response.provider.miner_hotkey})"
     render(
@@ -112,6 +116,8 @@ def _login_email(ctx: click.Context, email: str, totp_code: str | None) -> None:
         return
     # later provider commands without --hotkey use this account's cached session
     ConfigManager().set("provider.account", response.provider.miner_hotkey)
+    # ... also when `provider.hotkey` is set: the account signed in to last is the one commands act on
+    ConfigManager().set("provider.active", "account")
     render(
         ctx,
         {"provider_id": response.provider.id, "account": response.provider.miner_hotkey, "token_present": True},
@@ -128,6 +134,7 @@ def _login_token(ctx: click.Context, token: str) -> None:
         ctx.exit(emit_error(ctx, e))
         return
     ConfigManager().set("provider.token", token)
+    ConfigManager().set("provider.active", "token")
     render(
         ctx,
         {"provider_id": me.get("provider_id") or me.get("id"), "account": me.get("miner_hotkey"), "token_present": True},
@@ -164,10 +171,10 @@ def logout(ctx: click.Context) -> None:
     except ProviderError as e:
         ctx.exit(emit_error(ctx, e))
         return
-    if client.api_token:
-        ConfigManager().unset("provider.token")  # an exported LIUM_PROVIDER_TOKEN stays set in the shell
-    elif client.account:
-        ConfigManager().unset("provider.account")
+    if client.api_token or client.account:
+        cfg = ConfigManager()
+        cfg.unset("provider.token" if client.api_token else "provider.account")  # an exported LIUM_PROVIDER_TOKEN stays set
+        cfg.unset("provider.active")  # back to the configured hotkey, if any
     render(
         ctx,
         {"hotkey": ss58 or opts.get("hotkey")},
@@ -204,8 +211,10 @@ def whoami(ctx: click.Context) -> None:
             )
         ctx.exit(emit_error(ctx, e))
         return
-    summary = "portal session active"
-    render(ctx, body, summary=summary)
+    # which identity provider commands act on: a hotkey, an API token or a signed-in e-mail account
+    active = "hotkey" if client.hotkey else "token" if client.api_token else "account"
+    body = {**body, "active_identity": active}
+    render(ctx, body, summary=f"portal session active; commands act on {active} {client.hotkey or body.get('miner_hotkey')}")
 
 
 __all__ = ["portal_command"]
