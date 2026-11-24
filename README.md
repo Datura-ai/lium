@@ -380,6 +380,8 @@ lium mine --auto --hotkey <HOTKEY>
 # one-hour token; GPU model/count, port and address are read from the host, the price is the portal base price for the model
 curl -fsSL https://lium.io/mine.sh | bash -s -- --register <TOKEN>
 lium mine --register <TOKEN> --wait 0          # add the node, do not wait for the validator
+# mine.sh installs lium for the user who ran it, in ~/.local/bin; when a later shell says `lium: command not found`,
+# run it by full path (~/.local/bin/lium mine ...) or add it to PATH: export PATH="$HOME/.local/bin:$PATH"
 
 # Node behind CGNAT or a port-forwarding VPS: register the VPS address and forwarded port
 lium mine --auto --hotkey <HOTKEY> --ip <VPS_IP> --external-port <FORWARDED_PORT> --internal-port 8080
@@ -390,6 +392,10 @@ lium mine --auto --hotkey <HOTKEY> --ip <VPS_IP> --external-port <FORWARDED_PORT
 lium mine --register <TOKEN> --external-port 8081 --ssh-port 2201 --renting-port-range 41000-41100
 # ...and give the first node its own range afterwards: a re-run keeps its saved hotkey and changes only the range
 lium mine --auto --renting-port-range 40000-40100
+# Move the node to another account: `lium provider node rm` it under the old one, re-run with the new hotkey
+# (restarts the executor so it reports that hotkey; while a rental runs or is being created it is not restarted
+# and the run says to re-run later), then `lium provider node add` it
+lium mine --auto --hotkey <NEW_HOTKEY>
 
 # Opt-in host setup in the same run (off by default): Docker storage on xfs/pquota in an image file
 # (or --storage /dev/<spare disk> to FORMAT that disk), NTP on and the driver/Docker/containerd packages held
