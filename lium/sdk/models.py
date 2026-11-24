@@ -248,6 +248,10 @@ class PodInfo(_Serializable):
     # Set by ``Lium.up(wait=True)`` when backups were asked for but the account cannot have one yet:
     # the pod rented without it. Never on a /pods row.
     backup_notice: Optional[str] = None
+    # The /pods row's ``billing_paused``: the platform's billing charges this pod $0 right now, by the same rules its
+    # billing applies, whatever the status says. False from an older server that does not send it. Last, so a
+    # positional PodInfo call written before it keeps its meaning.
+    billing_paused: bool = False
 
     def eta_hint(self) -> Optional[str]:
         """One line for a pod that is still starting, e.g. ``est. ready in ~18 s (phase: pulling image)``.

@@ -2698,6 +2698,7 @@ class Lium:
                 api_key_name=d.get("api_key_name"),
                 api_key_stamped="api_key_id" in d or "created_by_api_key_id" in d,
                 local_volume_path=d.get("local_volume_path"),
+                billing_paused=d.get("billing_paused") is True,
             ))
 
         return pods
