@@ -153,8 +153,10 @@ class RemoteExecutionError(LiumError):
 
 
 class LiumInsufficientBalanceError(LiumPermissionError):
-    """The account cannot pay for this (403 with a balance reason, or 402 ``account_unfunded``: an API key on an
-    account with no balance tried a write).
+    """The account cannot pay for this: a 403 with a balance reason, or a 402 ``BALANCE_REQUIRED``.
+
+    The API sends 402 ``BALANCE_REQUIRED`` when an API key on an account with no balance lists pods
+    (the first call of a first rental). A 402 ``account_unfunded`` raises this too if a server sends it.
 
     ``required`` and ``available`` are the USD amounts printed in the server's
     refusal, when present, else ``None``; ``available`` keeps the sign of a
@@ -351,10 +353,12 @@ class LiumTransferInterruptedError(KeyboardInterrupt):
 
 
 class LiumRentOutcomeUnknownError(LiumError):
-    """A rent (:meth:`Lium.up`) was posted and its outcome could not be established: the first request got
-    no answer (a timeout, a dropped connection, a 5xx), no new pod was listed yet, and the repeat was refused
-    or failed too. The server may still be completing the first request, so a pod **may exist and bill**:
-    check ``ps()`` before renting again. ``idempotency_key`` is the key both requests carried.
+    """:meth:`Lium.up` could not confirm a rent's result; check ``ps()`` before renting again, a pod may be billing.
+
+    Raised when the first request got no answer (a timeout, a dropped connection, a 5xx) or was rate-limited,
+    and the repeat got no answer or failed too; or when the API answered without a pod id. No new pod was
+    listed yet, but the server may still be completing a request, so a pod **may exist and bill**.
+    ``idempotency_key`` is the key the requests carried.
     """
 
     def __init__(
