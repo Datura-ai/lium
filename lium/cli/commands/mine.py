@@ -876,8 +876,10 @@ def _executor_api_answers(executor_dir: Path) -> bool:
     import urllib.error
     import urllib.request
 
+    # never through an environment proxy (http_proxy): its answer is not the executor's
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/version", timeout=5):
+        with opener.open(f"http://127.0.0.1:{port}/version", timeout=5):
             return True
     except urllib.error.HTTPError:
         return True
