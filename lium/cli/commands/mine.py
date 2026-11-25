@@ -868,6 +868,23 @@ def _validator_session_open(executor_id: str) -> bool:
     return bool(_VALIDATOR_SESSION.search(_run(f"docker top {executor_id} -eo pid,args", check=False)[0]))
 
 
+def _executor_api_answers(executor_dir: Path) -> bool:
+    """The node API on its published port answers at all (an error status is still an answer)."""
+    port = _env_value(executor_dir / ".env", "EXTERNAL_PORT")
+    if not port.isdigit():
+        return False
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/version", timeout=5):
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except (urllib.error.URLError, OSError):
+        return False
+
+
 def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = False):
     # Start using the default docker-compose.yml
     # recreate: an executor already running keeps its old .env, so a new MINER_ACCOUNT_CLAIM never reaches it;
@@ -906,14 +923,11 @@ def _start_executor(executor_dir: Path, wait_secs: int = 180, recreate: bool = F
             
         container_id = out.strip()
         
-        # Check the health status directly using docker inspect
-        out, _ = _run(f"docker inspect --format='{{{{.State.Health.Status}}}}' {container_id}")
-        
-        if out.strip():
-            health_status = out.strip()
-            # Only return true if explicitly healthy
-            if health_status == "healthy":
-                return
+        # An executor without a Docker healthcheck (lium-io DAH-7125) has no health status: its API answering is the
+        # signal. check=False: inspecting a missing healthcheck fails.
+        out, _ = _run(f"docker inspect --format='{{{{.State.Health.Status}}}}' {container_id}", check=False)
+        if out.strip() == "healthy" or _executor_api_answers(executor_dir):
+            return
         time.sleep(3)
     diag = _compose_diagnostics(executor_dir)
     raise Exception(
