@@ -644,6 +644,10 @@ legitimately re-provisioned. Fingerprints are `SHA256:…`, as `ssh-keygen -lf` 
 `LIUM_SSH_INSECURE=1` restores the old accept-anything behaviour (each accepted key is
 reported on stderr). `lium ssh` runs OpenSSH with an argument list built from the
 pod's user, address and port; the API's connection string is never handed to a shell.
+Every `ssh` the CLI starts toward a pod (`lium ssh`, `lium up`, `lium rsync`, the `ssh_command`
+that `lium ps --format json` and `lium describe` print) passes `-o ForwardAgent=no -o ForwardX11=no
+-o ForwardX11Trusted=no`, so a `ForwardAgent yes` line in `~/.ssh/config` does not forward your SSH
+agent into the pod. To forward it on purpose, run the printed `ssh_command` with `-A` added.
 
 ### Scripts and agents (non-interactive use)
 
