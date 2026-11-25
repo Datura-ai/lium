@@ -55,6 +55,7 @@ from lium.provider.errors import (
     SSH_UNREACHABLE,
     UUID_NOT_FOUND,
     WALLET_NOT_FOUND,
+    WALLET_PASSWORD_WRONG,
     ProviderError,
 )
 from lium.provider.models import ProviderStatus
@@ -81,6 +82,7 @@ _EXIT_CODES: dict[str, int] = {
     PORTAL_AUTH_TOTP_REQUIRED: 2,
     PORTAL_AUTH_TOTP_INVALID: 2,
     WALLET_NOT_FOUND: 2,
+    WALLET_PASSWORD_WRONG: 2,
     PORTAL_FORBIDDEN: 2,
     # 3: portal (server-side)
     PORTAL_SERVER_ERROR: 3,
@@ -106,6 +108,7 @@ EXIT_NODE_BLOCKED = 10
 # replaces stays in the envelope as ``legacy_code``. Never rename a code once shipped.
 ERROR_CODES: dict[str, str] = {
     WALLET_NOT_FOUND: "auth.wallet_not_found",
+    WALLET_PASSWORD_WRONG: "auth.wallet_password_wrong",
     HOTKEY_NOT_REGISTERED: "auth.hotkey_not_registered",
     PORTAL_AUTH_EXPIRED: "auth.expired",
     PORTAL_AUTH_INVALID: "auth.invalid",

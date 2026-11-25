@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from lium.provider.errors import WALLET_NOT_FOUND, ProviderError
-from lium.provider.wallet import DECRYPT_FAILED_HINT, load_hotkey_keypair
+from lium.provider.errors import WALLET_NOT_FOUND, WALLET_PASSWORD_WRONG, ProviderError
+from lium.provider.wallet import load_hotkey_keypair
 
 
 def test_load_hotkey_keypair_with_factory() -> None:
@@ -70,8 +70,22 @@ def test_load_hotkey_keypair_no_signable_hotkey() -> None:
     assert exc.value.code == WALLET_NOT_FOUND
 
 
-def test_load_hotkey_keypair_encrypted_keyfile_hints_the_password() -> None:
-    """An encrypted hotkey file that does not decrypt points at the password, not at creating a wallet."""
+class WrongPasswordError(ValueError):
+    """Stands in for bittensor 11.3+'s ``bittensor.sp_core.WrongPasswordError``."""
+
+
+@pytest.mark.parametrize(
+    "wrong_password_error",
+    [
+        # bittensor-wallet 4.x (bittensor 9/10): one KeyFileError type, the variant named in its text
+        OSError('Failed to get hotkey: DecryptionError("Wrong password for decryption.")'),
+        # bittensor 11.3+: its own exception type
+        WrongPasswordError("wrong password for NaCl decryption"),
+    ],
+)
+def test_load_hotkey_keypair_wrong_password_is_not_a_missing_wallet(wrong_password_error: Exception) -> None:
+    """An encrypted hotkey file and a wrong password: the wallet exists, so the code and hint name the password,
+    not creating a wallet."""
 
     class EncryptedWallet:
         def __init__(self, **_k: Any) -> None:
@@ -79,13 +93,12 @@ def test_load_hotkey_keypair_encrypted_keyfile_hints_the_password() -> None:
 
         @property
         def hotkey(self) -> Any:
-            raise OSError(
-                'Generic error: Failed to get hotkey: DecryptionError("Wrong password for decryption.")'
-            )
+            raise wrong_password_error
 
     with pytest.raises(ProviderError) as exc:
-        load_hotkey_keypair("default", "default", wallet_factory=EncryptedWallet)
-    assert exc.value.code == WALLET_NOT_FOUND and exc.value.hint == DECRYPT_FAILED_HINT
+        load_hotkey_keypair("pwwallet", "enchot", wallet_factory=EncryptedWallet)
+    assert exc.value.code == WALLET_PASSWORD_WRONG
+    assert "password" in exc.value.hint and "new_coldkey" not in exc.value.hint
 
 
 def test_bundled_bittensor_wallet_decrypts_a_key_encrypted_by_4_1_1() -> None:

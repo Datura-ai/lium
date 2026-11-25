@@ -1,0 +1,2 @@
+### Fixed
+- `lium provider` commands given an encrypted hotkey and a wrong password now fail with `WALLET_PASSWORD_WRONG` (`auth.wallet_password_wrong`, exit 2) and a hint to retry with the right password. With bittensor 11.3+ (`WrongPasswordError`) they reported `WALLET_NOT_FOUND` and told you to create a wallet with `btcli wallet new_coldkey`, although the wallet existed. With bittensor-wallet 4.x, 0.46.14 already gave the password hint; only the error code changes, from `WALLET_NOT_FOUND` to `WALLET_PASSWORD_WRONG`.
