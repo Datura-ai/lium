@@ -153,10 +153,10 @@ class RemoteExecutionError(LiumError):
 
 
 class LiumInsufficientBalanceError(LiumPermissionError):
-    """The account cannot pay for this: a 403 with a balance reason, or a 402 ``account_unfunded``/``BALANCE_REQUIRED``.
+    """The account cannot pay for this: a 403 with a balance reason, or a 402 ``BALANCE_REQUIRED``.
 
-    The 402 codes come from an API key on an account with no balance: ``account_unfunded`` on a write,
-    ``BALANCE_REQUIRED`` on the pod list (the first call of a first rental).
+    The API sends 402 ``BALANCE_REQUIRED`` when an API key on an account with no balance lists pods
+    (the first call of a first rental). A 402 ``account_unfunded`` raises this too if a server sends it.
 
     ``required`` and ``available`` are the USD amounts printed in the server's
     refusal, when present, else ``None``; ``available`` keeps the sign of a
