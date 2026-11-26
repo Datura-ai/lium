@@ -153,10 +153,15 @@ class RemoteExecutionError(LiumError):
 
 
 class LiumInsufficientBalanceError(LiumPermissionError):
-    """The account cannot pay for this: a 403 with a balance reason, or a 402 ``BALANCE_REQUIRED``.
+    """The account cannot pay for this: a 403 with a balance reason, or a 402 balance refusal.
 
     The API sends 402 ``BALANCE_REQUIRED`` when an API key on an account with no balance lists pods
-    (the first call of a first rental). A 402 ``account_unfunded`` raises this too if a server sends it.
+    (the first call of a first rental), and 402 ``account_unfunded`` when such a key tries a write
+    other than a delete, cancelling a running backup or restore, a top-up or adding an SSH key.
+    Clearing a pod's removal deadline (``DELETE /pods/{id}/schedule-removal``) is refused too, since
+    the pod keeps running. A client at version 0.46.10 or older, or one that sends no
+    ``X-Lium-Client-Version``, gets a 403 ``insufficient_balance`` for the same writes; both raise
+    this error.
 
     ``required`` and ``available`` are the USD amounts printed in the server's
     refusal, when present, else ``None``; ``available`` keeps the sign of a

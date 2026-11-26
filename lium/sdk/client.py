@@ -766,7 +766,7 @@ def _pod_api_key_id(row: Dict[str, Any]) -> Optional[str]:
 
 
 # 402 codes that mean "this account has no balance": BALANCE_REQUIRED (GET /pods with an API key on a
-# $0 account, which sends no hint of its own); account_unfunded is recognised too if a server sends it
+# $0 account, which sends no hint of its own) and account_unfunded (any other write by such a key)
 FUNDING_REQUIRED_CODES = ("account_unfunded", "BALANCE_REQUIRED")
 FUNDING_HINT = "Add funds with 'lium topup' or 'lium fund', or on the Billing page, then retry."
 
