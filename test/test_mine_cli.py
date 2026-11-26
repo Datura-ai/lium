@@ -274,3 +274,86 @@ def test_a_word_after_the_debug_flag_stops_before_the_install(monkeypatch) -> No
 
     assert result.exit_code == 2
     assert "Unexpected '12'" in result.output
+
+
+def _serve_version(status: int):
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(status)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def _no_healthcheck_run(cmd, check=True, capture=True, cwd=None):
+    if "ps -q executor" in cmd:
+        return "abc123\n", ""
+    if cmd.startswith("docker inspect"):
+        assert check is False  # a container without a healthcheck fails this inspect
+        return "", "nil pointer evaluating *types.Health.Status"
+    return "", ""
+
+
+@pytest.mark.parametrize("status", [200, 500])
+def test_start_executor_without_a_healthcheck_returns_once_the_api_answers(monkeypatch, tmp_path: Path, status) -> None:
+    """lium-io DAH-7125: the executor has no Docker healthcheck; any answer of its API is the start signal."""
+    server = _serve_version(status)
+    try:
+        (tmp_path / ".env").write_text(f"EXTERNAL_PORT={server.server_address[1]}\n")
+        monkeypatch.setattr(mine, "_run", _no_healthcheck_run)
+        monkeypatch.setattr(mine, "_rental_pods", lambda: [])
+
+        mine._start_executor(tmp_path, wait_secs=5)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_start_executor_without_a_healthcheck_times_out_while_the_api_is_silent(monkeypatch, tmp_path: Path) -> None:
+    server = _serve_version(200)
+    port = server.server_address[1]
+    server.shutdown()
+    server.server_close()
+    (tmp_path / ".env").write_text(f"EXTERNAL_PORT={port}\n")
+    monkeypatch.setattr(mine, "_run", _no_healthcheck_run)
+    monkeypatch.setattr(mine, "_rental_pods", lambda: [])
+    monkeypatch.setattr(mine, "_compose_diagnostics", lambda d: "")
+    monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+    ticks = iter([0.0, 0.0, 10.0, 10.0])
+    monkeypatch.setattr(mine.time, "time", lambda: next(ticks))
+
+    with pytest.raises(Exception, match="timed out after 5s"):
+        mine._start_executor(tmp_path, wait_secs=5)
+
+
+def test_start_executor_without_a_healthcheck_ignores_an_environment_proxy(monkeypatch, tmp_path: Path) -> None:
+    """Review on #475: a proxy in http_proxy answered 500 for the silent executor and the wait reported it started."""
+    proxy = _serve_version(500)
+    silent = _serve_version(200)
+    port = silent.server_address[1]
+    silent.shutdown()
+    silent.server_close()
+    try:
+        (tmp_path / ".env").write_text(f"EXTERNAL_PORT={port}\n")
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_address[1]}")
+        monkeypatch.setenv("no_proxy", "")
+        monkeypatch.setattr(mine, "_run", _no_healthcheck_run)
+        monkeypatch.setattr(mine, "_rental_pods", lambda: [])
+        monkeypatch.setattr(mine, "_compose_diagnostics", lambda d: "")
+        monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+        ticks = iter([0.0, 0.0, 10.0, 10.0])
+        monkeypatch.setattr(mine.time, "time", lambda: next(ticks))
+
+        with pytest.raises(Exception, match="timed out after 5s"):
+            mine._start_executor(tmp_path, wait_secs=5)
+    finally:
+        proxy.shutdown()
+        proxy.server_close()
