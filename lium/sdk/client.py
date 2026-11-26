@@ -156,6 +156,12 @@ _SSH_INSECURE_ENV = "LIUM_SSH_INSECURE"
 _POD_ID_SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
 
+# Every ssh the SDK starts toward a pod sets these: command-line options beat ~/.ssh/config, so a
+# "ForwardAgent yes" or "ForwardX11 yes" there never hands the local agent or display to a pod.
+# (The gateway hop runs with -F /dev/null and only relays a TCP stream, so it needs none.)
+OPENSSH_NO_FORWARDING_OPTIONS = ("-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no")
+
+
 def ssh_insecure() -> bool:
     """True when host-key pinning is disabled via ``LIUM_SSH_INSECURE=1``."""
     return os.getenv(_SSH_INSECURE_ENV, "").strip().lower() in ("1", "true", "yes")
@@ -364,7 +370,7 @@ def pod_ssh_command(pod: PodInfo) -> Optional[str]:
         ]
     except OSError:
         return None  # the pin could not be moved (read-only home): no command beats one that skips the pin
-    return shlex.join(["ssh", "-p", str(port), *options, f"{user}@{host}"])
+    return shlex.join(["ssh", "-p", str(port), *options, *OPENSSH_NO_FORWARDING_OPTIONS, f"{user}@{host}"])
 
 
 class _LazyModule:
@@ -4992,7 +4998,9 @@ class Lium:
         argv = ["ssh"]
         if self.config.ssh_key_path:
             argv += ["-i", str(Path(self.config.ssh_key_path).expanduser())]
-        argv += ["-p", str(port), *openssh_jump_options(pod, self.config.ssh_key_path), *openssh_host_key_options(pod), f"{user}@{host}"]
+        # no ClearAllForwardings: port forwards the user set up for this pod in ~/.ssh/config keep working
+        argv += ["-p", str(port), *openssh_jump_options(pod, self.config.ssh_key_path), *openssh_host_key_options(pod),
+                 *OPENSSH_NO_FORWARDING_OPTIONS, f"{user}@{host}"]
         return argv
 
     def refresh_pod(self, pod: Union[str, PodInfo]) -> PodInfo:
@@ -5115,6 +5123,7 @@ class Lium:
         user, host, port = ssh_target(pod.ssh_cmd)
         ssh_cmd = shlex.join(
             ["ssh", "-i", str(self.config.ssh_key_path), "-p", str(port),
+             *OPENSSH_NO_FORWARDING_OPTIONS, "-o", "ClearAllForwardings=yes",   # a file transfer forwards nothing
              *openssh_jump_options(pod, self.config.ssh_key_path), *openssh_host_key_options(pod)]
         )
         remote_spec = f"{user}@{host}:{remote}"
@@ -5242,7 +5251,8 @@ class Lium:
                         f"{pin_copy['stderr'].strip()}"
                     )
                 host_key_opts = f"-o StrictHostKeyChecking=yes -o UserKnownHostsFile={key_path}.known_hosts"
-            ssh_opts = f"ssh -i {key_path} -p {dst_port} {host_key_opts} -o LogLevel=ERROR"
+            no_forwarding = shlex.join([*OPENSSH_NO_FORWARDING_OPTIONS, "-o", "ClearAllForwardings=yes"])
+            ssh_opts = f"ssh -i {key_path} -p {dst_port} {no_forwarding} {host_key_opts} -o LogLevel=ERROR"
             rsync_cmd = (
                 f"rsync {shlex.join(self.rsync_options(bwlimit=bwlimit, exclude=exclude, delete=delete))} "
                 f"-e {shlex.quote(ssh_opts)} {shlex.quote(src_path)} "

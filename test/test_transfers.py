@@ -218,6 +218,7 @@ def test_cp_grants_a_one_off_key_copies_and_revokes_it(dst_pinned):
     assert DST_PIN in pin_copy and f"> {key_path}.known_hosts" in pin_copy
     assert f"-o StrictHostKeyChecking=yes -o UserKnownHostsFile={key_path}.known_hosts" in copy
     assert "StrictHostKeyChecking=no" not in copy
+    assert "-o ForwardAgent=no -o ForwardX11=no -o ForwardX11Trusted=no -o ClearAllForwardings=yes" in copy
     assert "rsync -az --partial --bwlimit=3000 '--exclude=*.tmp'" in copy
     assert "-p 31000" in copy and "root@5.6.7.8:/workspace/ckpt/" in copy and "/workspace/ckpt/ " in copy
     assert f"{key_path}.known_hosts" in remove_key

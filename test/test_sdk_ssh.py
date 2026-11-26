@@ -1,4 +1,7 @@
 import os
+import shlex
+import shutil
+import subprocess
 import warnings
 from types import SimpleNamespace
 
@@ -656,3 +659,43 @@ def test_ssh_connection_tunnels_a_gateway_pod_through_the_pinned_gateway(monkeyp
         assert pod_client.hosts == [str(tmp_path / ".lium" / "known_hosts" / "pod-123")]
         assert not gateway.closed
     assert pod_client.closed and gateway.closed
+
+
+def _spawned_ssh_argvs(monkeypatch, tmp_path):
+    """The ssh argv of ``lium ssh`` and of the rsync ``-e`` transport, each with its destination."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("LIUM_SSH_INSECURE", raising=False)
+    calls = []
+    key_path = tmp_path / "id_ed25519"
+    key_path.write_text("key")
+    client = Lium(Config(api_key="test", ssh_key_path=key_path))
+    with monkeypatch.context() as m:   # the real subprocess.run stays for the ssh -G test
+        m.setattr(sdk_client.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or SimpleNamespace(returncode=0, stderr=""))
+        client.rsync(_pod(), local="./out", remote="/workspace/out")
+    transport = shlex.split(calls[0][calls[0].index("-e") + 1])
+    return {
+        "ssh": client.ssh_argv(_pod()),
+        "rsync": [*transport, "root@203.0.113.10"],
+        "printed": shlex.split(sdk_client.pod_ssh_command(_pod())),
+    }
+
+
+@pytest.mark.parametrize("which", ["ssh", "rsync", "printed"])
+def test_spawned_ssh_carries_the_no_forwarding_options(monkeypatch, tmp_path, which):
+    argv = _spawned_ssh_argvs(monkeypatch, tmp_path)[which]
+    joined = " ".join(argv)
+    assert "-o ForwardAgent=no -o ForwardX11=no -o ForwardX11Trusted=no" in joined
+    # only a file transfer drops forwarding wholesale; `lium ssh` keeps the user's own port forwards
+    assert ("ClearAllForwardings=yes" in joined) == (which == "rsync")
+
+
+@pytest.mark.skipif(shutil.which("ssh") is None, reason="needs the OpenSSH client")
+@pytest.mark.parametrize("which", ["ssh", "rsync", "printed"])
+def test_a_forward_agent_line_in_the_users_ssh_config_does_not_reach_the_pod(monkeypatch, tmp_path, which):
+    argv = _spawned_ssh_argvs(monkeypatch, tmp_path)[which]
+    config = tmp_path / "ssh_config"
+    config.write_text("Host *\n  ForwardAgent yes\n  ForwardX11 yes\n  ForwardX11Trusted yes\n")
+    evaluated = subprocess.run(["ssh", "-F", str(config), "-G", *argv[1:]], capture_output=True, text=True,
+                               check=True, stdin=subprocess.DEVNULL).stdout.splitlines()
+    for option in ("forwardagent no", "forwardx11 no", "forwardx11trusted no"):
+        assert option in evaluated

@@ -111,6 +111,7 @@ def test_ssh_argv_pins_the_host_key_and_names_only_the_pod(tmp_path, monkeypatch
         "-p", "20299",
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", f'UserKnownHostsFile="{hosts_file}"',
+        "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no",
         "root@203.0.113.7",
     ]
     assert hosts_file.exists()
@@ -136,7 +137,8 @@ def test_ssh_argv_insecure_env_restores_the_old_options(tmp_path, monkeypatch):
 
     argv = client.ssh_argv(_pod())
 
-    assert argv[-5:] == ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "root@203.0.113.7"]
+    assert argv[-11:] == ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+                          "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "root@203.0.113.7"]
     assert not (tmp_path / ".lium" / "known_hosts").exists()
 
 

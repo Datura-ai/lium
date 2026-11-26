@@ -123,7 +123,7 @@ class ControlMaster:
     """The control master of one pod: check it, start it, run a command over it, stop it."""
 
     def __init__(self, lium: Any, pod: PodInfo):
-        from .client import openssh_host_key_options, openssh_jump_options, ssh_target
+        from .client import OPENSSH_NO_FORWARDING_OPTIONS, openssh_host_key_options, openssh_jump_options, ssh_target
 
         user, host, port = ssh_target(pod.ssh_cmd)
         self.pod = pod
@@ -131,7 +131,7 @@ class ControlMaster:
         self.destination = f"{user}@{host}"
         # -F /dev/null: the renter's ~/.ssh/config (SendEnv, SetEnv, ...) must not reach a pod; every option is set here
         self.base = ["ssh", "-F", "/dev/null", "-p", str(port), "-o", f'ControlPath="{self.path}"', "-o", "BatchMode=yes",
-                     "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ClearAllForwardings=yes"]
+                     *OPENSSH_NO_FORWARDING_OPTIONS, "-o", "ClearAllForwardings=yes"]
         key_path = _key_path(lium)
         if key_path:
             self.base += ["-i", key_path, "-o", "IdentitiesOnly=yes"]

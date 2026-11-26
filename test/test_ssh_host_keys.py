@@ -68,7 +68,7 @@ def test_pod_ssh_command_is_omitted_while_a_file_is_at_the_pin_directory_path(ho
 def test_pod_ssh_command_is_the_pinned_form_of_the_api_command_without_a_key(home):
     pod = _pod()
 
-    assert pod_ssh_command(pod) == f"ssh -p 40499 {_options(pod)} user@pod.example"
+    assert pod_ssh_command(pod) == f"ssh -p 40499 {_options(pod)} -o ForwardAgent=no -o ForwardX11=no -o ForwardX11Trusted=no user@pod.example"
     assert "-i " not in pod_ssh_command(pod)
     assert "StrictHostKeyChecking=no" not in pod_ssh_command(pod)
 
@@ -89,7 +89,7 @@ def test_pod_ssh_command_creates_the_directory_but_no_pin_file(home):
 def test_pod_ssh_command_is_the_insecure_pair_only_under_the_opt_out(home, monkeypatch):
     monkeypatch.setenv("LIUM_SSH_INSECURE", "1")
 
-    assert pod_ssh_command(_pod()) == "ssh -p 40499 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null user@pod.example"
+    assert pod_ssh_command(_pod()) == "ssh -p 40499 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ForwardAgent=no -o ForwardX11=no -o ForwardX11Trusted=no user@pod.example"
 
 
 def test_pod_ssh_command_is_none_without_an_ssh_command_or_for_an_unexpected_one(home):
@@ -101,7 +101,7 @@ def test_pod_ssh_command_and_lium_ssh_agree_on_everything_but_the_key(home):
     pod = _pod()
     with_key = Lium(Config(api_key="test", ssh_key_path="/keys/id_ed25519")).ssh(pod)
 
-    assert with_key == f"ssh -i /keys/id_ed25519 -p 40499 {_options(pod)} user@pod.example"
+    assert with_key == f"ssh -i /keys/id_ed25519 -p 40499 {_options(pod)} -o ForwardAgent=no -o ForwardX11=no -o ForwardX11Trusted=no user@pod.example"
     assert pod_ssh_command(pod) == with_key.replace("-i /keys/id_ed25519 ", "")
 
 
