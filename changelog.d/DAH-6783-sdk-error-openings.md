@@ -1,2 +1,2 @@
 ### Fixed
-- SDK reference: `LiumRentOutcomeUnknownError` opens with "check `ps()` before renting again" and lists every case that raises it; `LiumInsufficientBalanceError` names only the 402 the API sends (`BALANCE_REQUIRED`), with `account_unfunded` still recognised if a server sends it.
+- SDK reference: `LiumRentOutcomeUnknownError` opens with "check `ps()` before renting again" and lists every case that raises it; `LiumInsufficientBalanceError` names both 402s the API sends to an API key on an account with no balance: `BALANCE_REQUIRED` on the pod list and `account_unfunded` on any other write except a delete, a backup or restore cancel, a top-up or adding an SSH key (clients at 0.46.10 or older get a 403 `insufficient_balance` instead, raising the same error).
