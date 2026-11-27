@@ -28,6 +28,7 @@ def no_client(monkeypatch):
     [
         ["--dry-run", "-y", "--hotkey", "hk1", "node", "rm", "abc-node"],
         ["-y", "--hotkey", "hk1", "node", "update-price", "abc-node", "--price", "0.01", "--dry-run"],
+        ["-y", "--hotkey", "hk1", "node", "intro-price", "abc-node", "--clear", "--dry-run"],
         ["--dry-run", "--hotkey", "hk1", "config", "opt-out"],
         ["--dry-run", "--hotkey", "hk1", "sync", "to-miner-server"],
         ["--dry-run", "--hotkey", "hk1", "config", "connect-discord", "--no-wait"],

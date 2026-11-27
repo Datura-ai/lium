@@ -37,6 +37,7 @@ SYNC_EXECUTOR_CENTRAL_PROVIDER = "/executors/sync-executor-central-provider"
 # Executors -- per-executor
 EXECUTOR_BY_ID = "/executors/{id}"
 UPDATE_PRICE = "/executors/{id}/update-price"
+INTRO_PRICE = "/executors/{id}/intro-price"
 UPDATE_GPU = "/executors/{id}/update-gpu"
 UPDATE_ADDRESS = "/executors/{id}/update-address"
 EXECUTOR_PODS = "/executors/{id}/pods"
