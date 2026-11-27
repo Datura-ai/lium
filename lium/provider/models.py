@@ -99,6 +99,20 @@ class UpdatePricePayload(BaseModel):
     price_per_gpu: float = Field(ge=0)
 
 
+class SetIntroPricePayload(BaseModel):
+    """DAH-7294: a new rental pays ``intro_price_per_gpu`` for its first ``intro_hours`` hours (24 to 720), then
+    the node's price. Both None removes it; the portal checks the node is Secure and the intro is below its price."""
+
+    intro_price_per_gpu: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    intro_hours: int | None = Field(default=None, ge=24, le=720)
+
+    @model_validator(mode="after")
+    def _both_or_neither(self) -> SetIntroPricePayload:
+        if (self.intro_price_per_gpu is None) != (self.intro_hours is None):
+            raise ValueError("set the intro price and hours together, or neither to remove it")
+        return self
+
+
 class UpdateAddressPayload(BaseModel):
     ip_address: str = Field(min_length=1, max_length=64)
     port: int = Field(ge=1, le=65535)

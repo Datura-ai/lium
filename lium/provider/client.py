@@ -33,6 +33,7 @@ from lium.provider._routes import (
     EXECUTOR_PODS,
     EXECUTOR_VERIFICATION,
     EXECUTORS,
+    INTRO_PRICE,
     LOGIN_EMAIL,
     LOGIN_FLEXIBLE,
     LOGIN_TOTP,
@@ -75,6 +76,7 @@ from lium.provider.models import (
     ProviderStatus,
     SafeProviderResponse,
     SetEmailPayload,
+    SetIntroPricePayload,
     SetMachineRequestSubscriptionPayload,
     SetMinGpuCountForRentalPayload,
     SetOptInRequest,
@@ -672,6 +674,18 @@ class ProviderClient:
         payload = _build_payload(UpdatePricePayload, price_per_gpu=price_per_gpu)
         return self._http.post(
             UPDATE_PRICE.format(id=_safe_id(node_id, label="node_id")),
+            json_body=payload,
+        )
+
+    def set_node_intro_price(
+        self, node_id: str, intro_price_per_gpu: float | None, intro_hours: int | None
+    ) -> dict[str, Any]:
+        """``PUT /executors/{id}/intro-price`` -- both None removes the intro price."""
+        payload = _build_payload(
+            SetIntroPricePayload, intro_price_per_gpu=intro_price_per_gpu, intro_hours=intro_hours
+        )
+        return self._http.put(
+            INTRO_PRICE.format(id=_safe_id(node_id, label="node_id")),
             json_body=payload,
         )
 

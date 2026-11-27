@@ -9,6 +9,7 @@ Subcommands:
 - ``add``                     -- queue a new node (calls /executors).
 - ``rm <id>``                 -- delete a node.
 - ``update-price <id>``       -- set price-per-GPU.
+- ``intro-price <id>``        -- set or clear a new rental's intro price.
 - ``update-gpu <id>``         -- change GPU type/count.
 - ``address <id> <ip> <port>`` -- move a node to a new ip:port, keeping its id.
 - ``min-gpu set/unset <id>``  -- min GPU count for rental.
@@ -400,6 +401,37 @@ def update_price(ctx: click.Context, node_id: str, price_per_gpu: float) -> None
         ctx.exit(handle_provider_error(ctx, e))
         return
     render(ctx, body, summary=f"price updated: {node_id} -> ${price_per_gpu}/GPU/hr")
+
+
+@node_command.command("intro-price", short_help="Set or clear the intro price for new rentals.")
+@click.argument("node_id", required=True)
+@click.option("--price", "intro_price_per_gpu", type=float, help="Intro price per GPU-hour, below the node's price.")
+@click.option("--hours", "intro_hours", type=int, help="Hours a new rental pays the intro price (24 to 720).")
+@click.option("--clear", is_flag=True, help="Remove the intro price; running rentals keep their terms.")
+@with_provider_overrides
+@click.pass_context
+def intro_price(
+    ctx: click.Context, node_id: str, intro_price_per_gpu: float | None, intro_hours: int | None, clear: bool
+) -> None:
+    """Secure nodes only. A new rental pays the intro price for its first HOURS, then the node's price; both are
+    fixed when it is rented."""
+    given = (intro_price_per_gpu is not None, intro_hours is not None)
+    if any(given) if clear else not all(given):
+        raise click.UsageError("give --price and --hours, or --clear")
+    require_hotkey(ctx, group="node")
+    require_persona_ack(ctx)
+    client = build_client(ctx)
+    try:
+        body = client.set_node_intro_price(node_id, intro_price_per_gpu, intro_hours)
+    except ProviderError as e:
+        ctx.exit(handle_provider_error(ctx, e))
+        return
+    summary = (
+        f"intro price removed: {node_id}"
+        if clear
+        else f"intro price set: {node_id} -> ${intro_price_per_gpu}/GPU/hr for {intro_hours} h"
+    )
+    render(ctx, body, summary=summary)
 
 
 @node_command.command("update-gpu", short_help="Change GPU type/count.")
