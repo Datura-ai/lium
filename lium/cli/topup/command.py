@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import shlex
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 
 import click
@@ -102,6 +103,15 @@ def baseline_or_fail(client: Lium, *, what: str) -> float:
             hint="Run 'lium balance --json'; retry with --wait once it answers, or without --wait.",
         )
     return baseline
+
+
+CARD_FEE_PERCENT = 3
+
+
+def card_charge_usd(amount: float) -> float:
+    """What a card pays for `amount` of credit: the amount plus the 3 % card fee, in cents half up, as the server charges."""
+    cents = int(Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) * 100)
+    return (cents + (cents * CARD_FEE_PERCENT + 50) // 100) / 100
 
 
 def wait_for_credit_or_fail(client: Lium, baseline: float, wait: float, extra: dict, *, charged: bool = False) -> dict:
@@ -319,7 +329,8 @@ def link_command(amount: float, wait: float | None, json_output: bool):
         "handoff": {
             "step": "card_payment",
             "who": "a person with a card",
-            "what": f"open the url and pay ${amount:,.2f}; the balance is credited seconds after",
+            "what": f"open the url and pay ${card_charge_usd(amount):,.2f} by card (the ${amount:,.2f} credit plus the "
+                    f"{CARD_FEE_PERCENT}% card fee); the balance is credited seconds after",
         },
     }
 
@@ -338,7 +349,8 @@ def link_command(amount: float, wait: float | None, json_output: bool):
     if json_output:
         click.echo(json.dumps(payload, sort_keys=True))
         return
-    ui.success(f"Payment page for ${amount:,.2f}")
+    ui.success(f"Payment page for ${amount:,.2f} of credit (${card_charge_usd(amount):,.2f} by card, with the "
+               f"{CARD_FEE_PERCENT}% card fee)")
     ui.info(f"URL: {escape(link['url'])}")
     ui.dim("Nothing is charged until someone pays there. 'lium topup wait' waits for the credit.")
 
@@ -450,10 +462,15 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
         if json_output:
             raise CliFailure(
                 "confirmation_required",
-                f"Confirmation required: this charges ${amount:,.2f} to {target}. Pass --yes with --json.",
+                f"Confirmation required: this charges ${card_charge_usd(amount):,.2f} to {target} (${amount:,.2f} "
+                f"credit plus the {CARD_FEE_PERCENT}% card fee). Pass --yes with --json.",
                 EXIT_CONFIGURATION_ERROR,
             )
-        if not ui.confirm(f"Charge ${amount:,.2f} to {target}? The charge is made straight away.", default=False):
+        if not ui.confirm(
+            f"Charge ${card_charge_usd(amount):,.2f} to {target} (${amount:,.2f} credit plus the {CARD_FEE_PERCENT}% "
+            "card fee)? The charge is made straight away.",
+            default=False,
+        ):
             ui.info("Nothing charged.")
             return
 
@@ -504,7 +521,8 @@ def card_command(amount: float, payment_method_id: str | None, idempotency_key: 
     card_text = " ".join(part for part in [(card.get("brand") or "card").capitalize(),
                                            f"····{card['last4']}" if card.get("last4") else ""] if part)
     amount_usd = result.get("amount_usd", amount)
-    ui.success(f"Charged ${amount_usd:,.2f} to {card_text}")
+    charged_usd = result.get("charged_usd", card_charge_usd(amount_usd))
+    ui.success(f"Charged ${charged_usd:,.2f} to {card_text} (${amount_usd:,.2f} credit plus the {CARD_FEE_PERCENT}% card fee)")
     if result.get("payment_intent_id"):
         ui.info(f"Payment intent:  {escape(str(result['payment_intent_id']))}")
     if result.get("idempotency_key"):
