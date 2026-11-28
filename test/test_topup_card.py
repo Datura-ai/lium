@@ -597,15 +597,15 @@ def test_card_asks_before_charging_and_a_no_charges_nothing(fake_lium, monkeypat
 
     declined = _run("-a", "50", yes=False, input="n\n")
     assert declined.exit_code == 0, declined.output
-    assert "Charge $50.00 to the default saved card?" in _text(declined)
+    assert "Charge $51.50 to the default saved card ($50.00 credit plus the 3% card fee)?" in _text(declined)
     assert "Nothing charged." in declined.output
     assert "Charged" not in declined.output
     assert fake_lium.calls == []
 
     accepted = _run("-a", "50", "--card", "pm_1Card", yes=False, input="y\n")
     assert accepted.exit_code == 0, accepted.output
-    assert "Charge $50.00 to card pm_1Card?" in _text(accepted)
-    assert "Charged $50.00 to Visa ····4242" in accepted.output
+    assert "Charge $51.50 to card pm_1Card ($50.00 credit plus the 3% card fee)?" in _text(accepted)
+    assert "Charged $51.50 to Visa ····4242 ($50.00 credit plus the 3% card fee)" in accepted.output
     assert fake_lium.calls == [(50.0, "pm_1Card", None)]
 
 
@@ -637,7 +637,7 @@ def test_card_charges_and_prints_the_card_and_the_balance(fake_lium):
     result = _run("-a", "50")
 
     assert result.exit_code == 0, result.output
-    assert "Charged $50.00 to Visa ····4242" in result.output
+    assert "Charged $51.50 to Visa ····4242 ($50.00 credit plus the 3% card fee)" in result.output
     assert "pi_3Test" in result.output
     assert "Idempotency key: nightly-1" in result.output
     assert "Balance:         $61.25" in result.output
@@ -678,7 +678,7 @@ def test_card_processing_with_payment_intent_is_success_exit_0(fake_lium):
 
     human = _run("-a", "50")
     assert human.exit_code == 0, human.output
-    assert "Charged $50.00 to Visa ····4242" in human.output
+    assert "Charged $51.50 to Visa ····4242 ($50.00 credit plus the 3% card fee)" in human.output
     assert "pi_3Test" in human.output
     assert "Idempotency key: nightly-1" in human.output
 
@@ -772,7 +772,7 @@ def test_a_failed_balance_read_after_the_charge_is_not_a_failure(fake_lium):
 
     human = _run("-a", "50")
     assert human.exit_code == 0, human.output
-    assert "Charged $50.00" in human.output
+    assert "Charged $51.50" in human.output
     assert "Balance:" not in human.output
 
     machine = _run("-a", "50", "--json")
@@ -786,7 +786,7 @@ def test_a_read_timeout_on_balance_after_the_charge_is_not_a_failure(fake_lium):
 
     human = _run("-a", "50")
     assert human.exit_code == 0, human.output
-    assert "Charged $50.00" in human.output
+    assert "Charged $51.50" in human.output
     assert "Idempotency key: nightly-1" in human.output
     assert "Balance:" not in human.output
 
@@ -975,3 +975,8 @@ def test_a_nan_amount_is_refused_before_the_charge(fake_lium):
     assert result.exit_code == EXIT_CONFIGURATION_ERROR, result.output
     assert "finite" in _text(result)
     assert fake_lium.calls == []
+
+
+@pytest.mark.parametrize(("amount", "charged"), [(50, 51.5), (10.5, 10.82), (10.005, 10.31), (100, 103.0)])
+def test_the_card_charge_is_the_amount_plus_the_three_percent_card_fee(amount, charged):
+    assert topup_module.card_charge_usd(amount) == charged
